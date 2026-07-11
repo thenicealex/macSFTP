@@ -1,0 +1,28 @@
+[package]
+name = "macsftp-app"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "macsftp"
+path = "src/main.rs"
+
+[dependencies]
+gpui = "=0.2.2"
+macsftp-core = { path = "../core" }
+macsftp-platform = { path = "../platform" }
+macsftp-storage = { path = "../storage" }
+macsftp-sftp = { path = "../sftp" }
+macsftp-ui = { path = "../ui" }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+tracing-appender = "0.2.5"
+
+[dev-dependencies]
+gpui = { version = "=0.2.2", features = ["test-support"] }
+
+[lints]
+workspace = true

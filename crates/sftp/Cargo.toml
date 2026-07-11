@@ -1,0 +1,29 @@
+[package]
+name = "macsftp-sftp"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "macsftp_sftp"
+path = "src/sftp.rs"
+
+[dependencies]
+macsftp-core = { path = "../core" }
+macsftp-storage = { path = "../storage" }
+flume = "0.11"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "fs", "io-util"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+russh = "0.62"
+russh-sftp = "2.3"
+ssh-key = "0.7.0-rc.11"
+tracing = "0.1.44"
+
+[dev-dependencies]
+macsftp-test-support = { path = "../test_support" }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "test-util"] }
+
+[lints]
+workspace = true

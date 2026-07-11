@@ -1,0 +1,6 @@
+[toolchain]
+# Track the installed stable toolchain locally; Cargo.toml's rust-version
+# remains the MSRV gate for reproducible compatibility checks.
+channel = "stable"
+components = ["clippy", "rustfmt"]
+targets = ["aarch64-apple-darwin"]

@@ -1,0 +1,25 @@
+[workspace]
+members = [
+    "crates/app",
+    "crates/core",
+    "crates/platform",
+    "crates/sftp",
+    "crates/storage",
+    "crates/test_support",
+    "crates/ui",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+publish = false
+rust-version = "1.96.1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"
