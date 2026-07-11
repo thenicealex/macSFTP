@@ -25,22 +25,27 @@ use macsftp_storage::{
     ResidualTempStore, TransferHistoryStore,
 };
 use macsftp_ui::{
-    ActiveTheme, FileRowModel, IconName, InputKeyResult, InputState, TextFieldModel, Theme,
-    DragPreview, connection_status, copy_name, section_header_static, transfer_history_detail,
-    transfer_history_title, transfer_title,
-    TransferRow, empty_state, file_row, file_table_header, format_size, format_timestamp, icon,
-    icon_button, tab, text_button, text_field, text_tooltip, transfer_row,
+    ActiveTheme, DragPreview, FileRowModel, IconName, InputKeyResult, InputState, TextFieldModel,
+    Theme, TransferRow, connection_status, copy_name, empty_state, file_row, file_table_header,
+    format_size, format_timestamp, icon, icon_button, section_header_static, tab, text_button,
+    text_field, text_tooltip, transfer_history_detail, transfer_history_title, transfer_row,
+    transfer_title,
 };
 
 use tracing::{debug, warn};
 
 use crate::app_actions::*;
-use crate::workspace::*;
-use crate::workspace::helpers::*;
 use crate::workspace::connect_form::*;
+use crate::workspace::helpers::*;
+use crate::workspace::*;
 
 impl Workspace {
-    pub(crate) fn focus_pane(&mut self, side: PaneSide, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn focus_pane(
+        &mut self,
+        side: PaneSide,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.focused_side = side;
         window.focus(self.pane_focus(side));
         cx.notify();
@@ -147,7 +152,12 @@ impl Workspace {
             self.open_entry_at(side, index, window, cx);
         }
     }
-    pub(crate) fn set_local_path(&mut self, path: LocalPath, _window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn set_local_path(
+        &mut self,
+        path: LocalPath,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let message = if let Some(tab) = self.active_tab_mut() {
             let message = Self::load_local_directory(&path, tab);
             tab.selection.selected_paths.clear();

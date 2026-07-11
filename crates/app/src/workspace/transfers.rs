@@ -25,19 +25,19 @@ use macsftp_storage::{
     ResidualTempStore, TransferHistoryStore,
 };
 use macsftp_ui::{
-    ActiveTheme, FileRowModel, IconName, InputKeyResult, InputState, TextFieldModel, Theme,
-    DragPreview, connection_status, copy_name, section_header_static, transfer_history_detail,
-    transfer_history_title, transfer_title,
-    TransferRow, empty_state, file_row, file_table_header, format_size, format_timestamp, icon,
-    icon_button, tab, text_button, text_field, text_tooltip, transfer_row,
+    ActiveTheme, DragPreview, FileRowModel, IconName, InputKeyResult, InputState, TextFieldModel,
+    Theme, TransferRow, connection_status, copy_name, empty_state, file_row, file_table_header,
+    format_size, format_timestamp, icon, icon_button, section_header_static, tab, text_button,
+    text_field, text_tooltip, transfer_history_detail, transfer_history_title, transfer_row,
+    transfer_title,
 };
 
 use tracing::{debug, warn};
 
 use crate::app_actions::*;
-use crate::workspace::*;
-use crate::workspace::helpers::*;
 use crate::workspace::connect_form::*;
+use crate::workspace::helpers::*;
+use crate::workspace::*;
 
 impl Workspace {
     pub(crate) fn begin_upload(&mut self, sources: Vec<LocalPath>, cx: &mut Context<Self>) {
@@ -169,7 +169,11 @@ impl Workspace {
             .unwrap_or_default();
         self.begin_download(sources, cx);
     }
-    pub(crate) fn cancel_transfer(&mut self, transfer_id: macsftp_core::TransferId, cx: &mut Context<Self>) {
+    pub(crate) fn cancel_transfer(
+        &mut self,
+        transfer_id: macsftp_core::TransferId,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(job) = self
             .state
             .transfers
@@ -186,7 +190,11 @@ impl Workspace {
         self.send_command(AppCommand::CancelTransfer { transfer_id }, cx);
         cx.notify();
     }
-    pub(crate) fn retry_transfer(&mut self, transfer_id: macsftp_core::TransferId, cx: &mut Context<Self>) {
+    pub(crate) fn retry_transfer(
+        &mut self,
+        transfer_id: macsftp_core::TransferId,
+        cx: &mut Context<Self>,
+    ) {
         self.send_command(AppCommand::RetryTransfer { transfer_id }, cx);
     }
     pub(crate) fn finalize_plan(&mut self, _job_id: macsftp_core::TransferId) {
@@ -309,7 +317,9 @@ impl Workspace {
         }
         self.transfer_history_flushed = true;
     }
-    pub(crate) fn reconcile_local_residual_temps(mut store: ResidualTempStore) -> ResidualTempStore {
+    pub(crate) fn reconcile_local_residual_temps(
+        mut store: ResidualTempStore,
+    ) -> ResidualTempStore {
         let local: Vec<_> = store.local_records().cloned().collect();
         for record in local {
             match std::fs::remove_file(&record.path) {

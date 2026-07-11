@@ -26,19 +26,19 @@ use macsftp_storage::{
     ResidualTempStore, TransferHistoryStore,
 };
 use macsftp_ui::{
-    ActiveTheme, FileRowModel, IconName, InputKeyResult, InputState, TextFieldModel, Theme,
-    DragPreview, connection_status, copy_name, section_header_static, transfer_history_detail,
-    transfer_history_title, transfer_title,
-    TransferRow, empty_state, file_row, file_table_header, format_size, format_timestamp, icon,
-    icon_button, tab, text_button, text_field, text_tooltip, transfer_row,
+    ActiveTheme, DragPreview, FileRowModel, IconName, InputKeyResult, InputState, TextFieldModel,
+    Theme, TransferRow, connection_status, copy_name, empty_state, file_row, file_table_header,
+    format_size, format_timestamp, icon, icon_button, section_header_static, tab, text_button,
+    text_field, text_tooltip, transfer_history_detail, transfer_history_title, transfer_row,
+    transfer_title,
 };
 
 use tracing::{debug, warn};
 
 use crate::app_actions::*;
-use crate::workspace::*;
-use crate::workspace::helpers::*;
 use crate::workspace::connect_form::*;
+use crate::workspace::helpers::*;
+use crate::workspace::*;
 
 #[cfg(test)]
 mod tests {

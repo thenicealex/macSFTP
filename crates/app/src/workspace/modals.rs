@@ -25,19 +25,19 @@ use macsftp_storage::{
     ResidualTempStore, TransferHistoryStore,
 };
 use macsftp_ui::{
-    ActiveTheme, FileRowModel, IconName, InputKeyResult, InputState, TextFieldModel, Theme,
-    DragPreview, connection_status, copy_name, section_header_static, transfer_history_detail,
-    transfer_history_title, transfer_title,
-    TransferRow, empty_state, file_row, file_table_header, format_size, format_timestamp, icon,
-    icon_button, tab, text_button, text_field, text_tooltip, transfer_row,
+    ActiveTheme, DragPreview, FileRowModel, IconName, InputKeyResult, InputState, TextFieldModel,
+    Theme, TransferRow, connection_status, copy_name, empty_state, file_row, file_table_header,
+    format_size, format_timestamp, icon, icon_button, section_header_static, tab, text_button,
+    text_field, text_tooltip, transfer_history_detail, transfer_history_title, transfer_row,
+    transfer_title,
 };
 
 use tracing::{debug, warn};
 
 use crate::app_actions::*;
-use crate::workspace::*;
-use crate::workspace::helpers::*;
 use crate::workspace::connect_form::*;
+use crate::workspace::helpers::*;
+use crate::workspace::*;
 
 impl Workspace {
     pub(crate) fn active_host_key_prompt(&self) -> Option<&HostKeyPrompt> {
@@ -238,7 +238,10 @@ impl Workspace {
             self.resolve_transfer_conflict(&prompt, ConflictDecision::CancelJob, window, cx);
         }
     }
-    pub(crate) fn render_connect_form_modal(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_connect_form_modal(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
         let form = self.connect_form.as_ref()?;
         let theme = cx.theme().clone();
 
@@ -696,7 +699,10 @@ impl Workspace {
                 .into_any_element(),
         )
     }
-    pub(crate) fn render_transfer_conflict_modal(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_transfer_conflict_modal(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
         let prompt = self.active_transfer_conflict_prompt()?.clone();
         let theme = cx.theme().clone();
         let source = match &prompt.source {

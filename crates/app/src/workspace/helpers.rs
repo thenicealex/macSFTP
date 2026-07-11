@@ -28,7 +28,10 @@ pub(crate) fn expand_home(path: &str) -> String {
 
 /// `SecretRef`s a fresh save would create for `profile_id` given the
 /// in-form `auth`. Mirrors `SecretRef::keychain_ref` (plan §11).
-pub(crate) fn secret_refs_for_settings(profile_id: ProfileId, auth: &AuthCredential) -> Vec<SecretRef> {
+pub(crate) fn secret_refs_for_settings(
+    profile_id: ProfileId,
+    auth: &AuthCredential,
+) -> Vec<SecretRef> {
     match auth {
         AuthCredential::Password { .. } => vec![SecretRef::keychain_ref(profile_id, "password")],
         AuthCredential::PrivateKey { passphrase, .. } => match passphrase {

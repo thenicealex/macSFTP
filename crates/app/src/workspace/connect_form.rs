@@ -8,9 +8,7 @@ use macsftp_storage::KeychainError;
 use macsftp_ui::{InputKeyResult, InputState};
 use tracing::warn;
 
-use crate::workspace::helpers::{
-    expand_home, secret_refs_for_profile, secret_refs_for_settings,
-};
+use crate::workspace::helpers::{expand_home, secret_refs_for_profile, secret_refs_for_settings};
 
 /// One field of the connect form, in Tab-cycle order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
