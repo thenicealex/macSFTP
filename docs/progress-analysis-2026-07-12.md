@@ -42,7 +42,6 @@ There is **no feature or technical debt work currently in progress** — every M
 
 With all P0/P1 tasks complete, the MVP is fully realized. Future work falls into optional, post-MVP enhancements:
 
-- **P2 — Resolve transitive `block v0.1.6` future-incompat note.** Noise from a dependency; pin/yank or ignore explicitly so the log is clean.
 - **P3 — Future Explorations:** Sync, remote edit, terminal, multi-window, App Store, signing/notarization, DMG/PKG packaging, auto-update, S3/WebDAV/FTP support, Keychain-backed profiles, connection pooling.
 
 ## 4. Risks (ranked) & impact
