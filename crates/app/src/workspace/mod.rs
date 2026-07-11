@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::SystemTime;
@@ -25,11 +26,14 @@ use macsftp_storage::{
 };
 use macsftp_ui::{
     ActiveTheme, FileRowModel, IconName, InputKeyResult, InputState, TextFieldModel, Theme,
+    DragPreview, connection_status, copy_name, section_header_static, transfer_history_detail,
+    transfer_history_title, transfer_title,
     TransferRow, empty_state, file_row, file_table_header, format_size, format_timestamp, icon,
     icon_button, tab, text_button, text_field, text_tooltip, transfer_row,
 };
 use tracing::{debug, warn};
 
+use crate::workspace::helpers::connection_in_flight;
 use crate::app_actions::{
     ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, CopyPath, CopyVersionInfo,
     DownloadSelection, FocusLocalPane, FocusRemotePane, MinimizeWindow, NewTab, OpenLogFolder,

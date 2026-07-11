@@ -1,3 +1,44 @@
+#![allow(unused_imports)]
+use std::collections::HashMap;
+use std::path::Path;
+use std::time::SystemTime;
+
+use gpui::{
+    App, ClickEvent, ClipboardItem, Context, FocusHandle, Focusable, FontWeight, Hsla, IntoElement,
+    KeyDownEvent, ParentElement, Render, ScrollStrategy, SharedString, Styled, Subscription, Task,
+    UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+};
+use macsftp_core::{
+    AppCommand, AppEvent, AppState, AuthCredential, AuthMethod, AuthMethodKind,
+    CommandDispatchError, ConflictDecision, ConflictDecisionCommand, ConflictRequest,
+    ConflictRequestId, ConnectCommand, ConnectionProfile, ConnectionSettings, ConnectionState,
+    DisconnectReason, EntryPath, ErrorCode, FileKind, HostKeyDecisionCommand, HostKeyPrompt,
+    LocalPath, ModalRequest, ModalRequestId, ProfileId, RemotePath, SecretRef, TabId, TabState,
+    Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferHistoryId,
+    TransferHistoryRecord, TransferHistoryStatus, TransferJob, TransferState, TrustRequestId,
+    UserFacingError, history_status_for_plan, sort_entries,
+};
+use macsftp_platform::{AppPaths, read_local_directory};
+use macsftp_sftp::{EventReceiver, RuntimeClient};
+use macsftp_storage::{
+    AppearancePreference, ConfigStore, KeychainError, KeychainStore, ProfileStore,
+    ResidualTempStore, TransferHistoryStore,
+};
+use macsftp_ui::{
+    ActiveTheme, FileRowModel, IconName, InputKeyResult, InputState, TextFieldModel, Theme,
+    DragPreview, connection_status, copy_name, section_header_static, transfer_history_detail,
+    transfer_history_title, transfer_title,
+    TransferRow, empty_state, file_row, file_table_header, format_size, format_timestamp, icon,
+    icon_button, tab, text_button, text_field, text_tooltip, transfer_row,
+};
+
+use tracing::{debug, warn};
+
+use crate::app_actions::*;
+use crate::workspace::*;
+use crate::workspace::helpers::*;
+use crate::workspace::connect_form::*;
+
 impl Workspace {
     pub(crate) fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();

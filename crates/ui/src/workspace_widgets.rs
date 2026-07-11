@@ -3,7 +3,7 @@ use macsftp_core::{
     ConnectionState, TransferEndpoint, TransferHistoryRecord, TransferHistoryStatus, TransferJob,
 };
 
-use crate::Theme;
+use crate::{Theme, ActiveTheme};
 
 /// Static section header used in the transfer drawer.
 pub fn section_header_static(label: &str, count: usize, theme: &Theme) -> impl IntoElement + use<> {

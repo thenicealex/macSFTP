@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 use gpui::{Context, FocusHandle, KeyDownEvent, SharedString, Window};
 use macsftp_core::{
     AuthCredential, AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionSettings, ProfileId,
