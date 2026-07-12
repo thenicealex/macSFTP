@@ -307,7 +307,7 @@ pub enum AuthMethodKind {
 /// persisted to the macOS Keychain (keyed by the profile's `SecretRef`)
 /// so it can be restored later; `Debug` is manually implemented to redact
 /// auth.
-#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, PartialEq, Eq, Hash, Zeroize, ZeroizeOnDrop)]
 pub struct ConnectionSettings {
     pub host: String,
     pub port: u16,
@@ -315,7 +315,30 @@ pub struct ConnectionSettings {
     pub auth: AuthCredential,
 }
 
-#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+pub struct ConnectionKey {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub auth_hash: u64,
+}
+
+impl ConnectionSettings {
+    pub fn connection_key(&self) -> ConnectionKey {
+        use std::hash::{Hash, Hasher};
+        use std::collections::hash_map::DefaultHasher;
+        let mut hasher = DefaultHasher::new();
+        self.auth.hash(&mut hasher);
+        ConnectionKey {
+            host: self.host.clone(),
+            port: self.port,
+            username: self.username.clone(),
+            auth_hash: hasher.finish(),
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, Zeroize, ZeroizeOnDrop)]
 pub enum AuthCredential {
     Password {
         password: String,
@@ -370,38 +393,7 @@ impl AuthFingerprint {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TransferSessionKey {
-    pub host: String,
-    pub port: u16,
-    pub username: String,
-    pub auth_fingerprint: AuthFingerprint,
-}
 
-impl TransferSessionKey {
-    pub fn new(
-        host: impl Into<String>,
-        port: u16,
-        username: impl Into<String>,
-        auth_fingerprint: AuthFingerprint,
-    ) -> Self {
-        Self {
-            host: host.into(),
-            port,
-            username: username.into(),
-            auth_fingerprint,
-        }
-    }
-
-    pub fn from_profile(profile: &ConnectionProfile, auth_fingerprint: AuthFingerprint) -> Self {
-        Self {
-            host: profile.host.clone(),
-            port: profile.port,
-            username: profile.username.clone(),
-            auth_fingerprint,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferSessionMode {
@@ -1752,7 +1744,7 @@ mod tests {
         RemoteEventScope, RemotePath, RemoteScoped, RuntimeBridgeConfig, SecretRef, SessionId,
         TabId, TabState, Timestamp, TransferDirection, TransferEndpoint, TransferHistoryId,
         TransferHistoryRecord, TransferHistoryStatus, TransferId, TransferJob, TransferPlanId,
-        TransferPlanState, TransferSessionKey, TransferState, TrustRequest, TrustRequestId,
+        TransferPlanState, ConnectionKey, TransferState, TrustRequest, TrustRequestId,
         UserFacingError,
     };
 
@@ -1787,30 +1779,6 @@ mod tests {
     }
 
     #[test]
-    fn transfer_session_key_changes_with_profile_revision() {
-        let profile = ConnectionProfile::new(
-            super::ProfileId(7),
-            "Production",
-            "example.com",
-            "alex",
-            AuthMethod::Password {
-                secret_ref: SecretRef::new("profile-7-password"),
-            },
-        );
-        let first_key = TransferSessionKey::from_profile(
-            &profile,
-            AuthFingerprint::password(SecretRef::new("profile-7-password"), profile.revision),
-        );
-        let second_key = TransferSessionKey::from_profile(
-            &profile,
-            AuthFingerprint::password(SecretRef::new("profile-7-password"), profile.revision + 1),
-        );
-
-        assert_ne!(first_key, second_key);
-        assert_eq!(first_key.host, "example.com");
-        assert_eq!(first_key.port, 22);
-        assert_eq!(first_key.username, "alex");
-    }
 
     #[test]
     fn trust_request_prompt_preserves_session_binding() {

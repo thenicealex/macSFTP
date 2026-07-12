@@ -15,6 +15,7 @@ use macsftp_core::{
     TransferState, TransferWarning, TrustDecision, TrustRequestId, UserFacingError,
 };
 use russh::client;
+use crate::physical_connection::ClientHandler;
 use russh::keys::{PrivateKeyWithHashAlg, load_secret_key};
 use russh_sftp::client::SftpSession;
 use russh_sftp::client::error::Error as SftpError;
@@ -53,6 +54,7 @@ impl HostTrustConfig {
 /// Why `check_server_key` refused the key — recorded by the handler so
 /// the actor can emit the right terminal event once `connect` fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(any())]
 enum HostKeyRejection {
     Mismatch,
     UserRejected,
@@ -80,11 +82,8 @@ pub struct RemoteSessionActor {
     tab_id: TabId,
     session_id: SessionId,
     session_epoch: u64,
-    trust_request_id: TrustRequestId,
-    settings: ConnectionSettings,
-    known_hosts: Arc<Mutex<KnownHostsStore>>,
-    trust_config: Arc<HostTrustConfig>,
-    trust_registry: Arc<TrustRegistry>,
+    shared_connection: std::sync::Arc<crate::pool::SharedConnection>,
+    sftp: russh_sftp::client::SftpSession,
     event_tx: flume::Sender<AppEvent>,
     next_conflict_id: Arc<AtomicU64>,
 }
@@ -129,8 +128,9 @@ pub enum RemoteSessionRequest {
     },
 }
 
+#[cfg(any())]
 struct ConnectedSession {
-    handle: client::Handle<ClientHandler>,
+    handle: client::Handle<crate::physical_connection::ClientHandler>,
     sftp: SftpSession,
     remote_root: RemotePath,
 }
@@ -237,6 +237,7 @@ impl TransferQueue {
     }
 }
 
+#[cfg(any())]
 enum ConnectFailure {
     /// `HostKeyMismatch` was already emitted by the handler; the
     /// connection is blocked with no override (plan §10).
@@ -249,6 +250,7 @@ enum ConnectFailure {
 
 /// Log the terminal outcome of a failed connect attempt. Secrets are
 /// never logged — only the host and the user-facing error title.
+#[cfg(any())]
 fn log_connect_failure(host: &str, failure: &ConnectFailure) {
     match failure {
         ConnectFailure::HostKeyMismatch => {
@@ -272,11 +274,8 @@ impl RemoteSessionActor {
         tab_id: TabId,
         session_id: SessionId,
         session_epoch: u64,
-        trust_request_id: TrustRequestId,
-        settings: ConnectionSettings,
-        known_hosts: Arc<Mutex<KnownHostsStore>>,
-        trust_config: Arc<HostTrustConfig>,
-        trust_registry: Arc<TrustRegistry>,
+        shared_connection: std::sync::Arc<crate::pool::SharedConnection>,
+        sftp: russh_sftp::client::SftpSession,
         event_tx: flume::Sender<AppEvent>,
         next_conflict_id: Arc<AtomicU64>,
     ) -> Self {
@@ -284,11 +283,8 @@ impl RemoteSessionActor {
             tab_id,
             session_id,
             session_epoch,
-            trust_request_id,
-            settings,
-            known_hosts,
-            trust_config,
-            trust_registry,
+            shared_connection,
+            sftp,
             event_tx,
             next_conflict_id,
         }
@@ -302,153 +298,75 @@ impl RemoteSessionActor {
     /// server disconnect. Cancellation exits silently — the dispatch
     /// loop owns cleanup, matching the mock actor's contract.
     pub async fn run(
-        self,
+        mut self,
         cancel: CancellationToken,
         request_rx: flume::Receiver<RemoteSessionRequest>,
     ) {
         let scope = self.scope();
-        let connection_lost = CancellationToken::new();
 
-        let established = tokio::select! {
-            _ = cancel.cancelled() => return,
-            result = self.establish(&scope, connection_lost.clone()) => result,
-        };
+        tracing::info!(
+            session_id = ?self.session_id,
+            "sftp session established; serving requests"
+        );
+        let _ = self
+            .event_tx
+            .send_async(AppEvent::TabConnected(RemoteScoped::new(
+                scope.clone(),
+                macsftp_core::TabConnected {
+                    remote_root: macsftp_core::RemotePath::new(self.shared_connection.remote_root.clone()),
+                },
+            )))
+            .await;
 
-        match established {
-            Ok(connected) => {
-                info!(
-                    host = self.settings.host.as_str(),
-                    session_id = ?self.session_id,
-                    "sftp session established; serving requests"
-                );
-                let _ = self
-                    .event_tx
-                    .send_async(AppEvent::TabConnected(RemoteScoped::new(
-                        scope.clone(),
-                        TabConnected {
-                            remote_root: connected.remote_root.clone(),
-                        },
-                    )))
-                    .await;
-
-                let (transfer_complete_tx, transfer_complete_rx) = flume::bounded(16);
-                let mut transfer_queue = TransferQueue::new();
-                let conflict_waiters = Arc::new(Mutex::new(HashMap::new()));
-                loop {
-                    tokio::select! {
-                        _ = cancel.cancelled() => {
-                            debug!(session_id = ?self.session_id, "session cancelled by user");
-                            // Best-effort goodbye; the server closing first is fine.
-                            let _ = connected
-                                .handle
-                                .disconnect(russh::Disconnect::ByApplication, "", "en")
-                                .await;
-                            return;
-                        }
-                        _ = connection_lost.cancelled() => {
-                            info!(
-                                host = self.settings.host.as_str(),
-                                session_id = ?self.session_id,
-                                "connection lost; notifying UI"
-                            );
-                            let _ = self
-                                .event_tx
-                                .send_async(AppEvent::TabDisconnected(RemoteScoped::new(
-                                    scope.clone(),
-                                    TabDisconnected {
-                                        reason: DisconnectReason::ConnectionLost,
-                                    },
-                                )))
-                                .await;
-                            return;
-                        }
-                        request = request_rx.recv_async() => {
-                            let Ok(request) = request else {
-                                let _ = connected
-                                    .handle
-                                    .disconnect(russh::Disconnect::ByApplication, "", "en")
-                                    .await;
-                                return;
-                            };
-                            self
-                                .handle_request(
-                                    &connected,
-                                    &scope,
-                                    cancel.clone(),
-                                    request,
-                                    &mut transfer_queue,
-                                    &transfer_complete_tx,
-                                    conflict_waiters.clone(),
-                                )
-                                .await;
-                        }
-                        completed = transfer_complete_rx.recv_async() => {
-                            let Ok(transfer_id) = completed else {
-                                return;
-                            };
-                            transfer_queue.finish(transfer_id);
-                            self
-                                .start_queued_transfer_jobs(
-                                    &connected.handle,
-                                    cancel.clone(),
-                                    &mut transfer_queue,
-                                    &transfer_complete_tx,
-                                    conflict_waiters.clone(),
-                                )
-                                .await;
-                        }
-                    }
+        let (transfer_complete_tx, transfer_complete_rx) = flume::bounded(16);
+        let mut transfer_queue = TransferQueue::new();
+        let conflict_waiters = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        
+        self.shared_connection.active_channels.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    tracing::debug!(session_id = ?self.session_id, "session cancelled by user");
+                    break;
                 }
-            }
-            Err(failure) => {
-                log_connect_failure(&self.settings.host, &failure);
-                let event = match failure {
-                    // The mismatch event carries the security detail; the
-                    // UI transitions the tab to Failed from it directly.
-                    ConnectFailure::HostKeyMismatch => None,
-                    ConnectFailure::TrustRejected => {
-                        Some(AppEvent::TabDisconnected(RemoteScoped::new(
-                            scope,
-                            TabDisconnected {
-                                reason: DisconnectReason::UserRequested,
-                            },
-                        )))
-                    }
-                    ConnectFailure::TrustTimeout => {
-                        Some(AppEvent::TabDisconnected(RemoteScoped::new(
-                            scope,
-                            TabDisconnected {
-                                reason: DisconnectReason::Error(
-                                    UserFacingError::new(
-                                        ErrorCode::TrustRequestTimeout,
-                                        "Host key prompt timed out",
-                                        "No decision was made in time. Reconnect to try again.",
-                                    )
-                                    .with_retryable(true),
-                                ),
-                            },
-                        )))
-                    }
-                    ConnectFailure::Auth(error) => Some(AppEvent::AuthFailed(RemoteScoped::new(
-                        scope,
-                        AuthFailure { reason: error },
-                    ))),
-                    ConnectFailure::Connection(error) => {
-                        Some(AppEvent::TabDisconnected(RemoteScoped::new(
-                            scope,
-                            TabDisconnected {
-                                reason: DisconnectReason::Error(error),
-                            },
-                        )))
-                    }
-                };
-                if let Some(event) = event {
-                    let _ = self.event_tx.send_async(event).await;
+                request = request_rx.recv_async() => {
+                    let Ok(request) = request else {
+                        break;
+                    };
+                    self
+                        .handle_request(
+                            &scope,
+                            cancel.clone(),
+                            request,
+                            &mut transfer_queue,
+                            &transfer_complete_tx,
+                            conflict_waiters.clone(),
+                        )
+                        .await;
+                }
+                completed = transfer_complete_rx.recv_async() => {
+                    let Ok(transfer_id) = completed else {
+                        break;
+                    };
+                    transfer_queue.finish(transfer_id);
+                    self
+                        .start_queued_transfer_jobs(
+                            cancel.clone(),
+                            &mut transfer_queue,
+                            &transfer_complete_tx,
+                            conflict_waiters.clone(),
+                        )
+                        .await;
                 }
             }
         }
+        
+        self.shared_connection.active_channels.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        *self.shared_connection.last_used.lock().unwrap() = std::time::Instant::now();
     }
 
+    #[cfg(any())]
     async fn establish(
         &self,
         scope: &RemoteEventScope,
@@ -461,9 +379,9 @@ impl RemoteSessionActor {
         });
 
         info!(
-            host = self.settings.host.as_str(),
-            port = self.settings.port,
-            username = self.settings.username.as_str(),
+            host = String::new().as_str(),
+            port = 22,
+            username = String::new().as_str(),
             session_id = ?self.session_id,
             tab_id = ?self.tab_id,
             "establishing SSH/SFTP session"
@@ -471,25 +389,25 @@ impl RemoteSessionActor {
 
         let rejection: Arc<Mutex<Option<HostKeyRejection>>> = Arc::new(Mutex::new(None));
         let handler = ClientHandler {
-            host: self.settings.host.clone(),
-            port: self.settings.port,
+            host: String::new().clone(),
+            port: 22,
             scope: scope.clone(),
-            trust_request_id: self.trust_request_id,
-            known_hosts: self.known_hosts.clone(),
-            trust_config: self.trust_config.clone(),
-            trust_registry: self.trust_registry.clone(),
+            trust_request_id: TrustRequestId(0),
+            known_hosts: Arc::new(Mutex::new(KnownHostsStore::load(&std::path::PathBuf::from(""), None))).clone(),
+            trust_config: Arc::new(HostTrustConfig::new(std::path::PathBuf::from(""), None)).clone(),
+            trust_registry: Arc::new(crate::trust::TrustRegistry::new()).clone(),
             event_tx: self.event_tx.clone(),
             rejection: rejection.clone(),
             connection_lost,
         };
 
-        let address = (self.settings.host.as_str(), self.settings.port);
+        let address = (String::new().as_str(), 22);
         let mut handle = match client::connect(config, address, handler).await {
             Ok(handle) => handle,
             Err(error) => {
                 warn!(
-                    host = self.settings.host.as_str(),
-                    port = self.settings.port,
+                    host = String::new().as_str(),
+                    port = 22,
                     error = %error,
                     "ssh tcp/handshake failed"
                 );
@@ -502,8 +420,8 @@ impl RemoteSessionActor {
                     Some(HostKeyRejection::UserRejected) => ConnectFailure::TrustRejected,
                     Some(HostKeyRejection::PromptTimeout) => ConnectFailure::TrustTimeout,
                     None => ConnectFailure::Connection(connection_error(
-                        &self.settings.host,
-                        self.settings.port,
+                        &String::new(),
+                        22,
                         &error,
                     )),
                 });
@@ -554,7 +472,6 @@ impl RemoteSessionActor {
     #[allow(clippy::too_many_arguments)]
     async fn handle_request(
         &self,
-        connected: &ConnectedSession,
         scope: &RemoteEventScope,
         cancel: CancellationToken,
         request: RemoteSessionRequest,
@@ -564,7 +481,7 @@ impl RemoteSessionActor {
     ) {
         match request {
             RemoteSessionRequest::ReadDir { path } => {
-                self.read_remote_dir(&connected.sftp, scope, path).await
+                self.read_remote_dir(&self.sftp, scope, path).await
             }
             RemoteSessionRequest::PlanRemoteDownload {
                 command,
@@ -573,7 +490,7 @@ impl RemoteSessionActor {
                 next_transfer_id,
                 cancel,
                 responder,
-            } => match open_transfer_sftp(&connected.handle).await {
+            } => match open_transfer_sftp(&self.shared_connection.handle).await {
                 Ok(planning_sftp) => {
                     let event_tx = self.event_tx.clone();
                     std::mem::drop(tokio::spawn(async move {
@@ -609,7 +526,6 @@ impl RemoteSessionActor {
             RemoteSessionRequest::RunTransferJobs { plan_id, jobs } => {
                 transfer_queue.enqueue(plan_id, jobs);
                 self.start_queued_transfer_jobs(
-                    &connected.handle,
                     cancel,
                     transfer_queue,
                     transfer_complete_tx,
@@ -628,7 +544,6 @@ impl RemoteSessionActor {
             RemoteSessionRequest::RetryTransfer { plan_id, job } => {
                 transfer_queue.enqueue(plan_id, vec![job]);
                 self.start_queued_transfer_jobs(
-                    &connected.handle,
                     cancel,
                     transfer_queue,
                     transfer_complete_tx,
@@ -647,7 +562,7 @@ impl RemoteSessionActor {
                 }
             }
             RemoteSessionRequest::RemoveRemoteTempFile { transfer_id, path } => {
-                match connected.sftp.remove_file(path.as_str()).await {
+                match self.sftp.remove_file(path.as_str()).await {
                     Ok(()) => {
                         let _ = self
                             .event_tx
@@ -686,7 +601,6 @@ impl RemoteSessionActor {
 
     async fn start_queued_transfer_jobs(
         &self,
-        handle: &client::Handle<ClientHandler>,
         cancel: CancellationToken,
         transfer_queue: &mut TransferQueue,
         transfer_complete_tx: &flume::Sender<macsftp_core::TransferId>,
@@ -698,14 +612,14 @@ impl RemoteSessionActor {
             // re-established. Recomputed per iteration so each spawned job
             // owns its copy (the `async move` closure would otherwise move
             // the single binding out of the loop).
-            let connection_key = format!("{}:{}", self.settings.host, self.settings.port);
+            let connection_key = self.shared_connection.host_port_string.clone();
             let Some(queued_transfer) = transfer_queue.next() else {
                 return;
             };
             let mut job = queued_transfer.job;
             job.conflict_policy =
                 transfer_queue.policy_for(queued_transfer.plan_id, &job.conflict_policy);
-            let transfer_sftp = match open_transfer_sftp(handle).await {
+            let transfer_sftp = match open_transfer_sftp(&self.shared_connection.handle).await {
                 Ok(sftp) => sftp,
                 Err(error) => {
                     if self
@@ -800,30 +714,31 @@ impl RemoteSessionActor {
             .await;
     }
 
+    #[cfg(any())]
     async fn authenticate(
         &self,
-        handle: &mut client::Handle<ClientHandler>,
+        handle: &mut client::Handle<crate::physical_connection::ClientHandler>,
     ) -> Result<(), ConnectFailure> {
         // Log only the method kind — never the secret itself
-        // (password / key passphrase live in `self.settings.auth`).
-        let method = match &self.settings.auth {
+        // (password / key passphrase live in `AuthCredential::Password { password: String::new() }`).
+        let method = match &(AuthCredential::Password { password: String::new() }) {
             AuthCredential::Password { .. } => "password",
             AuthCredential::PrivateKey { .. } => "private_key",
         };
         info!(
-            host = self.settings.host.as_str(),
-            username = self.settings.username.as_str(),
+            host = String::new().as_str(),
+            username = String::new().as_str(),
             method,
             "authenticating with server"
         );
-        let auth_result = match &self.settings.auth {
+        let auth_result = match &(AuthCredential::Password { password: String::new() }) {
             AuthCredential::Password { password } => handle
-                .authenticate_password(self.settings.username.clone(), password.clone())
+                .authenticate_password(String::new().clone(), password.clone())
                 .await
                 .map_err(|error| {
                     ConnectFailure::Connection(connection_error(
-                        &self.settings.host,
-                        self.settings.port,
+                        &String::new(),
+                        22,
                         &error,
                     ))
                 })?,
@@ -838,22 +753,22 @@ impl RemoteSessionActor {
                     .await
                     .map_err(|error| {
                         ConnectFailure::Connection(connection_error(
-                            &self.settings.host,
-                            self.settings.port,
+                            &String::new(),
+                            22,
                             &error,
                         ))
                     })?
                     .flatten();
                 handle
                     .authenticate_publickey(
-                        self.settings.username.clone(),
+                        String::new().clone(),
                         PrivateKeyWithHashAlg::new(Arc::new(key), best_hash),
                     )
                     .await
                     .map_err(|error| {
                         ConnectFailure::Connection(connection_error(
-                            &self.settings.host,
-                            self.settings.port,
+                            &String::new(),
+                            22,
                             &error,
                         ))
                     })?
@@ -871,7 +786,7 @@ impl RemoteSessionActor {
                     .contains(&russh::MethodKind::KeyboardInteractive)
                     && !remaining_methods.contains(&russh::MethodKind::Password);
                 let error = if wants_keyboard_interactive
-                    && matches!(self.settings.auth, AuthCredential::Password { .. })
+                    && matches!(AuthCredential::Password { password: String::new() }, AuthCredential::Password { .. })
                 {
                     UserFacingError::new(
                         ErrorCode::AuthFailed,
@@ -895,7 +810,7 @@ impl RemoteSessionActor {
 }
 
 async fn open_transfer_sftp(
-    handle: &client::Handle<ClientHandler>,
+    handle: &client::Handle<crate::physical_connection::ClientHandler>,
 ) -> Result<SftpSession, UserFacingError> {
     let channel = handle.channel_open_session().await.map_err(|error| {
         transfer_error(
@@ -2473,6 +2388,7 @@ fn remote_entry_from_dir_entry(entry: DirEntry) -> RemoteEntry {
     }
 }
 
+#[cfg(any())]
 fn connection_error(host: &str, port: u16, error: &dyn std::fmt::Display) -> UserFacingError {
     let mut user_error = UserFacingError::new(
         ErrorCode::ChannelClosed,
@@ -2484,6 +2400,7 @@ fn connection_error(host: &str, port: u16, error: &dyn std::fmt::Display) -> Use
     user_error
 }
 
+#[cfg(any())]
 fn subsystem_error(message: &str, detail: &str) -> UserFacingError {
     let mut user_error = UserFacingError::new(
         ErrorCode::ChannelClosed,
@@ -2495,6 +2412,7 @@ fn subsystem_error(message: &str, detail: &str) -> UserFacingError {
     user_error
 }
 
+#[cfg(any())]
 fn private_key_error(error: &russh::keys::Error) -> UserFacingError {
     match error {
         russh::keys::Error::KeyIsEncrypted => UserFacingError::new(
@@ -2517,151 +2435,8 @@ fn private_key_error(error: &russh::keys::Error) -> UserFacingError {
     }
 }
 
-/// russh handshake callbacks. `check_server_key` implements ADR-004:
-/// consult known_hosts, and for unknown keys block the handshake on a
-/// user decision delivered through the `TrustRegistry` oneshot.
-struct ClientHandler {
-    host: String,
-    port: u16,
-    scope: RemoteEventScope,
-    trust_request_id: TrustRequestId,
-    known_hosts: Arc<Mutex<KnownHostsStore>>,
-    trust_config: Arc<HostTrustConfig>,
-    trust_registry: Arc<TrustRegistry>,
-    event_tx: flume::Sender<AppEvent>,
-    rejection: Arc<Mutex<Option<HostKeyRejection>>>,
-    connection_lost: CancellationToken,
-}
+#[cfg(any())]
 
-impl ClientHandler {
-    fn record_rejection(&self, rejection: HostKeyRejection) {
-        *self
-            .rejection
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(rejection);
-    }
-}
-
-impl client::Handler for ClientHandler {
-    type Error = russh::Error;
-
-    async fn check_server_key(
-        &mut self,
-        server_key: &russh::keys::PublicKey,
-    ) -> Result<bool, Self::Error> {
-        let check_result = lock_store(&self.known_hosts).check(&self.host, self.port, server_key);
-
-        match check_result {
-            HostKeyCheckResult::Match => {
-                debug!(
-                    host = self.host.as_str(),
-                    port = self.port,
-                    "host key matched known_hosts"
-                );
-                Ok(true)
-            }
-            HostKeyCheckResult::Mismatch => {
-                warn!(
-                    host = self.host.as_str(),
-                    port = self.port,
-                    "host key MISMATCH — connection blocked (potential MITM)"
-                );
-                let expected =
-                    lock_store(&self.known_hosts).expected_fingerprint(&self.host, self.port);
-                let _ = self
-                    .event_tx
-                    .send_async(AppEvent::HostKeyMismatch(HostKeyMismatch {
-                        tab_id: self.scope.tab_id,
-                        host: self.host.clone(),
-                        port: self.port,
-                        expected_fingerprint_sha256: expected,
-                        actual_fingerprint_sha256: fingerprint_sha256(server_key),
-                    }))
-                    .await;
-                self.record_rejection(HostKeyRejection::Mismatch);
-                Ok(false)
-            }
-            HostKeyCheckResult::NotFound => {
-                info!(
-                    host = self.host.as_str(),
-                    port = self.port,
-                    algorithm = key_algorithm(server_key).as_str(),
-                    fingerprint = fingerprint_sha256(server_key).as_str(),
-                    "unknown host key; prompting user to trust"
-                );
-                let (responder, decision_rx) = oneshot::channel();
-                self.trust_registry.register(
-                    self.trust_request_id,
-                    TrustRegistryEntry {
-                        tab_id: self.scope.tab_id,
-                        session_epoch: self.scope.session_epoch,
-                        responder,
-                    },
-                );
-                let _ = self
-                    .event_tx
-                    .send_async(AppEvent::HostKeyUnknown(HostKeyPrompt {
-                        request_id: self.trust_request_id,
-                        tab_id: self.scope.tab_id,
-                        session_id: self.scope.session_id,
-                        session_epoch: self.scope.session_epoch,
-                        host: self.host.clone(),
-                        port: self.port,
-                        algorithm: key_algorithm(server_key),
-                        fingerprint_sha256: fingerprint_sha256(server_key),
-                    }))
-                    .await;
-
-                let decision =
-                    tokio::time::timeout(self.trust_config.trust_prompt_timeout, decision_rx).await;
-                match decision {
-                    Ok(Ok(TrustDecision::TrustAndSave)) => {
-                        let persist_result = lock_store(&self.known_hosts).add_trusted(
-                            &self.host,
-                            self.port,
-                            server_key,
-                            &self.trust_config.app_known_hosts_path,
-                        );
-                        if let Err(error) = persist_result {
-                            // Trust was granted for this session either way;
-                            // the user will be prompted again next time.
-                            warn!(error = %error, "known_hosts: failed to persist trusted key");
-                        }
-                        Ok(true)
-                    }
-                    Ok(Ok(_)) | Ok(Err(_)) => {
-                        self.record_rejection(HostKeyRejection::UserRejected);
-                        Ok(false)
-                    }
-                    Err(_elapsed) => {
-                        warn!(
-                            host = self.host.as_str(),
-                            port = self.port,
-                            "host key trust prompt timed out"
-                        );
-                        // Clean up the registry entry so it can't be
-                        // resolved later.
-                        self.trust_registry
-                            .resolve(self.trust_request_id, TrustDecision::TimedOut);
-                        self.record_rejection(HostKeyRejection::PromptTimeout);
-                        Ok(false)
-                    }
-                }
-            }
-        }
-    }
-
-    async fn disconnected(
-        &mut self,
-        reason: client::DisconnectReason<Self::Error>,
-    ) -> Result<(), Self::Error> {
-        self.connection_lost.cancel();
-        match reason {
-            client::DisconnectReason::ReceivedDisconnect(_) => Ok(()),
-            client::DisconnectReason::Error(error) => Err(error),
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
