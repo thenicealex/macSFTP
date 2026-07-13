@@ -792,6 +792,60 @@ mod tests {
     }
 
     #[gpui::test]
+    fn settings_profile_filter_narrows_list(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        workspace.update_in(&mut cx, |ws, _window, cx| {
+            let work = macsftp_core::ConnectionProfile::new(
+                ProfileId(1),
+                "Work Server",
+                "work.example.com",
+                "alex",
+                AuthMethod::Password {
+                    secret_ref: macsftp_core::SecretRef::keychain_ref(ProfileId(1), "password"),
+                },
+            );
+            let home = macsftp_core::ConnectionProfile::new(
+                ProfileId(2),
+                "Home NAS",
+                "nas.local",
+                "admin",
+                AuthMethod::Password {
+                    secret_ref: macsftp_core::SecretRef::keychain_ref(ProfileId(2), "password"),
+                },
+            );
+            match cx.resources_mut().profiles.save_profile(work) {
+                Ok(_) => {}
+                Err(error) => panic!("seed work profile: {error}"),
+            }
+            match cx.resources_mut().profiles.save_profile(home) {
+                Ok(_) => {}
+                Err(error) => panic!("seed home profile: {error}"),
+            }
+
+            let all = cx.resources().profiles.profiles().to_vec();
+            assert_eq!(all.len(), 2);
+            assert_eq!(
+                ws.filtered_profiles(&all).len(),
+                2,
+                "empty filter matches every profile"
+            );
+
+            ws.profile_filter.set_value("nas.local");
+            let filtered = ws.filtered_profiles(&all);
+            assert_eq!(filtered.len(), 1, "filter must narrow to one host");
+            assert_eq!(filtered[0].id, ProfileId(2));
+            assert_eq!(filtered[0].host, "nas.local");
+
+            ws.profile_filter.set_value("nomatch");
+            assert!(
+                ws.filtered_profiles(&all).is_empty(),
+                "non-matching filter yields no profiles"
+            );
+        });
+    }
+
+    #[gpui::test]
     fn about_action_opens_and_escape_closes_overlay(cx: &mut TestAppContext) {
         let (workspace, mut cx, _channels) = init_workspace(cx);
 

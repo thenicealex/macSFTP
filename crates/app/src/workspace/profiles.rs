@@ -223,10 +223,12 @@ impl crate::workspace::Workspace {
         id: ProfileId,
         cx: &mut Context<Self>,
     ) {
+        self.profile_filter_focused = false;
         self.load_profile_editor(id, cx);
     }
 
     pub(crate) fn start_new_profile(&mut self, cx: &mut Context<Self>) {
+        self.profile_filter_focused = false;
         self.selected_profile_id = None;
         self.profile_editor = Some(ProfileEditorState::blank());
         cx.notify();
@@ -237,6 +239,7 @@ impl crate::workspace::Workspace {
             return;
         };
         let secret_present = profile_secret_present(&profile, cx);
+        self.profile_filter_focused = false;
         self.selected_profile_id = Some(id);
         self.profile_editor = Some(ProfileEditorState::from_profile(&profile, secret_present));
         cx.notify();
@@ -443,8 +446,43 @@ impl crate::workspace::Workspace {
     ) -> Vec<&'a ConnectionProfile> {
         profiles
             .iter()
-            .filter(|profile| profile_matches_filter(profile, &self.profile_filter))
+            .filter(|profile| profile_matches_filter(profile, self.profile_filter.value()))
             .collect()
+    }
+
+    /// Focus the Profiles list filter field (click or explicit focus).
+    pub(crate) fn focus_profile_filter(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.profile_filter_focused = true;
+        window.focus(&self.workspace_focus);
+        cx.notify();
+    }
+
+    pub(crate) fn handle_profile_filter_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.profile_filter_focused {
+            return;
+        }
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.platform && keystroke.key == "v" {
+            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                self.profile_filter.insert(&text);
+                cx.stop_propagation();
+                cx.notify();
+            }
+            return;
+        }
+        if self.profile_filter.handle_keystroke(keystroke) == InputKeyResult::Handled {
+            cx.stop_propagation();
+            cx.notify();
+        }
     }
 
     /// Arm the profile-delete confirmation modal. Does not remove anything yet.
@@ -493,6 +531,9 @@ impl crate::workspace::Workspace {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.profile_filter_focused {
+            return;
+        }
         let Some(editor) = self.profile_editor.as_mut() else {
             return;
         };

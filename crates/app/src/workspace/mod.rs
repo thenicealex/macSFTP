@@ -94,8 +94,10 @@ pub struct Workspace {
     surface: WorkspaceSurface,
     /// Active sidebar section when `surface == Settings`.
     settings_section: SettingsSection,
-    /// Free-text filter for the Settings → Profiles list (Task 4 wires the input).
-    profile_filter: String,
+    /// Free-text filter for the Settings → Profiles list.
+    profile_filter: InputState,
+    /// `true` while the Profiles filter field owns key events.
+    profile_filter_focused: bool,
     /// Selected profile in Settings → Profiles (None when the list is empty).
     selected_profile_id: Option<ProfileId>,
     /// Draft for New / Edit profile in Settings → Profiles.
@@ -211,7 +213,8 @@ impl Workspace {
             focused_side: PaneSide::Local,
             surface: WorkspaceSurface::Files,
             settings_section: SettingsSection::General,
-            profile_filter: String::new(),
+            profile_filter: InputState::new(),
+            profile_filter_focused: false,
             selected_profile_id: None,
             profile_editor: None,
             profile_delete_confirm: None,

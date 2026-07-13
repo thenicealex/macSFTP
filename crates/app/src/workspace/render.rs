@@ -1820,12 +1820,16 @@ impl crate::workspace::Workspace {
     pub(crate) fn render_settings_profiles(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme().clone();
         let profiles = cx.resources().profiles.profiles().to_vec();
+        let total_count = profiles.len();
         let filtered = self.filtered_profiles(&profiles);
+        let filtered_count = filtered.len();
+        let filter_active = !self.profile_filter.value().trim().is_empty();
         let selected_id = self.selected_profile_id;
         let editing_new = self
             .profile_editor
             .as_ref()
             .is_some_and(|editor| editor.is_new);
+        let filter_focused = self.profile_filter_focused;
 
         // Materialize rows before the editor borrow of `cx` (listeners capture).
         let list_rows: Vec<_> = filtered
@@ -1854,8 +1858,39 @@ impl crate::workspace::Workspace {
             })
             .collect();
 
+        let list_body: gpui::AnyElement = if total_count == 0 {
+            empty_state(
+                "No saved profiles",
+                vec![
+                    text_button("settings-empty-new-profile", "New Profile").on_click(
+                        cx.listener(|workspace, _event, _window, cx| {
+                            workspace.start_new_profile(cx);
+                        }),
+                    ),
+                ],
+                cx,
+            )
+            .into_any_element()
+        } else if filtered_count == 0 && filter_active {
+            empty_state("No matches", vec![], cx).into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .min_h_0()
+                .children(list_rows)
+                .into_any_element()
+        };
+
         let detail = if self.profile_editor.is_some() {
             self.render_profile_editor(cx)
+        } else if total_count == 0 {
+            div()
+                .text_size(px(13.0))
+                .text_color(theme.colors.text_muted)
+                .child("Create a profile to get started")
+                .into_any_element()
         } else {
             div()
                 .text_size(px(13.0))
@@ -1879,6 +1914,8 @@ impl crate::workspace::Workspace {
                     .p_3()
                     .border_r_1()
                     .border_color(theme.colors.border)
+                    .track_focus(&self.workspace_focus)
+                    .on_key_down(cx.listener(Self::handle_profile_filter_key))
                     .child(
                         text_button("settings-new-profile", "New Profile").on_click(cx.listener(
                             |workspace, _event, _window, cx| {
@@ -1888,12 +1925,22 @@ impl crate::workspace::Workspace {
                     )
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .min_h_0()
-                            .children(list_rows),
-                    ),
+                            .id("settings-profile-filter")
+                            .on_click(cx.listener(|workspace, _event, window, cx| {
+                                workspace.focus_profile_filter(window, cx);
+                            }))
+                            .child(text_field(
+                                "settings-profile-filter-input",
+                                TextFieldModel {
+                                    state: &self.profile_filter,
+                                    placeholder: "Filter profiles…",
+                                    focused: filter_focused,
+                                    masked: false,
+                                },
+                                cx,
+                            )),
+                    )
+                    .child(list_body),
             )
             .child(div().flex_1().min_w_0().p_6().child(detail))
             .into_any_element()
@@ -1917,11 +1964,13 @@ impl crate::workspace::Workspace {
                 .flex()
                 .items_center()
                 .gap_2()
-                .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                .on_click(cx.listener(move |workspace, _event, window, cx| {
+                    workspace.profile_filter_focused = false;
                     if let Some(editor) = workspace.profile_editor.as_mut() {
                         editor.focused_field = field;
-                        cx.notify();
                     }
+                    window.focus(&workspace.modal_focus);
+                    cx.notify();
                 }))
                 .child(
                     div()
