@@ -328,8 +328,9 @@ impl crate::workspace::Workspace {
                     }
                 }
             }
-            AppEvent::TransferQueued(snapshot) | AppEvent::TransferRunning(snapshot) => {
-                if let Some(existing_job) = cx.transfers_mut()
+            AppEvent::TransferQueued(snapshot) => {
+                if let Some(existing_job) = cx
+                    .transfers_mut()
                     .jobs
                     .iter_mut()
                     .find(|job| job.id == snapshot.job.id)
@@ -339,8 +340,34 @@ impl crate::workspace::Workspace {
                     cx.transfers_mut().jobs.push(snapshot.job);
                 }
             }
+            AppEvent::TransferRunning(snapshot) => {
+                let rate_sample = match &snapshot.job.state {
+                    TransferState::Running { bytes_done, .. } => {
+                        Some((snapshot.job.id, *bytes_done))
+                    }
+                    _ => None,
+                };
+                if let Some(existing_job) = cx
+                    .transfers_mut()
+                    .jobs
+                    .iter_mut()
+                    .find(|job| job.id == snapshot.job.id)
+                {
+                    *existing_job = snapshot.job;
+                } else {
+                    cx.transfers_mut().jobs.push(snapshot.job);
+                }
+                if let Some((transfer_id, bytes_done)) = rate_sample {
+                    cx.rates_mut().observe(
+                        transfer_id,
+                        bytes_done,
+                        std::time::Instant::now(),
+                    );
+                }
+            }
             AppEvent::TransferProgress(progress) => {
-                if let Some(job) = cx.transfers_mut()
+                if let Some(job) = cx
+                    .transfers_mut()
                     .jobs
                     .iter_mut()
                     .find(|job| job.id == progress.transfer_id)
@@ -355,9 +382,15 @@ impl crate::workspace::Workspace {
                         started_at,
                     };
                 }
+                cx.rates_mut().observe(
+                    progress.transfer_id,
+                    progress.bytes_done,
+                    std::time::Instant::now(),
+                );
             }
             AppEvent::TransferWarning(warning) => {
-                if let Some(job) = cx.transfers_mut()
+                if let Some(job) = cx
+                    .transfers_mut()
                     .jobs
                     .iter_mut()
                     .find(|job| job.id == warning.transfer_id)
@@ -366,7 +399,9 @@ impl crate::workspace::Workspace {
                 }
             }
             AppEvent::TransferCompleted { transfer_id } => {
-                if let Some(job) = cx.transfers_mut()
+                cx.rates_mut().clear(transfer_id);
+                if let Some(job) = cx
+                    .transfers_mut()
                     .jobs
                     .iter_mut()
                     .find(|job| job.id == transfer_id)
@@ -376,7 +411,9 @@ impl crate::workspace::Workspace {
                 self.finalize_plan(transfer_id, cx);
             }
             AppEvent::TransferSkipped { transfer_id } => {
-                if let Some(job) = cx.transfers_mut()
+                cx.rates_mut().clear(transfer_id);
+                if let Some(job) = cx
+                    .transfers_mut()
                     .jobs
                     .iter_mut()
                     .find(|job| job.id == transfer_id)
@@ -386,7 +423,9 @@ impl crate::workspace::Workspace {
                 self.finalize_plan(transfer_id, cx);
             }
             AppEvent::TransferFailed(failure) => {
-                if let Some(job) = cx.transfers_mut()
+                cx.rates_mut().clear(failure.transfer_id);
+                if let Some(job) = cx
+                    .transfers_mut()
                     .jobs
                     .iter_mut()
                     .find(|job| job.id == failure.transfer_id)

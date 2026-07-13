@@ -89,24 +89,38 @@ impl ActiveResources for App {
 /// from [`AppResources`] because it is in-memory only (no disk path),
 /// created fresh via `Default`, and mutated continuously by every window's
 /// event-drain task.
+///
+/// `rates` is a view-side sliding-window sampler map (phase 2) keyed by
+/// transfer id; progress events update it, and the drawer/detail read it.
 #[derive(Default)]
-pub struct SharedTransfers(pub TransferStore);
+pub struct SharedTransfers {
+    pub store: TransferStore,
+    pub rates: crate::rate_sampler::TransferRateBook,
+}
 
 impl Global for SharedTransfers {}
 
-/// Read/write the shared transfer store anywhere a `&App`/`&mut App` is
-/// reachable.
+/// Read/write the shared transfer store (and rate book) anywhere a
+/// `&App`/`&mut App` is reachable.
 pub trait ActiveTransfers {
     fn transfers(&self) -> &TransferStore;
     fn transfers_mut(&mut self) -> &mut TransferStore;
+    fn rates(&self) -> &crate::rate_sampler::TransferRateBook;
+    fn rates_mut(&mut self) -> &mut crate::rate_sampler::TransferRateBook;
 }
 
 impl ActiveTransfers for App {
     fn transfers(&self) -> &TransferStore {
-        &self.global::<SharedTransfers>().0
+        &self.global::<SharedTransfers>().store
     }
     fn transfers_mut(&mut self) -> &mut TransferStore {
-        &mut self.global_mut::<SharedTransfers>().0
+        &mut self.global_mut::<SharedTransfers>().store
+    }
+    fn rates(&self) -> &crate::rate_sampler::TransferRateBook {
+        &self.global::<SharedTransfers>().rates
+    }
+    fn rates_mut(&mut self) -> &mut crate::rate_sampler::TransferRateBook {
+        &mut self.global_mut::<SharedTransfers>().rates
     }
 }
 
