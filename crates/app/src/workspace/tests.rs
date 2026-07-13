@@ -828,47 +828,6 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn connect_form_delete_opens_confirm_not_immediate(cx: &mut TestAppContext) {
-        let (workspace, mut cx, _channels) = init_workspace(cx);
-
-        let profile_id = ProfileId(7);
-        workspace.update_in(&mut cx, |ws, window, cx| {
-            let profile = macsftp_core::ConnectionProfile::new(
-                profile_id,
-                "Prod",
-                "sftp.example.com",
-                "deploy",
-                AuthMethod::Password {
-                    secret_ref: macsftp_core::SecretRef::keychain_ref(profile_id, "password"),
-                },
-            );
-            match cx.resources_mut().profiles.save_profile(profile) {
-                Ok(_) => {}
-                Err(error) => panic!("seed profile: {error}"),
-            }
-
-            ws.open_connect_form(window, cx);
-            // Connect form Delete must request confirmation, not call delete_profile.
-            ws.request_delete_profile(profile_id, window, cx);
-
-            assert_eq!(
-                ws.profile_delete_confirm,
-                Some(profile_id),
-                "Delete arms profile_delete_confirm"
-            );
-            assert!(
-                cx.resources().profiles.find_profile(profile_id).is_some(),
-                "profile must remain until the user confirms"
-            );
-            assert_eq!(
-                cx.resources().profiles.profiles().len(),
-                1,
-                "store still has the profile"
-            );
-        });
-    }
-
     #[test]
     fn profile_matches_filter_name_host_user() {
         let profile = macsftp_core::ConnectionProfile::new(
@@ -2642,6 +2601,286 @@ mod tests {
             }
             other => panic!("expected ConnectTab, got {other:?}"),
         }
+    }
+
+    #[gpui::test]
+    fn open_connect_form_resets_picker_and_save_as_flags(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _) = init_workspace(cx);
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            ws.open_connect_form(window, cx);
+            let form = ws.connect_form.as_mut().expect("form opens");
+            form.profile_picker_open = true;
+            form.save_as_expanded = true;
+            form.profile_picker_filter.set_value("partial");
+            ws.close_connect_form(window, cx);
+            ws.open_connect_form(window, cx);
+            let form = ws.connect_form.as_ref().expect("form reopens");
+            assert!(
+                !form.profile_picker_open,
+                "reopening connect form must reset profile_picker_open"
+            );
+            assert!(
+                !form.save_as_expanded,
+                "reopening connect form must reset save_as_expanded"
+            );
+            assert!(
+                form.profile_picker_filter.value().is_empty(),
+                "reopening connect form must clear profile_picker_filter"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn connect_save_as_collapsed_by_default(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _) = init_workspace(cx);
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            ws.open_connect_form(window, cx);
+            let form = ws.connect_form.as_ref().expect("form opens");
+            assert!(
+                !form.save_as_expanded,
+                "Save as profile must start collapsed"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn connect_save_as_expand_and_save_still_works(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.open_connect_form(window, cx);
+            let form = workspace.connect_form.as_mut().expect("form is open");
+            assert!(!form.save_as_expanded);
+            form.save_as_expanded = true;
+            form.host.set_value("save-as.example.com");
+            form.port.set_value("22");
+            form.username.set_value("deploy");
+            form.password.set_value("s3cret");
+            form.profile_name.set_value("Save As Box");
+            workspace.save_current_profile(cx);
+        });
+
+        workspace.read_with(&cx, |workspace, cx| {
+            let profiles = cx.resources().profiles.profiles();
+            assert_eq!(profiles.len(), 1, "profile saved to store");
+            assert_eq!(profiles[0].name, "Save As Box");
+            assert_eq!(profiles[0].host, "save-as.example.com");
+            assert_eq!(profiles[0].username, "deploy");
+            let form = workspace
+                .connect_form
+                .as_ref()
+                .expect("form stays open after save");
+            assert!(
+                !form.save_as_expanded,
+                "successful save collapses Save as"
+            );
+            assert_eq!(
+                form.source_profile_id,
+                Some(profiles[0].id),
+                "form links to the saved profile"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn connect_picker_select_profile_prefills_form(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.open_connect_form(window, cx);
+        });
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            let form = workspace.connect_form.as_mut().expect("form is open");
+            form.host.set_value("example.com");
+            form.username.set_value("alex");
+            form.password.set_value("hunter2");
+            form.profile_name.set_value("Work");
+            workspace.save_current_profile(cx);
+        });
+
+        let saved_id = workspace.read_with(&cx, |_workspace, cx| {
+            let profiles = cx.resources().profiles.profiles();
+            assert_eq!(profiles.len(), 1, "one profile saved");
+            assert_eq!(profiles[0].name, "Work");
+            profiles[0].id
+        });
+
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            let form = workspace.connect_form.as_mut().expect("form is open");
+            form.host.set_value("other.example.com");
+            form.username.set_value("other");
+            form.password = macsftp_ui::InputState::new();
+            form.profile_picker_open = true;
+            form.profile_picker_filter.set_value("work");
+            workspace.select_connect_profile(saved_id, cx);
+        });
+
+        workspace.read_with(&cx, |workspace, _| {
+            let form = workspace
+                .connect_form
+                .as_ref()
+                .expect("form open after select");
+            assert_eq!(form.source_profile_id, Some(saved_id));
+            assert_eq!(form.host.value(), "example.com");
+            assert_eq!(form.username.value(), "alex");
+            assert_eq!(
+                form.password.value(),
+                "hunter2",
+                "secret restored from Keychain"
+            );
+            assert!(
+                !form.profile_picker_open,
+                "selecting a profile must close the picker"
+            );
+            assert!(
+                form.profile_picker_filter.value().is_empty(),
+                "selecting a profile must clear the picker filter"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn connect_picker_filter_narrows_profiles(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            let work = macsftp_core::ConnectionProfile::new(
+                ProfileId(1),
+                "Work Server",
+                "work.example.com",
+                "alex",
+                AuthMethod::Password {
+                    secret_ref: macsftp_core::SecretRef::keychain_ref(ProfileId(1), "password"),
+                },
+            );
+            let home = macsftp_core::ConnectionProfile::new(
+                ProfileId(2),
+                "Home NAS",
+                "nas.local",
+                "admin",
+                AuthMethod::Password {
+                    secret_ref: macsftp_core::SecretRef::keychain_ref(ProfileId(2), "password"),
+                },
+            );
+            match cx.resources_mut().profiles.save_profile(work) {
+                Ok(_) => {}
+                Err(error) => panic!("seed work profile: {error}"),
+            }
+            match cx.resources_mut().profiles.save_profile(home) {
+                Ok(_) => {}
+                Err(error) => panic!("seed home profile: {error}"),
+            }
+
+            workspace.open_connect_form(window, cx);
+            {
+                let form = workspace.connect_form.as_mut().expect("form opens");
+                form.profile_picker_open = true;
+            }
+
+            assert_eq!(
+                workspace.filtered_connect_profiles(cx).len(),
+                2,
+                "empty filter matches every profile"
+            );
+
+            {
+                let form = workspace.connect_form.as_mut().expect("form opens");
+                form.profile_picker_filter.set_value("work");
+            }
+            let filtered = workspace.filtered_connect_profiles(cx);
+            assert_eq!(filtered.len(), 1, "filter must narrow to one profile");
+            assert_eq!(filtered[0].id, ProfileId(1));
+            assert_eq!(filtered[0].name, "Work Server");
+
+            {
+                let form = workspace.connect_form.as_mut().expect("form opens");
+                form.profile_picker_filter.set_value("nomatch");
+            }
+            assert!(
+                workspace.filtered_connect_profiles(cx).is_empty(),
+                "non-matching filter yields no profiles"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn escape_closes_profile_picker_before_connect_form(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.open_connect_form(window, cx);
+            let form = workspace.connect_form.as_mut().expect("form opens");
+            form.profile_picker_open = true;
+
+            workspace.cancel_active_modal(window, cx);
+            let form = workspace
+                .connect_form
+                .as_ref()
+                .expect("first Esc must keep Connect open");
+            assert!(
+                !form.profile_picker_open,
+                "first Esc must close the profile picker only"
+            );
+
+            workspace.cancel_active_modal(window, cx);
+            assert!(
+                workspace.connect_form.is_none(),
+                "second Esc must close the Connect form"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn connect_manual_entry_clears_profile_link_and_secrets(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.open_connect_form(window, cx);
+        });
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            let form = workspace.connect_form.as_mut().expect("form is open");
+            form.host.set_value("example.com");
+            form.username.set_value("alex");
+            form.password.set_value("hunter2");
+            form.profile_name.set_value("Work");
+            workspace.save_current_profile(cx);
+        });
+
+        let saved_id = workspace.read_with(&cx, |_workspace, cx| {
+            cx.resources().profiles.profiles()[0].id
+        });
+
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            workspace.select_connect_profile(saved_id, cx);
+            let form = workspace.connect_form.as_mut().expect("form is open");
+            form.profile_picker_open = true;
+            form.switch_to_manual_entry();
+        });
+
+        workspace.read_with(&cx, |workspace, _| {
+            let form = workspace
+                .connect_form
+                .as_ref()
+                .expect("form stays open after manual entry");
+            assert!(
+                form.source_profile_id.is_none(),
+                "manual entry must clear source_profile_id"
+            );
+            assert!(
+                form.password.value().is_empty(),
+                "manual entry must clear password"
+            );
+            assert_eq!(
+                form.host.value(),
+                "example.com",
+                "manual entry keeps host metadata"
+            );
+            assert_eq!(form.username.value(), "alex");
+            assert!(
+                !form.profile_picker_open,
+                "manual entry must close the picker"
+            );
+        });
     }
 
     #[gpui::test]

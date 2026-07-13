@@ -39,6 +39,7 @@ use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::connect_form::*;
 use crate::workspace::helpers::*;
 use crate::workspace::nav::HistoryOp;
+use crate::workspace::profiles::{SettingsSection, profile_matches_filter};
 use crate::workspace::*;
 
 impl crate::workspace::Workspace {
@@ -267,7 +268,14 @@ impl crate::workspace::Workspace {
             self.focus_pane(self.focused_side, window, cx);
             return;
         }
-        if self.connect_form.is_some() {
+        // Connect profile picker sits above the form: Esc closes the picker
+        // first, then a second Esc dismisses Connect.
+        if let Some(form) = &mut self.connect_form {
+            if form.profile_picker_open {
+                form.profile_picker_open = false;
+                cx.notify();
+                return;
+            }
             self.close_connect_form(window, cx);
             return;
         }
@@ -568,95 +576,169 @@ impl crate::workspace::Workspace {
             );
         }
 
-        // Saved profiles: pick one to prefill the form, or delete it.
-        let saved_profiles: Vec<(ProfileId, String, String)> = cx
-            .resources()
-            .profiles
-            .profiles()
-            .iter()
-            .map(|profile| {
-                (
-                    profile.id,
-                    profile.name.clone(),
-                    format!("{}@{}:{}", profile.username, profile.host, profile.port),
+        let profiles = cx.resources().profiles.profiles().to_vec();
+        let trigger_label = form.profile_trigger_label(&profiles);
+        let profile_picker_open = form.profile_picker_open;
+
+        card = card.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(96.0))
+                        .flex_none()
+                        .text_size(px(11.0))
+                        .text_color(theme.colors.text_muted)
+                        .child("Profile"),
                 )
-            })
-            .collect();
-        if !saved_profiles.is_empty() {
-            card = card.child(
+                .child(
+                    div()
+                        .id("profile-picker-trigger")
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .border_1()
+                        .border_color(theme.colors.border)
+                        .rounded_md()
+                        .cursor_pointer()
+                        .on_click(cx.listener(|workspace, _event, _window, cx| {
+                            if let Some(form) = &mut workspace.connect_form {
+                                form.profile_picker_open = !form.profile_picker_open;
+                                cx.notify();
+                            }
+                        }))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(12.0))
+                                .text_color(theme.colors.text)
+                                .child(trigger_label),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(10.0))
+                                .text_color(theme.colors.text_muted)
+                                .child(if profile_picker_open { "▴" } else { "▾" }),
+                        ),
+                )
+                .child(
+                    text_button("connect-manage-profiles", "Manage…").on_click(cx.listener(
+                        |workspace, _event, window, cx| {
+                            // OpenProfiles is gated on connect_form being closed;
+                            // dismiss Connect first so Settings Profiles can open.
+                            workspace.close_connect_form(window, cx);
+                            workspace.about_open = false;
+                            workspace.surface = WorkspaceSurface::Settings;
+                            workspace
+                                .set_settings_section(SettingsSection::Profiles, cx);
+                            workspace.workspace_focus.focus(window);
+                            cx.notify();
+                        },
+                    )),
+                ),
+        );
+
+        if profile_picker_open {
+            let filter_query = form.profile_picker_filter.value().to_string();
+            let filtered: Vec<&ConnectionProfile> = profiles
+                .iter()
+                .filter(|profile| profile_matches_filter(profile, &filter_query))
+                .collect();
+
+            let mut picker_panel = div()
+                .id("profile-picker-panel")
+                .flex()
+                .flex_col()
+                .gap_0()
+                .ml(px(104.0))
+                .max_h(px(200.0))
+                .overflow_y_scroll()
+                .border_1()
+                .border_color(theme.colors.border)
+                .rounded_md()
+                .bg(theme.colors.surface)
+                .child(
+                    div()
+                        .id("profile-picker-filter")
+                        .px_2()
+                        .py_1()
+                        .border_b_1()
+                        .border_color(theme.colors.border)
+                        .child(text_field(
+                            "profile-picker-filter-input",
+                            TextFieldModel {
+                                state: &form.profile_picker_filter,
+                                placeholder: "Filter profiles…",
+                                focused: true,
+                                masked: false,
+                            },
+                            cx,
+                        )),
+                );
+            if profiles.is_empty() {
+                picker_panel = picker_panel.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_size(px(12.0))
+                        .text_color(theme.colors.text_muted)
+                        .child("No saved profiles"),
+                );
+            } else if filtered.is_empty() {
+                picker_panel = picker_panel.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_size(px(12.0))
+                        .text_color(theme.colors.text_muted)
+                        .child("No matches"),
+                );
+            } else {
+                picker_panel = picker_panel.children(filtered.into_iter().map(|profile| {
+                    let profile_id = profile.id;
+                    div()
+                        .id(("profile-picker-row", profile.id.0))
+                        .px_2()
+                        .py_1()
+                        .min_w_0()
+                        .truncate()
+                        .cursor_pointer()
+                        .text_size(px(12.0))
+                        .text_color(theme.colors.text)
+                        .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                            workspace.select_connect_profile(profile_id, cx);
+                        }))
+                        .child(profile.name.clone())
+                }));
+            }
+            picker_panel = picker_panel.child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(theme.colors.text_muted)
-                            .child("Saved profiles"),
-                    )
-                    .children(
-                        saved_profiles
-                            .into_iter()
-                            .map(|(profile_id, name, summary)| {
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .flex_col()
-                                            .child(
-                                                div()
-                                                    .min_w_0()
-                                                    .truncate()
-                                                    .text_size(px(12.0))
-                                                    .text_color(theme.colors.text)
-                                                    .child(name),
-                                            )
-                                            .child(
-                                                div()
-                                                    .min_w_0()
-                                                    .truncate()
-                                                    .text_size(px(10.0))
-                                                    .text_color(theme.colors.text_muted)
-                                                    .child(summary),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_none()
-                                            .gap_1()
-                                            .child(
-                                                text_button(("use-profile", profile_id.0), "Use")
-                                                    .on_click(cx.listener(
-                                                        move |workspace, _event, _window, _cx| {
-                                                            workspace.use_profile(profile_id, _cx);
-                                                        },
-                                                    )),
-                                            )
-                                            .child(
-                                                text_button(
-                                                    ("delete-profile", profile_id.0),
-                                                    "Delete",
-                                                )
-                                                .on_click(cx.listener(
-                                                    move |workspace, _event, window, cx| {
-                                                        workspace.request_delete_profile(
-                                                            profile_id, window, cx,
-                                                        );
-                                                    },
-                                                )),
-                                            ),
-                                    )
-                            }),
-                    )
-                    .child(div().h(px(1.0)).bg(theme.colors.border).my_1()),
+                    .id("profile-picker-manual-entry")
+                    .px_2()
+                    .py_1()
+                    .min_w_0()
+                    .cursor_pointer()
+                    .text_size(px(12.0))
+                    .text_color(theme.colors.text_muted)
+                    .on_click(cx.listener(|workspace, _event, _window, cx| {
+                        if let Some(form) = &mut workspace.connect_form {
+                            form.switch_to_manual_entry();
+                            cx.notify();
+                        }
+                    }))
+                    .child("Manual entry"),
             );
+            card = card.child(picker_panel);
         }
 
         // When prefilled from a saved profile, `use_profile` restores the
@@ -757,53 +839,75 @@ impl crate::workspace::Workspace {
                 )),
         };
 
-        // Save the current connection as a profile. The secret is mapped
-        // to a SecretRef stub and never written to disk (plan §5).
-        card = card.child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .w(px(96.0))
-                        .flex_none()
-                        .text_size(px(11.0))
-                        .text_color(theme.colors.text_muted)
-                        .child("Save as"),
-                )
-                .child(
-                    div()
-                        .id("profile-name-row")
-                        .flex_1()
-                        .min_w_0()
-                        .on_click(cx.listener(
-                            move |workspace, _event: &ClickEvent, _window, cx| {
-                                if let Some(form) = &mut workspace.connect_form {
-                                    form.focused_field = ConnectField::ProfileName;
-                                    cx.notify();
-                                }
+        // Save as is collapsed by default so the form stays short for one-off
+        // connects. Expanding reveals the optional name field + Save profile.
+        // Secrets are mapped to a SecretRef stub and never written to disk
+        // (plan §5).
+        if form.save_as_expanded {
+            card = card.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(96.0))
+                            .flex_none()
+                            .text_size(px(11.0))
+                            .text_color(theme.colors.text_muted)
+                            .child("Save as"),
+                    )
+                    .child(
+                        div()
+                            .id("profile-name-row")
+                            .flex_1()
+                            .min_w_0()
+                            .on_click(cx.listener(
+                                move |workspace, _event: &ClickEvent, _window, cx| {
+                                    if let Some(form) = &mut workspace.connect_form {
+                                        form.focused_field = ConnectField::ProfileName;
+                                        cx.notify();
+                                    }
+                                },
+                            ))
+                            .child(text_field(
+                                "profile-name-input",
+                                TextFieldModel {
+                                    state: &form.profile_name,
+                                    placeholder: "profile name (optional)",
+                                    focused: form.focused_field == ConnectField::ProfileName,
+                                    masked: false,
+                                },
+                                cx,
+                            )),
+                    )
+                    .child(
+                        text_button("save-profile", "Save profile").on_click(cx.listener(
+                            |workspace, _event, _window, cx| {
+                                workspace.save_current_profile(cx);
                             },
-                        ))
-                        .child(text_field(
-                            "profile-name-input",
-                            TextFieldModel {
-                                state: &form.profile_name,
-                                placeholder: "profile name (optional)",
-                                focused: form.focused_field == ConnectField::ProfileName,
-                                masked: false,
-                            },
-                            cx,
                         )),
-                )
-                .child(
-                    text_button("save-profile", "Save profile").on_click(cx.listener(
-                        |workspace, _event, _window, cx| {
-                            workspace.save_current_profile(cx);
-                        },
-                    )),
-                ),
-        );
+                    ),
+            );
+        } else {
+            card = card.child(
+                div()
+                    .id("save-as-profile-expand")
+                    .flex()
+                    .items_center()
+                    .cursor_pointer()
+                    .text_size(px(12.0))
+                    .text_color(theme.colors.text_muted)
+                    .on_click(cx.listener(|workspace, _event, _window, cx| {
+                        if let Some(form) = &mut workspace.connect_form {
+                            form.save_as_expanded = true;
+                            form.focused_field = ConnectField::ProfileName;
+                            cx.notify();
+                        }
+                    }))
+                    .child("Save as profile…"),
+            );
+        }
 
         card = card.child(
             div()
