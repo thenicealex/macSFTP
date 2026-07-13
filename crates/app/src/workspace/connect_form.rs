@@ -9,6 +9,7 @@ use tracing::warn;
 
 use crate::resources::ActiveResources;
 use crate::workspace::helpers::{expand_home, secret_refs_for_profile, secret_refs_for_settings};
+use crate::workspace::profiles::profile_matches_filter;
 
 /// One field of the connect form, in Tab-cycle order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,8 +44,7 @@ pub(crate) struct ConnectForm {
     pub(crate) profile_name: InputState,
     /// Whether the inline profile picker panel is expanded.
     pub(crate) profile_picker_open: bool,
-    // Populated now so open/reset is correct; filter UI lands next.
-    #[allow(dead_code)]
+    /// Filter text for the inline profile picker list.
     pub(crate) profile_picker_filter: InputState,
     #[allow(dead_code)]
     pub(crate) save_as_expanded: bool,
@@ -373,6 +373,24 @@ impl crate::workspace::Workspace {
         cx.notify();
     }
 
+    /// Profiles visible in the Connect picker under the current filter.
+    pub(crate) fn filtered_connect_profiles<'a>(
+        &'a self,
+        cx: &'a App,
+    ) -> Vec<&'a ConnectionProfile> {
+        let query = self
+            .connect_form
+            .as_ref()
+            .map(|form| form.profile_picker_filter.value().to_string())
+            .unwrap_or_default();
+        cx.resources()
+            .profiles
+            .profiles()
+            .iter()
+            .filter(|profile| profile_matches_filter(profile, &query))
+            .collect()
+    }
+
     /// Persist the current form as a profile. If the form came from an
     /// existing profile, the same id is reused (update); otherwise a new
     /// id is allocated. The secret is mapped to a `SecretRef`, written to
@@ -532,8 +550,8 @@ impl crate::workspace::Workspace {
     }
 
     /// Route keys typed while the connect form has focus to the
-    /// focused field. Escape is left to the `CancelActiveModal`
-    /// binding; unhandled keys propagate to global bindings.
+    /// focused field. Escape closes the profile picker first when open;
+    /// otherwise it is left to the `CancelActiveModal` binding.
     pub(crate) fn handle_connect_form_key(
         &mut self,
         event: &KeyDownEvent,
@@ -545,6 +563,14 @@ impl crate::workspace::Workspace {
         };
         let keystroke = &event.keystroke;
 
+        if keystroke.key == "escape" {
+            if form.profile_picker_open {
+                form.profile_picker_open = false;
+                cx.stop_propagation();
+                cx.notify();
+            }
+            return;
+        }
         if keystroke.key == "enter" && !keystroke.modifiers.modified() {
             cx.stop_propagation();
             self.submit_connect_form(window, cx);
@@ -556,6 +582,24 @@ impl crate::workspace::Workspace {
             cx.notify();
             return;
         }
+
+        // While the picker is open, typeahead goes to the filter field.
+        if form.profile_picker_open {
+            if keystroke.modifiers.platform && keystroke.key == "v" {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    form.profile_picker_filter.insert(&text);
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+                return;
+            }
+            if form.profile_picker_filter.handle_keystroke(keystroke) == InputKeyResult::Handled {
+                cx.stop_propagation();
+                cx.notify();
+            }
+            return;
+        }
+
         if keystroke.modifiers.platform && keystroke.key == "v" {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
                 let focused_field = form.focused_field;

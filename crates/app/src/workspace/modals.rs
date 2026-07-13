@@ -39,6 +39,7 @@ use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::connect_form::*;
 use crate::workspace::helpers::*;
 use crate::workspace::nav::HistoryOp;
+use crate::workspace::profiles::profile_matches_filter;
 use crate::workspace::*;
 
 impl crate::workspace::Workspace {
@@ -267,7 +268,14 @@ impl crate::workspace::Workspace {
             self.focus_pane(self.focused_side, window, cx);
             return;
         }
-        if self.connect_form.is_some() {
+        // Connect profile picker sits above the form: Esc closes the picker
+        // first, then a second Esc dismisses Connect.
+        if let Some(form) = &mut self.connect_form {
+            if form.profile_picker_open {
+                form.profile_picker_open = false;
+                cx.notify();
+                return;
+            }
             self.close_connect_form(window, cx);
             return;
         }
@@ -626,6 +634,12 @@ impl crate::workspace::Workspace {
         );
 
         if profile_picker_open {
+            let filter_query = form.profile_picker_filter.value().to_string();
+            let filtered: Vec<&ConnectionProfile> = profiles
+                .iter()
+                .filter(|profile| profile_matches_filter(profile, &filter_query))
+                .collect();
+
             let mut picker_panel = div()
                 .id("profile-picker-panel")
                 .flex()
@@ -637,7 +651,25 @@ impl crate::workspace::Workspace {
                 .border_1()
                 .border_color(theme.colors.border)
                 .rounded_md()
-                .bg(theme.colors.surface);
+                .bg(theme.colors.surface)
+                .child(
+                    div()
+                        .id("profile-picker-filter")
+                        .px_2()
+                        .py_1()
+                        .border_b_1()
+                        .border_color(theme.colors.border)
+                        .child(text_field(
+                            "profile-picker-filter-input",
+                            TextFieldModel {
+                                state: &form.profile_picker_filter,
+                                placeholder: "Filter profiles…",
+                                focused: true,
+                                masked: false,
+                            },
+                            cx,
+                        )),
+                );
             if profiles.is_empty() {
                 picker_panel = picker_panel.child(
                     div()
@@ -647,8 +679,17 @@ impl crate::workspace::Workspace {
                         .text_color(theme.colors.text_muted)
                         .child("No saved profiles"),
                 );
+            } else if filtered.is_empty() {
+                picker_panel = picker_panel.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_size(px(12.0))
+                        .text_color(theme.colors.text_muted)
+                        .child("No matches"),
+                );
             } else {
-                picker_panel = picker_panel.children(profiles.iter().map(|profile| {
+                picker_panel = picker_panel.children(filtered.into_iter().map(|profile| {
                     let profile_id = profile.id;
                     div()
                         .id(("profile-picker-row", profile.id.0))

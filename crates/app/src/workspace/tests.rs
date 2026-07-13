@@ -2647,6 +2647,97 @@ mod tests {
     }
 
     #[gpui::test]
+    fn connect_picker_filter_narrows_profiles(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            let work = macsftp_core::ConnectionProfile::new(
+                ProfileId(1),
+                "Work Server",
+                "work.example.com",
+                "alex",
+                AuthMethod::Password {
+                    secret_ref: macsftp_core::SecretRef::keychain_ref(ProfileId(1), "password"),
+                },
+            );
+            let home = macsftp_core::ConnectionProfile::new(
+                ProfileId(2),
+                "Home NAS",
+                "nas.local",
+                "admin",
+                AuthMethod::Password {
+                    secret_ref: macsftp_core::SecretRef::keychain_ref(ProfileId(2), "password"),
+                },
+            );
+            match cx.resources_mut().profiles.save_profile(work) {
+                Ok(_) => {}
+                Err(error) => panic!("seed work profile: {error}"),
+            }
+            match cx.resources_mut().profiles.save_profile(home) {
+                Ok(_) => {}
+                Err(error) => panic!("seed home profile: {error}"),
+            }
+
+            workspace.open_connect_form(window, cx);
+            {
+                let form = workspace.connect_form.as_mut().expect("form opens");
+                form.profile_picker_open = true;
+            }
+
+            assert_eq!(
+                workspace.filtered_connect_profiles(cx).len(),
+                2,
+                "empty filter matches every profile"
+            );
+
+            {
+                let form = workspace.connect_form.as_mut().expect("form opens");
+                form.profile_picker_filter.set_value("work");
+            }
+            let filtered = workspace.filtered_connect_profiles(cx);
+            assert_eq!(filtered.len(), 1, "filter must narrow to one profile");
+            assert_eq!(filtered[0].id, ProfileId(1));
+            assert_eq!(filtered[0].name, "Work Server");
+
+            {
+                let form = workspace.connect_form.as_mut().expect("form opens");
+                form.profile_picker_filter.set_value("nomatch");
+            }
+            assert!(
+                workspace.filtered_connect_profiles(cx).is_empty(),
+                "non-matching filter yields no profiles"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn escape_closes_profile_picker_before_connect_form(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.open_connect_form(window, cx);
+            let form = workspace.connect_form.as_mut().expect("form opens");
+            form.profile_picker_open = true;
+
+            workspace.cancel_active_modal(window, cx);
+            let form = workspace
+                .connect_form
+                .as_ref()
+                .expect("first Esc must keep Connect open");
+            assert!(
+                !form.profile_picker_open,
+                "first Esc must close the profile picker only"
+            );
+
+            workspace.cancel_active_modal(window, cx);
+            assert!(
+                workspace.connect_form.is_none(),
+                "second Esc must close the Connect form"
+            );
+        });
+    }
+
+    #[gpui::test]
     fn connect_manual_entry_clears_profile_link_and_secrets(cx: &mut TestAppContext) {
         let (workspace, mut cx, _channels) = init_workspace(cx);
 
