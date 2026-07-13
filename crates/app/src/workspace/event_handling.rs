@@ -127,6 +127,7 @@ impl crate::workspace::Workspace {
                 // Reconcile remote residual temp files from a previous run
                 // now that a live session to this host exists (plan M5/M6).
                 self.clean_remote_residual_temps(tab_id, cx);
+                self.record_recent_for_tab(tab_id, cx);
             }
             AppEvent::TabDisconnected(scoped) => {
                 if let Some(tab) = self.state.tabs.find_tab_mut(scoped.scope.tab_id) {

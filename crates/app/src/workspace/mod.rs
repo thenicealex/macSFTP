@@ -11,7 +11,7 @@ use macsftp_core::{
     EntryPath, LocalPath, ProfileId, RemotePath, TabId, TabState,
 };
 use macsftp_sftp::{EventReceiver, RuntimeClient};
-use macsftp_storage::{AppearancePreference, SessionFile, SessionTabSnapshot};
+use macsftp_storage::{AppearancePreference, RecentEntryInput, SessionFile, SessionTabSnapshot};
 use macsftp_ui::{
     ActiveTheme, InputState, Theme, empty_state, text_button,
 };
@@ -654,6 +654,113 @@ impl Workspace {
             env!("CARGO_PKG_VERSION"),
             std::env::consts::ARCH
         )));
+    }
+
+    /// Record a successful connection in `recents.json` (deduped by host/port/user/profile).
+    pub(crate) fn record_recent_for_tab(&mut self, tab_id: TabId, cx: &mut Context<Self>) {
+        let Some(tab) = self.state.tabs.find_tab(tab_id) else {
+            return;
+        };
+        let settings = self.tab_settings.get(&tab_id);
+        let restored = self.restored_targets.get(&tab_id);
+        let host = settings
+            .map(|s| s.host.clone())
+            .or_else(|| restored.map(|r| r.host.clone()))
+            .unwrap_or_else(|| tab.title.clone());
+        let port = settings
+            .map(|s| s.port)
+            .or_else(|| restored.map(|r| r.port))
+            .unwrap_or(22);
+        let username = settings
+            .map(|s| s.username.clone())
+            .or_else(|| restored.map(|r| r.username.clone()))
+            .unwrap_or_default();
+        if host.is_empty() || username.is_empty() {
+            return;
+        }
+        let profile_id = tab.profile_id.map(|id| id.0);
+        let display_name = profile_id.and_then(|id| {
+            cx.resources()
+                .profiles
+                .find_profile(ProfileId(id))
+                .map(|profile| profile.name.clone())
+        });
+        let last_remote_path = tab
+            .remote
+            .path
+            .as_ref()
+            .map(|path| path.as_str().to_string());
+        let last_connected_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        if let Err(error) = cx.resources_mut().recents.upsert(RecentEntryInput {
+            host,
+            port,
+            username,
+            profile_id,
+            display_name,
+            last_remote_path,
+            last_connected_at,
+        }) {
+            warn!(error = %error, "could not save recents.json");
+        }
+    }
+
+    /// Open a recent connection: remember path for post-connect navigation and
+    /// prefill the connect form (Task 7 may auto-connect when profile secrets load).
+    pub(crate) fn open_recent_connection(
+        &mut self,
+        recent_id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(entry) = cx
+            .resources()
+            .recents
+            .entries()
+            .iter()
+            .find(|entry| entry.id == recent_id)
+            .cloned()
+        else {
+            return;
+        };
+
+        if let Some(tab_id) = self.state.tabs.active_tab_id {
+            let remote_path = entry
+                .last_remote_path
+                .as_ref()
+                .map(|path| RemotePath::new(path.clone()));
+            self.restored_targets.insert(
+                tab_id,
+                RestoredTabTarget {
+                    host: entry.host.clone(),
+                    port: entry.port,
+                    username: entry.username.clone(),
+                    profile_id: entry.profile_id.map(ProfileId),
+                    remote_path: remote_path.clone(),
+                },
+            );
+            if let Some(tab) = self.state.tabs.find_tab_mut(tab_id) {
+                tab.profile_id = entry.profile_id.map(ProfileId);
+                if let Some(path) = remote_path {
+                    tab.remote.path = Some(path);
+                }
+            }
+        }
+
+        // Prefer profile form prefill when the profile still exists; otherwise
+        // open_connect_form uses restored_targets for host/port/username.
+        if let Some(profile_id) = entry.profile_id.map(ProfileId)
+            && cx.resources().profiles.find_profile(profile_id).is_some()
+        {
+            self.use_profile(profile_id, cx);
+            window.focus(&self.connect_form_focus);
+            cx.notify();
+            return;
+        }
+
+        self.open_connect_form(window, cx);
     }
 }
 impl Focusable for Workspace {

@@ -636,16 +636,68 @@ impl crate::workspace::Workspace {
                 }
             }))
         };
+        let recent_rows: Vec<(u64, SharedString)> = if side == PaneSide::Remote {
+            cx.resources()
+                .recents
+                .entries()
+                .iter()
+                .map(|entry| {
+                    (
+                        entry.id,
+                        SharedString::from(format_recent_label(entry)),
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let remote_empty_with_recents =
+            |message: SharedString, actions: Vec<macsftp_ui::TextButton>, cx: &mut Context<Self>| {
+                let theme = cx.theme();
+                let rows = recent_rows.clone();
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .gap_3()
+                    .child(empty_state(message, actions, cx))
+                    .when(!rows.is_empty(), |container| {
+                        container
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(theme.colors.text_muted)
+                                    .font_family(theme.fonts.ui_family.clone())
+                                    .child("Recent connections"),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .gap_2()
+                                    .children(rows.into_iter().map(|(id, label)| {
+                                        text_button(
+                                            SharedString::from(format!("recent-{id}")),
+                                            label,
+                                        )
+                                        .on_click(cx.listener(move |workspace, _event, window, cx| {
+                                            workspace.open_recent_connection(id, window, cx);
+                                        }))
+                                    })),
+                            )
+                    })
+                    .into_any_element()
+            };
         let connection_placeholder: Option<gpui::AnyElement> = if side == PaneSide::Remote {
             match tab_state.map(|tab| &tab.connection) {
-                Some(ConnectionState::Empty) => Some(
-                    empty_state(
-                        "Not connected",
-                        vec![connect_button("connect-remote", "Connect… (⌘⇧R)")],
-                        cx,
-                    )
-                    .into_any_element(),
-                ),
+                Some(ConnectionState::Empty) => Some(remote_empty_with_recents(
+                    "Not connected".into(),
+                    vec![connect_button("connect-remote", "Connect… (⌘⇧R)")],
+                    cx,
+                )),
                 Some(ConnectionState::Connecting { .. } | ConnectionState::Reconnecting { .. }) => {
                     Some(
                         empty_state(
@@ -675,17 +727,14 @@ impl crate::workspace::Workspace {
                 Some(ConnectionState::AwaitingCredentials { .. }) => {
                     Some(empty_state("Waiting for credentials…", vec![], cx).into_any_element())
                 }
-                Some(ConnectionState::Disconnected { .. }) => Some(
-                    empty_state(
-                        "Disconnected",
-                        vec![
-                            connect_button("reconnect-remote", "Reconnect (⌘⇧R)"),
-                            edit_connection_button("edit-connection-disconnected"),
-                        ],
-                        cx,
-                    )
-                    .into_any_element(),
-                ),
+                Some(ConnectionState::Disconnected { .. }) => Some(remote_empty_with_recents(
+                    "Disconnected".into(),
+                    vec![
+                        connect_button("reconnect-remote", "Reconnect (⌘⇧R)"),
+                        edit_connection_button("edit-connection-disconnected"),
+                    ],
+                    cx,
+                )),
                 Some(ConnectionState::Failed { error }) => Some(
                     empty_state(
                         format!("{} — {}", error.title, error.message),

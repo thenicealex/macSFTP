@@ -732,6 +732,148 @@ mod tests {
     }
 
     #[gpui::test]
+    fn tab_connected_upserts_recents(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            workspace.connect_with(test_settings(), None, cx);
+        });
+        let _ = channels.command_rx.try_recv();
+
+        let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                AppEvent::TabConnected(RemoteScoped::new(
+                    scope,
+                    TabConnected {
+                        remote_root: RemotePath::new(TEST_REMOTE_ROOT),
+                    },
+                )),
+                window,
+                cx,
+            );
+        });
+
+        workspace.read_with(&cx, |_workspace, cx| {
+            let entries = cx.resources().recents.entries();
+            assert_eq!(entries.len(), 1, "successful connect must upsert one recent");
+            assert_eq!(entries[0].host, "mock.example.com");
+            assert_eq!(entries[0].port, 22);
+            assert_eq!(entries[0].username, "tester");
+            assert_eq!(
+                entries[0].last_remote_path.as_deref(),
+                Some(TEST_REMOTE_ROOT)
+            );
+            assert!(entries[0].profile_id.is_none());
+            assert!(entries[0].display_name.is_none());
+            assert!(entries[0].last_connected_at > 0);
+        });
+    }
+
+    #[gpui::test]
+    fn tab_connected_dedupes_recents(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+
+        // First successful connect.
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            workspace.connect_with(test_settings(), None, cx);
+        });
+        let _ = channels.command_rx.try_recv();
+        let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                AppEvent::TabConnected(RemoteScoped::new(
+                    scope,
+                    TabConnected {
+                        remote_root: RemotePath::new(TEST_REMOTE_ROOT),
+                    },
+                )),
+                window,
+                cx,
+            );
+        });
+        while channels.command_rx.try_recv().is_ok() {}
+
+        // Disconnect then connect again with the same host/user/port.
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                AppEvent::TabDisconnected(RemoteScoped::new(
+                    RemoteEventScope::new(TabId(1), SessionId(1), 1),
+                    TabDisconnected {
+                        reason: DisconnectReason::UserRequested,
+                    },
+                )),
+                window,
+                cx,
+            );
+            workspace.connect_with(test_settings(), None, cx);
+        });
+        let _ = channels.command_rx.try_recv();
+        // begin_connect bumps session_epoch to 2.
+        let scope = RemoteEventScope::new(TabId(1), SessionId(2), 2);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                AppEvent::TabConnected(RemoteScoped::new(
+                    scope,
+                    TabConnected {
+                        remote_root: RemotePath::new("/tmp"),
+                    },
+                )),
+                window,
+                cx,
+            );
+        });
+
+        workspace.read_with(&cx, |_workspace, cx| {
+            let entries = cx.resources().recents.entries();
+            assert_eq!(
+                entries.len(),
+                1,
+                "same host/port/user must dedupe to one recent entry"
+            );
+            assert_eq!(entries[0].host, "mock.example.com");
+            assert_eq!(entries[0].username, "tester");
+            assert_eq!(entries[0].last_remote_path.as_deref(), Some("/tmp"));
+        });
+    }
+
+    #[test]
+    fn format_recent_label_uses_display_name_when_present() {
+        use macsftp_storage::RecentEntry;
+        use super::format_recent_label;
+
+        let with_name = RecentEntry {
+            id: 1,
+            host: "example.com".into(),
+            port: 22,
+            username: "alex".into(),
+            profile_id: Some(3),
+            display_name: Some("Prod".into()),
+            last_remote_path: None,
+            last_connected_at: 1,
+        };
+        assert_eq!(
+            format_recent_label(&with_name),
+            "Prod · alex@example.com:22"
+        );
+
+        let without_name = RecentEntry {
+            display_name: None,
+            ..with_name.clone()
+        };
+        assert_eq!(format_recent_label(&without_name), "alex@example.com:22");
+
+        let custom_port = RecentEntry {
+            port: 2222,
+            display_name: None,
+            ..with_name
+        };
+        assert_eq!(
+            format_recent_label(&custom_port),
+            "alex@example.com:2222"
+        );
+    }
+
+    #[gpui::test]
     fn drag_local_file_onto_remote_pane_begins_upload(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
         workspace.update_in(&mut cx, |workspace, _window, cx| {

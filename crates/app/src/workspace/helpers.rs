@@ -5,6 +5,16 @@ use macsftp_core::{
     AuthCredential, AuthMethod, ConnectionState, LocalPath, ProfileId, RemotePath, SecretRef,
     TabState,
 };
+use macsftp_storage::RecentEntry;
+
+/// Row label for a recent connection: `Name · user@host:port` or `user@host:port`.
+pub(crate) fn format_recent_label(entry: &RecentEntry) -> String {
+    let endpoint = format!("{}@{}:{}", entry.username, entry.host, entry.port);
+    match entry.display_name.as_deref() {
+        Some(name) if !name.is_empty() => format!("{name} · {endpoint}"),
+        _ => endpoint,
+    }
+}
 
 pub(crate) fn connection_in_flight(connection: &ConnectionState) -> bool {
     matches!(
