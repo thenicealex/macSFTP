@@ -39,7 +39,7 @@ use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::connect_form::*;
 use crate::workspace::helpers::*;
 use crate::workspace::nav::HistoryOp;
-use crate::workspace::profiles::SettingsSection;
+use crate::workspace::profiles::{SettingsSection, profile_list_label};
 use crate::workspace::*;
 
 impl crate::workspace::Workspace {
@@ -244,14 +244,11 @@ impl crate::workspace::Workspace {
         // Profile-delete confirm sits above Settings / Connect so Esc dismisses
         // the confirm first rather than leaving the parent surface.
         if self.profile_delete_confirm.is_some() {
-            self.cancel_delete_profile(cx);
+            self.cancel_delete_profile(window, cx);
             return;
         }
         if self.surface == WorkspaceSurface::Settings {
-            self.surface = WorkspaceSurface::Files;
-            // Prefer pane focus so file-list keyboard nav works immediately after Esc.
-            self.focus_pane(self.focused_side, window, cx);
-            cx.notify();
+            self.leave_settings(window, cx);
             return;
         }
         if self.delete_confirm.is_some() {
@@ -272,7 +269,7 @@ impl crate::workspace::Workspace {
         // first, then a second Esc dismisses Connect.
         if let Some(form) = &mut self.connect_form {
             if form.profile_picker_open {
-                form.profile_picker_open = false;
+                form.close_profile_picker();
                 cx.notify();
                 return;
             }
@@ -682,7 +679,7 @@ impl crate::workspace::Workspace {
                         .py_1()
                         .text_size(px(12.0))
                         .text_color(theme.colors.text_muted)
-                        .child("No saved profiles"),
+                        .child("No saved profiles — manage in Settings"),
                 );
             } else if filtered.is_empty() {
                 picker_panel = picker_panel.child(
@@ -696,6 +693,7 @@ impl crate::workspace::Workspace {
             } else {
                 picker_panel = picker_panel.children(filtered.into_iter().map(|profile| {
                     let profile_id = profile.id;
+                    let label = profile_list_label(profile);
                     div()
                         .id(("profile-picker-row", profile.id.0))
                         .px_2()
@@ -708,7 +706,7 @@ impl crate::workspace::Workspace {
                         .on_click(cx.listener(move |workspace, _event, _window, cx| {
                             workspace.select_connect_profile(profile_id, cx);
                         }))
-                        .child(profile.name.clone())
+                        .child(label)
                 }));
             }
             picker_panel = picker_panel.child(
@@ -1276,7 +1274,7 @@ impl crate::workspace::Workspace {
             .on_key_down(cx.listener(|workspace, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" {
                     cx.stop_propagation();
-                    workspace.cancel_delete_profile(cx);
+                    workspace.cancel_delete_profile(window, cx);
                 } else if event.keystroke.key == "enter" && event.keystroke.modifiers.platform {
                     cx.stop_propagation();
                     workspace.confirm_delete_profile(window, cx);
@@ -1314,8 +1312,8 @@ impl crate::workspace::Workspace {
                     .child(
                         text_button("profile-delete-cancel", "Cancel")
                             .primary(true)
-                            .on_click(cx.listener(|workspace, _event, _window, cx| {
-                                workspace.cancel_delete_profile(cx);
+                            .on_click(cx.listener(|workspace, _event, window, cx| {
+                                workspace.cancel_delete_profile(window, cx);
                             })),
                     )
                     .child(

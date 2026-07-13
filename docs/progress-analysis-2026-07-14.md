@@ -164,7 +164,7 @@ macSFTP 已从「可连接的文件浏览器原型」演进为 **可当主力使
 ## 6. 建议的下一步优先级
 
 1. ~~**P0 — 工程守门**~~ **已完成（2026-07-14）：** `scripts/check.sh` 全绿（fmt / test / clippy `-D warnings`）。  
-2. **P1 — Connect/Profile 小 polish：** picker 行标签 + Enter 行为 + Settings 草稿丢弃（一天内可交付）。  
+2. ~~**P1 — Connect/Profile 小 polish**~~ **已完成（2026-07-14）：** picker 行标签、Enter 选首条、Settings 草稿丢弃、删除后焦点、filter 清空。  
 3. **P1 — 手测签字：** 按 phase6 audit 手测清单跑一轮，把 accepted risk 收敛为 pass 或具体 bug 单。  
 4. **P2 — 共享 profile 保存路径**，降低 Keychain 逻辑分叉。  
 5. **P2 — 按用户真实痛点** 开下一专项（例如传输体验、批量操作、书签），**不要**再平行开大而全的「阶段 7 杂烩」。
@@ -204,3 +204,4 @@ macSFTP 已从「可连接的文件浏览器原型」演进为 **可当主力使
 | --- | --- |
 | 2026-07-14 | 初版：六阶段完成态 + Profile/Connect/Drawer 专项 + 改进 backlog |
 | 2026-07-14 | P0：`scripts/check.sh` 全绿；core 重复 `#[test]`、sftp clippy、app lint 清理 |
+| 2026-07-14 | P1：Connect/Profile polish（行标签、Enter、草稿、焦点、filter） |

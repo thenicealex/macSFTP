@@ -791,7 +791,7 @@ mod tests {
             );
 
             // Cancel leaves everything as-is.
-            ws.cancel_delete_profile(cx);
+            ws.cancel_delete_profile(window, cx);
             assert!(ws.profile_delete_confirm.is_none());
             assert!(
                 cx.resources().profiles.find_profile(profile_id).is_some(),
@@ -2811,6 +2811,7 @@ mod tests {
             workspace.open_connect_form(window, cx);
             let form = workspace.connect_form.as_mut().expect("form opens");
             form.profile_picker_open = true;
+            form.profile_picker_filter.set_value("work");
 
             workspace.cancel_active_modal(window, cx);
             let form = workspace
@@ -2821,11 +2822,117 @@ mod tests {
                 !form.profile_picker_open,
                 "first Esc must close the profile picker only"
             );
+            assert!(
+                form.profile_picker_filter.value().is_empty(),
+                "closing the picker must clear its filter"
+            );
 
             workspace.cancel_active_modal(window, cx);
             assert!(
                 workspace.connect_form.is_none(),
                 "second Esc must close the Connect form"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn connect_picker_enter_selects_first_filtered_profile(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            let work = macsftp_core::ConnectionProfile::new(
+                ProfileId(1),
+                "Work",
+                "work.example.com",
+                "alex",
+                AuthMethod::Password {
+                    secret_ref: macsftp_core::SecretRef::keychain_ref(ProfileId(1), "password"),
+                },
+            );
+            let home = macsftp_core::ConnectionProfile::new(
+                ProfileId(2),
+                "Home",
+                "home.example.com",
+                "root",
+                AuthMethod::Password {
+                    secret_ref: macsftp_core::SecretRef::keychain_ref(ProfileId(2), "password"),
+                },
+            );
+            match cx.resources_mut().profiles.save_profile(work) {
+                Ok(_) => {}
+                Err(error) => panic!("seed work: {error}"),
+            }
+            match cx.resources_mut().profiles.save_profile(home) {
+                Ok(_) => {}
+                Err(error) => panic!("seed home: {error}"),
+            }
+            match cx.resources().keychain.store(
+                &macsftp_core::SecretRef::keychain_ref(ProfileId(1), "password"),
+                "secret",
+            ) {
+                Ok(()) => {}
+                Err(error) => panic!("seed keychain: {error}"),
+            }
+
+            workspace.open_connect_form(window, cx);
+            {
+                let form = workspace.connect_form.as_mut().expect("form");
+                form.profile_picker_open = true;
+                form.profile_picker_filter.set_value("work");
+            }
+            // Simulate Enter while picker is open (handle_connect_form_key path).
+            let first_id = workspace
+                .filtered_connect_profiles(cx)
+                .first()
+                .map(|p| p.id)
+                .expect("filter matches Work");
+            assert_eq!(first_id, ProfileId(1));
+            workspace.select_connect_profile(first_id, cx);
+
+            let form = workspace.connect_form.as_ref().expect("form");
+            assert_eq!(form.source_profile_id, Some(ProfileId(1)));
+            assert_eq!(form.host.value(), "work.example.com");
+            assert!(!form.profile_picker_open);
+        });
+
+        // Selecting a profile must not enqueue ConnectTab.
+        assert!(
+            channels.command_rx.try_recv().is_err(),
+            "profile select must not auto-connect"
+        );
+    }
+
+    #[gpui::test]
+    fn leave_settings_discards_unsaved_new_profile_draft(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.surface = WorkspaceSurface::Settings;
+            workspace.set_settings_section(SettingsSection::Profiles, cx);
+            workspace.start_new_profile(cx);
+            {
+                let editor = workspace
+                    .profile_editor
+                    .as_mut()
+                    .expect("new profile draft");
+                editor.host.set_value("draft.example.com");
+                editor.username.set_value("draft-user");
+            }
+            assert!(
+                workspace.profile_editor.as_ref().is_some_and(|e| e.is_new),
+                "draft should be open"
+            );
+
+            workspace.leave_settings(window, cx);
+
+            assert_eq!(workspace.surface, WorkspaceSurface::Files);
+            assert!(
+                workspace.profile_editor.is_none(),
+                "leave Settings must discard unsaved New draft"
+            );
+            assert!(
+                cx.resources().profiles.profiles().is_empty(),
+                "discarded draft must not write profiles.json"
             );
         });
     }
@@ -2854,6 +2961,7 @@ mod tests {
             workspace.select_connect_profile(saved_id, cx);
             let form = workspace.connect_form.as_mut().expect("form is open");
             form.profile_picker_open = true;
+            form.profile_picker_filter.set_value("work");
             form.switch_to_manual_entry();
         });
 
@@ -2869,6 +2977,10 @@ mod tests {
             assert!(
                 form.password.value().is_empty(),
                 "manual entry must clear password"
+            );
+            assert!(
+                form.profile_picker_filter.value().is_empty(),
+                "manual entry must clear picker filter"
             );
             assert_eq!(
                 form.host.value(),

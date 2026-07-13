@@ -64,7 +64,7 @@ impl PaneFilter {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WorkspaceSurface {
+pub(crate) enum WorkspaceSurface {
     Files,
     Settings,
 }

@@ -240,6 +240,13 @@ impl ConnectForm {
         self.password = InputState::new();
         self.passphrase = InputState::new();
         self.profile_picker_open = false;
+        self.profile_picker_filter = InputState::new();
+    }
+
+    /// Close the profile picker and clear its filter (Esc / after Manual).
+    pub(crate) fn close_profile_picker(&mut self) {
+        self.profile_picker_open = false;
+        self.profile_picker_filter = InputState::new();
     }
 }
 
@@ -562,7 +569,7 @@ impl crate::workspace::Workspace {
 
         if keystroke.key == "escape" {
             if form.profile_picker_open {
-                form.profile_picker_open = false;
+                form.close_profile_picker();
                 cx.stop_propagation();
                 cx.notify();
             }
@@ -570,6 +577,18 @@ impl crate::workspace::Workspace {
         }
         if keystroke.key == "enter" && !keystroke.modifiers.modified() {
             cx.stop_propagation();
+            // When the picker is open, Enter selects the first filtered
+            // profile (or no-ops if none) — never starts Connect.
+            if form.profile_picker_open {
+                let first_id = self
+                    .filtered_connect_profiles(cx)
+                    .first()
+                    .map(|profile| profile.id);
+                if let Some(profile_id) = first_id {
+                    self.select_connect_profile(profile_id, cx);
+                }
+                return;
+            }
             self.submit_connect_form(window, cx);
             return;
         }

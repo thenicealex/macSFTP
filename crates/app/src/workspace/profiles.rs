@@ -6,6 +6,7 @@ use macsftp_ui::{InputKeyResult, InputState};
 use tracing::warn;
 
 use crate::resources::ActiveResources;
+use crate::workspace::WorkspaceSurface;
 use crate::workspace::helpers::{expand_home, secret_refs_for_profile};
 
 /// Settings sidebar section (General appearance vs Profiles management).
@@ -499,13 +500,40 @@ impl crate::workspace::Workspace {
                 self.set_settings_section(SettingsSection::Profiles, cx);
             }
         }
-        self.focus_pane(self.focused_side, window, cx);
+        self.restore_focus_after_profile_delete(window, cx);
         cx.notify();
     }
 
     /// Dismiss the profile-delete confirmation without deleting.
-    pub(crate) fn cancel_delete_profile(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn cancel_delete_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.profile_delete_confirm = None;
+        self.restore_focus_after_profile_delete(window, cx);
+        cx.notify();
+    }
+
+    /// After dismissing the delete confirm, return keyboard focus to Connect
+    /// or Settings when those surfaces are still open (not always the file pane).
+    fn restore_focus_after_profile_delete(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
+        if self.connect_form.is_some() {
+            window.focus(&self.connect_form_focus);
+        } else if self.surface == WorkspaceSurface::Settings {
+            window.focus(&self.workspace_focus);
+        } else {
+            window.focus(self.pane_focus(self.focused_side));
+        }
+    }
+
+    /// Leave Settings: discard unsaved editor drafts (including New Profile)
+    /// and return to the Files surface.
+    pub(crate) fn leave_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.profile_editor = None;
+        self.selected_profile_id = None;
+        self.profile_filter = InputState::new();
+        self.profile_filter_focused = false;
+        self.profile_delete_confirm = None;
+        self.settings_section = SettingsSection::General;
+        self.surface = WorkspaceSurface::Files;
+        self.focus_pane(self.focused_side, window, cx);
         cx.notify();
     }
 

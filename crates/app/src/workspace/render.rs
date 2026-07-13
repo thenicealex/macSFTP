@@ -16,10 +16,10 @@ use macsftp_ui::{
 
 use crate::palette_commands::labeled_shortcut;
 use crate::resources::{ActiveResources, ActiveTransfers};
+use crate::workspace::PaneSide;
 use crate::workspace::helpers::*;
 use crate::workspace::nav::{HistoryOp, breadcrumb_display_indices, breadcrumb_segments};
 use crate::workspace::profiles::{ProfileEditorField, SettingsSection, profile_list_label};
-use crate::workspace::{PaneSide, WorkspaceSurface};
 use macsftp_storage::AppearancePreference;
 
 impl crate::workspace::Workspace {
@@ -1846,9 +1846,7 @@ impl crate::workspace::Workspace {
                     )
                     .child(text_button("settings-done", "Done").on_click(cx.listener(
                         |workspace, _event, window, cx| {
-                            workspace.surface = WorkspaceSurface::Files;
-                            workspace.focus_pane(workspace.focused_side, window, cx);
-                            cx.notify();
+                            workspace.leave_settings(window, cx);
                         },
                     ))),
             )
