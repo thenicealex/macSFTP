@@ -44,7 +44,7 @@ use crate::workspace::*;
 mod tests {
     use gpui::{Entity, TestAppContext, VisualTestContext};
     use macsftp_core::{
-        AppCommand, AppEvent, AuthCredential, AuthMethodKind, ConflictDecision, ConflictPolicy,
+        AppCommand, AppEvent, AuthCredential, AuthMethod, AuthMethodKind, ConflictDecision, ConflictPolicy,
         ConflictRequestId, ConnectionSettings, ConnectionState, DisconnectReason, EntryPath,
         ErrorCode, FileKind, FileSortField, HostKeyPrompt, LocalPath, MetadataPolicy, ProfileId,
         RemoteDirSnapshot, RemoteEntry, RemoteEventScope, RemoteOperationFailure, RemotePath,
@@ -911,6 +911,11 @@ mod tests {
                 !matches!(tab.connection, ConnectionState::Connecting { .. }),
                 "must not auto-connect without a profile/secret"
             );
+            assert_eq!(
+                tab.remote.path.as_ref().map(|path| path.as_str()),
+                Some("/var/www"),
+                "last_remote_path must seed tab.remote.path for post-connect nav"
+            );
         });
         assert!(
             channels.command_rx.try_recv().is_err(),
@@ -985,6 +990,92 @@ mod tests {
             assert!(
                 matches!(tab.connection, ConnectionState::Connecting { .. }),
                 "tab must enter Connecting after open recent"
+            );
+            assert_eq!(
+                tab.remote.path.as_ref().map(|path| path.as_str()),
+                Some("/home/deploy"),
+                "last_remote_path must seed tab.remote.path on auto-connect"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn open_recent_with_missing_keychain_password_keeps_form_open(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.open_connect_form(window, cx);
+        });
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            let form = workspace.connect_form.as_mut().expect("form is open");
+            form.host.set_value("missing-secret.example.com");
+            form.port.set_value("22");
+            form.username.set_value("deploy");
+            form.password.set_value("s3cret");
+            form.profile_name.set_value("Missing secret box");
+            workspace.save_current_profile(cx);
+        });
+
+        let recent_id = workspace.update_in(&mut cx, |_workspace, _window, cx| {
+            let profiles = cx.resources().profiles.profiles();
+            assert_eq!(profiles.len(), 1, "profile saved");
+            let saved = &profiles[0];
+            let saved_id = saved.id;
+            let secret_ref = match &saved.auth {
+                AuthMethod::Password { secret_ref } => secret_ref.clone(),
+                other => panic!("expected password auth, got {other:?}"),
+            };
+            cx.resources()
+                .keychain
+                .delete(&secret_ref)
+                .expect("delete keychain secret for regression");
+            assert!(
+                cx.resources()
+                    .keychain
+                    .load(&secret_ref)
+                    .expect("load after delete")
+                    .is_none(),
+                "secret must be gone before open recent"
+            );
+            cx.resources_mut()
+                .recents
+                .upsert(macsftp_storage::RecentEntryInput {
+                    host: "missing-secret.example.com".into(),
+                    port: 22,
+                    username: "deploy".into(),
+                    profile_id: Some(saved_id.0),
+                    display_name: Some("Missing secret box".into()),
+                    last_remote_path: Some("/srv".into()),
+                    last_connected_at: 3,
+                })
+                .expect("seed recent with profile");
+            cx.resources().recents.entries()[0].id
+        });
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_form = None;
+            workspace.open_recent_connection(recent_id, window, cx);
+        });
+
+        assert!(
+            channels.command_rx.try_recv().is_err(),
+            "must not ConnectTab when Keychain password is missing"
+        );
+        workspace.read_with(&cx, |workspace, _| {
+            let form = workspace
+                .connect_form
+                .as_ref()
+                .expect("form stays open so user can re-enter password");
+            assert_eq!(form.host.value(), "missing-secret.example.com");
+            assert_eq!(form.username.value(), "deploy");
+            assert!(
+                form.password.value().is_empty(),
+                "password field empty when Keychain secret missing"
+            );
+            let tab = workspace.state.tabs.active_tab().expect("tab exists");
+            assert!(
+                !matches!(tab.connection, ConnectionState::Connecting { .. }),
+                "must not enter Connecting with empty password"
             );
         });
     }

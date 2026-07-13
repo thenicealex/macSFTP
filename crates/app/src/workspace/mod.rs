@@ -781,8 +781,11 @@ impl Workspace {
             }
         }
 
-        // Profile still exists → use_profile (Keychain) then auto-connect if
-        // secrets load into a valid form; otherwise leave the form open.
+        // Profile still exists → use_profile (Keychain) then auto-connect only when
+        // required credentials are present (password non-empty, or private-key
+        // path set). Missing Keychain password must leave the form open — not
+        // auto-connect with an empty password. Manual connect still allows
+        // empty password via submit_connect_form.
         // Missing/deleted profile falls through to host-meta prefill only.
         if let Some(profile_id) = entry.profile_id.map(ProfileId)
             && cx.resources().profiles.find_profile(profile_id).is_some()
@@ -791,7 +794,7 @@ impl Workspace {
             if self
                 .connect_form
                 .as_ref()
-                .is_some_and(|form| form.build_settings().is_ok())
+                .is_some_and(|form| form.can_auto_connect())
             {
                 self.submit_connect_form(window, cx);
                 return;

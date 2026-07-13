@@ -197,6 +197,20 @@ impl ConnectForm {
             auth,
         })
     }
+
+    /// Whether auto-connect (e.g. open recent with a profile) has credentials.
+    /// Password auth requires a non-empty password so a missing Keychain secret
+    /// does not auto-connect with `""`. Private-key auth only requires a key
+    /// path; an empty passphrase is valid.
+    pub(crate) fn can_auto_connect(&self) -> bool {
+        if self.build_settings().is_err() {
+            return false;
+        }
+        match self.auth_method {
+            AuthMethodKind::Password => !self.password.value().is_empty(),
+            AuthMethodKind::PrivateKey => true,
+        }
+    }
 }
 
 impl crate::workspace::Workspace {
