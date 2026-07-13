@@ -21,7 +21,8 @@ use crate::app_actions::{
     ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, ConfirmTabSwitcher, CopyPath,
     CopyVersionInfo, DeleteSelection, DownloadSelection, FilterPane, FocusLocalPane,
     FocusRemotePane, GoToPath, MinimizeWindow, NavigateBack, NavigateForward, NewFolder, NewTab,
-    OpenCommandPalette, OpenLogFolder, OpenSelectedEntry, OpenSettings, PageDown, PageUp,
+    OpenCommandPalette, OpenLogFolder, OpenProfiles, OpenSelectedEntry, OpenSettings, PageDown,
+    PageUp,
     ParentDirectory, ReconnectTab, RefreshPane, RenameEntry, SelectAllEntries, SelectFirstEntry,
     SelectLastEntry, SelectNextEntry, SelectNextEntryExtend, SelectPrevEntry,
     SelectPrevEntryExtend, ShowAbout, ShowTransferDrawer, TabSwitcherNext, TabSwitcherPrev,
@@ -1021,6 +1022,20 @@ impl Render for Workspace {
                     workspace.about_open = false;
                     workspace.surface = WorkspaceSurface::Settings;
                     workspace.settings_section = SettingsSection::General;
+                    workspace.workspace_focus.focus(window);
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|workspace, _: &OpenProfiles, window, cx| {
+                if workspace.connect_form.is_none()
+                    && workspace.active_host_key_prompt().is_none()
+                    && workspace.active_transfer_conflict_prompt().is_none()
+                    && workspace.delete_confirm.is_none()
+                    && !workspace.go_to_path_open
+                {
+                    workspace.about_open = false;
+                    workspace.surface = WorkspaceSurface::Settings;
+                    workspace.set_settings_section(SettingsSection::Profiles, cx);
                     workspace.workspace_focus.focus(window);
                     cx.notify();
                 }

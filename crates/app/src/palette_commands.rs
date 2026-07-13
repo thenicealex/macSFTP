@@ -93,6 +93,13 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         when: PaletteWhen::Always,
     },
     PaletteCommand {
+        id: "OpenProfiles",
+        title: "Manage Profiles",
+        keywords: &["profile", "credentials", "settings"],
+        keybinding: None,
+        when: PaletteWhen::Always,
+    },
+    PaletteCommand {
         id: "ShowAbout",
         title: "About macSFTP",
         keywords: &["version", "info"],
@@ -305,6 +312,8 @@ mod tests {
         };
         let hits = filter_palette_commands("mkdir", &ctx);
         assert!(hits.iter().any(|c| c.id == "NewFolder"));
+        let profile_hits = filter_palette_commands("credentials", &ctx);
+        assert!(profile_hits.iter().any(|c| c.id == "OpenProfiles"));
     }
 
     #[test]
@@ -323,6 +332,7 @@ mod tests {
             ("DownloadSelection", Some("⌘D")),
             ("ShowTransferDrawer", Some("⌘J")),
             ("OpenSettings", Some("⌘,")),
+            ("OpenProfiles", None),
             ("ShowAbout", None),
             ("DeleteSelection", Some("⌘⌫")),
             ("RenameEntry", Some("F2")),

@@ -68,8 +68,9 @@ mod tests {
     use macsftp_ui::InputState;
     use crate::app_actions::{
         self, ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, FilterPane, GoToPath,
-        NavigateBack, NewTab, OpenSettings, PageDown, SelectAllEntries, SelectNextEntry,
-        SelectNextEntryExtend, SelectPrevEntry, ShowAbout, ShowTransferDrawer, ToggleHiddenFiles,
+        NavigateBack, NewTab, OpenProfiles, OpenSettings, PageDown, SelectAllEntries,
+        SelectNextEntry, SelectNextEntryExtend, SelectPrevEntry, ShowAbout, ShowTransferDrawer,
+        ToggleHiddenFiles,
     };
     use crate::resources::{ActiveResources, ActiveTransfers};
     use crate::workspace::nav::HistoryOp;
@@ -445,6 +446,21 @@ mod tests {
         cx.dispatch_action(CancelActiveModal);
         workspace.read_with(&cx, |workspace, _| {
             assert_eq!(workspace.surface, WorkspaceSurface::Files);
+        });
+    }
+
+    #[gpui::test]
+    fn open_profiles_action_opens_settings_profiles_section(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        cx.dispatch_action(OpenProfiles);
+        workspace.read_with(&cx, |workspace, _| {
+            assert_eq!(workspace.surface, WorkspaceSurface::Settings);
+            assert_eq!(
+                workspace.settings_section,
+                SettingsSection::Profiles,
+                "OpenProfiles opens Settings on the Profiles section"
+            );
         });
     }
 
@@ -3669,6 +3685,20 @@ mod tests {
             ws.execute_palette_selected(window, cx);
             assert!(!ws.palette_open);
             assert_eq!(ws.state.tabs.tabs.len(), 2);
+        });
+    }
+
+    #[gpui::test]
+    fn command_palette_manage_profiles_opens_profiles_section(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _) = init_workspace(cx);
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            ws.open_command_palette(window, cx);
+            ws.palette_input.set_value("manage profiles");
+            ws.palette_selected = 0;
+            ws.execute_palette_selected(window, cx);
+            assert!(!ws.palette_open);
+            assert_eq!(ws.surface, WorkspaceSurface::Settings);
+            assert_eq!(ws.settings_section, SettingsSection::Profiles);
         });
     }
 

@@ -45,6 +45,7 @@ actions!(
         ToggleHiddenFiles,
         CancelActiveModal,
         OpenSettings,
+        OpenProfiles,
         ShowAbout,
         OpenLogFolder,
         CopyVersionInfo,
