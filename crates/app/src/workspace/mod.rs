@@ -877,7 +877,7 @@ impl Render for Workspace {
                 .child(self.render_tab_bar(cx))
                 .child(main_area)
                 .when(self.drawer_open, |workspace_root| {
-                    workspace_root.child(self.render_transfer_drawer(cx))
+                    workspace_root.child(self.render_transfer_drawer(window, cx))
                 })
                 .child(self.render_status_bar(cx))
                 .into_any_element()
