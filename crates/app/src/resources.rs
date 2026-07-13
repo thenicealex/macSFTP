@@ -14,7 +14,7 @@ use gpui::{App, Global};
 use macsftp_core::{TabId, TransferStore};
 use macsftp_platform::AppPaths;
 use macsftp_storage::{
-    ConfigStore, KeychainStore, ProfileStore, ResidualTempStore, SessionStore,
+    ConfigStore, KeychainStore, ProfileStore, RecentsStore, ResidualTempStore, SessionStore,
     TransferHistoryStore,
 };
 use tracing::warn;
@@ -32,6 +32,8 @@ pub struct AppResources {
     pub residual_temps: ResidualTempStore,
     /// Last-window tab layout (host/user/paths). No secrets.
     pub session: SessionStore,
+    /// Recent successful connections (host/user/paths). No secrets.
+    pub recents: RecentsStore,
     /// Monotonic tab-id source, shared across every window so ids never
     /// collide (the runtime keys its session registry by `TabId`). An
     /// injected `Arc<AtomicU64>` rather than a `static`, so each test gets
@@ -54,6 +56,7 @@ impl AppResources {
             app_paths.residual_temp_file.clone(),
         ));
         let session = SessionStore::open_or_empty(app_paths.session_file.clone());
+        let recents = RecentsStore::open_or_empty(app_paths.recents_file.clone());
         Self {
             app_paths,
             config,
@@ -62,6 +65,7 @@ impl AppResources {
             transfer_history,
             residual_temps,
             session,
+            recents,
             next_tab_id: Arc::new(AtomicU64::new(1)),
         }
     }

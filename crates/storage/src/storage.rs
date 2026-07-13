@@ -21,6 +21,10 @@ pub use residual_temp::ResidualTempStore;
 pub mod session;
 pub use session::{SessionFile, SessionStore, SessionTabSnapshot};
 
+/// Recent successful connections (plan §18 / Phase 5): `recents.json`.
+pub mod recents;
+pub use recents::{RecentEntry, RecentEntryInput, RecentsFile, RecentsStore};
+
 pub fn crate_name() -> &'static str {
     "macsftp-storage"
 }
