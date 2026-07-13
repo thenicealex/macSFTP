@@ -1050,6 +1050,7 @@ impl Render for Workspace {
 
 mod command_palette;
 mod connect_form;
+mod drawer_height;
 mod event_handling;
 mod file_ops;
 mod helpers;
