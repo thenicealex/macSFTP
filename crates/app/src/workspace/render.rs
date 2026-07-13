@@ -78,6 +78,7 @@ impl crate::workspace::Workspace {
         let tab_state = self.active_tab();
         let is_remote_refreshing =
             side == PaneSide::Remote && tab_state.is_some_and(|tab| tab.remote.is_refreshing);
+        let entry_count = self.entry_count(side);
         let remote_error = (side == PaneSide::Remote)
             .then(|| tab_state.and_then(|tab| tab.remote.error.clone()))
             .flatten();
@@ -194,7 +195,7 @@ impl crate::workspace::Workspace {
                     .truncate()
                     .child(path_label.clone().unwrap_or_else(|| pane_name.to_string())),
             )
-            .when(is_remote_refreshing, |bar| {
+            .when(is_remote_refreshing && entry_count > 0, |bar| {
                 bar.child(
                     div()
                         .flex_none()
@@ -358,11 +359,10 @@ impl crate::workspace::Workspace {
             None
         };
 
-        let entry_count = self.entry_count(side);
         let list: gpui::AnyElement = if let Some(placeholder) = connection_placeholder {
             placeholder
         } else if entry_count == 0 && is_remote_refreshing {
-            empty_state("Loading directory…", vec![], cx).into_any_element()
+            empty_state("Loading…", vec![], cx).into_any_element()
         } else if entry_count == 0 {
             empty_state("Empty directory", vec![], cx).into_any_element()
         } else {
