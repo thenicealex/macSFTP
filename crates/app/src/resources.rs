@@ -50,8 +50,20 @@ impl AppResources {
     /// backend (`new_memory()` vs `new_os()`).
     pub fn load(app_paths: AppPaths, config: ConfigStore, keychain: KeychainStore) -> Self {
         let profiles = ProfileStore::open_or_empty(app_paths.profiles_file.clone());
-        let transfer_history =
+        // History is session-scoped: drop residual records left by older
+        // builds that flushed plans on quit, and rewrite the file empty so
+        // the next launch does not resurrect them if quit is skipped.
+        let mut transfer_history =
             TransferHistoryStore::open_or_empty(app_paths.transfer_history_file.clone());
+        if !transfer_history.records().is_empty() {
+            transfer_history.clear();
+            if let Err(error) = transfer_history.save() {
+                warn!(
+                    error = %error,
+                    "could not clear residual transfer history on launch"
+                );
+            }
+        }
         let residual_temps = reconcile_local_residual_temps(ResidualTempStore::open_or_empty(
             app_paths.residual_temp_file.clone(),
         ));

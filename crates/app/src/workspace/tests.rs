@@ -3090,80 +3090,59 @@ mod tests {
     }
 
     #[gpui::test]
-    fn flush_persists_running_transfer_as_unfinished_history(cx: &mut TestAppContext) {
+    fn flush_clears_transfer_history_on_session_end(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
         let _ = channels.command_rx.try_recv();
 
-        // Simulate an in-flight upload plan in the live transfer store.
+        // Seed a history record as older builds would leave on disk.
         workspace.update_in(&mut cx, |_workspace, _window, cx| {
-            let plan_id = macsftp_core::TransferPlanId(7);
-            let root_job_id = macsftp_core::TransferId(7);
             let now = macsftp_core::Timestamp::unix_epoch();
-            cx.transfers_mut().plans.push(macsftp_core::TransferPlan {
-                id: plan_id,
-                root_job_id,
-                source_root: TransferEndpoint::Local(LocalPath::new("/tmp/report.pdf")),
-                destination_root: TransferEndpoint::Remote(RemotePath::new("/srv/report.pdf")),
-                state: macsftp_core::TransferPlanState::Running,
-                planned_count: 1,
-                total_bytes: None,
-                child_jobs: vec![root_job_id],
-                conflict_policy: ConflictPolicy::Ask,
-            });
-            cx.transfers_mut().jobs.push(macsftp_core::TransferJob {
-                id: root_job_id,
-                direction: TransferDirection::Upload,
-                source: TransferEndpoint::Local(LocalPath::new("/tmp/report.pdf")),
-                destination: TransferEndpoint::Remote(RemotePath::new("/srv/report.pdf")),
-                state: macsftp_core::TransferState::Running {
-                    bytes_done: 0,
-                    bytes_total: None,
+            let id = cx.resources_mut().transfer_history.allocate_id();
+            cx.resources_mut()
+                .transfer_history
+                .append(vec![TransferHistoryRecord {
+                    id,
+                    profile_id: None,
+                    direction: TransferDirection::Upload,
+                    sources: vec![TransferEndpoint::Local(LocalPath::new("/tmp/report.pdf"))],
+                    destination: TransferEndpoint::Remote(RemotePath::new("/srv/report.pdf")),
+                    metadata_policy: MetadataPolicy::default(),
+                    conflict_policy: ConflictPolicy::Ask,
+                    status: TransferHistoryStatus::Completed,
                     started_at: now,
-                },
-                metadata_policy: MetadataPolicy::default(),
-                conflict_policy: ConflictPolicy::Ask,
-                warnings: Vec::new(),
-                created_at: now,
-            });
+                    last_updated: now,
+                }]);
+            assert_eq!(cx.resources().transfer_history.records().len(), 1);
         });
 
-        // The quit hook path: flush the live transfers to disk.
+        // Quit path: session-scoped policy clears history instead of appending plans.
         workspace.update_in(&mut cx, |workspace, _window, cx| {
             workspace.flush_transfer_history(cx);
         });
 
         workspace.read_with(&cx, |_workspace, cx| {
-            let records = cx.resources().transfer_history.records();
-            assert_eq!(records.len(), 1, "one in-flight plan persisted");
-            assert!(matches!(
-                records[0].status,
-                TransferHistoryStatus::Unfinished
-            ));
-            assert_eq!(records[0].direction, TransferDirection::Upload);
-            assert_eq!(records[0].sources.len(), 1);
-            assert_eq!(
-                records[0].destination,
-                TransferEndpoint::Remote(RemotePath::new("/srv/report.pdf"))
+            assert!(
+                cx.resources().transfer_history.records().is_empty(),
+                "history must be empty after session flush"
             );
         });
 
-        // And it survives a reload from disk.
         let reopened = macsftp_storage::TransferHistoryStore::open_or_empty(
             workspace.read_with(&cx, |_workspace, cx| {
                 cx.resources().transfer_history.path().clone()
             }),
         );
-        assert_eq!(reopened.records().len(), 1);
-        assert!(matches!(
-            reopened.records()[0].status,
-            TransferHistoryStatus::Unfinished
-        ));
-        // A second flush must not duplicate (guarded by the flushed flag).
+        assert!(
+            reopened.records().is_empty(),
+            "cleared history must persist empty on disk"
+        );
+
+        // Guard still prevents a second pass from reintroducing records.
         workspace.update_in(&mut cx, |workspace, _window, cx| {
             workspace.flush_transfer_history(cx);
         });
         workspace.read_with(&cx, |_workspace, cx| {
-            assert_eq!(cx.resources().transfer_history.records().len(), 1);
+            assert!(cx.resources().transfer_history.records().is_empty());
         });
     }
 

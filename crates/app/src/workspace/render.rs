@@ -1351,9 +1351,8 @@ impl crate::workspace::Workspace {
             }
         }
 
-        // History (plan §18): persisted transfers from prior sessions,
-        // including unfinished ones captured at the last app close. Only
-        // shown when there is something to retry or review.
+        // History: session-scoped store (cleared on quit / launch residual
+        // wipe). Normally empty; kept for retry paths that inject records.
         let mut history_records: Vec<TransferHistoryRecord> =
             cx.resources().transfer_history.records().to_vec();
         history_records.sort_by_key(|record| std::cmp::Reverse(record.last_updated));

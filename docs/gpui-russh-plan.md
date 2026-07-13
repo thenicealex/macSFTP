@@ -1605,23 +1605,22 @@ Profile 结构预留：
 
 用于 UI 便利，不作为审计日志。
 
-策略：
+策略（已调整，2026-07-14）：
 
-- completed/failed history 保留 7 天；
-- 或最多保留 100 条，取更小集合；
-- 关闭 app 时运行中的 transfer 进入 cancelled/unfinished history；
-- 下次启动显示未完成 history，用户可手动重试。
+- **History 仅会话内有效**：App 退出时清空 memory + `transfer_history.json`，
+  **不**把 completed/unfinished plan 跨启动持久化；
+- 启动时若磁盘仍有旧记录（旧版本或异常退出残留），加载后立即 clear 并写回空文件；
+- 会话内 Completed/Failed 仍在 drawer 的 live 分组中展示（`TransferStore`），随进程结束消失；
+- 存储层仍保留 7 天 / 100 条 prune API 供未来若恢复跨会话 history 使用。
 
-实现（2026-07-11，gate-GREEN）：plan 状态映射到 `TransferHistoryStatus`
-（`Unfinished`/`Completed`/`Failed`/`Cancelled`），落盘到
-`{app_support}/transfer_history.json`（storage crate `TransferHistoryStore`，
-原子 temp+rename）。`Workspace::new` 在 `on_app_quit` 里快照当前
-`TransferStore` 的 plan 为 history（运行中→`Unfinished`），prune 后落盘；
-`Workspace` 启动时载入并在 transfer 抽屉增加 History 区。Retry 不恢复旧
-tab actor：用当前已连接 tab 的 `tab_id`/`session_epoch`/`profile_id`
+实现：`TransferHistoryStore` 落盘
+`{app_support}/transfer_history.json`（原子 temp+rename）。
+`on_app_quit` → `flush_transfer_history` **clear + save empty**（不再 snapshot plans）。
+`AppResources::load` 丢弃残留 records。Retry 路径仍可用（测试或未来手动注入 record）：
+用当前已连接 tab 的 `tab_id`/`session_epoch`/`profile_id`
 由 `TransferHistoryRecord::to_start_command` 重建 `StartTransferCommand`。
-`core` 新增 `TransferHistoryId`/`TransferHistoryStatus`/`TransferHistoryRecord`
-（serde），`Timestamp` 增加手动 serde（Unix 秒）。
+`core` 含 `TransferHistoryId`/`TransferHistoryStatus`/`TransferHistoryRecord`
+（serde），`Timestamp` 手动 serde（Unix 秒）。
 
 ## 19. 测试计划
 

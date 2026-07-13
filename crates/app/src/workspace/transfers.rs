@@ -278,48 +278,13 @@ impl crate::workspace::Workspace {
         if self.transfer_history_flushed {
             return;
         }
-        let now = Timestamp(SystemTime::now());
-        // Snapshot the shared transfer store first so its (immutable)
-        // borrow of the App is released before we mutably borrow the
-        // resources global to allocate ids and append.
-        let plans: Vec<(macsftp_core::TransferPlan, Option<TransferJob>)> = {
-            let transfers = cx.transfers();
-            transfers
-                .plans
-                .iter()
-                .map(|plan| {
-                    let root_job = transfers.find_job(plan.root_job_id).cloned();
-                    (plan.clone(), root_job)
-                })
-                .collect()
-        };
-        let mut new_records: Vec<TransferHistoryRecord> = Vec::new();
-        for (plan, root_job) in &plans {
-            let record = TransferHistoryRecord {
-                id: cx.resources_mut().transfer_history.allocate_id(),
-                profile_id: None,
-                direction: root_job
-                    .as_ref()
-                    .map(|job| job.direction)
-                    .unwrap_or(TransferDirection::Upload),
-                sources: vec![plan.source_root.clone()],
-                destination: plan.destination_root.clone(),
-                metadata_policy: root_job
-                    .as_ref()
-                    .map(|job| job.metadata_policy.clone())
-                    .unwrap_or_default(),
-                conflict_policy: plan.conflict_policy.clone(),
-                status: history_status_for_plan(plan.state.clone(), root_job.as_ref()),
-                started_at: root_job.as_ref().map(|job| job.created_at).unwrap_or(now),
-                last_updated: now,
-            };
-            new_records.push(record);
-        }
+        // Session-scoped history: do not carry completed/unfinished plans
+        // across process launches. Clear memory + disk so the next run
+        // starts with an empty History section.
         let history = &mut cx.resources_mut().transfer_history;
-        history.append(new_records);
-        history.prune(now);
+        history.clear();
         if let Err(error) = history.save() {
-            warn!(error = %error, "could not persist transfer history on quit");
+            warn!(error = %error, "could not clear transfer history on quit");
         }
         self.transfer_history_flushed = true;
     }

@@ -152,6 +152,12 @@ impl TransferHistoryStore {
         self.records.len() != before
     }
 
+    /// Drop every in-memory record. Callers that need the empty set on
+    /// disk should follow with [`Self::save`].
+    pub fn clear(&mut self) {
+        self.records.clear();
+    }
+
     /// Enforce the retention policy: drop records older than
     /// `RETENTION_DAYS` and cap the remainder at `MAX_HISTORY_RECORDS`,
     /// keeping the most recently updated.
