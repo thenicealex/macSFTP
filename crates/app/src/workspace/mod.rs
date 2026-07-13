@@ -19,11 +19,11 @@ use tracing::warn;
 
 use crate::app_actions::{
     ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, CopyPath, CopyVersionInfo,
-    DeleteSelection, DownloadSelection, FocusLocalPane, FocusRemotePane, GoToPath, MinimizeWindow,
-    NavigateBack, NavigateForward, NewFolder, NewTab, OpenLogFolder, OpenSelectedEntry,
-    OpenSettings, ParentDirectory, ReconnectTab, RefreshPane, RenameEntry, SelectNextEntry,
-    SelectPrevEntry, ShowAbout, ShowTransferDrawer, ToggleHiddenFiles, UploadSelection,
-    ZoomWindow,
+    DeleteSelection, DownloadSelection, FilterPane, FocusLocalPane, FocusRemotePane, GoToPath,
+    MinimizeWindow, NavigateBack, NavigateForward, NewFolder, NewTab, OpenLogFolder,
+    OpenSelectedEntry, OpenSettings, ParentDirectory, ReconnectTab, RefreshPane, RenameEntry,
+    SelectNextEntry, SelectPrevEntry, ShowAbout, ShowTransferDrawer, ToggleHiddenFiles,
+    UploadSelection, ZoomWindow,
 };
 use crate::resources::ActiveResources;
 use crate::workspace::file_ops::{ContextMenuState, DeleteConfirmState, InlineEditState};
@@ -34,6 +34,27 @@ use crate::workspace::nav::{HistoryOp, TabNavState};
 pub enum PaneSide {
     Local,
     Remote,
+}
+
+/// Per-pane type-to-filter / cmd-f state (view-only; not persisted).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PaneFilter {
+    pub(crate) query: String,
+    pub(crate) input: InputState,
+    /// `true` after `cmd-f`: key events prefer the filter input.
+    pub(crate) explicit_focus: bool,
+}
+
+impl PaneFilter {
+    pub(crate) fn is_active(&self) -> bool {
+        !self.query.is_empty() || self.explicit_focus
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.query.clear();
+        self.input.clear();
+        self.explicit_focus = false;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +99,9 @@ pub struct Workspace {
     go_to_path_open: bool,
     go_to_path_input: InputState,
     go_to_path_error: Option<SharedString>,
+    /// Active-tab type-to-filter state (cleared on tab switch / navigate).
+    local_filter: PaneFilter,
+    remote_filter: PaneFilter,
     /// Session credentials per tab, kept in memory only so Reconnect
     /// works without re-typing. Replaced by Keychain-backed profiles.
     tab_settings: HashMap<TabId, ConnectionSettings>,
@@ -160,6 +184,8 @@ impl Workspace {
             go_to_path_open: false,
             go_to_path_input: InputState::new(),
             go_to_path_error: None,
+            local_filter: PaneFilter::default(),
+            remote_filter: PaneFilter::default(),
             tab_settings: HashMap::new(),
             tab_nav: HashMap::new(),
             transfer_history_flushed: false,
@@ -203,6 +229,7 @@ impl Workspace {
         }
         self.state.tabs.open_tab(tab);
         self.state.tabs.active_tab_id = Some(tab_id);
+        self.clear_filters();
         self.reset_scroll_positions();
         self.focus_pane(PaneSide::Local, window, cx);
         cx.notify();
@@ -228,6 +255,7 @@ impl Workspace {
     pub(crate) fn activate_tab(&mut self, tab_id: TabId, cx: &mut Context<Self>) {
         if self.state.tabs.find_tab(tab_id).is_some() {
             self.state.tabs.active_tab_id = Some(tab_id);
+            self.clear_filters();
             self.reset_scroll_positions();
             cx.notify();
         }
@@ -490,6 +518,9 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|workspace, _: &GoToPath, window, cx| {
                 workspace.open_go_to_path(window, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &FilterPane, window, cx| {
+                workspace.open_filter_pane(window, cx);
             }))
             .on_action(cx.listener(|workspace, _: &CopyPath, _window, cx| {
                 workspace.copy_focused_path(cx);

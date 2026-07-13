@@ -55,12 +55,29 @@ impl crate::workspace::Workspace {
         cx.notify();
     }
 
+    pub(crate) fn pane_filter(&self, side: PaneSide) -> &PaneFilter {
+        match side {
+            PaneSide::Local => &self.local_filter,
+            PaneSide::Remote => &self.remote_filter,
+        }
+    }
+
+    pub(crate) fn pane_filter_mut(&mut self, side: PaneSide) -> &mut PaneFilter {
+        match side {
+            PaneSide::Local => &mut self.local_filter,
+            PaneSide::Remote => &mut self.remote_filter,
+        }
+    }
+
+    pub(crate) fn filter_query(&self, side: PaneSide) -> &str {
+        self.pane_filter(side).query.as_str()
+    }
+
     /// Indices of stored entries that currently appear in the file list.
     /// Index space used by selection, keyboard nav, and `uniform_list`.
     pub(crate) fn visible_indices(&self, side: PaneSide, cx: &App) -> Vec<usize> {
         let show_hidden = cx.resources().config.config().show_hidden_files;
-        // Type-to-filter (Task 5) will supply a real query; empty means no name filter.
-        let query = "";
+        let query = self.filter_query(side);
         match (self.active_tab(), side) {
             (Some(tab), PaneSide::Local) => {
                 visible_local_indices(&tab.local.entries, show_hidden, query)
@@ -69,6 +86,20 @@ impl crate::workspace::Workspace {
                 visible_remote_indices(&tab.remote.entries, show_hidden, query)
             }
             (None, _) => Vec::new(),
+        }
+    }
+
+    /// Visible count after hidden-files filter only (ignores name query).
+    pub(crate) fn count_after_hidden(&self, side: PaneSide, cx: &App) -> usize {
+        let show_hidden = cx.resources().config.config().show_hidden_files;
+        match (self.active_tab(), side) {
+            (Some(tab), PaneSide::Local) => {
+                visible_local_indices(&tab.local.entries, show_hidden, "").len()
+            }
+            (Some(tab), PaneSide::Remote) => {
+                visible_remote_indices(&tab.remote.entries, show_hidden, "").len()
+            }
+            (None, _) => 0,
         }
     }
 
@@ -328,8 +359,118 @@ impl crate::workspace::Workspace {
         }
     }
 
-    /// Type-to-filter lands in a later task; clear is a no-op until then.
-    pub(crate) fn clear_filter(&mut self, _side: PaneSide) {}
+    pub(crate) fn clear_filter(&mut self, side: PaneSide) {
+        self.pane_filter_mut(side).clear();
+    }
+
+    pub(crate) fn clear_filters(&mut self) {
+        self.local_filter.clear();
+        self.remote_filter.clear();
+    }
+
+    /// `cmd-f`: show the filter bar and route keys into the filter input.
+    pub(crate) fn open_filter_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.filter_input_blocked() {
+            return;
+        }
+        let side = self.focused_side;
+        let filter = self.pane_filter_mut(side);
+        filter.explicit_focus = true;
+        filter.input.set_value(filter.query.clone());
+        self.focus_pane(side, window, cx);
+        cx.notify();
+    }
+
+    /// Surfaces that own keyboard input block type-to-filter / cmd-f.
+    fn filter_input_blocked(&self) -> bool {
+        self.go_to_path_open
+            || self.connect_form.is_some()
+            || self.delete_confirm.is_some()
+            || self.inline_edit.is_some()
+            || self.active_host_key_prompt().is_some()
+            || self.active_transfer_conflict_prompt().is_some()
+            || self.about_open
+            || self.surface != WorkspaceSurface::Files
+    }
+
+    /// FilePane key path for type-to-filter and explicit filter editing.
+    pub(crate) fn handle_filter_key(
+        &mut self,
+        side: PaneSide,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.filter_input_blocked() {
+            return;
+        }
+
+        let keystroke = &event.keystroke;
+
+        // Escape always clears an active filter for this pane.
+        if keystroke.key == "escape" && !keystroke.modifiers.modified() {
+            if self.pane_filter(side).is_active() {
+                cx.stop_propagation();
+                self.clear_filter(side);
+                window.focus(self.pane_focus(side));
+                cx.notify();
+            }
+            return;
+        }
+
+        if self.pane_filter(side).explicit_focus {
+            if keystroke.modifiers.platform && keystroke.key == "v" {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    let filter = self.pane_filter_mut(side);
+                    filter.input.insert(&text);
+                    filter.query = filter.input.value().to_string();
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+                return;
+            }
+            let filter = self.pane_filter_mut(side);
+            if filter.input.handle_keystroke(keystroke) == InputKeyResult::Handled {
+                filter.query = filter.input.value().to_string();
+                cx.stop_propagation();
+                cx.notify();
+            }
+            return;
+        }
+
+        // Type-to-filter: printable chars (shift ok) append; backspace pops.
+        let modifiers = keystroke.modifiers;
+        if modifiers.platform || modifiers.control || modifiers.alt || modifiers.function {
+            return;
+        }
+
+        if keystroke.key == "backspace" {
+            let filter = self.pane_filter_mut(side);
+            if filter.query.is_empty() {
+                return;
+            }
+            filter.query.pop();
+            if filter.query.is_empty() {
+                filter.clear();
+            } else {
+                filter.input.set_value(filter.query.clone());
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+
+        if let Some(key_char) = &keystroke.key_char {
+            if !key_char.chars().any(char::is_control) {
+                let filter = self.pane_filter_mut(side);
+                filter.query.push_str(key_char);
+                filter.input.set_value(filter.query.clone());
+                filter.explicit_focus = false;
+                cx.stop_propagation();
+                cx.notify();
+            }
+        }
+    }
 
     pub(crate) fn navigate_focused(
         &mut self,

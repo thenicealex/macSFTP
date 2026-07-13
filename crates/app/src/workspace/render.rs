@@ -589,6 +589,8 @@ impl crate::workspace::Workspace {
             placeholder
         } else if entry_count == 0 && is_remote_refreshing {
             loading_state("Loading…", cx).into_any_element()
+        } else if entry_count == 0 && !self.filter_query(side).is_empty() {
+            empty_state("No matches", vec![], cx).into_any_element()
         } else if entry_count == 0 {
             empty_state("Empty directory", vec![], cx).into_any_element()
         } else {
@@ -696,7 +698,9 @@ impl crate::workspace::Workspace {
                     .is_some_and(|edit| edit.side == side)
                 {
                     workspace.handle_inline_edit_key(event, window, cx);
+                    return;
                 }
+                workspace.handle_filter_key(side, event, window, cx);
             }))
             .when(side == PaneSide::Local, |pane| {
                 pane.border_r_1().border_color(theme.colors.border)
@@ -734,6 +738,84 @@ impl crate::workspace::Workspace {
                     });
                 }
             }))
+            .when(self.pane_filter(side).is_active(), |pane| {
+                let filter = self.pane_filter(side);
+                let matched = entry_count;
+                let total_after_hidden = self.count_after_hidden(side, cx);
+                let explicit_focus = filter.explicit_focus;
+                let query_display = filter.query.clone();
+                let filter_field_id = if side == PaneSide::Local {
+                    "local-filter-input"
+                } else {
+                    "remote-filter-input"
+                };
+                let clear_id = if side == PaneSide::Local {
+                    "local-filter-clear"
+                } else {
+                    "remote-filter-clear"
+                };
+                pane.child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .border_b_1()
+                        .border_color(theme.colors.border_focused)
+                        .bg(theme.colors.surface)
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme.colors.text_muted)
+                                .child("Filter:"),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .when(explicit_focus, |row| {
+                                    row.child(text_field(
+                                        filter_field_id,
+                                        TextFieldModel {
+                                            state: &self.pane_filter(side).input,
+                                            placeholder: "Filter by name…",
+                                            focused: true,
+                                            masked: false,
+                                        },
+                                        cx,
+                                    ))
+                                })
+                                .when(!explicit_focus, |row| {
+                                    row.child(
+                                        div()
+                                            .text_size(px(12.0))
+                                            .font_family(theme.fonts.mono_family.clone())
+                                            .text_color(theme.colors.text)
+                                            .truncate()
+                                            .child(query_display),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(11.0))
+                                .text_color(theme.colors.text_muted)
+                                .child(format!("· {matched}/{total_after_hidden}")),
+                        )
+                        .child(
+                            icon_button(clear_id, IconName::Close, "Clear Filter (Esc)").on_click(
+                                cx.listener(move |workspace, _event, window, cx| {
+                                    workspace.clear_filter(side);
+                                    workspace.focus_pane(side, window, cx);
+                                    cx.notify();
+                                }),
+                            ),
+                        ),
+                )
+            })
             .when(inline_edit_active, |pane| {
                 let edit = self.inline_edit.as_ref().expect("checked active");
                 let label = match &edit.kind {

@@ -11,9 +11,12 @@ pub(crate) fn is_dotfile(name: &str) -> bool {
     name.starts_with('.')
 }
 
+/// Case-insensitive basename substring match; empty query matches everything.
+pub(crate) fn name_matches(name: &str, query: &str) -> bool {
+    query.is_empty() || name.to_lowercase().contains(&query.to_lowercase())
+}
+
 /// Indices into `entries` that should appear in the local file list.
-///
-/// `query` is reserved for type-to-filter (Task 5); pass `""` until then.
 pub(crate) fn visible_local_indices(
     entries: &[LocalEntry],
     show_hidden: bool,
@@ -36,18 +39,10 @@ fn visible_indices<'a>(
     show_hidden: bool,
     query: &str,
 ) -> Vec<usize> {
-    let query_lower = if query.is_empty() {
-        None
-    } else {
-        Some(query.to_lowercase())
-    };
     names
         .enumerate()
         .filter(|(_, name)| show_hidden || !is_dotfile(name))
-        .filter(|(_, name)| match &query_lower {
-            None => true,
-            Some(needle) => name.to_lowercase().contains(needle),
-        })
+        .filter(|(_, name)| name_matches(name, query))
         .map(|(index, _)| index)
         .collect()
 }
@@ -56,7 +51,14 @@ fn visible_indices<'a>(
 mod tests {
     use macsftp_core::{FileKind, LocalEntry, LocalPath, RemoteEntry, RemotePath};
 
-    use super::{is_dotfile, visible_local_indices, visible_remote_indices};
+    use super::{is_dotfile, name_matches, visible_local_indices, visible_remote_indices};
+
+    #[test]
+    fn filter_query_case_insensitive_substring() {
+        assert!(name_matches("ReadMe.TXT", "me.t"));
+        assert!(!name_matches("ReadMe.TXT", "xyz"));
+        assert!(name_matches("ReadMe.TXT", ""));
+    }
 
     fn local(name: &str) -> LocalEntry {
         LocalEntry {

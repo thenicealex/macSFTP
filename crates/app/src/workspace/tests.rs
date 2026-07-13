@@ -60,9 +60,9 @@ mod tests {
 
     use super::{AppPaths, PaneSide, Workspace, WorkspaceSurface};
     use crate::app_actions::{
-        self, ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, GoToPath, NavigateBack,
-        NewTab, OpenSettings, SelectNextEntry, SelectPrevEntry, ShowAbout, ShowTransferDrawer,
-        ToggleHiddenFiles,
+        self, ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, FilterPane, GoToPath,
+        NavigateBack, NewTab, OpenSettings, SelectNextEntry, SelectPrevEntry, ShowAbout,
+        ShowTransferDrawer, ToggleHiddenFiles,
     };
     use crate::resources::{ActiveResources, ActiveTransfers};
     use crate::workspace::nav::HistoryOp;
@@ -2057,6 +2057,85 @@ mod tests {
                 "action toggles back to false"
             );
             assert_eq!(workspace.entry_count(PaneSide::Local, cx), 1);
+        });
+
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[gpui::test]
+    fn type_to_filter_reduces_visible_local_entries(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        let (fixture, base) = temp_local_fixture("type-to-filter");
+        std::fs::write(fixture.join("a.txt"), b"a").expect("write a");
+        std::fs::write(fixture.join("b.txt"), b"b").expect("write b");
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.set_local_path(base, window, cx);
+            assert_eq!(
+                workspace.entry_count(PaneSide::Local, cx),
+                2,
+                "both files visible before filter"
+            );
+
+            workspace.local_filter.query = "a".into();
+            workspace
+                .local_filter
+                .input
+                .set_value(workspace.local_filter.query.clone());
+            assert_eq!(
+                workspace.entry_count(PaneSide::Local, cx),
+                1,
+                "filter query reduces to matching names"
+            );
+            let path = workspace
+                .entry_path_at(PaneSide::Local, 0, cx)
+                .expect("one match");
+            match path {
+                EntryPath::Local(local) => {
+                    assert!(
+                        local.as_str().ends_with("a.txt"),
+                        "matched a.txt, got {}",
+                        local.as_str()
+                    );
+                }
+                EntryPath::Remote(_) => panic!("local path expected"),
+            }
+            assert_eq!(
+                workspace.count_after_hidden(PaneSide::Local, cx),
+                2,
+                "total after hidden ignores name filter"
+            );
+
+            workspace.clear_filter(PaneSide::Local);
+            assert_eq!(
+                workspace.entry_count(PaneSide::Local, cx),
+                2,
+                "clear restores full list"
+            );
+            assert!(!workspace.local_filter.is_active());
+        });
+
+        // cmd-f / FilterPane opens explicit focus without requiring a query.
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.open_filter_pane(window, cx);
+            assert!(workspace.local_filter.explicit_focus);
+            assert!(workspace.local_filter.is_active());
+            workspace.local_filter.query = "b".into();
+            assert_eq!(workspace.entry_count(PaneSide::Local, cx), 1);
+        });
+        cx.dispatch_action(FilterPane);
+        workspace.read_with(&cx, |workspace, _cx| {
+            assert!(
+                workspace.local_filter.explicit_focus,
+                "FilterPane action sets explicit_focus"
+            );
+        });
+
+        // Tab switch clears filters.
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.open_new_tab(window, cx);
+            assert!(!workspace.local_filter.is_active());
+            assert!(!workspace.remote_filter.is_active());
         });
 
         let _ = std::fs::remove_dir_all(&fixture);
