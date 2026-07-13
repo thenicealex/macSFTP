@@ -3,8 +3,8 @@ use gpui::{
     Styled, Window, div, prelude::*, px, uniform_list,
 };
 use macsftp_core::{
-    ConnectionState, EntryPath, TransferHistoryRecord, TransferHistoryStatus, TransferId,
-    TransferJob, TransferState,
+    ConnectionState, EntryPath, LocalPath, RemotePath, TransferHistoryRecord,
+    TransferHistoryStatus, TransferId, TransferJob, TransferState,
 };
 use macsftp_ui::{
     ActiveTheme, DragPreview, FileRowModel, IconName, TextFieldModel, connection_status,
@@ -15,7 +15,7 @@ use macsftp_ui::{
 
 use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::helpers::*;
-use crate::workspace::nav::HistoryOp;
+use crate::workspace::nav::{HistoryOp, breadcrumb_display_indices, breadcrumb_segments};
 use crate::workspace::{PaneSide, WorkspaceSurface};
 use macsftp_storage::AppearancePreference;
 
@@ -256,20 +256,125 @@ impl crate::workspace::Workspace {
                     },
                 )),
             )
-            .child(
-                div()
+            .child({
+                let text_color = if pane_focused {
+                    theme.colors.text
+                } else {
+                    theme.colors.text_muted
+                };
+                let muted_color = theme.colors.text_muted;
+                let hover_background = theme.colors.element_hover;
+                let active_background = theme.colors.element_active;
+                let side_tag: u32 = match side {
+                    PaneSide::Local => 0,
+                    PaneSide::Remote => 1,
+                };
+
+                let mut trail = div()
+                    .id(("path-breadcrumb", side_tag as usize))
+                    .flex()
                     .flex_1()
                     .min_w_0()
+                    .items_center()
+                    .gap_1()
                     .px_1()
-                    .text_size(px(12.0))
-                    .text_color(if pane_focused {
-                        theme.colors.text
-                    } else {
-                        theme.colors.text_muted
-                    })
-                    .truncate()
-                    .child(path_label.clone().unwrap_or_else(|| pane_name.to_string())),
-            )
+                    .overflow_x_hidden();
+
+                match path_label.as_deref() {
+                    None => {
+                        trail = trail.child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(text_color)
+                                .truncate()
+                                .child(pane_name.to_string()),
+                        );
+                    }
+                    Some(path) => {
+                        let segments = breadcrumb_segments(path);
+                        let display = breadcrumb_display_indices(segments.len());
+                        // Root label is already "/"; omit the separator after it so we
+                        // never render "//Users".
+                        let mut skip_next_separator = false;
+                        let mut first = true;
+                        for (display_i, index_opt) in display.into_iter().enumerate() {
+                            if !first && !skip_next_separator {
+                                trail = trail.child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(11.0))
+                                        .text_color(muted_color)
+                                        .child("/"),
+                                );
+                            }
+                            first = false;
+                            skip_next_separator = false;
+
+                            match index_opt {
+                                None => {
+                                    trail = trail.child(
+                                        div()
+                                            .flex_none()
+                                            .text_size(px(12.0))
+                                            .text_color(muted_color)
+                                            .child("…"),
+                                    );
+                                }
+                                Some(seg_i) => {
+                                    let (label, absolute) = &segments[seg_i];
+                                    let is_root = label == "/";
+                                    if is_root {
+                                        skip_next_separator = true;
+                                    }
+                                    let label = label.clone();
+                                    let absolute = absolute.clone();
+                                    let element_id = (
+                                        "breadcrumb-seg",
+                                        side_tag as usize * 1000 + display_i,
+                                    );
+                                    trail = trail.child(
+                                        div()
+                                            .id(element_id)
+                                            .flex_none()
+                                            .px_1()
+                                            .rounded_sm()
+                                            .text_size(px(12.0))
+                                            .text_color(text_color)
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(hover_background))
+                                            .active(|style| style.bg(active_background))
+                                            .tooltip(text_tooltip(absolute.clone()))
+                                            .on_click(cx.listener(
+                                                move |workspace, _event, window, cx| {
+                                                    workspace.focused_side = side;
+                                                    match side {
+                                                        PaneSide::Local => {
+                                                            workspace.navigate_pane_local(
+                                                                LocalPath::new(absolute.clone()),
+                                                                HistoryOp::Push,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        }
+                                                        PaneSide::Remote => {
+                                                            workspace.navigate_pane_remote(
+                                                                RemotePath::new(absolute.clone()),
+                                                                HistoryOp::Push,
+                                                                cx,
+                                                            );
+                                                        }
+                                                    }
+                                                },
+                                            ))
+                                            .child(label),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                trail
+            })
             .when(is_remote_refreshing && entry_count > 0, |bar| {
                 bar.child(
                     div()

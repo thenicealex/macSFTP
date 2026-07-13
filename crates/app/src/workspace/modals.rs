@@ -38,6 +38,7 @@ use crate::app_actions::*;
 use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::connect_form::*;
 use crate::workspace::helpers::*;
+use crate::workspace::nav::HistoryOp;
 use crate::workspace::*;
 
 impl crate::workspace::Workspace {
@@ -220,6 +221,12 @@ impl crate::workspace::Workspace {
         cx.notify();
     }
     pub(crate) fn cancel_active_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Go to Path is highest priority so Esc always dismisses the path
+        // field even if another surface is also "open" in theory.
+        if self.go_to_path_open {
+            self.close_go_to_path(window, cx);
+            return;
+        }
         if self.about_open {
             self.about_open = false;
             cx.notify();
@@ -253,6 +260,190 @@ impl crate::workspace::Workspace {
         } else if let Some(prompt) = self.active_transfer_conflict_prompt().cloned() {
             self.resolve_transfer_conflict(&prompt, ConflictDecision::CancelJob, window, cx);
         }
+    }
+
+    pub(crate) fn open_go_to_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.connect_form.is_some()
+            || self.active_host_key_prompt().is_some()
+            || self.active_transfer_conflict_prompt().is_some()
+            || self.delete_confirm.is_some()
+            || self.inline_edit.is_some()
+        {
+            return;
+        }
+        self.about_open = false;
+        self.go_to_path_open = true;
+        self.go_to_path_input.clear();
+        self.go_to_path_error = None;
+        window.focus(&self.modal_focus);
+        cx.notify();
+    }
+
+    pub(crate) fn close_go_to_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.go_to_path_open = false;
+        self.go_to_path_input.clear();
+        self.go_to_path_error = None;
+        self.focus_pane(self.focused_side, window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn submit_go_to_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let raw = self.go_to_path_input.value().trim().to_string();
+        if raw.is_empty() {
+            self.go_to_path_error = Some("Enter a path".into());
+            cx.notify();
+            return;
+        }
+
+        match self.focused_side {
+            PaneSide::Local => {
+                let expanded = expand_home(&raw);
+                let path = LocalPath::new(expanded);
+                if !Path::new(path.as_str()).exists() {
+                    self.go_to_path_error = Some("Path not found".into());
+                    self.status_message = Some("Path not found".into());
+                    cx.notify();
+                    return;
+                }
+                self.go_to_path_open = false;
+                self.go_to_path_input.clear();
+                self.go_to_path_error = None;
+                self.navigate_pane_local(path, HistoryOp::Push, window, cx);
+            }
+            PaneSide::Remote => {
+                self.go_to_path_open = false;
+                self.go_to_path_input.clear();
+                self.go_to_path_error = None;
+                self.navigate_pane_remote(RemotePath::new(raw), HistoryOp::Push, cx);
+            }
+        }
+        self.focus_pane(self.focused_side, window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn handle_go_to_path_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.go_to_path_open {
+            return;
+        }
+        let keystroke = &event.keystroke;
+        if keystroke.key == "enter" && !keystroke.modifiers.modified() {
+            cx.stop_propagation();
+            self.submit_go_to_path(window, cx);
+            return;
+        }
+        if keystroke.modifiers.platform && keystroke.key == "v" {
+            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                self.go_to_path_input.insert(&text);
+                self.go_to_path_error = None;
+                cx.stop_propagation();
+                cx.notify();
+            }
+            return;
+        }
+        if self.go_to_path_input.handle_keystroke(keystroke) == InputKeyResult::Handled {
+            self.go_to_path_error = None;
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn render_go_to_path_modal(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        if !self.go_to_path_open {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        let side_label = match self.focused_side {
+            PaneSide::Local => "Local",
+            PaneSide::Remote => "Remote",
+        };
+
+        Some(
+            div()
+                .id("go-to-path-scrim")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
+                .child(
+                    div()
+                        .key_context("GoToPath")
+                        .track_focus(&self.modal_focus)
+                        .on_key_down(cx.listener(Self::handle_go_to_path_key))
+                        .flex()
+                        .flex_col()
+                        .gap_3()
+                        .w(px(460.0))
+                        .p_4()
+                        .bg(theme.colors.elevated_surface)
+                        .border_1()
+                        .border_color(theme.colors.border)
+                        .rounded_md()
+                        .font_family(theme.fonts.ui_family.clone())
+                        .child(
+                            div()
+                                .text_size(px(14.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(theme.colors.text)
+                                .child(format!("Go to Path ({side_label})")),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(theme.colors.text_muted)
+                                .child("Enter an absolute path. Enter navigates · Esc cancels"),
+                        )
+                        .child(text_field(
+                            "go-to-path-input",
+                            TextFieldModel {
+                                state: &self.go_to_path_input,
+                                placeholder: "Absolute path",
+                                focused: true,
+                                masked: false,
+                            },
+                            cx,
+                        ))
+                        .when_some(self.go_to_path_error.clone(), |card, error| {
+                            card.child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(theme.colors.error)
+                                    .child(error),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    text_button("go-to-path-cancel", "Cancel").on_click(
+                                        cx.listener(|workspace, _event, window, cx| {
+                                            workspace.close_go_to_path(window, cx);
+                                        }),
+                                    ),
+                                )
+                                .child(
+                                    text_button("go-to-path-go", "Go")
+                                        .primary(true)
+                                        .on_click(cx.listener(|workspace, _event, window, cx| {
+                                            workspace.submit_go_to_path(window, cx);
+                                        })),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
     pub(crate) fn render_connect_form_modal(
         &self,

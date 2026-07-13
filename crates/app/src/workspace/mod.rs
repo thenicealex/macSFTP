@@ -19,7 +19,7 @@ use tracing::warn;
 
 use crate::app_actions::{
     ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, CopyPath, CopyVersionInfo,
-    DeleteSelection, DownloadSelection, FocusLocalPane, FocusRemotePane, MinimizeWindow,
+    DeleteSelection, DownloadSelection, FocusLocalPane, FocusRemotePane, GoToPath, MinimizeWindow,
     NavigateBack, NavigateForward, NewFolder, NewTab, OpenLogFolder, OpenSelectedEntry,
     OpenSettings, ParentDirectory, ReconnectTab, RefreshPane, RenameEntry, SelectNextEntry,
     SelectPrevEntry, ShowAbout, ShowTransferDrawer, ToggleHiddenFiles, UploadSelection,
@@ -74,6 +74,10 @@ pub struct Workspace {
     inline_edit: Option<InlineEditState>,
     /// Phase 1 context menu for the focused file pane.
     context_menu: Option<ContextMenuState>,
+    /// Go to Path modal (`cmd-shift-g`).
+    go_to_path_open: bool,
+    go_to_path_input: InputState,
+    go_to_path_error: Option<SharedString>,
     /// Session credentials per tab, kept in memory only so Reconnect
     /// works without re-typing. Replaced by Keychain-backed profiles.
     tab_settings: HashMap<TabId, ConnectionSettings>,
@@ -153,6 +157,9 @@ impl Workspace {
             delete_confirm: None,
             inline_edit: None,
             context_menu: None,
+            go_to_path_open: false,
+            go_to_path_input: InputState::new(),
+            go_to_path_error: None,
             tab_settings: HashMap::new(),
             tab_nav: HashMap::new(),
             transfer_history_flushed: false,
@@ -481,6 +488,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|workspace, _: &NavigateForward, window, cx| {
                 workspace.navigate_focused(HistoryOp::Forward, window, cx);
             }))
+            .on_action(cx.listener(|workspace, _: &GoToPath, window, cx| {
+                workspace.open_go_to_path(window, cx);
+            }))
             .on_action(cx.listener(|workspace, _: &CopyPath, _window, cx| {
                 workspace.copy_focused_path(cx);
             }))
@@ -501,6 +511,7 @@ impl Render for Workspace {
                     && workspace.active_host_key_prompt().is_none()
                     && workspace.active_transfer_conflict_prompt().is_none()
                     && workspace.delete_confirm.is_none()
+                    && !workspace.go_to_path_open
                 {
                     workspace.about_open = false;
                     workspace.surface = WorkspaceSurface::Settings;
@@ -513,6 +524,7 @@ impl Render for Workspace {
                     && workspace.active_host_key_prompt().is_none()
                     && workspace.active_transfer_conflict_prompt().is_none()
                     && workspace.delete_confirm.is_none()
+                    && !workspace.go_to_path_open
                 {
                     workspace.about_open = true;
                     cx.notify();
@@ -542,6 +554,7 @@ impl Render for Workspace {
             .children(self.render_host_key_modal(cx))
             .children(self.render_transfer_conflict_modal(cx))
             .children(self.render_delete_confirm_modal(cx))
+            .children(self.render_go_to_path_modal(cx))
             .children(self.render_context_menu(cx))
             .children(self.render_about(cx))
     }

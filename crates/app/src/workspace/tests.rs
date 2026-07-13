@@ -60,8 +60,8 @@ mod tests {
 
     use super::{AppPaths, PaneSide, Workspace, WorkspaceSurface};
     use crate::app_actions::{
-        self, ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, NavigateBack, NewTab,
-        OpenSettings, SelectNextEntry, SelectPrevEntry, ShowAbout, ShowTransferDrawer,
+        self, ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, GoToPath, NavigateBack,
+        NewTab, OpenSettings, SelectNextEntry, SelectPrevEntry, ShowAbout, ShowTransferDrawer,
         ToggleHiddenFiles,
     };
     use crate::resources::{ActiveResources, ActiveTransfers};
@@ -1116,6 +1116,145 @@ mod tests {
         });
 
         let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[gpui::test]
+    fn go_to_path_navigates_local_with_push_history(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        let (fixture, parent) = temp_local_fixture("go-to-path");
+        let child_dir = fixture.join("child");
+        std::fs::create_dir(&child_dir).expect("child dir");
+        let child = LocalPath::new(child_dir.to_string_lossy().into_owned());
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.set_local_path(parent.clone(), window, cx);
+            workspace.focused_side = PaneSide::Local;
+            workspace.open_go_to_path(window, cx);
+            assert!(workspace.go_to_path_open);
+            workspace.go_to_path_input.set_value(child.as_str());
+            workspace.submit_go_to_path(window, cx);
+            assert!(!workspace.go_to_path_open);
+            assert_eq!(
+                workspace
+                    .active_tab()
+                    .and_then(|tab| tab.local.path.as_ref().map(LocalPath::as_str)),
+                Some(child.as_str()),
+                "submit_go_to_path must navigate to entered local path"
+            );
+            assert!(
+                workspace.pane_can_navigate_back(PaneSide::Local),
+                "go to path must push history"
+            );
+        });
+
+        // Missing path stays on current directory and reports an error.
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.open_go_to_path(window, cx);
+            workspace
+                .go_to_path_input
+                .set_value(format!("{}/does-not-exist", parent.as_str()));
+            workspace.submit_go_to_path(window, cx);
+            assert!(
+                workspace.go_to_path_open,
+                "modal stays open on missing path"
+            );
+            assert_eq!(
+                workspace.go_to_path_error.as_ref().map(|s| s.as_ref()),
+                Some("Path not found")
+            );
+            assert_eq!(
+                workspace
+                    .active_tab()
+                    .and_then(|tab| tab.local.path.as_ref().map(LocalPath::as_str)),
+                Some(child.as_str()),
+                "failed go to path must not change current path"
+            );
+        });
+
+        // Esc / CancelActiveModal closes the modal.
+        cx.dispatch_action(CancelActiveModal);
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(
+                !workspace.go_to_path_open,
+                "CancelActiveModal closes go to path"
+            );
+        });
+
+        // Action opens the modal again.
+        cx.dispatch_action(GoToPath);
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(workspace.go_to_path_open, "GoToPath action opens modal");
+        });
+
+        // Empty path is rejected.
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.go_to_path_input.clear();
+            workspace.submit_go_to_path(window, cx);
+            assert!(workspace.go_to_path_open);
+            assert_eq!(
+                workspace.go_to_path_error.as_ref().map(|s| s.as_ref()),
+                Some("Enter a path")
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[gpui::test]
+    fn go_to_path_remote_requests_directory_with_push(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            workspace.connect_with(test_settings(), None, cx);
+        });
+        let _ = channels.command_rx.try_recv();
+
+        let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                AppEvent::TabConnected(RemoteScoped::new(
+                    scope.clone(),
+                    TabConnected {
+                        remote_root: RemotePath::new(TEST_REMOTE_ROOT),
+                    },
+                )),
+                window,
+                cx,
+            );
+        });
+        // TabConnected requests the remote root listing.
+        let _ = channels.command_rx.try_recv();
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                AppEvent::RemoteDirLoaded(RemoteScoped::new(
+                    scope,
+                    RemoteDirSnapshot {
+                        path: RemotePath::new(TEST_REMOTE_ROOT),
+                        entries: vec![],
+                    },
+                )),
+                window,
+                cx,
+            );
+
+            workspace.focused_side = PaneSide::Remote;
+            workspace.open_go_to_path(window, cx);
+            workspace
+                .go_to_path_input
+                .set_value(format!("{TEST_REMOTE_ROOT}/docs"));
+            workspace.submit_go_to_path(window, cx);
+            assert!(!workspace.go_to_path_open);
+            assert!(
+                workspace.pane_can_navigate_back(PaneSide::Remote),
+                "remote go to path must push history"
+            );
+        });
+
+        assert!(matches!(
+            channels.command_rx.try_recv(),
+            Ok(AppCommand::ReadRemoteDir { tab_id: TabId(1), path })
+                if path.as_str() == &format!("{TEST_REMOTE_ROOT}/docs")
+        ));
     }
 
     #[gpui::test]
