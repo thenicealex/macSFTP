@@ -285,12 +285,18 @@ impl crate::workspace::Workspace {
             ))
         };
         let retry_directory_button = |id: &'static str| {
-            text_button(id, "Refresh & Retry").on_click(cx.listener(
-                |workspace, _event, window, cx| {
+            text_button(id, "Retry").on_click(cx.listener(|workspace, _event, window, cx| {
+                let Some(tab) = workspace.active_tab() else {
+                    return;
+                };
+                let tab_id = tab.id;
+                if let Some(path) = tab.remote.path.clone() {
+                    workspace.request_remote_directory(tab_id, path, cx);
+                } else {
                     workspace.focused_side = PaneSide::Remote;
                     workspace.refresh_focused_pane(window, cx);
-                },
-            ))
+                }
+            }))
         };
         let connection_placeholder: Option<gpui::AnyElement> = if side == PaneSide::Remote {
             match tab_state.map(|tab| &tab.connection) {
@@ -952,6 +958,22 @@ impl crate::workspace::Workspace {
 
         row
     }
+    /// Count of selected paths on the focused pane (local or remote).
+    pub(crate) fn focused_selection_count(&self) -> usize {
+        let Some(tab) = self.active_tab() else {
+            return 0;
+        };
+        tab.selection
+            .selected_paths
+            .iter()
+            .filter(|path| match (self.focused_side, path) {
+                (PaneSide::Local, EntryPath::Local(_)) => true,
+                (PaneSide::Remote, EntryPath::Remote(_)) => true,
+                _ => false,
+            })
+            .count()
+    }
+
     pub(crate) fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
 
@@ -962,6 +984,8 @@ impl crate::workspace::Workspace {
             }
             None => (theme.colors.text_disabled, "No connection".to_string()),
         };
+
+        let selected_count = self.focused_selection_count();
 
         let transfers = cx.transfers();
         let jobs = &transfers.jobs;
@@ -981,11 +1005,6 @@ impl crate::workspace::Workspace {
             .iter()
             .filter(|job| matches!(job.state, TransferState::Failed { .. }))
             .count();
-
-        let mut transfer_summary = format!("{active_count} active");
-        if failed_count > 0 {
-            transfer_summary.push_str(&format!(" · {failed_count} failed"));
-        }
 
         div()
             .flex()
@@ -1013,6 +1032,9 @@ impl crate::workspace::Workspace {
                             .bg(status_color),
                     )
                     .child(div().truncate().child(status_text))
+                    .when(selected_count > 0, |row| {
+                        row.child(div().child(format!("{selected_count} selected")))
+                    })
                     .children(
                         self.status_message
                             .clone()
@@ -1043,7 +1065,14 @@ impl crate::workspace::Workspace {
                             theme.colors.text_muted
                         },
                     ))
-                    .child(transfer_summary),
+                    .child(div().child(format!("{active_count} active")))
+                    .when(failed_count > 0, |row| {
+                        row.child(
+                            div()
+                                .text_color(theme.colors.error)
+                                .child(format!("· {failed_count} failed")),
+                        )
+                    }),
             )
     }
     pub(crate) fn render_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {

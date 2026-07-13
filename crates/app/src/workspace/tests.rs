@@ -1887,4 +1887,54 @@ mod tests {
             );
         });
     }
+
+    #[gpui::test]
+    fn status_bar_selection_count_tracks_focused_pane(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        let (fixture, base) = temp_local_fixture("status-selection");
+        std::fs::write(fixture.join("a.txt"), b"a").expect("file a");
+        std::fs::write(fixture.join("b.txt"), b"b").expect("file b");
+        std::fs::write(fixture.join("c.txt"), b"c").expect("file c");
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.set_local_path(base, window, cx);
+            let local_paths: Vec<EntryPath> = workspace
+                .active_tab()
+                .expect("tab")
+                .local
+                .entries
+                .iter()
+                .take(2)
+                .map(|entry| EntryPath::Local(entry.path.clone()))
+                .collect();
+            assert_eq!(local_paths.len(), 2);
+
+            if let Some(tab) = workspace.active_tab_mut() {
+                tab.selection.selected_paths = local_paths.clone();
+                tab.selection.selected_paths.push(EntryPath::Remote(
+                    RemotePath::new(format!("{TEST_REMOTE_ROOT}/remote-only.txt")),
+                ));
+            }
+
+            workspace.focused_side = PaneSide::Local;
+            assert_eq!(
+                workspace.focused_selection_count(),
+                2,
+                "local focus should count only local selections"
+            );
+
+            workspace.focused_side = PaneSide::Remote;
+            assert_eq!(
+                workspace.focused_selection_count(),
+                1,
+                "remote focus should count only remote selections"
+            );
+
+            if let Some(tab) = workspace.active_tab_mut() {
+                tab.selection.selected_paths.clear();
+            }
+            assert_eq!(workspace.focused_selection_count(), 0);
+        });
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
 }
