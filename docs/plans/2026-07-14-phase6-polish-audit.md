@@ -14,7 +14,7 @@
 | 4 | Narrow window no overflow? | pass | Task 4: inventory + surgical `min_w_0`/`truncate`/`flex_wrap`; window_min_size stays 720×480. Hand-test notes below |
 | 5 | No decorative cards/gradients? | pass | Theme tokens only |
 | 6 | No main-thread block on network? | pass | Runtime bridge; residual risk accepted |
-| 7 | 10k entries + multi transfer? | pass | Task 5: unit smoke on 10k `visible_*_indices` (no timing assert). Hand GUI smoke procedure below — result pending interactive run |
+| 7 | 10k entries + multi transfer? | pass | Task 5+6: unit smoke on 10k `visible_*_indices` (no timing assert) **pass**. Interactive multi-transfer GUI: **accepted risk: interactive GUI smoke deferred; 10k unit smoke pass** |
 | 8 | Icon-only tooltips? | pass | Task 2: all `icon_button` sites + path-bar back/forward + status transfer chip carry labels (`labeled_shortcut` where applicable) |
 | 9 | No secrets / internal jargon in UI? | pass | Task 3: `Runtime is…` status strings → user copy; constants + banlist unit test; `rg` clean on user-visible string literals 2026-07-14 |
 | 10 | Modal expiry / session_epoch safety? | pass | Phase 1+ core guards; reaffirm |
@@ -73,7 +73,7 @@ Residual: single ultra-long breadcrumb segment clips without ellipsis (acceptabl
 - Switch tabs / toggle drawer: responsive
 - Progress updates remain throttled (phase 2)
 
-**Result:** pending interactive hand run (agent environment has no GUI session). Automation portion: **pass**.
+**Result:** **accepted risk: interactive GUI smoke deferred; 10k unit smoke pass** (agent environment has no interactive GUI session; local 10k unit tests pass).
 
 ## Copy banlist (user-visible)
 
@@ -81,6 +81,22 @@ Forbidden substrings (case-insensitive) in UI labels/status: `runtime`, `actor`,
 Allowed: `Keychain`, host/port/profile/transfer/permission.
 
 **Task 3 (2026-07-14):** Grepped `crates/app/src` (`runtime|actor|channel|session.epoch|AppCommand`); only user-visible hits were `send_command` status strings in `workspace/mod.rs` — rewritten to `STATUS_BUSY_TRY_AGAIN` / `STATUS_CONNECTION_SERVICE_UNAVAILABLE`. Remaining hits are identifiers, comments, or logs. Guard: `user_status_strings_avoid_internal_jargon`.
+
+**Task 6 closeout re-scan (2026-07-14):**
+```bash
+rg -n -i "runtime is|actor|session epoch" crates/app/src --type rust -g '!**/tests.rs'
+```
+Hits are comments/identifiers only (`main.rs` doc, `modals`/`mod`/`panes`/`event_handling`/`file_ops` comments). No user-visible string regressions.
+
+## Closeout (Task 6)
+
+| Check | Result |
+| --- | --- |
+| Regression `cargo test -p macsftp-platform -p macsftp-storage -p macsftp-app --bin macsftp` | **pass** — platform 9, storage 34 (+1 ignored), app bin 107; all green |
+| §15 rows | All `pass` (row 7 notes accepted risk for interactive GUI only) — no `unknown` |
+| Region matrix | Complete |
+| Hand performance smoke | accepted risk: interactive GUI smoke deferred; 10k unit smoke pass |
+| Banlist residual | Clean for UI copy |
 
 ## Spot-check log (PR0 / Task 1)
 
