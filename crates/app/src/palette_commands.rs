@@ -148,6 +148,15 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keybinding: Some("⌘]"),
         when: PaletteWhen::HasActiveTab,
     },
+    // Toolbar parent-directory control (⌘↑). Display string is the source of
+    // truth for path-bar tooltips via `labeled_shortcut`.
+    PaletteCommand {
+        id: "ParentDirectory",
+        title: "Parent Directory",
+        keywords: &["up", "cd..", "parent", "folder"],
+        keybinding: Some("⌘↑"),
+        when: PaletteWhen::HasActiveTab,
+    },
     PaletteCommand {
         id: "ToggleHiddenFiles",
         title: "Show Hidden Files",
@@ -187,6 +196,26 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
 
 pub fn all_palette_commands() -> &'static [PaletteCommand] {
     PALETTE_COMMANDS
+}
+
+/// Display key chord for a registry id (e.g. `"RefreshPane"` → `Some("⌘R")`).
+/// Tooltips should use this (or [`labeled_shortcut`]) so path-bar strings cannot
+/// drift from palette rows. Actual key bindings live in `app_actions`; these
+/// strings are display-only.
+pub fn keybinding_for(command_id: &str) -> Option<&'static str> {
+    all_palette_commands()
+        .iter()
+        .find(|command| command.id == command_id)
+        .and_then(|command| command.keybinding)
+}
+
+/// `"Refresh"` + `"RefreshPane"` → `"Refresh (⌘R)"`. Falls back to `label` alone
+/// when the id is missing or has no keybinding.
+pub fn labeled_shortcut(label: &str, command_id: &str) -> String {
+    match keybinding_for(command_id) {
+        Some(key) => format!("{label} ({key})"),
+        None => label.to_string(),
+    }
 }
 
 /// Filter the registry by `when` and case-insensitive title/keyword substring.
@@ -302,6 +331,7 @@ mod tests {
             ("GoToPath", Some("⌘⇧G")),
             ("NavigateBack", Some("⌘[")),
             ("NavigateForward", Some("⌘]")),
+            ("ParentDirectory", Some("⌘↑")),
             ("ToggleHiddenFiles", Some("⌘⇧.")),
             ("CopyPath", Some("⌘⇧C")),
             ("ReconnectTab", Some("⌘⇧R")),
@@ -312,5 +342,37 @@ mod tests {
             let command = by_id.get(id).unwrap_or_else(|| panic!("missing id: {id}"));
             assert_eq!(command.keybinding, keybinding, "keybinding for {id}");
         }
+    }
+
+    #[test]
+    fn labeled_shortcut_matches_registry_for_toolbar_tooltips() {
+        // Path-bar / status-bar tooltips (Task 5 discoverability) must show the
+        // same chords as palette rows. Keep this table in sync with render.rs.
+        let cases = [
+            ("New Tab", "NewTab", "New Tab (⌘T)"),
+            ("Refresh", "RefreshPane", "Refresh (⌘R)"),
+            ("Parent Directory", "ParentDirectory", "Parent Directory (⌘↑)"),
+            ("Back", "NavigateBack", "Back (⌘[)"),
+            ("Forward", "NavigateForward", "Forward (⌘])"),
+            ("New Folder", "NewFolder", "New Folder (⌘⇧N)"),
+            ("Delete Selection", "DeleteSelection", "Delete Selection (⌘⌫)"),
+            ("Toggle Transfers", "ShowTransferDrawer", "Toggle Transfers (⌘J)"),
+            ("Show Hidden Files", "ToggleHiddenFiles", "Show Hidden Files (⌘⇧.)"),
+            ("Hide Hidden Files", "ToggleHiddenFiles", "Hide Hidden Files (⌘⇧.)"),
+            ("Upload Selection", "UploadSelection", "Upload Selection (⌘U)"),
+            ("Download Selection", "DownloadSelection", "Download Selection (⌘D)"),
+            ("Copy Path", "CopyPath", "Copy Path (⌘⇧C)"),
+            ("Reconnect", "ReconnectTab", "Reconnect (⌘⇧R)"),
+        ];
+        for (label, id, expected) in cases {
+            assert_eq!(labeled_shortcut(label, id), expected, "tooltip for {id}");
+            assert_eq!(keybinding_for(id).is_some(), true, "key present for {id}");
+        }
+    }
+
+    #[test]
+    fn labeled_shortcut_falls_back_without_key() {
+        assert_eq!(labeled_shortcut("About macSFTP", "ShowAbout"), "About macSFTP");
+        assert_eq!(labeled_shortcut("Unknown", "NotACommand"), "Unknown");
     }
 }

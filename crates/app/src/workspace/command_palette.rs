@@ -129,6 +129,7 @@ impl Workspace {
             "GoToPath" => self.open_go_to_path(window, cx),
             "NavigateBack" => self.navigate_focused(HistoryOp::Back, window, cx),
             "NavigateForward" => self.navigate_focused(HistoryOp::Forward, window, cx),
+            "ParentDirectory" => self.go_to_parent_directory(window, cx),
             "ToggleHiddenFiles" => self.toggle_hidden_files(cx),
             "CopyPath" => self.copy_focused_path(cx),
             "ReconnectTab" => self.request_connect(window, cx),
@@ -194,6 +195,8 @@ impl Workspace {
             self.palette_selected.min(commands.len() - 1)
         };
 
+        let has_results = !commands.is_empty();
+        let mono_family = theme.fonts.mono_family.clone();
         let rows = commands.into_iter().enumerate().map(|(index, command)| {
             let is_selected = index == selected;
             let title: SharedString = command.title.into();
@@ -204,6 +207,7 @@ impl Workspace {
                 theme.colors.elevated_surface
             };
             let hover_background = theme.colors.element_hover;
+            let mono = mono_family.clone();
 
             div()
                 .id(("palette-row", index))
@@ -233,7 +237,9 @@ impl Workspace {
                     row.child(
                         div()
                             .flex_none()
+                            .min_w(px(56.0))
                             .text_size(px(12.0))
+                            .font_family(mono)
                             .text_color(theme.colors.text_muted)
                             .child(binding),
                     )
@@ -269,10 +275,23 @@ impl Workspace {
                         .font_family(theme.fonts.ui_family.clone())
                         .child(
                             div()
-                                .text_size(px(14.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.colors.text)
-                                .child("Command Palette"),
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_size(px(14.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(theme.colors.text)
+                                        .child("Command Palette"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .font_family(theme.fonts.mono_family.clone())
+                                        .text_color(theme.colors.text_muted)
+                                        .child("⌘⇧P"),
+                                ),
                         )
                         .child(text_field(
                             "command-palette-input",
@@ -292,7 +311,23 @@ impl Workspace {
                                 .gap_1()
                                 .min_h_0()
                                 .overflow_y_scroll()
-                                .children(rows),
+                                .when(has_results, |list| list.children(rows))
+                                .when(!has_results, |list| {
+                                    list.child(
+                                        div()
+                                            .px_2()
+                                            .py_2()
+                                            .text_size(px(13.0))
+                                            .text_color(theme.colors.text_muted)
+                                            .child("No matching commands"),
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme.colors.text_muted)
+                                .child("↑↓ move · Enter run · Esc close"),
                         ),
                 )
                 .into_any_element(),

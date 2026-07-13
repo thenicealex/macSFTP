@@ -13,6 +13,7 @@ use macsftp_ui::{
     transfer_history_detail, transfer_history_title, transfer_row, transfer_title,
 };
 
+use crate::palette_commands::labeled_shortcut;
 use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::helpers::*;
 use crate::workspace::nav::{HistoryOp, breadcrumb_display_indices, breadcrumb_segments};
@@ -61,11 +62,14 @@ impl crate::workspace::Workspace {
                     .children(tabs),
             )
             .child(div().px_1().child(
-                icon_button("new-tab", IconName::Plus, "New Tab (⌘T)").on_click(cx.listener(
-                    |workspace, _event, window, cx| {
-                        workspace.open_new_tab(window, cx);
-                    },
-                )),
+                icon_button(
+                    "new-tab",
+                    IconName::Plus,
+                    labeled_shortcut("New Tab", "NewTab"),
+                )
+                .on_click(cx.listener(|workspace, _event, window, cx| {
+                    workspace.open_new_tab(window, cx);
+                })),
             ))
     }
 
@@ -304,7 +308,7 @@ impl crate::workspace::Workspace {
                     .items_center()
                     .justify_center()
                     .rounded_sm()
-                    .tooltip(text_tooltip("Back (⌘[)"))
+                    .tooltip(text_tooltip(labeled_shortcut("Back", "NavigateBack")))
                     .when(can_navigate_back, |button| {
                         button
                             .hover(|style| style.bg(hover_background))
@@ -337,7 +341,10 @@ impl crate::workspace::Workspace {
                     .items_center()
                     .justify_center()
                     .rounded_sm()
-                    .tooltip(text_tooltip("Forward (⌘])"))
+                    .tooltip(text_tooltip(labeled_shortcut(
+                        "Forward",
+                        "NavigateForward",
+                    )))
                     .when(can_navigate_forward, |button| {
                         button
                             .hover(|style| style.bg(hover_background))
@@ -355,20 +362,26 @@ impl crate::workspace::Workspace {
                     )
             })
             .child(
-                icon_button(up_id, IconName::ArrowUp, "Parent Directory (⌘↑)").on_click(
-                    cx.listener(move |workspace, _event, window, cx| {
-                        workspace.focused_side = side;
-                        workspace.go_to_parent_directory(window, cx);
-                    }),
-                ),
+                icon_button(
+                    up_id,
+                    IconName::ArrowUp,
+                    labeled_shortcut("Parent Directory", "ParentDirectory"),
+                )
+                .on_click(cx.listener(move |workspace, _event, window, cx| {
+                    workspace.focused_side = side;
+                    workspace.go_to_parent_directory(window, cx);
+                })),
             )
             .child(
-                icon_button(refresh_id, IconName::Refresh, "Refresh (⌘R)").on_click(cx.listener(
-                    move |workspace, _event, window, cx| {
-                        workspace.focused_side = side;
-                        workspace.refresh_focused_pane(window, cx);
-                    },
-                )),
+                icon_button(
+                    refresh_id,
+                    IconName::Refresh,
+                    labeled_shortcut("Refresh", "RefreshPane"),
+                )
+                .on_click(cx.listener(move |workspace, _event, window, cx| {
+                    workspace.focused_side = side;
+                    workspace.refresh_focused_pane(window, cx);
+                })),
             )
             .child({
                 let text_color = if pane_focused {
@@ -499,18 +512,22 @@ impl crate::workspace::Workspace {
                 )
             })
             .child(
-                icon_button(copy_id, IconName::Copy, "Copy Path (⌘⇧C)").on_click(cx.listener(
-                    move |workspace, _event, _window, cx| {
-                        workspace.focused_side = side;
-                        workspace.copy_focused_path(cx);
-                    },
-                )),
+                icon_button(
+                    copy_id,
+                    IconName::Copy,
+                    labeled_shortcut("Copy Path", "CopyPath"),
+                )
+                .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                    workspace.focused_side = side;
+                    workspace.copy_focused_path(cx);
+                })),
             )
             .child({
+                // Labels differ by toggle state; chord always from registry.
                 let hidden_tooltip = if show_hidden_files {
-                    "Hide Hidden Files (⌘⇧.)"
+                    labeled_shortcut("Hide Hidden Files", "ToggleHiddenFiles")
                 } else {
-                    "Show Hidden Files (⌘⇧.)"
+                    labeled_shortcut("Show Hidden Files", "ToggleHiddenFiles")
                 };
                 let mut button = icon_button(
                     if side == PaneSide::Local {
@@ -537,7 +554,7 @@ impl crate::workspace::Workspace {
                         "remote-new-folder"
                     },
                     IconName::Plus,
-                    "New Folder (⌘⇧N)",
+                    labeled_shortcut("New Folder", "NewFolder"),
                 )
                 .on_click(cx.listener(move |workspace, _event, window, cx| {
                     workspace.focused_side = side;
@@ -552,7 +569,7 @@ impl crate::workspace::Workspace {
                         "remote-delete"
                     },
                     IconName::Close,
-                    "Delete Selection (⌘⌫)",
+                    labeled_shortcut("Delete Selection", "DeleteSelection"),
                 )
                 .on_click(cx.listener(move |workspace, _event, window, cx| {
                     workspace.focused_side = side;
@@ -561,12 +578,16 @@ impl crate::workspace::Workspace {
             )
             .when(side == PaneSide::Local, |bar| {
                 bar.child(
-                    icon_button("local-upload", IconName::Upload, "Upload Selection (⌘U)")
-                        .disabled(!can_upload)
-                        .on_click(cx.listener(move |workspace, _event, _window, cx| {
-                            workspace.focused_side = PaneSide::Local;
-                            workspace.upload_selection(cx);
-                        })),
+                    icon_button(
+                        "local-upload",
+                        IconName::Upload,
+                        labeled_shortcut("Upload Selection", "UploadSelection"),
+                    )
+                    .disabled(!can_upload)
+                    .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                        workspace.focused_side = PaneSide::Local;
+                        workspace.upload_selection(cx);
+                    })),
                 )
             })
             .when(side == PaneSide::Remote, |bar| {
@@ -574,7 +595,7 @@ impl crate::workspace::Workspace {
                     icon_button(
                         "remote-download",
                         IconName::Download,
-                        "Download Selection (⌘D)",
+                        labeled_shortcut("Download Selection", "DownloadSelection"),
                     )
                     .disabled(!can_download)
                     .on_click(cx.listener(
@@ -1463,7 +1484,10 @@ impl crate::workspace::Workspace {
                     .px_1()
                     .rounded_sm()
                     .hover(|style| style.bg(theme.colors.element_hover))
-                    .tooltip(text_tooltip("Toggle Transfers (⌘J)"))
+                    .tooltip(text_tooltip(labeled_shortcut(
+                        "Toggle Transfers",
+                        "ShowTransferDrawer",
+                    )))
                     .on_click(cx.listener(|workspace, _event, _window, cx| {
                         workspace.drawer_open = !workspace.drawer_open;
                         cx.notify();
