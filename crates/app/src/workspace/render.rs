@@ -304,12 +304,29 @@ impl crate::workspace::Workspace {
                 ),
                 Some(ConnectionState::Connecting { .. } | ConnectionState::Reconnecting { .. }) => {
                     Some(
-                        empty_state(format!("Connecting to {target_host}…"), vec![], cx)
-                            .into_any_element(),
+                        empty_state(
+                            format!("Connecting to {target_host}…"),
+                            vec![text_button("cancel-connect", "Cancel").on_click(cx.listener(
+                                |workspace, _event, window, cx| {
+                                    workspace.cancel_connect(window, cx);
+                                },
+                            ))],
+                            cx,
+                        )
+                        .into_any_element(),
                     )
                 }
                 Some(ConnectionState::AwaitingHostKey { .. }) => Some(
-                    empty_state("Waiting for host key decision…", vec![], cx).into_any_element(),
+                    empty_state(
+                        format!("Waiting for host key · {target_host}"),
+                        vec![text_button("cancel-host-key", "Cancel").on_click(cx.listener(
+                            |workspace, _event, window, cx| {
+                                workspace.cancel_connect(window, cx);
+                            },
+                        ))],
+                        cx,
+                    )
+                    .into_any_element(),
                 ),
                 Some(ConnectionState::AwaitingCredentials { .. }) => {
                     Some(empty_state("Waiting for credentials…", vec![], cx).into_any_element())

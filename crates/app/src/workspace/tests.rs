@@ -447,6 +447,39 @@ mod tests {
     }
 
     #[gpui::test]
+    fn cancel_connect_sends_disconnect_and_clears_connecting(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, cx);
+            assert!(matches!(
+                workspace.active_tab().expect("tab").connection,
+                ConnectionState::Connecting { .. }
+            ));
+            workspace.cancel_connect(window, cx);
+            assert_eq!(
+                workspace.active_tab().expect("tab").connection,
+                ConnectionState::Disconnected {
+                    reason: DisconnectReason::UserRequested,
+                }
+            );
+            let tab = workspace.active_tab().expect("tab");
+            assert!(tab.remote.entries.is_empty());
+            assert!(tab.remote.path.is_none());
+            assert!(!tab.remote.is_refreshing);
+            assert!(tab.remote.error.is_none());
+        });
+
+        let mut saw_disconnect = false;
+        while let Ok(command) = channels.command_rx.try_recv() {
+            if matches!(command, AppCommand::DisconnectTab { .. }) {
+                saw_disconnect = true;
+            }
+        }
+        assert!(saw_disconnect, "DisconnectTab must be sent");
+    }
+
+    #[gpui::test]
     fn custom_conflict_rename_validates_and_sends_plan_scoped_decision(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
         let prompt = TransferConflictPrompt {

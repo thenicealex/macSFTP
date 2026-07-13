@@ -292,4 +292,33 @@ impl crate::workspace::Workspace {
             self.select_index(side, index, cx);
         }
     }
+
+    /// Cancel an in-flight connect/reconnect (or host-key wait) from the
+    /// remote empty-state Cancel button.
+    pub(crate) fn cancel_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        let tab_id = tab.id;
+        match &tab.connection {
+            ConnectionState::AwaitingHostKey { request_id, .. } => {
+                let request_id = *request_id;
+                self.reject_host_key(request_id, window, cx);
+                return;
+            }
+            ConnectionState::Connecting { .. } | ConnectionState::Reconnecting { .. } => {}
+            _ => return,
+        }
+        self.send_command(AppCommand::DisconnectTab { tab_id }, cx);
+        if let Some(tab) = self.state.tabs.find_tab_mut(tab_id) {
+            tab.disconnect(DisconnectReason::UserRequested);
+            tab.remote.entries.clear();
+            tab.remote.path = None;
+            tab.remote.is_refreshing = false;
+            tab.remote.error = None;
+        }
+        self.state.drain_expired_modals();
+        self.focus_pane(self.focused_side, window, cx);
+        cx.notify();
+    }
 }
