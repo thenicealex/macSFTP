@@ -408,8 +408,6 @@ async fn command_dispatch_loop(
                             cancel.clone(),
                         );
 
-                        let _ = event_tx.send_async(AppEvent::TabConnecting { tab_id: cmd.tab_id }).await;
-
                         let event_tx_clone = event_tx.clone();
                         let next_conflict_id_clone = next_conflict_id.clone();
                         let cancel_clone = cancel.clone();

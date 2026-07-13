@@ -190,39 +190,6 @@ pub fn connection_error(host: &str, port: u16, error: &dyn std::fmt::Display) ->
     user_error
 }
 
-fn subsystem_error(message: &str, detail: &str) -> UserFacingError {
-    let mut user_error = UserFacingError::new(
-        ErrorCode::ChannelClosed,
-        "Connection failed",
-        message.to_string(),
-    )
-    .with_retryable(true);
-    user_error.detail = Some(detail.to_string());
-    user_error
-}
-
-fn private_key_error(error: &russh::keys::Error) -> UserFacingError {
-    match error {
-        russh::keys::Error::KeyIsEncrypted => UserFacingError::new(
-            ErrorCode::AuthFailed,
-            "Private key is encrypted",
-            "A passphrase is required to unlock this private key.",
-        ),
-        // Note: the key path is deliberately not included (plan §17 —
-        // no private key paths in user-facing errors).
-        _ => {
-            let mut user_error = UserFacingError::new(
-                ErrorCode::AuthFailed,
-                "Could not read private key",
-                "The private key could not be loaded. Check the key file \
-                 and passphrase.",
-            );
-            user_error.detail = Some(error.to_string());
-            user_error
-        }
-    }
-}
-
 async fn authenticate(
     handle: &mut client::Handle<ClientHandler>,
     settings: &ConnectionSettings,
@@ -257,11 +224,29 @@ async fn authenticate(
             key_path,
             passphrase,
         } => {
-            let key = load_secret_key(key_path, passphrase.as_deref()).map_err(|error| {
-                ConnectFailure::AuthFailed(AuthFailure {
-                    reason: UserFacingError::new(ErrorCode::AuthFailed, "Could not load private key", &error.to_string()),
-                })
-            })?;
+            // Surface key-load failures as an `AuthFailed` event, mirroring
+            // the `AuthResult::Failure` branch below so the UI always sees a
+            // single, consistent auth-failure signal regardless of *where*
+            // the authentication step failed.
+            let key = match load_secret_key(key_path, passphrase.as_deref()) {
+                Ok(key) => key,
+                Err(error) => {
+                    let reason = UserFacingError::new(
+                        ErrorCode::AuthFailed,
+                        "Could not load private key",
+                        &error.to_string(),
+                    );
+                    let _ = event_tx
+                        .send_async(AppEvent::AuthFailed(RemoteScoped::new(
+                            scope.clone(),
+                            AuthFailure {
+                                reason: reason.clone(),
+                            },
+                        )))
+                        .await;
+                    return Err(ConnectFailure::AuthFailed(AuthFailure { reason }));
+                }
+            };
             let best_hash = handle
                 .best_supported_rsa_hash()
                 .await

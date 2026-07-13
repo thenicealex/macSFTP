@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use macsftp_core::{
@@ -22,7 +22,6 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use crate::known_hosts::KnownHostsStore;
 use tracing::warn;
 
 /// Host trust file locations and prompt policy (plan §10).
@@ -55,14 +54,6 @@ enum HostKeyRejection {
     Mismatch,
     UserRejected,
     PromptTimeout,
-}
-
-/// Recover from mutex poisoning: known_hosts state stays usable even
-/// if another actor panicked while holding the lock.
-fn lock_store(store: &Mutex<KnownHostsStore>) -> MutexGuard<'_, KnownHostsStore> {
-    store
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// The real per-tab browsing session actor (plan §9, milestone M3).
@@ -2383,56 +2374,6 @@ fn remote_entry_from_dir_entry(entry: DirEntry) -> RemoteEntry {
         link_target: None,
     }
 }
-
-#[cfg(any())]
-fn connection_error(host: &str, port: u16, error: &dyn std::fmt::Display) -> UserFacingError {
-    let mut user_error = UserFacingError::new(
-        ErrorCode::ChannelClosed,
-        "Connection failed",
-        format!("Could not connect to {host}:{port}."),
-    )
-    .with_retryable(true);
-    user_error.detail = Some(error.to_string());
-    user_error
-}
-
-#[cfg(any())]
-fn subsystem_error(message: &str, detail: &str) -> UserFacingError {
-    let mut user_error = UserFacingError::new(
-        ErrorCode::ChannelClosed,
-        "Connection failed",
-        message.to_string(),
-    )
-    .with_retryable(true);
-    user_error.detail = Some(detail.to_string());
-    user_error
-}
-
-#[cfg(any())]
-fn private_key_error(error: &russh::keys::Error) -> UserFacingError {
-    match error {
-        russh::keys::Error::KeyIsEncrypted => UserFacingError::new(
-            ErrorCode::AuthFailed,
-            "Private key is encrypted",
-            "A passphrase is required to unlock this private key.",
-        ),
-        // Note: the key path is deliberately not included (plan §17 —
-        // no private key paths in user-facing errors).
-        _ => {
-            let mut user_error = UserFacingError::new(
-                ErrorCode::AuthFailed,
-                "Could not read private key",
-                "The private key could not be loaded. Check the key file \
-                 and passphrase.",
-            );
-            user_error.detail = Some(error.to_string());
-            user_error
-        }
-    }
-}
-
-#[cfg(any())]
-
 
 #[cfg(test)]
 mod tests {

@@ -10,14 +10,15 @@ use std::time::Duration;
 
 use macsftp_core::{
     AppCommand, AppEvent, AuthCredential, ConflictDecision, ConnectCommand, ConnectionSettings,
-    DisconnectReason, ErrorCode, FileKind, ProfileId, RemotePath, RuntimeBridgeConfig, SessionId,
-    TabId, Timestamp, TransferDirection, TransferEndpoint, TransferId, TransferJob, TransferState,
-    TrustDecision, TrustRequestId,
+    DisconnectReason, ErrorCode, FileKind, ProfileId, RemoteEventScope, RemotePath,
+    RuntimeBridgeConfig, SessionId, TabId, Timestamp, TransferDirection, TransferEndpoint,
+    TransferId, TransferJob, TransferState, TrustDecision, TrustRequestId,
 };
 use macsftp_sftp::{
     EventReceiver, HostTrustConfig, KnownHostsStore, RemoteSessionActor, RemoteSessionRequest,
     RuntimeController, SessionBackend, TrustRegistry,
 };
+use macsftp_sftp::pool::ConnectionManager;
 use macsftp_test_support::SshTestServer;
 use tokio_util::sync::CancellationToken;
 
@@ -65,23 +66,42 @@ fn spawn_actor(
         auth,
     };
 
-    let actor = RemoteSessionActor::new(
-        TAB,
-        SESSION,
-        EPOCH,
+    let (requests, request_rx) = flume::bounded(16);
+    let cancel = CancellationToken::new();
+
+    // Establish the connection via the Connection Pool (mirrors the runtime
+    // path), then build the actor from the already-connected SharedConnection
+    // plus a fresh SFTP session. We return the fixture immediately and let the
+    // test resolve the host-key trust prompt via `next_event`, which runs
+    // concurrently with the connection task — so there is no deadlock.
+    let cm = Arc::new(ConnectionManager::new());
+    let scope = RemoteEventScope::new(TAB, SESSION, EPOCH);
+    let connect_rx = cm.connect_session(
+        &settings,
+        &scope,
         TRUST_REQUEST,
-        settings,
         known_hosts,
         trust_config,
         trust_registry.clone(),
-        event_tx,
-        Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        event_tx.clone(),
+        CancellationToken::new(),
     );
 
-    let (requests, request_rx) = flume::bounded(16);
-    let cancel = CancellationToken::new();
     let actor_cancel = cancel.clone();
-    tokio::spawn(actor.run(actor_cancel, request_rx));
+    tokio::spawn(async move {
+        if let Ok(Ok((shared, sftp))) = connect_rx.recv_async().await {
+            let actor = RemoteSessionActor::new(
+                TAB,
+                SESSION,
+                EPOCH,
+                shared,
+                sftp,
+                event_tx,
+                Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            );
+            actor.run(actor_cancel, request_rx).await;
+        }
+    });
 
     ActorFixture {
         events: event_rx,
@@ -125,7 +145,7 @@ async fn wait_for_transfer_completion(fixture: &ActorFixture, transfer_id: Trans
     }
 }
 
-async fn wait_for_runtime_transfer_completion(events: &EventReceiver) -> TransferId {
+async fn wait_for_runtime_transfer_completion(events: &mut EventReceiver) -> TransferId {
     let mut transfer_id = None;
     loop {
         match next_runtime_event(events, "runtime transfer event").await {
@@ -857,7 +877,7 @@ async fn runtime_plans_and_executes_single_file_upload_and_download() {
             },
         ))
         .expect("upload command should send");
-    let _ = wait_for_runtime_transfer_completion(&events).await;
+    let _ = wait_for_runtime_transfer_completion(&mut events).await;
     assert_eq!(
         std::fs::read(&upload_destination).expect("read uploaded file"),
         b"runtime upload"
@@ -884,7 +904,7 @@ async fn runtime_plans_and_executes_single_file_upload_and_download() {
             },
         ))
         .expect("download command should send");
-    let _ = wait_for_runtime_transfer_completion(&events).await;
+    let _ = wait_for_runtime_transfer_completion(&mut events).await;
     assert_eq!(
         std::fs::read(&download_destination).expect("read downloaded file"),
         b"runtime download"
