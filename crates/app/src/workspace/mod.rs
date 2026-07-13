@@ -261,6 +261,11 @@ impl Workspace {
         }
         self.tab_mru.retain(|id| *id != tab_id);
         self.tab_nav.remove(&tab_id);
+        // Keep MRU front aligned with the newly active tab after close
+        // (TabStore promotes another tab without going through activate_tab).
+        if let Some(active_id) = self.state.tabs.active_tab_id {
+            self.touch_mru(active_id);
+        }
         if self.tab_switcher_open {
             if self.tab_mru.is_empty() {
                 self.tab_switcher_open = false;
@@ -291,6 +296,7 @@ impl Workspace {
                 self.tab_switcher_index = 0;
             }
             self.clear_filters();
+            self.selection_anchor = None;
             self.reset_scroll_positions();
             cx.notify();
         }

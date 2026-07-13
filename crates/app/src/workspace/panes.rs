@@ -678,6 +678,7 @@ impl crate::workspace::Workspace {
 
         self.set_local_path(target, window, cx);
         self.clear_filter(PaneSide::Local);
+        self.selection_anchor = None;
     }
 
     pub(crate) fn navigate_pane_remote(
@@ -747,6 +748,7 @@ impl crate::workspace::Workspace {
         }
 
         self.clear_filter(PaneSide::Remote);
+        self.selection_anchor = None;
     }
 
     pub(crate) fn pane_can_navigate_back(&self, side: PaneSide) -> bool {

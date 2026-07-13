@@ -2655,6 +2655,25 @@ mod tests {
     }
 
     #[gpui::test]
+    fn close_active_tab_touches_mru_with_new_active(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _) = init_workspace(cx);
+        cx.dispatch_action(NewTab); // mru: 2, 1
+        cx.dispatch_action(NewTab); // mru: 3, 2, 1; active 3
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            assert_eq!(ws.state.tabs.active_tab_id, Some(TabId(3)));
+            assert_eq!(ws.tab_mru[0], TabId(3));
+            ws.close_tab_by_id(TabId(3), window, cx);
+            let active = ws.state.tabs.active_tab_id.expect("a tab remains");
+            assert_ne!(active, TabId(3));
+            assert_eq!(
+                ws.tab_mru.first().copied(),
+                Some(active),
+                "after closing the active tab, MRU front must match the new active tab"
+            );
+        });
+    }
+
+    #[gpui::test]
     fn tab_switcher_next_and_enter_activates_mru(cx: &mut TestAppContext) {
         let (workspace, mut cx, _) = init_workspace(cx);
         cx.dispatch_action(NewTab); // mru: 2, 1
