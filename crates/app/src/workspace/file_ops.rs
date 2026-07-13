@@ -493,10 +493,12 @@ impl crate::workspace::Workspace {
         let dir_count = state.entries.iter().filter(|e| e.is_dir).count();
         let show_dont_ask = cx.resources().config.config().confirm_delete;
 
-        let mut name_list = div().flex().flex_col().gap_1();
+        let mut name_list = div().flex().flex_col().gap_1().min_w_0();
         for name in &names {
             name_list = name_list.child(
                 div()
+                    .min_w_0()
+                    .truncate()
                     .text_size(px(12.0))
                     .text_color(theme.colors.text)
                     .child(name.clone()),
@@ -607,6 +609,7 @@ impl crate::workspace::Workspace {
         card = card.child(
             div()
                 .flex()
+                .flex_wrap()
                 .justify_end()
                 .gap_2()
                 .child(

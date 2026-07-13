@@ -167,6 +167,9 @@ impl RenderOnce for TransferRow {
                     .child(
                         div()
                             .flex_none()
+                            .max_w(px(160.0))
+                            .min_w_0()
+                            .truncate()
                             .text_size(px(10.0))
                             .text_color(theme.colors.text_muted)
                             .font_family(theme.fonts.mono_family.clone())

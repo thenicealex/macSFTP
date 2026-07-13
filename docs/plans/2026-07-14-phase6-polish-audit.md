@@ -11,7 +11,7 @@
 | 1 | Single-window work context? | pass | No marketing landing; Files surface first |
 | 2 | Palette or shortcut path? | pass | Phase 4 palette + bindings |
 | 3 | loading/empty/error/disabled/focused/hover/selected? | pass | Focus states via pane/path-bar borders; disabled tool buttons; empty/loading/error surfaces exist |
-| 4 | Narrow window no overflow? | unknown | Task 4 |
+| 4 | Narrow window no overflow? | pass | Task 4: inventory + surgical `min_w_0`/`truncate`/`flex_wrap`; window_min_size stays 720×480. Hand-test notes below |
 | 5 | No decorative cards/gradients? | pass | Theme tokens only |
 | 6 | No main-thread block on network? | pass | Runtime bridge; residual risk accepted |
 | 7 | 10k entries + multi transfer? | unknown | Task 5 smoke |
@@ -25,21 +25,35 @@ Status values: `pass` | `fail` | `unknown` | `accepted risk` (with reason).
 
 | Region | Tooltip | Focus open | Focus close | Truncate | Notes |
 | --- | --- | --- | --- | --- | --- |
-| Tab bar + close | pass | n/a | n/a | unknown | `ui/tab.rs` Close Tab via `icon_button`; new-tab has `labeled_shortcut` |
-| Path bar (back/up/refresh/copy/…) | pass | n/a | n/a | unknown | `render.rs` `icon_button` + `labeled_shortcut`; back/forward use `text_tooltip` |
-| Filter clear | pass | n/a | pass | n/a | Clear Filter (Esc) via `icon_button`; clear restores pane focus |
-| Transfer drawer cancel/retry | pass | n/a | n/a | unknown | `transfer_row.rs` Cancel/Retry Transfer |
-| Status bar transfer chip | pass | n/a | n/a | unknown | `labeled_shortcut("Toggle Transfers", "ShowTransferDrawer")` |
-| Connect form | n/a | pass | pass | unknown | `close_connect_form` → `focus_pane` |
-| Host key modal | n/a | pass | pass | unknown | `reject_host_key` / trust paths call `focus_pane` |
-| Conflict modal | n/a | pass | pass | unknown | `resolve_transfer_conflict` → `focus_pane` |
-| Delete confirm | n/a | pass | pass | unknown | `cancel_delete_confirm` → `focus_pane` |
-| Go to Path | n/a | pass | pass | n/a | Open → `modal_focus`; Esc/`close_go_to_path` → `focus_pane` (tested) |
-| Command palette | n/a | pass | pass | unknown | Open → `modal_focus`; `close_command_palette` → `focus_pane` |
-| Tab switcher | n/a | pass | pass | n/a | Open → `modal_focus`; `close_tab_switcher` → `focus_pane` |
+| Tab bar + close | pass | n/a | n/a | pass | Tab title `min_w_0`+`truncate`+`max_w(220)`; strip `flex_1`+`min_w_0`+`overflow_x_scroll` |
+| Path bar (back/up/refresh/copy/…) | pass | n/a | n/a | pass | Breadcrumb trail `flex_1`+`min_w_0`+`overflow_x_hidden`; deep paths clip, not horizontal window overflow |
+| Filter clear | pass | n/a | pass | pass | Query cell `flex_1`+`min_w_0`+`truncate` when inactive |
+| Transfer drawer cancel/retry | pass | n/a | n/a | pass | Title truncates; detail `max_w(160)`+truncate; drawer header agg label truncates |
+| Status bar transfer chip | pass | n/a | n/a | pass | Left cluster `flex_1`+`min_w_0`; status/message truncate; chip `flex_none` |
+| Connect form | n/a | pass | pass | pass | Field/profile rows `min_w_0`; profile name/summary truncate; footer `flex_wrap` |
+| Host key modal | n/a | pass | pass | pass | Value cells truncate; footer `flex_wrap` |
+| Conflict modal | n/a | pass | pass | pass | Paths truncate; action rows `flex_wrap` |
+| Delete confirm | n/a | pass | pass | pass | Name preview truncate; footer `flex_wrap` |
+| Go to Path | n/a | pass | pass | pass | Footer `flex_wrap`; fixed 460 card fits min width |
+| Command palette | n/a | pass | pass | pass | Existing fixed-width card; out of Task 4 layout rework |
+| Tab switcher | n/a | pass | pass | pass | Title `flex_1`+`min_w_0`+`truncate` |
 | Context menu / inline edit | n/a | n/a | pass | n/a | Esc closes then `focus_pane` |
 | About | n/a | n/a | pass | n/a | Esc + Close → `close_about` → `focus_pane` (tested) |
-| Settings surface | n/a | pass | pass | unknown | Open → `workspace_focus`; Esc/Done → Files + `focus_pane` |
+| Settings surface | n/a | pass | pass | pass | Existing `min_w_0` on content column |
+
+## Narrow-window hand-test notes (Task 4)
+
+**Baseline:** `window_min_size` 720×480 unchanged. No pixel CI — code review + layout inventory.
+
+| Check | Result |
+| --- | --- |
+| Min size 720×480 | Confirmed in `main.rs`; not lowered |
+| Long tab title | Tab max width + truncate; strip scrolls horizontally |
+| Deep path bar | Breadcrumb shrinks/`overflow_x_hidden` inside pane |
+| Transfer drawer long path | `transfer_title` truncates; detail capped |
+| Connect + Delete modals | Fixed card ≤460/420; footers wrap; long names truncate |
+
+Residual: single ultra-long breadcrumb segment clips without ellipsis (acceptable); dual-pane path bars stay tight (~110px trail) at 720 but do not force window overflow.
 
 ## Hand performance smoke (Task 5)
 

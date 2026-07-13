@@ -126,6 +126,7 @@ impl crate::workspace::Workspace {
                         div()
                             .flex_1()
                             .min_w_0()
+                            .truncate()
                             .text_size(px(13.0))
                             .text_color(theme.colors.text)
                             .child(title),
@@ -1163,12 +1164,19 @@ impl crate::workspace::Workspace {
                 .gap_2()
                 .h(px(28.0))
                 .px_2()
+                .min_w_0()
                 .text_size(px(11.0))
                 .text_color(theme.colors.text_muted)
                 .child(icon(IconName::Transfers, theme.colors.text_muted))
-                .child("Transfers")
-                .child(div().flex_1())
-                .child(agg_label),
+                .child(div().flex_none().child("Transfers"))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_right()
+                        .child(agg_label),
+                ),
         );
 
         if jobs.is_empty() && cx.resources().transfer_history.records().is_empty() {
@@ -1504,6 +1512,7 @@ impl crate::workspace::Workspace {
             .child(
                 div()
                     .flex()
+                    .flex_1()
                     .items_center()
                     .gap_2()
                     .min_w_0()
@@ -1514,20 +1523,26 @@ impl crate::workspace::Workspace {
                             .rounded_full()
                             .bg(status_color),
                     )
-                    .child(div().truncate().child(status_text))
+                    .child(div().min_w_0().truncate().child(status_text))
                     .when(selected_count > 0, |row| {
-                        row.child(div().child(format!("{selected_count} selected")))
+                        row.child(
+                            div()
+                                .flex_none()
+                                .child(format!("{selected_count} selected")),
+                        )
                     })
-                    .children(
-                        self.status_message
-                            .clone()
-                            .map(|message| div().truncate().child(format!("— {message}"))),
-                    ),
+                    .children(self.status_message.clone().map(|message| {
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .child(format!("— {message}"))
+                    })),
             )
             .child(
                 div()
                     .id("status-transfers")
                     .flex()
+                    .flex_none()
                     .items_center()
                     .gap_1()
                     .px_1()

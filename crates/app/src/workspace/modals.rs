@@ -451,6 +451,7 @@ impl crate::workspace::Workspace {
                         .child(
                             div()
                                 .flex()
+                                .flex_wrap()
                                 .justify_end()
                                 .gap_2()
                                 .child(
@@ -599,15 +600,21 @@ impl crate::workspace::Workspace {
                                     .child(
                                         div()
                                             .flex()
+                                            .flex_1()
+                                            .min_w_0()
                                             .flex_col()
                                             .child(
                                                 div()
+                                                    .min_w_0()
+                                                    .truncate()
                                                     .text_size(px(12.0))
                                                     .text_color(theme.colors.text)
                                                     .child(name),
                                             )
                                             .child(
                                                 div()
+                                                    .min_w_0()
+                                                    .truncate()
                                                     .text_size(px(10.0))
                                                     .text_color(theme.colors.text_muted)
                                                     .child(summary),
@@ -616,6 +623,7 @@ impl crate::workspace::Workspace {
                                     .child(
                                         div()
                                             .flex()
+                                            .flex_none()
                                             .gap_1()
                                             .child(
                                                 text_button(("use-profile", profile_id.0), "Use")
@@ -792,6 +800,7 @@ impl crate::workspace::Workspace {
         card = card.child(
             div()
                 .flex()
+                .flex_wrap()
                 .justify_end()
                 .gap_2()
                 .child(
@@ -845,6 +854,7 @@ impl crate::workspace::Workspace {
                     div()
                         .flex_1()
                         .min_w_0()
+                        .truncate()
                         .text_size(if mono { px(11.0) } else { px(12.0) })
                         .text_color(theme.colors.text)
                         .when(mono, |value_cell| {
@@ -913,6 +923,7 @@ impl crate::workspace::Workspace {
                         .child(
                             div()
                                 .flex()
+                                .flex_wrap()
                                 .justify_end()
                                 .gap_2()
                                 .child(text_button("host-key-cancel", "Cancel").on_click(
@@ -964,6 +975,7 @@ impl crate::workspace::Workspace {
                     div()
                         .flex_1()
                         .min_w_0()
+                        .truncate()
                         .text_size(px(11.0))
                         .text_color(theme.colors.text)
                         .child(value),
@@ -1074,6 +1086,7 @@ impl crate::workspace::Workspace {
                         .child(
                             div()
                                 .flex()
+                                .flex_wrap()
                                 .justify_end()
                                 .gap_2()
                                 .child(decision_button(
@@ -1103,6 +1116,7 @@ impl crate::workspace::Workspace {
                         .child(
                             div()
                                 .flex()
+                                .flex_wrap()
                                 .justify_end()
                                 .gap_2()
                                 .child(
