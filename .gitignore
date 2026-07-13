@@ -4,3 +4,4 @@ build/
 .codegraph/
 .workbuddy/
 .DS_Store
+.worktrees/
