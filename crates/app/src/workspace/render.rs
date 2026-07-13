@@ -78,7 +78,8 @@ impl crate::workspace::Workspace {
         let tab_state = self.active_tab();
         let is_remote_refreshing =
             side == PaneSide::Remote && tab_state.is_some_and(|tab| tab.remote.is_refreshing);
-        let entry_count = self.entry_count(side);
+        let show_hidden_files = cx.resources().config.config().show_hidden_files;
+        let entry_count = self.entry_count(side, cx);
         let remote_error = (side == PaneSide::Remote)
             .then(|| tab_state.and_then(|tab| tab.remote.error.clone()))
             .flatten();
@@ -212,6 +213,29 @@ impl crate::workspace::Workspace {
                     },
                 )),
             )
+            .child({
+                let hidden_tooltip = if show_hidden_files {
+                    "Hide Hidden Files (⌘⇧.)"
+                } else {
+                    "Show Hidden Files (⌘⇧.)"
+                };
+                let mut button = icon_button(
+                    if side == PaneSide::Local {
+                        "local-toggle-hidden"
+                    } else {
+                        "remote-toggle-hidden"
+                    },
+                    IconName::File,
+                    hidden_tooltip,
+                )
+                .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                    workspace.toggle_hidden_files(cx);
+                }));
+                if show_hidden_files {
+                    button = button.icon_color(theme.colors.accent);
+                }
+                button
+            })
             .child(
                 icon_button(
                     if side == PaneSide::Local {
@@ -399,12 +423,14 @@ impl crate::workspace::Workspace {
                         return Vec::new();
                     };
                     let selected_paths = &tab.selection.selected_paths;
+                    let real_indices = workspace_view.visible_indices(side, cx);
 
                     visible_range
-                        .filter_map(|index| {
+                        .filter_map(|visible_index| {
+                            let real_index = *real_indices.get(visible_index)?;
                             let (model, drag_item) = match side {
                                 PaneSide::Local => {
-                                    let entry = tab.local.entries.get(index)?;
+                                    let entry = tab.local.entries.get(real_index)?;
                                     (
                                         FileRowModel {
                                             name: entry.name.clone().into(),
@@ -419,7 +445,7 @@ impl crate::workspace::Workspace {
                                     )
                                 }
                                 PaneSide::Remote => {
-                                    let entry = tab.remote.entries.get(index)?;
+                                    let entry = tab.remote.entries.get(real_index)?;
                                     (
                                         FileRowModel {
                                             name: entry.name.clone().into(),
@@ -436,11 +462,16 @@ impl crate::workspace::Workspace {
                             };
                             let workspace = workspace.clone();
                             Some(
-                                file_row(("file-row", index), model, cx)
+                                file_row(("file-row", visible_index), model, cx)
                                     .on_click(move |event, window, cx| {
                                         workspace.update(cx, |workspace, cx| {
-                                            workspace
-                                                .on_row_clicked(side, index, event, window, cx);
+                                            workspace.on_row_clicked(
+                                                side,
+                                                visible_index,
+                                                event,
+                                                window,
+                                                cx,
+                                            );
                                         });
                                     })
                                     .on_drag(

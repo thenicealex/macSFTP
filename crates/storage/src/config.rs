@@ -17,6 +17,8 @@ pub struct AppConfig {
     pub appearance: AppearancePreference,
     /// When true, delete actions open a confirmation modal first.
     pub confirm_delete: bool,
+    /// When true, file panes show dotfiles (`name` starts with `.`).
+    pub show_hidden_files: bool,
 }
 
 impl AppConfig {
@@ -29,6 +31,7 @@ impl Default for AppConfig {
             version: Self::CURRENT_VERSION,
             appearance: AppearancePreference::System,
             confirm_delete: true,
+            show_hidden_files: false,
         }
     }
 }
@@ -136,6 +139,15 @@ impl ConfigStore {
         result
     }
 
+    pub fn set_show_hidden_files(&mut self, show_hidden_files: bool) -> Result<(), ConfigError> {
+        self.config.show_hidden_files = show_hidden_files;
+        let result = self.save();
+        if result.is_ok() {
+            self.initial_error = None;
+        }
+        result
+    }
+
     fn save(&self) -> Result<(), ConfigError> {
         let json =
             serde_json::to_string_pretty(&self.config).map_err(|error| ConfigError::Parse {
@@ -228,6 +240,28 @@ mod tests {
 
         let restored = ConfigStore::open(path.clone()).expect("reload");
         assert!(!restored.config().confirm_delete);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn show_hidden_files_defaults_false_and_round_trips() {
+        let path = temp_config_path("hidden");
+        cleanup(&path);
+
+        let store = ConfigStore::open(path.clone()).expect("defaults");
+        assert!(!store.config().show_hidden_files);
+
+        // Missing field on disk still defaults to false.
+        std::fs::write(path.as_str(), r#"{"version":1,"appearance":"system"}"#)
+            .expect("write partial config");
+        let mut store = ConfigStore::open(path.clone()).expect("parse partial");
+        assert!(!store.config().show_hidden_files);
+        store
+            .set_show_hidden_files(true)
+            .expect("persist show_hidden_files");
+
+        let restored = ConfigStore::open(path.clone()).expect("reload");
+        assert!(restored.config().show_hidden_files);
         cleanup(&path);
     }
 

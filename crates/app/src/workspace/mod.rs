@@ -22,7 +22,7 @@ use crate::app_actions::{
     DeleteSelection, DownloadSelection, FocusLocalPane, FocusRemotePane, MinimizeWindow, NewFolder,
     NewTab, OpenLogFolder, OpenSelectedEntry, OpenSettings, ParentDirectory, ReconnectTab,
     RefreshPane, RenameEntry, SelectNextEntry, SelectPrevEntry, ShowAbout, ShowTransferDrawer,
-    UploadSelection, ZoomWindow,
+    ToggleHiddenFiles, UploadSelection, ZoomWindow,
 };
 use crate::resources::ActiveResources;
 use crate::workspace::file_ops::{ContextMenuState, DeleteConfirmState, InlineEditState};
@@ -481,6 +481,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|workspace, _: &NewFolder, window, cx| {
                 workspace.begin_new_folder(window, cx);
             }))
+            .on_action(cx.listener(|workspace, _: &ToggleHiddenFiles, _window, cx| {
+                workspace.toggle_hidden_files(cx);
+            }))
             .on_action(cx.listener(|workspace, _: &OpenSettings, window, cx| {
                 if workspace.connect_form.is_none()
                     && workspace.active_host_key_prompt().is_none()
@@ -542,5 +545,6 @@ mod render;
 #[cfg(test)]
 mod tests;
 mod transfers;
+mod visible_entries;
 
 use connect_form::ConnectForm;

@@ -61,7 +61,7 @@ mod tests {
     use super::{AppPaths, PaneSide, Workspace, WorkspaceSurface};
     use crate::app_actions::{
         self, ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, NewTab, OpenSettings,
-        SelectNextEntry, SelectPrevEntry, ShowAbout, ShowTransferDrawer,
+        SelectNextEntry, SelectPrevEntry, ShowAbout, ShowTransferDrawer, ToggleHiddenFiles,
     };
     use crate::resources::{ActiveResources, ActiveTransfers};
 
@@ -1730,6 +1730,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("fixture dir");
         (dir.clone(), LocalPath::new(dir.to_string_lossy().into_owned()))
+    }
+
+    #[gpui::test]
+    fn hidden_files_filtered_by_default(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        let (fixture, base) = temp_local_fixture("hidden-files");
+        std::fs::write(fixture.join(".secret"), b"secret").expect("write hidden");
+        std::fs::write(fixture.join("visible.txt"), b"ok").expect("write visible");
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.set_local_path(base, window, cx);
+            let tab = workspace.active_tab().expect("tab");
+            assert_eq!(
+                tab.local.entries.len(),
+                2,
+                "stored listing keeps every entry"
+            );
+            assert_eq!(
+                workspace.entry_count(PaneSide::Local, cx),
+                1,
+                "dotfiles hidden by default"
+            );
+            let path = workspace
+                .entry_path_at(PaneSide::Local, 0, cx)
+                .expect("one visible path");
+            match path {
+                EntryPath::Local(local) => {
+                    assert!(
+                        local.as_str().ends_with("visible.txt"),
+                        "visible row should be visible.txt, got {}",
+                        local.as_str()
+                    );
+                }
+                EntryPath::Remote(_) => panic!("local path expected"),
+            }
+
+            workspace.toggle_hidden_files(cx);
+            assert!(
+                cx.resources().config.config().show_hidden_files,
+                "toggle persists true"
+            );
+            assert_eq!(
+                workspace.entry_count(PaneSide::Local, cx),
+                2,
+                "both entries after show_hidden"
+            );
+        });
+
+        cx.dispatch_action(ToggleHiddenFiles);
+        workspace.read_with(&cx, |workspace, cx| {
+            assert!(
+                !cx.resources().config.config().show_hidden_files,
+                "action toggles back to false"
+            );
+            assert_eq!(workspace.entry_count(PaneSide::Local, cx), 1);
+        });
+
+        let _ = std::fs::remove_dir_all(&fixture);
     }
 
     #[gpui::test]

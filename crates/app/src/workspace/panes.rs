@@ -36,8 +36,10 @@ use macsftp_ui::{
 use tracing::{debug, warn};
 
 use crate::app_actions::*;
+use crate::resources::ActiveResources;
 use crate::workspace::connect_form::*;
 use crate::workspace::helpers::*;
+use crate::workspace::visible_entries::{visible_local_indices, visible_remote_indices};
 use crate::workspace::*;
 
 impl crate::workspace::Workspace {
@@ -51,62 +53,95 @@ impl crate::workspace::Workspace {
         window.focus(self.pane_focus(side));
         cx.notify();
     }
-    pub(crate) fn entry_count(&self, side: PaneSide) -> usize {
+
+    /// Indices of stored entries that currently appear in the file list.
+    /// Index space used by selection, keyboard nav, and `uniform_list`.
+    pub(crate) fn visible_indices(&self, side: PaneSide, cx: &App) -> Vec<usize> {
+        let show_hidden = cx.resources().config.config().show_hidden_files;
+        // Type-to-filter (Task 5) will supply a real query; empty means no name filter.
+        let query = "";
         match (self.active_tab(), side) {
-            (Some(tab), PaneSide::Local) => tab.local.entries.len(),
-            (Some(tab), PaneSide::Remote) => tab.remote.entries.len(),
-            (None, _) => 0,
+            (Some(tab), PaneSide::Local) => {
+                visible_local_indices(&tab.local.entries, show_hidden, query)
+            }
+            (Some(tab), PaneSide::Remote) => {
+                visible_remote_indices(&tab.remote.entries, show_hidden, query)
+            }
+            (None, _) => Vec::new(),
         }
     }
-    pub(crate) fn entry_path_at(&self, side: PaneSide, index: usize) -> Option<EntryPath> {
+
+    pub(crate) fn entry_count(&self, side: PaneSide, cx: &App) -> usize {
+        self.visible_indices(side, cx).len()
+    }
+
+    pub(crate) fn entry_path_at(
+        &self,
+        side: PaneSide,
+        visible_index: usize,
+        cx: &App,
+    ) -> Option<EntryPath> {
+        let real_index = *self.visible_indices(side, cx).get(visible_index)?;
         let tab = self.active_tab()?;
         match side {
             PaneSide::Local => tab
                 .local
                 .entries
-                .get(index)
+                .get(real_index)
                 .map(|entry| EntryPath::Local(entry.path.clone())),
             PaneSide::Remote => tab
                 .remote
                 .entries
-                .get(index)
+                .get(real_index)
                 .map(|entry| EntryPath::Remote(entry.path.clone())),
         }
     }
-    pub(crate) fn selected_index(&self, side: PaneSide) -> Option<usize> {
+
+    /// Visible-list index of the first selected path on `side`, if any.
+    pub(crate) fn selected_index(&self, side: PaneSide, cx: &App) -> Option<usize> {
         let tab = self.active_tab()?;
         let selected = tab.selection.selected_paths.first()?;
+        let visible = self.visible_indices(side, cx);
         match (side, selected) {
-            (PaneSide::Local, EntryPath::Local(path)) => tab
-                .local
-                .entries
-                .iter()
-                .position(|entry| &entry.path == path),
-            (PaneSide::Remote, EntryPath::Remote(path)) => tab
-                .remote
-                .entries
-                .iter()
-                .position(|entry| &entry.path == path),
+            (PaneSide::Local, EntryPath::Local(path)) => visible.iter().position(|&real_index| {
+                tab.local
+                    .entries
+                    .get(real_index)
+                    .is_some_and(|entry| &entry.path == path)
+            }),
+            (PaneSide::Remote, EntryPath::Remote(path)) => visible.iter().position(|&real_index| {
+                tab.remote
+                    .entries
+                    .get(real_index)
+                    .is_some_and(|entry| &entry.path == path)
+            }),
             _ => None,
         }
     }
-    pub(crate) fn select_index(&mut self, side: PaneSide, index: usize, cx: &mut Context<Self>) {
-        let Some(path) = self.entry_path_at(side, index) else {
+
+    pub(crate) fn select_index(
+        &mut self,
+        side: PaneSide,
+        visible_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self.entry_path_at(side, visible_index, cx) else {
             return;
         };
         if let Some(tab) = self.active_tab_mut() {
             tab.selection.selected_paths = vec![path];
         }
         self.scroll_handle(side)
-            .scroll_to_item(index, ScrollStrategy::Top);
+            .scroll_to_item(visible_index, ScrollStrategy::Top);
         cx.notify();
     }
+
     pub(crate) fn move_selection(&mut self, side: PaneSide, offset: isize, cx: &mut Context<Self>) {
-        let entry_count = self.entry_count(side);
+        let entry_count = self.entry_count(side, cx);
         if entry_count == 0 {
             return;
         }
-        let next_index = match self.selected_index(side) {
+        let next_index = match self.selected_index(side, cx) {
             Some(current) => {
                 (current as isize + offset).clamp(0, entry_count as isize - 1) as usize
             }
@@ -114,19 +149,24 @@ impl crate::workspace::Workspace {
         };
         self.select_index(side, next_index, cx);
     }
+
     pub(crate) fn open_entry_at(
         &mut self,
         side: PaneSide,
-        index: usize,
+        visible_index: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let real_index = match self.visible_indices(side, cx).get(visible_index).copied() {
+            Some(index) => index,
+            None => return,
+        };
         let Some(tab) = self.active_tab() else {
             return;
         };
         match side {
             PaneSide::Local => {
-                let Some(entry) = tab.local.entries.get(index) else {
+                let Some(entry) = tab.local.entries.get(real_index) else {
                     return;
                 };
                 if entry.kind == FileKind::Directory {
@@ -138,7 +178,7 @@ impl crate::workspace::Workspace {
                 let remote_directory = tab
                     .remote
                     .entries
-                    .get(index)
+                    .get(real_index)
                     .filter(|entry| entry.kind == FileKind::Directory)
                     .map(|entry| entry.path.clone());
                 if let Some(path) = remote_directory {
@@ -147,11 +187,25 @@ impl crate::workspace::Workspace {
             }
         }
     }
+
     pub(crate) fn open_selected_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let side = self.focused_side;
-        if let Some(index) = self.selected_index(side) {
+        if let Some(index) = self.selected_index(side, cx) {
             self.open_entry_at(side, index, window, cx);
         }
+    }
+
+    pub(crate) fn toggle_hidden_files(&mut self, cx: &mut Context<Self>) {
+        let next = !cx.resources().config.config().show_hidden_files;
+        match cx.resources_mut().config.set_show_hidden_files(next) {
+            Ok(()) => self.config_error = None,
+            Err(error) => {
+                warn!(error = %error, "could not save show_hidden_files");
+                self.config_error =
+                    Some("Could not write config.json. Check file permissions.".into());
+            }
+        }
+        cx.notify();
     }
     pub(crate) fn set_local_path(
         &mut self,
