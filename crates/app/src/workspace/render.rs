@@ -3,8 +3,8 @@ use gpui::{
     Styled, Window, div, prelude::*, px, uniform_list,
 };
 use macsftp_core::{
-    ConnectionState, EntryPath, TransferHistoryRecord, TransferHistoryStatus, TransferJob,
-    TransferState,
+    ConnectionState, EntryPath, TransferHistoryRecord, TransferHistoryStatus, TransferId,
+    TransferJob, TransferState,
 };
 use macsftp_ui::{
     ActiveTheme, DragPreview, FileRowModel, IconName, TextFieldModel, connection_status,
@@ -575,6 +575,20 @@ impl crate::workspace::Workspace {
         let jobs = cx.transfers().jobs.clone();
         let jobs = &jobs;
 
+        let now = std::time::Instant::now();
+        let running: Vec<(TransferId, u64, Option<u64>)> = jobs
+            .iter()
+            .filter_map(|job| match &job.state {
+                TransferState::Running {
+                    bytes_done,
+                    bytes_total,
+                    ..
+                } => Some((job.id, *bytes_done, *bytes_total)),
+                _ => None,
+            })
+            .collect();
+        let agg = cx.rates().aggregate(&running, now);
+
         let active_jobs: Vec<&TransferJob> = jobs
             .iter()
             .filter(|job| {
@@ -600,6 +614,30 @@ impl crate::workspace::Workspace {
             .filter(|job| matches!(job.state, TransferState::Failed { .. }))
             .collect();
 
+        // Drawer chrome: counts plus aggregate speed/ETA for running jobs.
+        let agg_label = {
+            let mut s = format!(
+                "{} active · {} queued · {} done · {} failed",
+                active_jobs.len(),
+                queued_jobs.len(),
+                completed_jobs.len(),
+                failed_jobs.len()
+            );
+            if let Some(bps) = agg.speed_bps {
+                s.push_str(&format!(
+                    " · {}",
+                    crate::rate_sampler::format_speed(Some(bps))
+                ));
+            }
+            if let Some(eta) = agg.eta_secs {
+                s.push_str(&format!(
+                    " · ETA {}",
+                    crate::rate_sampler::format_eta(Some(eta))
+                ));
+            }
+            s
+        };
+
         let mut drawer = div()
             .id("transfer-drawer")
             .flex()
@@ -624,13 +662,7 @@ impl crate::workspace::Workspace {
                 .child(icon(IconName::Transfers, theme.colors.text_muted))
                 .child("Transfers")
                 .child(div().flex_1())
-                .child(format!(
-                    "{} active · {} queued · {} done · {} failed",
-                    active_jobs.len(),
-                    queued_jobs.len(),
-                    completed_jobs.len(),
-                    failed_jobs.len()
-                )),
+                .child(agg_label),
         );
 
         if jobs.is_empty() && cx.resources().transfer_history.records().is_empty() {
