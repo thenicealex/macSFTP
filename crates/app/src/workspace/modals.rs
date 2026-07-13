@@ -237,13 +237,13 @@ impl crate::workspace::Workspace {
             return;
         }
         if self.about_open {
-            self.about_open = false;
-            cx.notify();
+            self.close_about(window, cx);
             return;
         }
         if self.surface == WorkspaceSurface::Settings {
             self.surface = WorkspaceSurface::Files;
-            self.workspace_focus.focus(window);
+            // Prefer pane focus so file-list keyboard nav works immediately after Esc.
+            self.focus_pane(self.focused_side, window, cx);
             cx.notify();
             return;
         }
@@ -253,10 +253,12 @@ impl crate::workspace::Workspace {
         }
         if self.context_menu.is_some() {
             self.close_context_menu(cx);
+            self.focus_pane(self.focused_side, window, cx);
             return;
         }
         if self.inline_edit.is_some() {
             self.cancel_inline_edit(cx);
+            self.focus_pane(self.focused_side, window, cx);
             return;
         }
         if self.connect_form.is_some() {
@@ -292,6 +294,16 @@ impl crate::workspace::Workspace {
         self.go_to_path_open = false;
         self.go_to_path_input.clear();
         self.go_to_path_error = None;
+        self.focus_pane(self.focused_side, window, cx);
+        cx.notify();
+    }
+
+    /// Dismiss About and restore keyboard-usable pane focus.
+    pub(crate) fn close_about(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.about_open {
+            return;
+        }
+        self.about_open = false;
         self.focus_pane(self.focused_side, window, cx);
         cx.notify();
     }

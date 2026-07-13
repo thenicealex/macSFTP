@@ -449,6 +449,59 @@ mod tests {
         workspace.read_with(&cx, |workspace, _| assert!(!workspace.about_open));
     }
 
+    #[gpui::test]
+    fn about_escape_restores_pane_focus(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            // Simulate focus having left the pane (e.g. after interacting with About).
+            window.focus(&ws.modal_focus);
+            ws.about_open = true;
+            ws.cancel_active_modal(window, cx);
+            assert!(!ws.about_open, "Esc must close About");
+            let pane = ws.pane_focus(ws.focused_side).clone();
+            assert!(
+                pane.is_focused(window),
+                "Esc from About must restore pane focus"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn about_close_button_restores_pane_focus(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            window.focus(&ws.modal_focus);
+            ws.about_open = true;
+            ws.close_about(window, cx);
+            assert!(!ws.about_open, "Close must dismiss About");
+            let pane = ws.pane_focus(ws.focused_side).clone();
+            assert!(
+                pane.is_focused(window),
+                "About Close button must restore pane focus"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn go_to_path_escape_restores_pane_focus(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            ws.open_go_to_path(window, cx);
+            assert!(ws.go_to_path_open);
+            assert!(
+                ws.modal_focus.is_focused(window),
+                "open_go_to_path focuses modal_focus"
+            );
+            ws.cancel_active_modal(window, cx);
+            assert!(!ws.go_to_path_open);
+            let pane = ws.pane_focus(ws.focused_side).clone();
+            assert!(
+                pane.is_focused(window),
+                "Esc from Go to Path restores pane focus"
+            );
+        });
+    }
+
     // ── Runtime bridge wiring (M2a/M2c app side) ───────────────────
 
     #[gpui::test]

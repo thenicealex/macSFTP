@@ -1627,7 +1627,7 @@ impl crate::workspace::Workspace {
                     .child(text_button("settings-done", "Done").on_click(cx.listener(
                         |workspace, _event, window, cx| {
                             workspace.surface = WorkspaceSurface::Files;
-                            workspace.workspace_focus.focus(window);
+                            workspace.focus_pane(workspace.focused_side, window, cx);
                             cx.notify();
                         },
                     ))),
@@ -1830,9 +1830,8 @@ impl crate::workspace::Workspace {
                                         })),
                                 )
                                 .child(text_button("about-close", "Close").primary(true).on_click(
-                                    cx.listener(|workspace, _event, _window, cx| {
-                                        workspace.about_open = false;
-                                        cx.notify();
+                                    cx.listener(|workspace, _event, window, cx| {
+                                        workspace.close_about(window, cx);
                                     }),
                                 )),
                         ),
