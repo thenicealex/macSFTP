@@ -738,8 +738,9 @@ impl Workspace {
         }
     }
 
-    /// Open a recent connection: remember path for post-connect navigation and
-    /// prefill the connect form (Task 7 may auto-connect when profile secrets load).
+    /// Open a recent connection: remember path for post-connect navigation.
+    /// With a live profile and Keychain secret, auto-connects; otherwise opens
+    /// the connect form prefilled (profile metadata or host/user/port).
     pub(crate) fn open_recent_connection(
         &mut self,
         recent_id: u64,
@@ -780,12 +781,21 @@ impl Workspace {
             }
         }
 
-        // Prefer profile form prefill when the profile still exists; otherwise
-        // open_connect_form uses restored_targets for host/port/username.
+        // Profile still exists → use_profile (Keychain) then auto-connect if
+        // secrets load into a valid form; otherwise leave the form open.
+        // Missing/deleted profile falls through to host-meta prefill only.
         if let Some(profile_id) = entry.profile_id.map(ProfileId)
             && cx.resources().profiles.find_profile(profile_id).is_some()
         {
             self.use_profile(profile_id, cx);
+            if self
+                .connect_form
+                .as_ref()
+                .is_some_and(|form| form.build_settings().is_ok())
+            {
+                self.submit_connect_form(window, cx);
+                return;
+            }
             window.focus(&self.connect_form_focus);
             cx.notify();
             return;

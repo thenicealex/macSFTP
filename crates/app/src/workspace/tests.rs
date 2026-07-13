@@ -874,6 +874,122 @@ mod tests {
     }
 
     #[gpui::test]
+    fn open_recent_without_profile_prefills_form(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+
+        let recent_id = workspace.update_in(&mut cx, |_workspace, _window, cx| {
+            cx.resources_mut()
+                .recents
+                .upsert(macsftp_storage::RecentEntryInput {
+                    host: "recent.example.com".into(),
+                    port: 2222,
+                    username: "alex".into(),
+                    profile_id: None,
+                    display_name: None,
+                    last_remote_path: Some("/var/www".into()),
+                    last_connected_at: 1,
+                })
+                .expect("seed recent without profile");
+            cx.resources().recents.entries()[0].id
+        });
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.open_recent_connection(recent_id, window, cx);
+        });
+
+        workspace.read_with(&cx, |workspace, _| {
+            let form = workspace
+                .connect_form
+                .as_ref()
+                .expect("form must open when recent has no profile");
+            assert_eq!(form.host.value(), "recent.example.com");
+            assert_eq!(form.port.value(), "2222");
+            assert_eq!(form.username.value(), "alex");
+            assert!(form.source_profile_id.is_none());
+            let tab = workspace.state.tabs.active_tab().expect("tab exists");
+            assert!(
+                !matches!(tab.connection, ConnectionState::Connecting { .. }),
+                "must not auto-connect without a profile/secret"
+            );
+        });
+        assert!(
+            channels.command_rx.try_recv().is_err(),
+            "no ConnectTab without credentials"
+        );
+    }
+
+    #[gpui::test]
+    fn open_recent_with_profile_and_keychain_connects(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.open_connect_form(window, cx);
+        });
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            let form = workspace.connect_form.as_mut().expect("form is open");
+            form.host.set_value("profile.example.com");
+            form.port.set_value("22");
+            form.username.set_value("deploy");
+            form.password.set_value("s3cret");
+            form.profile_name.set_value("Deploy box");
+            workspace.save_current_profile(cx);
+        });
+
+        let (saved_id, recent_id) = workspace.update_in(&mut cx, |_workspace, _window, cx| {
+            let profiles = cx.resources().profiles.profiles();
+            assert_eq!(profiles.len(), 1, "profile saved");
+            let saved_id = profiles[0].id;
+            cx.resources_mut()
+                .recents
+                .upsert(macsftp_storage::RecentEntryInput {
+                    host: "profile.example.com".into(),
+                    port: 22,
+                    username: "deploy".into(),
+                    profile_id: Some(saved_id.0),
+                    display_name: Some("Deploy box".into()),
+                    last_remote_path: Some("/home/deploy".into()),
+                    last_connected_at: 2,
+                })
+                .expect("seed recent with profile");
+            let recent_id = cx.resources().recents.entries()[0].id;
+            (saved_id, recent_id)
+        });
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            // Close any leftover form so open_recent owns the path.
+            workspace.connect_form = None;
+            workspace.open_recent_connection(recent_id, window, cx);
+        });
+
+        let command = channels
+            .command_rx
+            .try_recv()
+            .expect("open recent with profile+keychain must send ConnectTab");
+        match command {
+            AppCommand::ConnectTab(connect) => {
+                assert_eq!(connect.settings.host, "profile.example.com");
+                assert_eq!(connect.settings.port, 22);
+                assert_eq!(connect.settings.username, "deploy");
+                assert_eq!(connect.profile_id, saved_id);
+            }
+            other => panic!("expected ConnectTab, got {other:?}"),
+        }
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(
+                workspace.connect_form.is_none(),
+                "form closes when auto-connect succeeds"
+            );
+            let tab = workspace.state.tabs.active_tab().expect("tab exists");
+            assert_eq!(tab.title, "profile.example.com");
+            assert_eq!(tab.profile_id, Some(saved_id));
+            assert!(
+                matches!(tab.connection, ConnectionState::Connecting { .. }),
+                "tab must enter Connecting after open recent"
+            );
+        });
+    }
+
+    #[gpui::test]
     fn drag_local_file_onto_remote_pane_begins_upload(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
         workspace.update_in(&mut cx, |workspace, window, cx| {
