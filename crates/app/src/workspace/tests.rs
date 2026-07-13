@@ -2571,6 +2571,143 @@ mod tests {
     }
 
     #[gpui::test]
+    fn activate_tab_updates_mru_front(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _) = init_workspace(cx);
+        // open_new_tab seeds MRU with tab 1.
+        cx.dispatch_action(NewTab); // tabs 1,2 active 2
+        cx.dispatch_action(NewTab); // tabs 1,2,3 active 3
+        workspace.read_with(&cx, |ws, _| {
+            assert_eq!(ws.tab_mru.first(), Some(&TabId(3)));
+            assert_eq!(ws.tab_mru, vec![TabId(3), TabId(2), TabId(1)]);
+        });
+
+        workspace.update(&mut cx, |ws, cx| {
+            ws.activate_tab(TabId(2), cx);
+        });
+        workspace.update(&mut cx, |ws, cx| {
+            ws.activate_tab(TabId(3), cx);
+        });
+        workspace.read_with(&cx, |ws, _| {
+            assert_eq!(ws.tab_mru[0], TabId(3), "most recent activation is front");
+            let pos2 = ws
+                .tab_mru
+                .iter()
+                .position(|id| *id == TabId(2))
+                .expect("tab 2 stays in mru");
+            let pos1 = ws
+                .tab_mru
+                .iter()
+                .position(|id| *id == TabId(1))
+                .expect("tab 1 stays in mru");
+            assert!(pos2 < pos1, "tab 2 was activated more recently than tab 1");
+        });
+    }
+
+    #[gpui::test]
+    fn cmd_shift_tab_still_creation_order(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _) = init_workspace(cx);
+        cx.dispatch_action(NewTab); // 1, 2 active 2
+        cx.dispatch_action(NewTab); // 1, 2, 3 active 3
+        // Scramble MRU so it differs from creation order: activate 1, then 3.
+        workspace.update(&mut cx, |ws, cx| {
+            ws.activate_tab(TabId(1), cx);
+        });
+        workspace.update(&mut cx, |ws, cx| {
+            ws.activate_tab(TabId(3), cx);
+        });
+        workspace.read_with(&cx, |ws, _| {
+            assert_eq!(ws.tab_mru, vec![TabId(3), TabId(1), TabId(2)]);
+            assert_eq!(ws.state.tabs.active_tab_id, Some(TabId(3)));
+        });
+
+        // From tab 1 in creation order: ActivateNextTab → tab 2 (not MRU next).
+        workspace.update(&mut cx, |ws, cx| {
+            ws.activate_tab(TabId(1), cx);
+        });
+        cx.dispatch_action(ActivateNextTab);
+        workspace.read_with(&cx, |ws, _| {
+            assert_eq!(
+                ws.state.tabs.active_tab_id,
+                Some(TabId(2)),
+                "cmd-shift-] must walk creation order, not MRU"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn close_tab_removes_from_mru(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _) = init_workspace(cx);
+        cx.dispatch_action(NewTab);
+        cx.dispatch_action(NewTab);
+        workspace.update(&mut cx, |ws, cx| {
+            ws.activate_tab(TabId(2), cx);
+        });
+        workspace.read_with(&cx, |ws, _| {
+            assert!(ws.tab_mru.contains(&TabId(3)));
+        });
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            ws.close_tab_by_id(TabId(3), window, cx);
+        });
+        workspace.read_with(&cx, |ws, _| {
+            assert!(!ws.tab_mru.contains(&TabId(3)));
+            assert_eq!(ws.tab_mru.len(), 2);
+        });
+    }
+
+    #[gpui::test]
+    fn tab_switcher_next_and_enter_activates_mru(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _) = init_workspace(cx);
+        cx.dispatch_action(NewTab); // mru: 2, 1
+        cx.dispatch_action(NewTab); // mru: 3, 2, 1 active 3
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            ws.tab_switcher_next(window, cx);
+            assert!(ws.tab_switcher_open);
+            assert_eq!(ws.tab_switcher_index, 1, "first open starts at MRU[1]");
+            assert_eq!(ws.tab_mru[1], TabId(2));
+            ws.confirm_tab_switcher(window, cx);
+            assert!(!ws.tab_switcher_open);
+            assert_eq!(ws.state.tabs.active_tab_id, Some(TabId(2)));
+            assert_eq!(ws.tab_mru[0], TabId(2));
+        });
+    }
+
+    #[gpui::test]
+    fn tab_switcher_esc_cancels_without_switch(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _) = init_workspace(cx);
+        cx.dispatch_action(NewTab);
+        cx.dispatch_action(NewTab); // active 3
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            assert_eq!(ws.state.tabs.active_tab_id, Some(TabId(3)));
+            ws.tab_switcher_next(window, cx);
+            assert_eq!(ws.tab_switcher_index, 1);
+            ws.cancel_active_modal(window, cx);
+            assert!(!ws.tab_switcher_open);
+            assert_eq!(
+                ws.state.tabs.active_tab_id,
+                Some(TabId(3)),
+                "Esc must not change the active tab"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn cancel_modal_closes_palette_before_switcher(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _) = init_workspace(cx);
+        cx.dispatch_action(NewTab);
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            ws.tab_switcher_next(window, cx);
+            assert!(ws.tab_switcher_open);
+            ws.open_command_palette(window, cx);
+            assert!(ws.palette_open);
+            ws.cancel_active_modal(window, cx);
+            assert!(!ws.palette_open, "palette closes first");
+            assert!(ws.tab_switcher_open, "switcher remains until next Esc");
+            ws.cancel_active_modal(window, cx);
+            assert!(!ws.tab_switcher_open);
+        });
+    }
+
+    #[gpui::test]
     fn command_palette_filters_and_runs_new_tab(cx: &mut TestAppContext) {
         let (workspace, mut cx, _) = init_workspace(cx);
         workspace.update_in(&mut cx, |ws, window, cx| {

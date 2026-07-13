@@ -18,13 +18,14 @@ use macsftp_ui::{
 use tracing::warn;
 
 use crate::app_actions::{
-    ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, CopyPath, CopyVersionInfo,
-    DeleteSelection, DownloadSelection, FilterPane, FocusLocalPane, FocusRemotePane, GoToPath,
-    MinimizeWindow, NavigateBack, NavigateForward, NewFolder, NewTab, OpenCommandPalette,
-    OpenLogFolder, OpenSelectedEntry, OpenSettings, PageDown, PageUp, ParentDirectory,
-    ReconnectTab, RefreshPane, RenameEntry, SelectAllEntries, SelectFirstEntry, SelectLastEntry,
-    SelectNextEntry, SelectNextEntryExtend, SelectPrevEntry, SelectPrevEntryExtend, ShowAbout,
-    ShowTransferDrawer, ToggleHiddenFiles, UploadSelection, ZoomWindow,
+    ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, ConfirmTabSwitcher, CopyPath,
+    CopyVersionInfo, DeleteSelection, DownloadSelection, FilterPane, FocusLocalPane,
+    FocusRemotePane, GoToPath, MinimizeWindow, NavigateBack, NavigateForward, NewFolder, NewTab,
+    OpenCommandPalette, OpenLogFolder, OpenSelectedEntry, OpenSettings, PageDown, PageUp,
+    ParentDirectory, ReconnectTab, RefreshPane, RenameEntry, SelectAllEntries, SelectFirstEntry,
+    SelectLastEntry, SelectNextEntry, SelectNextEntryExtend, SelectPrevEntry,
+    SelectPrevEntryExtend, ShowAbout, ShowTransferDrawer, TabSwitcherNext, TabSwitcherPrev,
+    ToggleHiddenFiles, UploadSelection, ZoomWindow,
 };
 use crate::resources::ActiveResources;
 use crate::workspace::file_ops::{ContextMenuState, DeleteConfirmState, InlineEditState};
@@ -104,6 +105,11 @@ pub struct Workspace {
     palette_open: bool,
     palette_input: InputState,
     palette_selected: usize,
+    /// MRU tab order for ctrl-tab switcher only (front = most recent).
+    /// `cmd-shift-[/]` still walk creation order in `state.tabs.tabs`.
+    tab_mru: Vec<TabId>,
+    tab_switcher_open: bool,
+    tab_switcher_index: usize,
     /// Active-tab type-to-filter state (cleared on tab switch / navigate).
     local_filter: PaneFilter,
     remote_filter: PaneFilter,
@@ -194,6 +200,9 @@ impl Workspace {
             palette_open: false,
             palette_input: InputState::new(),
             palette_selected: 0,
+            tab_mru: Vec::new(),
+            tab_switcher_open: false,
+            tab_switcher_index: 0,
             local_filter: PaneFilter::default(),
             remote_filter: PaneFilter::default(),
             selection_anchor: None,
@@ -240,6 +249,7 @@ impl Workspace {
         }
         self.state.tabs.open_tab(tab);
         self.state.tabs.active_tab_id = Some(tab_id);
+        self.touch_mru(tab_id);
         self.clear_filters();
         self.reset_scroll_positions();
         self.focus_pane(PaneSide::Local, window, cx);
@@ -249,7 +259,16 @@ impl Workspace {
         if self.state.tabs.close_tab(tab_id).is_none() {
             return;
         }
+        self.tab_mru.retain(|id| *id != tab_id);
         self.tab_nav.remove(&tab_id);
+        if self.tab_switcher_open {
+            if self.tab_mru.is_empty() {
+                self.tab_switcher_open = false;
+                self.tab_switcher_index = 0;
+            } else {
+                self.tab_switcher_index = self.tab_switcher_index.min(self.tab_mru.len() - 1);
+            }
+        }
         // Tell the runtime to cancel the tab's actor and reject its
         // pending trust requests; late events are dropped by the stale
         // event guard because the tab no longer exists.
@@ -266,11 +285,22 @@ impl Workspace {
     pub(crate) fn activate_tab(&mut self, tab_id: TabId, cx: &mut Context<Self>) {
         if self.state.tabs.find_tab(tab_id).is_some() {
             self.state.tabs.active_tab_id = Some(tab_id);
+            self.touch_mru(tab_id);
+            if self.tab_switcher_open {
+                self.tab_switcher_open = false;
+                self.tab_switcher_index = 0;
+            }
             self.clear_filters();
             self.reset_scroll_positions();
             cx.notify();
         }
     }
+    /// Move `tab_id` to the front of the MRU list (most recently used).
+    pub(crate) fn touch_mru(&mut self, tab_id: TabId) {
+        self.tab_mru.retain(|id| *id != tab_id);
+        self.tab_mru.insert(0, tab_id);
+    }
+    /// Creation-order cycle for `cmd-shift-[` / `]`. Does **not** walk MRU.
     pub(crate) fn activate_tab_in_direction(&mut self, offset: isize, cx: &mut Context<Self>) {
         let tabs = &self.state.tabs.tabs;
         if tabs.is_empty() {
@@ -286,6 +316,59 @@ impl Workspace {
         let next_index = (current_index as isize + offset).rem_euclid(tab_count) as usize;
         let next_tab_id = tabs[next_index].id;
         self.activate_tab(next_tab_id, cx);
+    }
+    pub(crate) fn tab_switcher_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tab_mru.is_empty() {
+            return;
+        }
+        if !self.tab_switcher_open {
+            self.tab_switcher_open = true;
+            // First press targets the previous tab (MRU[1]), matching OS switchers.
+            self.tab_switcher_index = if self.tab_mru.len() > 1 { 1 } else { 0 };
+            window.focus(&self.modal_focus);
+        } else {
+            let count = self.tab_mru.len();
+            self.tab_switcher_index = (self.tab_switcher_index + 1) % count;
+        }
+        cx.notify();
+    }
+    pub(crate) fn tab_switcher_prev(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tab_mru.is_empty() {
+            return;
+        }
+        if !self.tab_switcher_open {
+            self.tab_switcher_open = true;
+            self.tab_switcher_index = self.tab_mru.len() - 1;
+            window.focus(&self.modal_focus);
+        } else {
+            let count = self.tab_mru.len() as isize;
+            self.tab_switcher_index =
+                (self.tab_switcher_index as isize - 1).rem_euclid(count) as usize;
+        }
+        cx.notify();
+    }
+    pub(crate) fn close_tab_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.tab_switcher_open {
+            return;
+        }
+        self.tab_switcher_open = false;
+        self.tab_switcher_index = 0;
+        self.focus_pane(self.focused_side, window, cx);
+        cx.notify();
+    }
+    pub(crate) fn confirm_tab_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.tab_switcher_open {
+            return;
+        }
+        let tab_id = self.tab_mru.get(self.tab_switcher_index).copied();
+        self.tab_switcher_open = false;
+        self.tab_switcher_index = 0;
+        if let Some(tab_id) = tab_id {
+            // activate_tab also touch_mru's and would no-op the open flag.
+            self.activate_tab(tab_id, cx);
+        }
+        self.focus_pane(self.focused_side, window, cx);
+        cx.notify();
     }
     pub(crate) fn reset_scroll_positions(&mut self) {
         self.local_scroll = UniformListScrollHandle::new();
@@ -480,6 +563,15 @@ impl Render for Workspace {
             .on_action(cx.listener(|workspace, _: &ActivatePrevTab, _window, cx| {
                 workspace.activate_tab_in_direction(-1, cx);
             }))
+            .on_action(cx.listener(|workspace, _: &TabSwitcherNext, window, cx| {
+                workspace.tab_switcher_next(window, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &TabSwitcherPrev, window, cx| {
+                workspace.tab_switcher_prev(window, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &ConfirmTabSwitcher, window, cx| {
+                workspace.confirm_tab_switcher(window, cx);
+            }))
             .on_action(cx.listener(|workspace, _: &FocusLocalPane, window, cx| {
                 workspace.focus_pane(PaneSide::Local, window, cx);
             }))
@@ -628,6 +720,7 @@ impl Render for Workspace {
             .children(self.render_go_to_path_modal(cx))
             .children(self.render_context_menu(cx))
             .children(self.render_about(cx))
+            .children(self.render_tab_switcher(cx))
             .children(self.render_command_palette(cx))
     }
 }

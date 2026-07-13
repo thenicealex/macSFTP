@@ -226,6 +226,11 @@ impl crate::workspace::Workspace {
             self.close_command_palette(window, cx);
             return;
         }
+        // MRU tab switcher next (phase 4 design §4.3 — Esc cancels without switching).
+        if self.tab_switcher_open {
+            self.close_tab_switcher(window, cx);
+            return;
+        }
         // Go to Path next so Esc dismisses the path field when palette is closed.
         if self.go_to_path_open {
             self.close_go_to_path(window, cx);

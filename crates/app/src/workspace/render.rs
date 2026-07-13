@@ -68,6 +68,120 @@ impl crate::workspace::Workspace {
                 )),
             ))
     }
+
+    /// Elevated MRU list for ctrl-tab. Confirm with Enter; Esc cancels (no key-up required).
+    pub(crate) fn render_tab_switcher(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        if !self.tab_switcher_open || self.tab_mru.is_empty() {
+            return None;
+        }
+        let theme = cx.theme().clone();
+        let selected = self.tab_switcher_index.min(self.tab_mru.len() - 1);
+
+        let rows = self.tab_mru.iter().enumerate().filter_map(|(index, tab_id)| {
+            let tab_state = self.state.tabs.find_tab(*tab_id)?;
+            let (status_color, status_label) = connection_status(&tab_state.connection, &theme);
+            let title: SharedString = tab_state.title.clone().into();
+            let is_selected = index == selected;
+            let background = if is_selected {
+                theme.colors.element_selected
+            } else {
+                theme.colors.elevated_surface
+            };
+            let hover_background = theme.colors.element_hover;
+            let tab_id = *tab_id;
+
+            Some(
+                div()
+                    .id(("tab-switcher-row", tab_id.0))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(background)
+                    .when(!is_selected, |row| {
+                        row.hover(move |style| style.bg(hover_background))
+                    })
+                    .on_click(cx.listener(move |workspace, _event, window, cx| {
+                        // Click selects that tab immediately (same as Enter on that row).
+                        workspace.tab_switcher_index = index;
+                        workspace.confirm_tab_switcher(window, cx);
+                    }))
+                    .child(
+                        div()
+                            .size(px(8.0))
+                            .rounded_full()
+                            .bg(status_color)
+                            .flex_none(),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(13.0))
+                            .text_color(theme.colors.text)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.0))
+                            .text_color(theme.colors.text_muted)
+                            .child(status_label),
+                    ),
+            )
+        });
+
+        Some(
+            div()
+                .id("tab-switcher-scrim")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.35))
+                .child(
+                    div()
+                        .key_context("TabSwitcher")
+                        .track_focus(&self.modal_focus)
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .w(px(360.0))
+                        .max_h(px(360.0))
+                        .p_3()
+                        .bg(theme.colors.elevated_surface)
+                        .border_1()
+                        .border_color(theme.colors.border)
+                        .rounded_md()
+                        .font_family(theme.fonts.ui_family.clone())
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(theme.colors.text_muted)
+                                .child("Switch Tab · Enter confirm · Esc cancel"),
+                        )
+                        .child(
+                            div()
+                                .id("tab-switcher-list")
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .children(rows),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     pub(crate) fn render_pane(
         &self,
         side: PaneSide,
