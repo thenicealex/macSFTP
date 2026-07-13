@@ -39,7 +39,7 @@ use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::connect_form::*;
 use crate::workspace::helpers::*;
 use crate::workspace::nav::HistoryOp;
-use crate::workspace::profiles::{SettingsSection, profile_matches_filter};
+use crate::workspace::profiles::SettingsSection;
 use crate::workspace::*;
 
 impl crate::workspace::Workspace {
@@ -649,11 +649,7 @@ impl crate::workspace::Workspace {
         );
 
         if profile_picker_open {
-            let filter_query = form.profile_picker_filter.value().to_string();
-            let filtered: Vec<&ConnectionProfile> = profiles
-                .iter()
-                .filter(|profile| profile_matches_filter(profile, &filter_query))
-                .collect();
+            let filtered = self.filtered_connect_profiles(cx);
 
             let mut picker_panel = div()
                 .id("profile-picker-panel")
