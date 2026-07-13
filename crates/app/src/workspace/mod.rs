@@ -890,16 +890,16 @@ impl Render for Workspace {
             .id("workspace")
             .key_context("Workspace")
             .track_focus(&self.workspace_focus)
-            .when(self.drawer_resize.is_some(), |root| {
-                root.on_mouse_up(
-                    gpui::MouseButton::Left,
-                    cx.listener(|workspace, _event, _window, cx| {
-                        if workspace.drawer_resize.take().is_some() {
-                            cx.notify();
-                        }
-                    }),
-                )
-            })
+            // Always attach so clear works even before the tree re-renders
+            // after drag start (drawer_resize may still be None on last paint).
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|workspace, _event, _window, cx| {
+                    if workspace.drawer_resize.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
             .on_action(cx.listener(|workspace, _: &NewTab, window, cx| {
                 workspace.open_new_tab(window, cx);
             }))
