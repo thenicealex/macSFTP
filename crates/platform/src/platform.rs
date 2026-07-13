@@ -17,6 +17,8 @@ pub struct AppPaths {
     pub known_hosts_file: LocalPath,
     pub transfer_history_file: LocalPath,
     pub residual_temp_file: LocalPath,
+    pub session_file: LocalPath,
+    pub recents_file: LocalPath,
     pub log_file: LocalPath,
 }
 
@@ -34,6 +36,8 @@ impl AppPaths {
                 "{app_support_dir}/transfer_history.json"
             )),
             residual_temp_file: LocalPath::new(format!("{app_support_dir}/residual_temp.json")),
+            session_file: LocalPath::new(format!("{app_support_dir}/session.json")),
+            recents_file: LocalPath::new(format!("{app_support_dir}/recents.json")),
             log_file: LocalPath::new(format!("{log_dir}/macsftp.log")),
         }
     }
@@ -47,6 +51,8 @@ impl AppPaths {
             &self.known_hosts_file,
             &self.transfer_history_file,
             &self.residual_temp_file,
+            &self.session_file,
+            &self.recents_file,
             &self.log_file,
         ] {
             if let Some(parent) = std::path::Path::new(file.as_str()).parent() {
@@ -259,6 +265,14 @@ mod tests {
         assert_eq!(
             paths.log_file.as_str(),
             "/Users/alex/Library/Logs/macSFTP/macsftp.log"
+        );
+        assert_eq!(
+            paths.session_file.as_str(),
+            "/Users/alex/Library/Application Support/macSFTP/session.json"
+        );
+        assert_eq!(
+            paths.recents_file.as_str(),
+            "/Users/alex/Library/Application Support/macSFTP/recents.json"
         );
     }
 
