@@ -1,40 +1,49 @@
 # macSFTP — UX 提升分阶段完整计划
 
-**Date:** 2026-07-13 GMT+8
-**基准:** `docs/ui-ux-guidelines.md`（强制设计规范）+ 实测当前实现状态（`crates/app/src/workspace/*`、`crates/core/src/core.rs`、`crates/sftp/*`）。
+**Date:** 2026-07-13 GMT+8  
+**Status update:** 2026-07-14 — **阶段 1–6 均已交付**；后续进度与改进 backlog 见 **`docs/progress-analysis-2026-07-14.md`**。  
+**基准:** `docs/ui-ux-guidelines.md`（强制设计规范）+ 实测当前实现状态（`crates/app/src/workspace/*`、`crates/core/src/core.rs`、`crates/sftp/*`）。  
 **用户优先方向（已确认）:** ① 核心文件操作 ② 反馈与可观测性。**节奏:** 系统完整优先（每个维度一次做透，而非零散 quick win）。
 
 ---
 
 ## 0. 当前 UX 现状（地面真相）
 
-**已具备（不动）：**
+> **2026-07-14 注：** 下列「已具备」为计划起草时基线；「确认缺失」表中条目**均已在阶段 1–6 关闭**。阶段后专项（Settings Profiles、Connect profile picker、Transfer drawer 高度）亦已合入。细节与剩余改进见 `docs/progress-analysis-2026-07-14.md`。
+
+**已具备（起草时基线 + 后续交付）：**
 - 视觉系统完整（M7）：`Theme` 全局 + 语义色/尺寸/字体全令牌化，dark/light/system 三态。
-- 主布局齐全：tab bar + 左右 pane + transfer drawer + status bar。
+- 主布局齐全：tab bar + 左右 pane + transfer drawer + status bar（drawer 可拖拽调高）。
 - 文件列表**已虚拟化**（`uniform_list`），支持 10k entries。
 - 拖拽：local↔remote 上传/下载（`DragPreview` + drop handlers）。
-- 传输：分组（active/queued/completed/failed）、cancel/retry、planning 流式、history 持久化 + 重试。
-- 连接：connect form、host-key modal、冲突 modal（含 apply-to-all）、Keychain profile。
-- Settings/About surface、拖拽、复制路径、多标签、多窗口（本轮新增）。
+- 传输：分组（active/queued/completed/failed）、cancel/retry、planning 流式、history 持久化 + 重试；**真实速度/ETA**。
+- 连接：connect form（**紧凑 profile picker**）、host-key modal、冲突 modal（含 apply-to-all）、Keychain + **Settings Profiles CRUD**、recents。
+- 文件操作：删除/重命名/新建文件夹、右键菜单、行内编辑。
+- 导航：type-to-filter、back/forward、面包屑、Go to Path、隐藏文件、列排序。
+- 效率：command palette、键盘多选/翻页、MRU tab 切换。
+- 持久化：session 布局恢复（不自动连）、recents、窗口标题。
+- Settings/About surface、复制路径、多标签、多窗口。
 
-**确认缺失/半成品（本计划要补的）：**
+**原「确认缺失」表（历史记录，2026-07-14 起全部已关闭）：**
 
-| 缺口 | 证据 | 归属优先级 |
-| --- | --- | --- |
-| **无任何用户级文件操作**（删除/重命名/新建文件夹） | `AppCommand` 枚举（`core.rs:1000`）只有 read + transfer + connect；无 `DeleteEntry`/`RenameEntry`/`CreateDirectory`（唯一的 `Rename` 是传输冲突用的 `RenameStrategy`） | **① 最高** |
-| **传输速度/ETA 是硬编码占位符** | `render.rs` `render_transfer_job`：`format!("{} / {} · — MB/s · ETA —", …)` —— 字节进度真实、但速度和 ETA 是字面量 `— MB/s · ETA —` | **② 高** |
-| **无目录内搜索/过滤** | 文件 pane 无 filter 字段、无 type-to-filter | ①（可用性） |
-| **无右键上下文菜单** | 无 secondary-click / context-menu 处理 | ① |
-| **path bar 无"后退"** | 只有 up/refresh/copy，无导航历史 back/forward | ②（导航反馈） |
-| **command palette 是 stub** | `OpenCommandPalette` action 已定义但未绑定键、无 palette UI | 键盘/效率 |
-| **键盘导航不完整** | 只绑定了 up/down/enter/cmd-up；缺 page up/down、home/end、shift 范围多选 | 键盘/效率 |
-| **tab 切换按创建顺序非 MRU** | `activate_tab_in_direction` 走 `Vec` 顺序（规范 §5 要求 MRU） | 键盘/效率 |
-| **无 session 恢复** | `TabId` 不持久化，重启从空 tab 开始 | 上手/持久化 |
-| **首次加载无 skeleton** | 有 `is_refreshing` 标记与"Refreshing…"，但首载无骨架屏（规范 §6.3 允许 skeleton/spinner） | ② |
+| 缺口（起草时） | 关闭于 |
+| --- | --- |
+| 无用户级文件操作 | 阶段 1 |
+| 传输速度/ETA 占位符 | 阶段 2 |
+| 无目录内搜索/过滤 | 阶段 3 |
+| 无右键上下文菜单 | 阶段 1 |
+| path bar 无后退 | 阶段 3 |
+| command palette stub | 阶段 4 |
+| 键盘导航不完整 | 阶段 4 |
+| tab 非 MRU | 阶段 4 |
+| 无 session 恢复 | 阶段 5 |
+| 首载反馈不足 | 阶段 2 |
 
 ---
 
 ## 阶段 1 — 核心文件操作（最高优先，系统做透）
+
+**状态（2026-07-14）：✅ 已交付**
 
 **目标：** 让 macSFTP 从"只读 + 传输"变成可当主力用的 SFTP 客户端 —— 远程与本地都能删除、重命名、新建文件夹，且键盘 + 右键 + 按钮三条入口齐全（规范 §2.2）。
 
@@ -63,6 +72,8 @@
 
 ## 阶段 2 — 反馈与可观测性（第二优先，系统做透）
 
+**状态（2026-07-14）：✅ 已交付**
+
 **目标：** 让所有"进行中/加载中/出错"状态在原位透明表达（规范 §2.3/§6.3/§7/§10），消灭占位符与静默。
 
 ### 2a. 真实传输速度 + ETA（消灭 `— MB/s · ETA —` 占位符）
@@ -89,6 +100,8 @@
 
 ## 阶段 3 — 搜索与目录导航（补齐"核心文件操作"的可用性）
 
+**状态（2026-07-14）：✅ 已交付**
+
 **目标：** 大目录里能快速定位与穿梭（规范 §6.1/§6.2）。
 
 - **目录内 type-to-filter**：pane 聚焦时直接敲字 → 增量过滤当前列表（不发网络，纯本地过滤已加载 entries）；`Esc` 清除。
@@ -103,6 +116,8 @@
 
 ## 阶段 4 — 键盘与命令面板（效率）
 
+**状态（2026-07-14）：✅ 已交付**
+
 **目标：** 高频动作三入口齐全、纯键盘可完成一切（规范 §2.2/§9/§12）。
 
 - **Command palette**：实现 `OpenCommandPalette`（当前 stub）——`cmd-shift-p` 打开，模糊搜索所有 app-level action，Enter 执行（规范 §9：忘快捷键也能用 palette 完成）。复用 `InputState` + 虚拟列表。
@@ -116,6 +131,8 @@
 
 ## 阶段 5 — 上手与持久化（降低重复成本）
 
+**状态（2026-07-14）：✅ 已交付**（布局恢复，不自动 Connect）
+
 **目标：** 重启/重连不必从零（规范目标：状态透明、快速路径）。
 
 - **Session 恢复**：关闭时持久化打开的 tab（host/path/profile 引用，不存 secret），重启后可选恢复上次工作区。
@@ -128,6 +145,8 @@
 ---
 
 ## 阶段 6 — 打磨与达标（收尾）
+
+**状态（2026-07-14）：✅ 已交付**（审计清单见 `docs/plans/2026-07-14-phase6-polish-audit.md`；交互式 GUI 手测部分为 accepted risk）
 
 **目标：** 过规范 §12/§13 与 §15 评审清单。
 
@@ -162,3 +181,15 @@
 - 窄窗口文本是否不溢出？是否不阻塞主线程？是否能处理 10k entries？
 - icon-only button 是否有 tooltip？是否未泄露 secret / 内部术语？
 - 危险操作（删除、覆盖）是否有确认或可撤销语义？
+
+---
+
+## 阶段后补充（2026-07-14，不在原六阶段内）
+
+| 专项 | 状态 | 文档 |
+| --- | --- | --- |
+| Settings → Profiles 管理 | ✅ | `docs/plans/2026-07-14-profile-management-*` |
+| Connect profile 紧凑选择器 | ✅ | `docs/plans/2026-07-14-connect-panel-profile-picker-*` |
+| Transfer drawer 可调高度 / 粘性头 | ✅ | `docs/plans/2026-07-14-transfer-drawer-ux-*` |
+
+**后续改进 backlog（摘要）：** Connect picker 行标签与 Enter 行为、Settings 草稿丢弃、§15 交互手测签字、profile 保存路径去重、多窗口 session 写盘策略。完整列表见 `docs/progress-analysis-2026-07-14.md` §5–§6。
