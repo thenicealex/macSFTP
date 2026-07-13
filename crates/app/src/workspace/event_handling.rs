@@ -183,8 +183,8 @@ impl crate::workspace::Workspace {
             }
             AppEvent::FsOperationFailed { scope, failure } => {
                 // FsScope has no session_id; filter by tab + epoch only.
-                // Phase 1 surfaces failures in the status bar (and keeps the
-                // listing visible). Phase 2 will add in-pane Retry UI.
+                // Fs failures stay status-bar-only (listing remains visible);
+                // directory-read errors use RemoteOperationFailed + in-pane Retry.
                 let accept = match scope {
                     macsftp_core::FsScope::Local { tab_id } => {
                         self.state.tabs.find_tab(tab_id).is_some()

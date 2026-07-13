@@ -9,8 +9,8 @@ use macsftp_core::{
 use macsftp_ui::{
     ActiveTheme, DragPreview, FileRowModel, IconName, TextFieldModel, connection_status,
     empty_state, file_row, file_table_header, format_size, format_timestamp, icon, icon_button,
-    section_header_static, tab, text_button, text_field, text_tooltip, transfer_history_detail,
-    transfer_history_title, transfer_row, transfer_title,
+    loading_state, section_header_static, tab, text_button, text_field, text_tooltip,
+    transfer_history_detail, transfer_history_title, transfer_row, transfer_title,
 };
 
 use crate::resources::{ActiveResources, ActiveTransfers};
@@ -385,7 +385,7 @@ impl crate::workspace::Workspace {
         let list: gpui::AnyElement = if let Some(placeholder) = connection_placeholder {
             placeholder
         } else if entry_count == 0 && is_remote_refreshing {
-            empty_state("Loading…", vec![], cx).into_any_element()
+            loading_state("Loading…", cx).into_any_element()
         } else if entry_count == 0 {
             empty_state("Empty directory", vec![], cx).into_any_element()
         } else {

@@ -1937,4 +1937,41 @@ mod tests {
         });
         let _ = std::fs::remove_dir_all(&fixture);
     }
+
+    /// App-level wiring: after workspace init, `SharedTransfers.rates` is
+    /// reachable via `ActiveTransfers` and produces speed from observes.
+    #[gpui::test]
+    fn rate_book_observe_produces_speed_snapshot(cx: &mut TestAppContext) {
+        use std::time::{Duration, Instant};
+
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        let transfer_id = TransferId(7);
+        let t0 = Instant::now();
+
+        workspace.update(&mut cx, |_workspace, cx| {
+            cx.rates_mut().observe(transfer_id, 0, t0);
+            cx.rates_mut()
+                .observe(transfer_id, 1_000_000, t0 + Duration::from_secs(1));
+            let snap = cx.rates().snapshot(
+                transfer_id,
+                1_000_000,
+                Some(2_000_000),
+                t0 + Duration::from_secs(1),
+            );
+            assert!(
+                snap.speed_bps
+                    .is_some_and(|speed| speed > 900_000.0 && speed < 1_100_000.0),
+                "expected ~1 MB/s after two observes 1s apart, got {:?}",
+                snap.speed_bps
+            );
+            assert!(!snap.stalled);
+            let detail =
+                crate::rate_sampler::format_running_detail(1_000_000, Some(2_000_000), &snap);
+            assert!(
+                detail.contains("MB/s") || detail.contains("KB/s"),
+                "detail should include speed: {detail}"
+            );
+            assert!(detail.contains("ETA"), "detail should include ETA: {detail}");
+        });
+    }
 }

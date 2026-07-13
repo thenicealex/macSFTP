@@ -235,3 +235,26 @@ pub fn empty_state(
             empty.child(div().flex().gap_2().children(actions))
         })
 }
+
+/// First-load / busy placeholder: static activity glyph + short message.
+/// Centered like [`empty_state`]; no animation dependency required.
+pub fn loading_state(message: impl Into<SharedString>, cx: &App) -> impl IntoElement {
+    let theme = cx.theme();
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .items_center()
+        .justify_center()
+        .gap_2()
+        .text_size(px(13.0))
+        .text_color(theme.colors.text_muted)
+        .font_family(theme.fonts.ui_family.clone())
+        .child(
+            div()
+                .text_size(px(18.0))
+                .text_color(theme.colors.accent)
+                .child("↻"),
+        )
+        .child(message.into())
+}

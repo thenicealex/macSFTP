@@ -8,7 +8,8 @@ mod transfer_row;
 mod workspace_widgets;
 
 pub use components::{
-    IconButton, TextButton, Tooltip, empty_state, icon_button, text_button, text_tooltip,
+    IconButton, TextButton, Tooltip, empty_state, icon_button, loading_state, text_button,
+    text_tooltip,
 };
 pub use file_list::{
     FileRowModel, MODIFIED_COLUMN_WIDTH, SIZE_COLUMN_WIDTH, file_row, file_table_header,
