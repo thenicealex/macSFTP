@@ -8,10 +8,10 @@ use gpui::{
 use macsftp_core::{
     AppCommand, AppState,
     CommandDispatchError, ConnectCommand, ConnectionSettings, ConnectionState,
-    EntryPath, LocalPath, ProfileId, TabId, TabState,
+    EntryPath, LocalPath, ProfileId, RemotePath, TabId, TabState,
 };
 use macsftp_sftp::{EventReceiver, RuntimeClient};
-use macsftp_storage::AppearancePreference;
+use macsftp_storage::{AppearancePreference, SessionFile, SessionTabSnapshot};
 use macsftp_ui::{
     ActiveTheme, InputState, Theme, empty_state, text_button,
 };
@@ -63,6 +63,17 @@ impl PaneFilter {
 enum WorkspaceSurface {
     Files,
     Settings,
+}
+
+/// Non-secret connection target restored from `session.json` for form
+/// prefill and post-connect remote path navigation.
+#[derive(Debug, Clone)]
+pub(crate) struct RestoredTabTarget {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub profile_id: Option<ProfileId>,
+    pub remote_path: Option<RemotePath>,
 }
 
 pub struct Workspace {
@@ -120,9 +131,13 @@ pub struct Workspace {
     tab_settings: HashMap<TabId, ConnectionSettings>,
     /// Per-tab local/remote back-forward history (session-only).
     tab_nav: HashMap<TabId, TabNavState>,
+    /// Connection meta restored from `session.json` (form prefill / path).
+    restored_targets: HashMap<TabId, RestoredTabTarget>,
     /// Guards against double-flushing history if the quit hook fires
     /// more than once.
     transfer_history_flushed: bool,
+    /// Guards against double-flushing session layout on quit.
+    session_flushed: bool,
     _appearance_subscription: Subscription,
     /// Keeps the event drain task alive for the workspace's lifetime.
     _event_drain: Task<()>,
@@ -132,6 +147,7 @@ impl Workspace {
     pub fn new(
         runtime_client: RuntimeClient,
         mut event_receiver: EventReceiver,
+        restore_session: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -208,19 +224,162 @@ impl Workspace {
             selection_anchor: None,
             tab_settings: HashMap::new(),
             tab_nav: HashMap::new(),
+            restored_targets: HashMap::new(),
             transfer_history_flushed: false,
+            session_flushed: false,
             _appearance_subscription: appearance_subscription,
             _event_drain: event_drain,
         };
-        // Persist in-flight transfers to disk when the app quits (plan §18)
-        // so they can be shown and retried on next launch.
+        // Persist transfer history and session layout when the app quits.
         cx.on_app_quit(|workspace, cx| {
             workspace.flush_transfer_history(cx);
+            workspace.flush_session(cx);
             async {}
         })
         .detach();
-        workspace.open_new_tab(window, cx);
+        // Restore previous tabs only on the first window. Never auto-connect.
+        if restore_session {
+            workspace.restore_session_tabs(window, cx);
+        }
+        if workspace.state.tabs.tabs.is_empty() {
+            workspace.open_new_tab(window, cx);
+        }
         workspace
+    }
+
+    /// Rebuild disconnected tabs from `session.json`. Does not send ConnectTab.
+    fn restore_session_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let file = cx.resources().session.file().clone();
+        if file.tabs.is_empty() {
+            return;
+        }
+        let mut restored_ids = Vec::new();
+        for snap in &file.tabs {
+            let tab_id = cx.resources().next_tab_id();
+            let title = if snap.title.is_empty() {
+                snap.host.clone()
+            } else {
+                snap.title.clone()
+            };
+            let mut tab = TabState::new(tab_id, title);
+            tab.profile_id = snap.profile_id.map(ProfileId);
+            tab.connection = ConnectionState::Empty;
+            if let Some(local) = &snap.local_path {
+                let path = LocalPath::new(local.clone());
+                if let Some(message) = Self::load_local_directory(&path, &mut tab) {
+                    self.status_message = Some(message.into());
+                }
+            } else if let Some(message) =
+                Self::load_local_directory(&self.default_local_path, &mut tab)
+            {
+                self.status_message = Some(message.into());
+            }
+            if let Some(remote) = &snap.remote_path {
+                tab.remote.path = Some(RemotePath::new(remote.clone()));
+                tab.remote.entries.clear();
+            }
+            self.restored_targets.insert(
+                tab_id,
+                RestoredTabTarget {
+                    host: snap.host.clone(),
+                    port: snap.port,
+                    username: snap.username.clone(),
+                    profile_id: snap.profile_id.map(ProfileId),
+                    remote_path: snap
+                        .remote_path
+                        .as_ref()
+                        .map(|path| RemotePath::new(path.clone())),
+                },
+            );
+            self.state.tabs.open_tab(tab);
+            restored_ids.push(tab_id);
+            self.touch_mru(tab_id);
+        }
+        let active_index = file
+            .active_tab_index
+            .min(restored_ids.len().saturating_sub(1));
+        if let Some(active_id) = restored_ids.get(active_index).copied() {
+            self.state.tabs.active_tab_id = Some(active_id);
+            self.touch_mru(active_id);
+        }
+        self.clear_filters();
+        self.reset_scroll_positions();
+        self.focus_pane(PaneSide::Local, window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn build_session_snapshot(&self) -> SessionFile {
+        let tabs: Vec<SessionTabSnapshot> = self
+            .state
+            .tabs
+            .tabs
+            .iter()
+            .map(|tab| {
+                let settings = self.tab_settings.get(&tab.id);
+                let restored = self.restored_targets.get(&tab.id);
+                SessionTabSnapshot {
+                    title: tab.title.clone(),
+                    profile_id: tab.profile_id.map(|id| id.0),
+                    host: settings
+                        .map(|s| s.host.clone())
+                        .or_else(|| restored.map(|r| r.host.clone()))
+                        .unwrap_or_else(|| tab.title.clone()),
+                    port: settings
+                        .map(|s| s.port)
+                        .or_else(|| restored.map(|r| r.port))
+                        .unwrap_or(22),
+                    username: settings
+                        .map(|s| s.username.clone())
+                        .or_else(|| restored.map(|r| r.username.clone()))
+                        .unwrap_or_default(),
+                    local_path: tab.local.path.as_ref().map(|p| p.as_str().to_string()),
+                    remote_path: tab
+                        .remote
+                        .path
+                        .as_ref()
+                        .map(|p| p.as_str().to_string())
+                        .or_else(|| {
+                            restored.and_then(|r| {
+                                r.remote_path
+                                    .as_ref()
+                                    .map(|path| path.as_str().to_string())
+                            })
+                        }),
+                }
+            })
+            .collect();
+        let active_tab_index = self
+            .state
+            .tabs
+            .active_tab_id
+            .and_then(|id| self.state.tabs.tabs.iter().position(|t| t.id == id))
+            .unwrap_or(0);
+        SessionFile {
+            version: SessionFile::CURRENT_VERSION,
+            active_tab_index,
+            tabs,
+        }
+    }
+
+    pub(crate) fn flush_session(&mut self, cx: &mut Context<Self>) {
+        if self.session_flushed {
+            return;
+        }
+        self.session_flushed = true;
+        // Multi-window MVP: each workspace overwrites session.json on quit.
+        // Last writer wins; if >1 window, log once (design accepts loss of other windows).
+        if cx.windows().len() > 1 {
+            tracing::warn!(
+                windows = cx.windows().len(),
+                "multiple windows open; session.json will reflect this workspace only"
+            );
+        }
+        let snapshot = self.build_session_snapshot();
+        let session = &mut cx.resources_mut().session;
+        session.replace(snapshot);
+        if let Err(error) = session.save() {
+            tracing::warn!(error = %error, "could not save session.json");
+        }
     }
     pub(crate) fn active_tab(&self) -> Option<&TabState> {
         self.state.tabs.active_tab()

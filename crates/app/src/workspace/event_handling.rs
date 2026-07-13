@@ -97,21 +97,33 @@ impl crate::workspace::Workspace {
             AppEvent::TabConnected(scoped) => {
                 let tab_id = scoped.scope.tab_id;
                 let remote_root = scoped.payload.remote_root;
+                // Prefer the path restored from the previous session so the
+                // user lands where they left off; fall back to the actor's
+                // remote_root. Clear the preference after use so reconnect
+                // navigates from the live path.
+                let navigate_to = {
+                    let restored = self
+                        .restored_targets
+                        .get(&tab_id)
+                        .and_then(|target| target.remote_path.clone());
+                    restored.unwrap_or(remote_root)
+                };
+                if let Some(target) = self.restored_targets.get_mut(&tab_id) {
+                    target.remote_path = None;
+                }
                 if let Some(tab) = self.state.tabs.find_tab_mut(tab_id) {
                     tab.complete_connect(
                         scoped.scope.session_id,
                         macsftp_core::Timestamp(std::time::SystemTime::now()),
                     );
-                    // Start from the canonical remote root. The actor will
-                    // replace this empty first-load state with a real listing.
                     tab.remote.entries.clear();
-                    tab.remote.path = Some(remote_root.clone());
+                    tab.remote.path = Some(navigate_to.clone());
                     tab.remote.is_refreshing = false;
                     tab.remote.error = None;
                     tab.selection.selected_paths.clear();
                 }
                 self.remote_scroll = UniformListScrollHandle::new();
-                self.request_remote_directory(tab_id, remote_root, cx);
+                self.request_remote_directory(tab_id, navigate_to, cx);
                 // Reconcile remote residual temp files from a previous run
                 // now that a live session to this host exists (plan M5/M6).
                 self.clean_remote_residual_temps(tab_id, cx);

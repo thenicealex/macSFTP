@@ -243,11 +243,14 @@ fn open_workspace_window(cx: &mut App) -> gpui::Result<()> {
         (controller.client(), controller.event_receiver())
     };
 
+    // First window restores the previous session layout; Cmd+N windows start empty.
+    let restore_session = cx.windows().is_empty();
+
     // The first window (including one reopened after the last closed) opens
     // centered at the default size. Additional windows pass `None` so gpui
     // cascades them off the active window instead of stacking exactly on
     // top of it.
-    let window_bounds = if cx.windows().is_empty() {
+    let window_bounds = if restore_session {
         Some(WindowBounds::Windowed(Bounds::centered(
             None,
             size(px(1200.0), px(800.0)),
@@ -267,7 +270,11 @@ fn open_workspace_window(cx: &mut App) -> gpui::Result<()> {
             }),
             ..Default::default()
         },
-        |window, cx| cx.new(|cx| Workspace::new(runtime_client, event_receiver, window, cx)),
+        |window, cx| {
+            cx.new(|cx| {
+                Workspace::new(runtime_client, event_receiver, restore_session, window, cx)
+            })
+        },
     )?;
     cx.activate(true);
     Ok(())

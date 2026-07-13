@@ -55,7 +55,9 @@ mod tests {
         TrustRequestId, UserFacingError,
     };
     use macsftp_sftp::{BridgeChannels, EventReceiver, RuntimeClient};
-    use macsftp_storage::AppearancePreference;
+    use macsftp_storage::{
+        AppearancePreference, SessionFile, SessionStore, SessionTabSnapshot,
+    };
     use macsftp_ui::{Appearance, Theme};
 
     use super::{AppPaths, PaneSide, Workspace, WorkspaceSurface};
@@ -72,7 +74,14 @@ mod tests {
     fn init_workspace(
         cx: &mut TestAppContext,
     ) -> (Entity<Workspace>, VisualTestContext, BridgeChannels) {
-        let app_paths = temp_app_paths();
+        init_workspace_with_paths(cx, temp_app_paths(), false)
+    }
+
+    fn init_workspace_with_paths(
+        cx: &mut TestAppContext,
+        app_paths: AppPaths,
+        restore_session: bool,
+    ) -> (Entity<Workspace>, VisualTestContext, BridgeChannels) {
         let config = macsftp_storage::ConfigStore::with_defaults(app_paths.config_file.clone());
         cx.update(|cx| {
             cx.set_global(Theme::dark());
@@ -92,7 +101,9 @@ mod tests {
         let (_event_tx, receiver) = macsftp_sftp::test_event_channel(
             RuntimeBridgeConfig::default().event_channel_capacity,
         );
-        let window = cx.add_window(|window, cx| Workspace::new(client, receiver, window, cx));
+        let window = cx.add_window(|window, cx| {
+            Workspace::new(client, receiver, restore_session, window, cx)
+        });
         let workspace = window
             .root(cx)
             .expect("workspace root view should be available");
@@ -2756,6 +2767,165 @@ mod tests {
             ws.cancel_active_modal(window, cx);
             assert!(!ws.go_to_path_open);
         });
+    }
+
+    #[gpui::test]
+    fn restore_session_rebuilds_tabs_without_connect(cx: &mut TestAppContext) {
+        let app_paths = temp_app_paths();
+        let mut store = SessionStore::open_or_empty(app_paths.session_file.clone());
+        store.replace(SessionFile {
+            version: SessionFile::CURRENT_VERSION,
+            active_tab_index: 1,
+            tabs: vec![
+                SessionTabSnapshot {
+                    title: "alpha.example".into(),
+                    profile_id: Some(3),
+                    host: "alpha.example".into(),
+                    port: 22,
+                    username: "alice".into(),
+                    local_path: None,
+                    remote_path: Some("/home/alice/proj".into()),
+                },
+                SessionTabSnapshot {
+                    title: "beta.example".into(),
+                    profile_id: None,
+                    host: "beta.example".into(),
+                    port: 2222,
+                    username: "bob".into(),
+                    local_path: None,
+                    remote_path: Some("/var/www".into()),
+                },
+            ],
+        });
+        store
+            .save()
+            .expect("session.json must save for restore test");
+
+        let (workspace, cx, channels) = init_workspace_with_paths(cx, app_paths, true);
+
+        workspace.read_with(&cx, |workspace, _| {
+            assert_eq!(workspace.state.tabs.tabs.len(), 2);
+            assert_eq!(workspace.state.tabs.tabs[0].title, "alpha.example");
+            assert_eq!(workspace.state.tabs.tabs[1].title, "beta.example");
+            assert_eq!(
+                workspace.state.tabs.tabs[0].profile_id,
+                Some(ProfileId(3))
+            );
+            assert_eq!(
+                workspace.state.tabs.tabs[0].remote.path,
+                Some(RemotePath::new("/home/alice/proj"))
+            );
+            assert_eq!(
+                workspace.state.tabs.tabs[1].remote.path,
+                Some(RemotePath::new("/var/www"))
+            );
+            for tab in &workspace.state.tabs.tabs {
+                assert_eq!(
+                    tab.connection,
+                    ConnectionState::Empty,
+                    "restored tabs must not auto-connect"
+                );
+            }
+            assert_eq!(
+                workspace.state.tabs.active_tab_id,
+                Some(TabId(2)),
+                "active_tab_index 1 selects the second restored tab"
+            );
+        });
+
+        assert!(
+            channels.command_rx.try_recv().is_err(),
+            "restore must not enqueue ConnectTab or any other command"
+        );
+    }
+
+    #[gpui::test]
+    fn build_session_snapshot_round_trips_active_tab_and_paths(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            // Start with the default tab; open a second and configure both.
+            {
+                let tab = workspace.active_tab_mut().expect("default tab");
+                tab.title = "first-host".into();
+                tab.profile_id = Some(ProfileId(9));
+                tab.local.path = Some(LocalPath::new("/tmp/local-a"));
+                tab.remote.path = Some(RemotePath::new("/home/a"));
+            }
+            workspace.open_new_tab(window, cx);
+            {
+                let tab = workspace.active_tab_mut().expect("second tab");
+                tab.title = "second-host".into();
+                tab.local.path = Some(LocalPath::new("/tmp/local-b"));
+                tab.remote.path = Some(RemotePath::new("/home/b"));
+            }
+            // Activate the first tab so active index is 0.
+            let first_id = workspace.state.tabs.tabs[0].id;
+            workspace.activate_tab(first_id, cx);
+
+            let snapshot = workspace.build_session_snapshot();
+            assert_eq!(snapshot.active_tab_index, 0);
+            assert_eq!(snapshot.tabs.len(), 2);
+            assert_eq!(snapshot.tabs[0].title, "first-host");
+            assert_eq!(snapshot.tabs[0].profile_id, Some(9));
+            assert_eq!(
+                snapshot.tabs[0].local_path.as_deref(),
+                Some("/tmp/local-a")
+            );
+            assert_eq!(snapshot.tabs[0].remote_path.as_deref(), Some("/home/a"));
+            assert_eq!(snapshot.tabs[1].title, "second-host");
+            assert_eq!(
+                snapshot.tabs[1].local_path.as_deref(),
+                Some("/tmp/local-b")
+            );
+            assert_eq!(snapshot.tabs[1].remote_path.as_deref(), Some("/home/b"));
+        });
+    }
+
+    #[gpui::test]
+    fn flush_session_writes_session_json(cx: &mut TestAppContext) {
+        let app_paths = temp_app_paths();
+        let session_path = app_paths.session_file.clone();
+        let (workspace, mut cx, _channels) =
+            init_workspace_with_paths(cx, app_paths, false);
+
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            {
+                let tab = workspace.active_tab_mut().expect("default tab");
+                tab.title = "saved-host".into();
+                tab.remote.path = Some(RemotePath::new("/srv/data"));
+            }
+            workspace.tab_settings.insert(
+                TabId(1),
+                ConnectionSettings {
+                    host: "saved-host".into(),
+                    port: 2222,
+                    username: "deploy".into(),
+                    auth: AuthCredential::Password {
+                        password: "not-persisted".into(),
+                    },
+                },
+            );
+            workspace.flush_session(cx);
+            // Second flush is a no-op guard.
+            workspace.flush_session(cx);
+        });
+
+        let reloaded = SessionStore::open(session_path).expect("session.json should exist");
+        assert_eq!(reloaded.file().tabs.len(), 1);
+        assert_eq!(reloaded.file().tabs[0].title, "saved-host");
+        assert_eq!(reloaded.file().tabs[0].host, "saved-host");
+        assert_eq!(reloaded.file().tabs[0].port, 2222);
+        assert_eq!(reloaded.file().tabs[0].username, "deploy");
+        assert_eq!(
+            reloaded.file().tabs[0].remote_path.as_deref(),
+            Some("/srv/data")
+        );
+        let raw = std::fs::read_to_string(reloaded.path().as_str()).expect("read session.json");
+        assert!(
+            !raw.contains("not-persisted"),
+            "password must never appear in session.json: {raw}"
+        );
     }
 
     /// App-level wiring: after workspace init, `SharedTransfers.rates` is
