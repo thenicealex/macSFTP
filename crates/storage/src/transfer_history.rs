@@ -1,13 +1,15 @@
-use std::time::{Duration, SystemTime};
+use std::io::ErrorKind;
 
 use macsftp_core::{LocalPath, TransferHistoryId, TransferHistoryRecord};
 use serde::{Deserialize, Serialize};
 
 use super::StorageError;
 
-/// On-disk envelope for transfer history (plan §18). Mirrors
-/// `ProfilesFile`: a versioned wrapper around the record list so the
-/// file format can evolve without breaking older writes.
+/// On-disk envelope for residual transfer-history cleanup.
+///
+/// Product policy is **session-scoped** history (no cross-launch catalog).
+/// The file only exists so quit/launch can wipe leftovers from older builds
+/// that used to persist plans; the app never *loads* records for UI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferHistoryFile {
     pub version: u32,
@@ -24,9 +26,6 @@ impl TransferHistoryFile {
         }
     }
 
-    /// Read the history file from `path`. A missing file is an empty
-    /// store (first launch); other IO or parse failures surface as
-    /// `StorageError`.
     pub fn load(path: &LocalPath) -> Result<Self, StorageError> {
         match std::fs::read_to_string(path.as_str()) {
             Ok(contents) => {
@@ -36,9 +35,7 @@ impl TransferHistoryFile {
                     })?;
                 Ok(parsed)
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(TransferHistoryFile::new())
-            }
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(TransferHistoryFile::new()),
             Err(error) => Err(StorageError::Io {
                 path: path.as_str().to_string(),
                 message: error.to_string(),
@@ -46,8 +43,6 @@ impl TransferHistoryFile {
         }
     }
 
-    /// Atomically write the history file via a temp file + rename, so a
-    /// crash mid-write can't leave a truncated file.
     pub fn save(&self, path: &LocalPath) -> Result<(), StorageError> {
         let json = serde_json::to_string_pretty(self).map_err(|error| StorageError::Parse {
             message: error.to_string(),
@@ -72,14 +67,8 @@ impl Default for TransferHistoryFile {
     }
 }
 
-/// Retention policy (plan §18): keep completed/failed history for 7 days
-/// or at most 100 entries, whichever is the smaller set.
-const MAX_HISTORY_RECORDS: usize = 100;
-const RETENTION_DAYS: u64 = 7;
-const RETENTION_SECONDS: u64 = RETENTION_DAYS * 24 * 60 * 60;
-
-/// Disk-backed transfer-history store. Owns the `transfer_history.json`
-/// path and the in-memory `TransferHistoryFile`, keeping them in sync.
+/// In-process transfer-history bag used for optional mid-session records
+/// (tests / retry helpers). Does **not** restore a catalog across launches.
 pub struct TransferHistoryStore {
     path: LocalPath,
     records: Vec<TransferHistoryRecord>,
@@ -87,7 +76,23 @@ pub struct TransferHistoryStore {
 }
 
 impl TransferHistoryStore {
-    /// Open the store at `path`, loading any existing records.
+    /// Product entry point: empty memory and best-effort delete of any residual
+    /// on-disk file from older cross-session history builds.
+    pub fn open_session(path: LocalPath) -> Self {
+        match std::fs::remove_file(path.as_str()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            // Leave a broken/unreadable residual for `clear_and_persist` on quit.
+            Err(_) => {}
+        }
+        Self {
+            path,
+            records: Vec::new(),
+            next_id: TransferHistoryId(1),
+        }
+    }
+
+    /// Load records from disk (unit tests / diagnostics only — not used by app startup).
     pub fn open(path: LocalPath) -> Result<Self, StorageError> {
         let file = TransferHistoryFile::load(&path)?;
         let next_id = file
@@ -104,9 +109,7 @@ impl TransferHistoryStore {
         })
     }
 
-    /// Like `open`, but never fails: a missing or unreadable history
-    /// file yields an empty store that still remembers `path`, so the
-    /// next save recovers.
+    /// Like [`Self::open`], but never fails (missing/corrupt → empty).
     pub fn open_or_empty(path: LocalPath) -> Self {
         match Self::open(path.clone()) {
             Ok(store) => store,
@@ -130,52 +133,33 @@ impl TransferHistoryStore {
         self.records.iter().find(|record| record.id == id)
     }
 
-    /// Allocate a fresh history id for a new record.
     pub fn allocate_id(&mut self) -> TransferHistoryId {
         let id = self.next_id;
         self.next_id = TransferHistoryId(self.next_id.0 + 1);
         id
     }
 
-    /// Append freshly persisted records (e.g. in-flight transfers
-    /// captured at app close). Callers are responsible for de-duping
-    /// within a session.
+    /// Append mid-session records (tests inject unfinished/failed for retry).
     pub fn append(&mut self, new_records: Vec<TransferHistoryRecord>) {
         self.records.extend(new_records);
     }
 
-    /// Remove a record by id (e.g. after it is retried). Returns true if
-    /// a record was removed.
     pub fn remove(&mut self, id: TransferHistoryId) -> bool {
         let before = self.records.len();
         self.records.retain(|record| record.id != id);
         self.records.len() != before
     }
 
-    /// Drop every in-memory record. Callers that need the empty set on
-    /// disk should follow with [`Self::save`].
     pub fn clear(&mut self) {
         self.records.clear();
     }
 
-    /// Enforce the retention policy: drop records older than
-    /// `RETENTION_DAYS` and cap the remainder at `MAX_HISTORY_RECORDS`,
-    /// keeping the most recently updated.
-    pub fn prune(&mut self, now: macsftp_core::Timestamp) {
-        let cutoff = now
-            .0
-            .checked_sub(Duration::from_secs(RETENTION_SECONDS))
-            .unwrap_or(SystemTime::UNIX_EPOCH);
-        self.records
-            .retain(|record| record.last_updated.0 >= cutoff);
-        if self.records.len() > MAX_HISTORY_RECORDS {
-            self.records
-                .sort_by_key(|record| std::cmp::Reverse(record.last_updated));
-            self.records.truncate(MAX_HISTORY_RECORDS);
-        }
+    /// Empty the store and write an empty file (session end / residual wipe).
+    pub fn clear_and_persist(&mut self) -> Result<(), StorageError> {
+        self.clear();
+        self.save()
     }
 
-    /// Flush the in-memory records to disk atomically.
     pub fn save(&self) -> Result<(), StorageError> {
         TransferHistoryFile {
             version: TransferHistoryFile::CURRENT_VERSION,
@@ -196,8 +180,6 @@ mod tests {
 
     use super::TransferHistoryStore;
 
-    // Unique temp path per call so concurrent tests never clobber each
-    // other's transfer_history.json (plan §9).
     fn temp_history_path() -> LocalPath {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, Ordering::SeqCst);
@@ -209,11 +191,7 @@ mod tests {
         ))
     }
 
-    fn sample_record(
-        id: u64,
-        status: TransferHistoryStatus,
-        age_secs: u64,
-    ) -> TransferHistoryRecord {
+    fn sample_record(id: u64, status: TransferHistoryStatus) -> TransferHistoryRecord {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock must be after the Unix epoch")
@@ -227,76 +205,65 @@ mod tests {
             metadata_policy: MetadataPolicy::default(),
             conflict_policy: ConflictPolicy::Ask,
             status,
-            started_at: Timestamp::from_secs_since_epoch(now - age_secs),
-            last_updated: Timestamp::from_secs_since_epoch(now - age_secs),
+            started_at: Timestamp::from_secs_since_epoch(now),
+            last_updated: Timestamp::from_secs_since_epoch(now),
         }
     }
 
     #[test]
-    fn history_round_trips_through_disk() {
+    fn open_session_starts_empty_and_deletes_residual_file() {
+        let path = temp_history_path();
+        let mut seeded = TransferHistoryStore::open_or_empty(path.clone());
+        seeded.append(vec![sample_record(1, TransferHistoryStatus::Completed)]);
+        seeded.save().expect("seed residual file");
+        assert!(std::path::Path::new(path.as_str()).exists());
+
+        let session = TransferHistoryStore::open_session(path.clone());
+        assert!(session.records().is_empty());
+        assert!(
+            !std::path::Path::new(path.as_str()).exists(),
+            "residual cross-session file must be removed"
+        );
+    }
+
+    #[test]
+    fn history_round_trips_through_disk_for_diagnostics() {
         let path = temp_history_path();
         let mut store = TransferHistoryStore::open_or_empty(path.clone());
-        assert!(store.records().is_empty());
-
-        store.append(vec![sample_record(1, TransferHistoryStatus::Unfinished, 0)]);
+        store.append(vec![sample_record(
+            1,
+            TransferHistoryStatus::Failed {
+                message: "boom".into(),
+                retryable: true,
+            },
+        )]);
         store.save().expect("save");
 
         let mut reopened = TransferHistoryStore::open_or_empty(path);
         assert_eq!(reopened.records().len(), 1);
         assert_eq!(reopened.records()[0].id, TransferHistoryId(1));
-        // allocate_id continues after the loaded max.
         assert_eq!(reopened.allocate_id(), TransferHistoryId(2));
     }
 
     #[test]
-    fn missing_file_loads_empty() {
-        let path = temp_history_path();
-        let store = TransferHistoryStore::open_or_empty(path);
-        assert!(store.records().is_empty());
-    }
-
-    #[test]
-    fn prune_drops_old_and_caps_count() {
+    fn clear_and_persist_writes_empty_file() {
         let path = temp_history_path();
         let mut store = TransferHistoryStore::open_or_empty(path.clone());
-        // 5 old (30 days) + 5 fresh.
-        for id in 1..=10u64 {
-            let age = if id <= 5 { 30 * 24 * 3600 } else { 60 };
-            store.append(vec![sample_record(
-                id,
-                TransferHistoryStatus::Completed,
-                age,
-            )]);
-        }
-        let now = Timestamp::from_secs_since_epoch(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("system clock must be after the Unix epoch")
-                .as_secs(),
-        );
-        store.prune(now);
-        // Old ones gone; fresh five remain.
-        assert_eq!(store.records().len(), 5);
-        assert!(
-            store
-                .records()
-                .iter()
-                .all(|r| matches!(r.status, TransferHistoryStatus::Completed))
-        );
+        store.append(vec![sample_record(3, TransferHistoryStatus::Unfinished)]);
+        store.save().expect("save");
+        store.clear_and_persist().expect("clear");
+        assert!(store.records().is_empty());
+        let reopened = TransferHistoryStore::open_or_empty(path);
+        assert!(reopened.records().is_empty());
     }
 
     #[test]
     fn remove_drops_record() {
         let path = temp_history_path();
-        let mut store = TransferHistoryStore::open_or_empty(path.clone());
-        store.append(vec![sample_record(
-            99,
-            TransferHistoryStatus::Unfinished,
-            0,
-        )]);
+        let mut store = TransferHistoryStore::open_or_empty(path);
+        store.append(vec![sample_record(99, TransferHistoryStatus::Unfinished)]);
         assert!(store.remove(TransferHistoryId(99)));
         assert!(store.records().is_empty());
-        // Removing a missing id is a no-op.
         assert!(!store.remove(TransferHistoryId(99)));
     }
 }

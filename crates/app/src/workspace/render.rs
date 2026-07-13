@@ -4,14 +4,14 @@ use gpui::{
     uniform_list,
 };
 use macsftp_core::{
-    AuthMethodKind, ConnectionState, EntryPath, LocalPath, RemotePath, TransferHistoryRecord,
-    TransferHistoryStatus, TransferId, TransferJob, TransferState,
+    AuthMethodKind, ConnectionState, EntryPath, LocalPath, RemotePath, TransferId, TransferJob,
+    TransferState,
 };
 use macsftp_ui::{
     ActiveTheme, DragPreview, FileRowModel, IconName, InputState, TextFieldModel,
     connection_status, empty_state, file_row, file_table_header, format_size, format_timestamp,
     icon, icon_button, loading_state, section_header_static, tab, text_button, text_field,
-    text_tooltip, transfer_history_detail, transfer_history_title, transfer_row, transfer_title,
+    text_tooltip, transfer_row, transfer_title,
 };
 
 use crate::palette_commands::labeled_shortcut;
@@ -1249,7 +1249,7 @@ impl crate::workspace::Workspace {
             .min_h_0()
             .overflow_y_scroll();
 
-        if jobs.is_empty() && cx.resources().transfer_history.records().is_empty() {
+        if jobs.is_empty() {
             body = body.child(
                 div()
                     .flex()
@@ -1333,61 +1333,7 @@ impl crate::workspace::Workspace {
             }
         }
 
-        // History: session-scoped store (cleared on quit / launch residual
-        // wipe). Normally empty; kept for retry paths that inject records.
-        let mut history_records: Vec<TransferHistoryRecord> =
-            cx.resources().transfer_history.records().to_vec();
-        history_records.sort_by_key(|record| std::cmp::Reverse(record.last_updated));
-        if !history_records.is_empty() {
-            body = body.child(section_header_static(
-                "History",
-                history_records.len(),
-                &theme,
-            ));
-            for record in &history_records {
-                body = body.child(self.render_history_record(record, cx));
-            }
-        }
-
         drawer.child(body)
-    }
-    pub(crate) fn render_history_record(
-        &self,
-        record: &TransferHistoryRecord,
-        cx: &mut Context<Self>,
-    ) -> macsftp_ui::TransferRow {
-        let theme = cx.theme().clone();
-        let title = transfer_history_title(record);
-        let (state_label, state_color): (SharedString, Hsla) = match &record.status {
-            TransferHistoryStatus::Unfinished => ("Unfinished".into(), theme.colors.warning),
-            TransferHistoryStatus::Completed => ("Completed".into(), theme.colors.success),
-            TransferHistoryStatus::Cancelled => ("Cancelled".into(), theme.colors.text_muted),
-            TransferHistoryStatus::Failed { .. } => ("Failed".into(), theme.colors.error),
-        };
-        let connected = self
-            .active_tab()
-            .and_then(connected_transfer_session)
-            .is_some();
-        let mut row = transfer_row(
-            ("history", record.id.0),
-            record.direction,
-            title,
-            state_label,
-            state_color,
-        )
-        .detail(transfer_history_detail(record));
-        // Only offer retry when a live connection exists — the retry
-        // rebuilds a transfer against the current connected tab.
-        if record.is_retryable() && connected {
-            let workspace = cx.entity();
-            let record_id = record.id;
-            row = row.on_retry(move |_event, _window, cx| {
-                workspace.update(cx, |workspace, cx| {
-                    workspace.retry_history_transfer(record_id, cx);
-                });
-            });
-        }
-        row
     }
     pub(crate) fn render_transfer_job(
         &self,

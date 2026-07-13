@@ -1603,24 +1603,15 @@ Profile 结构预留：
 
 ### Transfer history
 
-用于 UI 便利，不作为审计日志。
+**单一语义（2026-07-14）：无跨会话传输目录。**
 
-策略（已调整，2026-07-14）：
-
-- **History 仅会话内有效**：App 退出时清空 memory + `transfer_history.json`，
-  **不**把 completed/unfinished plan 跨启动持久化；
-- 启动时若磁盘仍有旧记录（旧版本或异常退出残留），加载后立即 clear 并写回空文件；
-- 会话内 Completed/Failed 仍在 drawer 的 live 分组中展示（`TransferStore`），随进程结束消失；
-- 存储层仍保留 7 天 / 100 条 prune API 供未来若恢复跨会话 history 使用。
-
-实现：`TransferHistoryStore` 落盘
-`{app_support}/transfer_history.json`（原子 temp+rename）。
-`on_app_quit` → `flush_transfer_history` **clear + save empty**（不再 snapshot plans）。
-`AppResources::load` 丢弃残留 records。Retry 路径仍可用（测试或未来手动注入 record）：
-用当前已连接 tab 的 `tab_id`/`session_epoch`/`profile_id`
-由 `TransferHistoryRecord::to_start_command` 重建 `StartTransferCommand`。
-`core` 含 `TransferHistoryId`/`TransferHistoryStatus`/`TransferHistoryRecord`
-（serde），`Timestamp` 手动 serde（Unix 秒）。
+- Drawer 只展示进程内 `TransferStore` 的 Active / Queued / Completed / Failed。
+- **没有**跨启动 History 分区；退出后不恢复未完成/已完成清单。
+- `TransferHistoryStore` 仅会话内存袋：启动 `open_session` 清空并删除残留
+  `transfer_history.json`；退出 `clear_and_persist` 写空文件。
+- `TransferHistoryRecord` + `retry_history_transfer` 保留给测试与命令重建
+  （`to_start_command` 用当前 tab 的 `session_epoch`/`profile_id`），**不**再
+  从 plan snapshot 写入磁盘、**不**做 7 天/100 条 prune 目录策略。
 
 ## 19. 测试计划
 
@@ -2064,12 +2055,12 @@ M7 ≈ 100%；MVP ≈ 100%。
 
 1. Profile folder/group：MVP 不做 UI，但 profile 数据结构预留 `group_id: Option<ProfileGroupId>`。
 2. 同 profile 多 tab：允许。`TabState` 与 `ProfileId` 是多对一。
-3. 关闭 app 时运行中 transfer：MVP 取消运行中 transfer，并在下次启动展示未完成 history。
+3. 关闭 app 时运行中 transfer：随进程结束；**不**跨启动展示未完成 history（会话清空）。
 4. 远端删除：SFTP 无 trash 概念。MVP 直接 confirm 删除，批量删除必须显示不可撤销提示。
 5. private key passphrase：默认可记住到 Keychain，但 profile 必须有 `remember_passphrase` 开关。
 6. `~/.ssh/config` Host alias：不进 MVP。profile 字段保持与 ssh config 概念接近，方便后续导入。
 7. 默认本地起始目录：首次为 home；之后可按 profile 记住上次路径。
-8. transfer completed history：保留 7 天或最多 100 条，取更小集合。
+8. transfer history：无跨会话目录；drawer 只显示进程内 `TransferStore` 分组。
 9. known_hosts 子集外 entry：按行忽略并写 WARN log，不阻断整个文件解析。
 10. 无 Docker 的本地 integration tests：默认 skip 并打印提示；CI 必须提供 Docker。
 11. M0 类型草案范围：只定义核心 struct/enum/id/new/default 骨架，不实现业务状态机。

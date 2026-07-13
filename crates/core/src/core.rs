@@ -1689,11 +1689,12 @@ impl std::fmt::Display for TransferHistoryId {
     }
 }
 
-/// Outcome of a transfer as recorded in on-disk history (plan §18).
+/// Outcome tag for a session-scoped transfer history record.
 ///
-/// `Unfinished` is the state written for transfers that were still in
-/// flight when the app closed — they are shown on next launch and can be
-/// retried manually.
+/// Product policy: history is **not** a cross-launch catalog. Live
+/// Active/Completed/Failed jobs live in `TransferStore` for the process
+/// lifetime. These records exist for mid-session helpers/tests (e.g. retry
+/// command rebuild) and are wiped on quit/launch residual purge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransferHistoryStatus {
     Unfinished,
@@ -1702,9 +1703,9 @@ pub enum TransferHistoryStatus {
     Cancelled,
 }
 
-/// A persisted transfer record. Holds enough to rebuild a
+/// Session-scoped transfer snapshot used to rebuild a
 /// `StartTransferCommand` for the *current* connected tab on retry
-/// (plan §18: retry does not restore the closed tab's session actor).
+/// (does not restore a closed tab's session actor).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransferHistoryRecord {
     pub id: TransferHistoryId,
@@ -1751,25 +1752,6 @@ impl TransferHistoryRecord {
                     ..
                 }
         )
-    }
-}
-
-/// Map a plan state to a persisted history status. `root_job` is accepted
-/// for future per-job detail but the plan state is authoritative.
-pub fn history_status_for_plan(
-    plan_state: TransferPlanState,
-    _root_job: Option<&TransferJob>,
-) -> TransferHistoryStatus {
-    match plan_state {
-        TransferPlanState::Queued | TransferPlanState::Planning | TransferPlanState::Running => {
-            TransferHistoryStatus::Unfinished
-        }
-        TransferPlanState::Completed => TransferHistoryStatus::Completed,
-        TransferPlanState::Cancelled => TransferHistoryStatus::Cancelled,
-        TransferPlanState::Failed { error } => TransferHistoryStatus::Failed {
-            message: error.message.to_string(),
-            retryable: error.retryable,
-        },
     }
 }
 
@@ -1880,12 +1862,11 @@ mod tests {
     use super::AppEvent;
     use super::{
         AppState, AuthFingerprint, AuthMethod, AuthMethodKind, ConflictPolicy, ConflictRequest,
-        ConflictRequestId, ConnectionProfile, ConnectionState, DisconnectReason, ErrorCode,
-        HostKeyPrompt, LocalPath, MetadataPolicy, ModalRequest, ModalRequestId, ProfileId,
-        RemoteEventScope, RemotePath, RemoteScoped, RuntimeBridgeConfig, SecretRef, SessionId,
-        TabId, TabState, Timestamp, TransferDirection, TransferEndpoint, TransferHistoryId,
-        TransferHistoryRecord, TransferHistoryStatus, TransferId, TransferJob, TransferPlanId,
-        TransferPlanState, TransferState, TrustRequest, TrustRequestId, UserFacingError,
+        ConflictRequestId, ConnectionProfile, ConnectionState, DisconnectReason, HostKeyPrompt,
+        LocalPath, MetadataPolicy, ModalRequest, ModalRequestId, ProfileId, RemoteEventScope,
+        RemotePath, RemoteScoped, RuntimeBridgeConfig, SecretRef, SessionId, TabId, TabState,
+        Timestamp, TransferDirection, TransferEndpoint, TransferHistoryId, TransferHistoryRecord,
+        TransferHistoryStatus, TransferId, TransferPlanId, TrustRequest, TrustRequestId,
     };
 
     #[test]
@@ -2738,44 +2719,6 @@ mod tests {
         let restored: TransferHistoryRecord = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(record, restored);
         assert!(restored.is_retryable());
-    }
-
-    #[test]
-    fn transfer_history_status_maps_running_plan_to_unfinished() {
-        let running = super::history_status_for_plan(
-            TransferPlanState::Running,
-            Some(&TransferJob {
-                id: TransferId(1),
-                direction: TransferDirection::Download,
-                source: TransferEndpoint::Remote(RemotePath::new("/srv/a")),
-                destination: TransferEndpoint::Local(LocalPath::new("/tmp/a")),
-                state: TransferState::Running {
-                    bytes_done: 0,
-                    bytes_total: None,
-                    started_at: Timestamp::unix_epoch(),
-                },
-                metadata_policy: MetadataPolicy::default(),
-                conflict_policy: ConflictPolicy::Ask,
-                warnings: Vec::new(),
-                created_at: Timestamp::unix_epoch(),
-            }),
-        );
-        assert_eq!(running, TransferHistoryStatus::Unfinished);
-
-        let failed = super::history_status_for_plan(
-            TransferPlanState::Failed {
-                error: UserFacingError::new(ErrorCode::Unknown, "t", "disk full")
-                    .with_retryable(true),
-            },
-            None,
-        );
-        assert_eq!(
-            failed,
-            TransferHistoryStatus::Failed {
-                message: "disk full".into(),
-                retryable: true,
-            }
-        );
     }
 
     #[test]

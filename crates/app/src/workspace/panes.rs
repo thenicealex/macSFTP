@@ -16,7 +16,7 @@ use macsftp_core::{
     HostKeyPrompt, LocalPath, ModalRequest, ModalRequestId, ProfileId, RemotePath, SecretRef,
     SortDirection, TabId, TabState, Timestamp, TransferConflictPrompt, TransferDirection,
     TransferEndpoint, TransferHistoryId, TransferHistoryRecord, TransferHistoryStatus, TransferJob,
-    TransferState, TrustRequestId, UserFacingError, history_status_for_plan, sort_entries,
+    TransferState, TrustRequestId, UserFacingError, sort_entries,
 };
 use macsftp_platform::{AppPaths, read_local_directory};
 use macsftp_sftp::{EventReceiver, RuntimeClient};

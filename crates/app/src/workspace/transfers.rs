@@ -16,7 +16,7 @@ use macsftp_core::{
     LocalPath, ModalRequest, ModalRequestId, ProfileId, RemotePath, SecretRef, TabId, TabState,
     Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferHistoryId,
     TransferHistoryRecord, TransferHistoryStatus, TransferJob, TransferState, TrustRequestId,
-    UserFacingError, history_status_for_plan, sort_entries,
+    UserFacingError, sort_entries,
 };
 use macsftp_platform::{AppPaths, read_local_directory};
 use macsftp_sftp::{EventReceiver, RuntimeClient};
@@ -278,12 +278,9 @@ impl crate::workspace::Workspace {
         if self.transfer_history_flushed {
             return;
         }
-        // Session-scoped history: do not carry completed/unfinished plans
-        // across process launches. Clear memory + disk so the next run
-        // starts with an empty History section.
-        let history = &mut cx.resources_mut().transfer_history;
-        history.clear();
-        if let Err(error) = history.save() {
+        // Session end: empty memory + residual file. Live jobs already die
+        // with TransferStore; there is no cross-session history catalog.
+        if let Err(error) = cx.resources_mut().transfer_history.clear_and_persist() {
             warn!(error = %error, "could not clear transfer history on quit");
         }
         self.transfer_history_flushed = true;

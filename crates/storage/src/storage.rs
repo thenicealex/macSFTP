@@ -9,8 +9,8 @@ pub use keychain::{KeychainError, KeychainStore};
 pub mod config;
 pub use config::{AppConfig, AppearancePreference, ConfigError, ConfigStore};
 
-/// On-disk transfer history (plan §18): persists in-flight and finished
-/// transfers so they survive app restarts and can be retried.
+/// Session-scoped transfer-history bag + residual file wipe (not a
+/// cross-launch catalog).
 pub mod transfer_history;
 pub use transfer_history::TransferHistoryStore;
 
