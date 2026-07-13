@@ -8,7 +8,7 @@ use gpui::{
 use macsftp_core::{
     AppCommand, AppState,
     CommandDispatchError, ConnectCommand, ConnectionSettings, ConnectionState,
-    LocalPath, ProfileId, TabId, TabState,
+    EntryPath, LocalPath, ProfileId, TabId, TabState,
 };
 use macsftp_sftp::{EventReceiver, RuntimeClient};
 use macsftp_storage::AppearancePreference;
@@ -21,9 +21,10 @@ use crate::app_actions::{
     ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, CopyPath, CopyVersionInfo,
     DeleteSelection, DownloadSelection, FilterPane, FocusLocalPane, FocusRemotePane, GoToPath,
     MinimizeWindow, NavigateBack, NavigateForward, NewFolder, NewTab, OpenLogFolder,
-    OpenSelectedEntry, OpenSettings, ParentDirectory, ReconnectTab, RefreshPane, RenameEntry,
-    SelectNextEntry, SelectPrevEntry, ShowAbout, ShowTransferDrawer, ToggleHiddenFiles,
-    UploadSelection, ZoomWindow,
+    OpenSelectedEntry, OpenSettings, PageDown, PageUp, ParentDirectory, ReconnectTab, RefreshPane,
+    RenameEntry, SelectAllEntries, SelectFirstEntry, SelectLastEntry, SelectNextEntry,
+    SelectNextEntryExtend, SelectPrevEntry, SelectPrevEntryExtend, ShowAbout, ShowTransferDrawer,
+    ToggleHiddenFiles, UploadSelection, ZoomWindow,
 };
 use crate::resources::ActiveResources;
 use crate::workspace::file_ops::{ContextMenuState, DeleteConfirmState, InlineEditState};
@@ -102,6 +103,8 @@ pub struct Workspace {
     /// Active-tab type-to-filter state (cleared on tab switch / navigate).
     local_filter: PaneFilter,
     remote_filter: PaneFilter,
+    /// Anchor path for shift-range multi-select (view-local; single-select resets it).
+    selection_anchor: Option<EntryPath>,
     /// Session credentials per tab, kept in memory only so Reconnect
     /// works without re-typing. Replaced by Keychain-backed profiles.
     tab_settings: HashMap<TabId, ConnectionSettings>,
@@ -186,6 +189,7 @@ impl Workspace {
             go_to_path_error: None,
             local_filter: PaneFilter::default(),
             remote_filter: PaneFilter::default(),
+            selection_anchor: None,
             tab_settings: HashMap::new(),
             tab_nav: HashMap::new(),
             transfer_history_flushed: false,
@@ -503,6 +507,32 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|workspace, _: &SelectPrevEntry, _window, cx| {
                 workspace.move_selection(workspace.focused_side, -1, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &SelectNextEntryExtend, _window, cx| {
+                workspace.move_selection_extend(workspace.focused_side, 1, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &SelectPrevEntryExtend, _window, cx| {
+                workspace.move_selection_extend(workspace.focused_side, -1, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &PageDown, _window, cx| {
+                workspace.page_selection(workspace.focused_side, 1, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &PageUp, _window, cx| {
+                workspace.page_selection(workspace.focused_side, -1, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &SelectFirstEntry, _window, cx| {
+                let side = workspace.focused_side;
+                workspace.select_index(side, 0, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &SelectLastEntry, _window, cx| {
+                let side = workspace.focused_side;
+                let n = workspace.entry_count(side, cx);
+                if n > 0 {
+                    workspace.select_index(side, n - 1, cx);
+                }
+            }))
+            .on_action(cx.listener(|workspace, _: &SelectAllEntries, _window, cx| {
+                workspace.select_all_visible(workspace.focused_side, cx);
             }))
             .on_action(cx.listener(|workspace, _: &OpenSelectedEntry, window, cx| {
                 workspace.open_selected_entry(window, cx);

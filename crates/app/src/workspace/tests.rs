@@ -61,8 +61,8 @@ mod tests {
     use super::{AppPaths, PaneSide, Workspace, WorkspaceSurface};
     use crate::app_actions::{
         self, ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, FilterPane, GoToPath,
-        NavigateBack, NewTab, OpenSettings, SelectNextEntry, SelectPrevEntry, ShowAbout,
-        ShowTransferDrawer, ToggleHiddenFiles,
+        NavigateBack, NewTab, OpenSettings, PageDown, SelectAllEntries, SelectNextEntry,
+        SelectNextEntryExtend, SelectPrevEntry, ShowAbout, ShowTransferDrawer, ToggleHiddenFiles,
     };
     use crate::resources::{ActiveResources, ActiveTransfers};
     use crate::workspace::nav::HistoryOp;
@@ -270,6 +270,116 @@ mod tests {
         });
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[gpui::test]
+    fn page_down_moves_by_ten_on_visible_list(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        let (fixture, base) = temp_local_fixture("page-down");
+        for i in 0..15 {
+            std::fs::write(fixture.join(format!("f{i:02}.txt")), b"x").expect("write file");
+        }
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.set_local_path(base, window, cx);
+            assert_eq!(
+                workspace.entry_count(PaneSide::Local, cx),
+                15,
+                "fixture has 15 plain files"
+            );
+            workspace.select_index(PaneSide::Local, 0, cx);
+        });
+
+        cx.dispatch_action(PageDown);
+        workspace.read_with(&cx, |workspace, cx| {
+            assert_eq!(
+                workspace.selected_index(PaneSide::Local, cx),
+                Some(10),
+                "page down steps PAGE_SIZE=10 on the visible list"
+            );
+            let tab = workspace.active_tab().expect("active tab");
+            assert_eq!(
+                tab.selection.selected_paths.len(),
+                1,
+                "page down single-selects"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[gpui::test]
+    fn shift_down_extends_selection_range(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        let (fixture, base) = temp_local_fixture("shift-range");
+        for name in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"] {
+            std::fs::write(fixture.join(name), b"x").expect("write file");
+        }
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.set_local_path(base, window, cx);
+            assert_eq!(workspace.entry_count(PaneSide::Local, cx), 5);
+            // Anchor at visible index 1, then extend to 3.
+            workspace.select_index(PaneSide::Local, 1, cx);
+            workspace.extend_selection_to(PaneSide::Local, 3, cx);
+            let tab = workspace.active_tab().expect("active tab");
+            assert_eq!(
+                tab.selection.selected_paths.len(),
+                3,
+                "closed range [1,3] yields three paths"
+            );
+        });
+
+        // Shift-down from the active edge continues the range.
+        cx.dispatch_action(SelectNextEntryExtend);
+        workspace.read_with(&cx, |workspace, _| {
+            let tab = workspace.active_tab().expect("active tab");
+            assert_eq!(
+                tab.selection.selected_paths.len(),
+                4,
+                "shift-down grows selection by one"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[gpui::test]
+    fn select_all_selects_all_visible(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        let (fixture, base) = temp_local_fixture("select-all");
+        std::fs::write(fixture.join(".hidden"), b"h").expect("write hidden");
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(fixture.join(name), b"x").expect("write visible");
+        }
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.set_local_path(base, window, cx);
+            assert_eq!(
+                workspace.entry_count(PaneSide::Local, cx),
+                3,
+                "dotfile hidden by default"
+            );
+        });
+
+        cx.dispatch_action(SelectAllEntries);
+        workspace.read_with(&cx, |workspace, _| {
+            let tab = workspace.active_tab().expect("active tab");
+            assert_eq!(
+                tab.selection.selected_paths.len(),
+                3,
+                "cmd-a selects only visible entries"
+            );
+            assert!(
+                tab.selection
+                    .selected_paths
+                    .iter()
+                    .all(|path| matches!(path, EntryPath::Local(local) if !local.as_str().contains("/.hidden"))),
+                "hidden path must not be selected"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&fixture);
     }
 
     #[gpui::test]

@@ -43,6 +43,9 @@ use crate::workspace::nav::HistoryOp;
 use crate::workspace::visible_entries::{visible_local_indices, visible_remote_indices};
 use crate::workspace::*;
 
+/// Visible-list page step for PageUp / PageDown (design §3).
+pub const PAGE_SIZE: usize = 10;
+
 impl crate::workspace::Workspace {
     pub(crate) fn focus_pane(
         &mut self,
@@ -133,22 +136,63 @@ impl crate::workspace::Workspace {
     pub(crate) fn selected_index(&self, side: PaneSide, cx: &App) -> Option<usize> {
         let tab = self.active_tab()?;
         let selected = tab.selection.selected_paths.first()?;
+        self.visible_index_of_path(side, selected, cx)
+    }
+
+    /// Visible-list index of `path` on `side`, if currently shown.
+    pub(crate) fn visible_index_of_path(
+        &self,
+        side: PaneSide,
+        path: &EntryPath,
+        cx: &App,
+    ) -> Option<usize> {
+        let tab = self.active_tab()?;
         let visible = self.visible_indices(side, cx);
-        match (side, selected) {
-            (PaneSide::Local, EntryPath::Local(path)) => visible.iter().position(|&real_index| {
-                tab.local
-                    .entries
-                    .get(real_index)
-                    .is_some_and(|entry| &entry.path == path)
-            }),
-            (PaneSide::Remote, EntryPath::Remote(path)) => visible.iter().position(|&real_index| {
-                tab.remote
-                    .entries
-                    .get(real_index)
-                    .is_some_and(|entry| &entry.path == path)
-            }),
+        match (side, path) {
+            (PaneSide::Local, EntryPath::Local(local_path)) => {
+                visible.iter().position(|&real_index| {
+                    tab.local
+                        .entries
+                        .get(real_index)
+                        .is_some_and(|entry| &entry.path == local_path)
+                })
+            }
+            (PaneSide::Remote, EntryPath::Remote(remote_path)) => {
+                visible.iter().position(|&real_index| {
+                    tab.remote
+                        .entries
+                        .get(real_index)
+                        .is_some_and(|entry| &entry.path == remote_path)
+                })
+            }
             _ => None,
         }
+    }
+
+    /// Active end of a multi-select range (the selected visible index away from the anchor).
+    fn selection_edge_visible_index(&self, side: PaneSide, cx: &App) -> Option<usize> {
+        let tab = self.active_tab()?;
+        let mut selected_visible = Vec::new();
+        for path in &tab.selection.selected_paths {
+            if let Some(index) = self.visible_index_of_path(side, path, cx) {
+                selected_visible.push(index);
+            }
+        }
+        if selected_visible.is_empty() {
+            return None;
+        }
+        let lo = *selected_visible.iter().min()?;
+        let hi = *selected_visible.iter().max()?;
+        let anchor_index = self
+            .selection_anchor
+            .as_ref()
+            .and_then(|path| self.visible_index_of_path(side, path, cx));
+        // Keep the end opposite the anchor so shift+arrow continues from there.
+        Some(match anchor_index {
+            Some(anchor) if anchor == lo => hi,
+            Some(anchor) if anchor == hi => lo,
+            _ => hi,
+        })
     }
 
     pub(crate) fn select_index(
@@ -160,6 +204,7 @@ impl crate::workspace::Workspace {
         let Some(path) = self.entry_path_at(side, visible_index, cx) else {
             return;
         };
+        self.selection_anchor = Some(path.clone());
         if let Some(tab) = self.active_tab_mut() {
             tab.selection.selected_paths = vec![path];
         }
@@ -180,6 +225,99 @@ impl crate::workspace::Workspace {
             None => 0,
         };
         self.select_index(side, next_index, cx);
+    }
+
+    pub(crate) fn extend_selection_to(
+        &mut self,
+        side: PaneSide,
+        visible_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let visible = self.visible_indices(side, cx);
+        if visible.is_empty() {
+            return;
+        }
+        let end = visible_index.min(visible.len() - 1);
+        let anchor_path = self.selection_anchor.clone().or_else(|| {
+            self.entry_path_at(side, self.selected_index(side, cx).unwrap_or(0), cx)
+        });
+        let Some(anchor_path) = anchor_path else {
+            return;
+        };
+        if self.selection_anchor.is_none() {
+            self.selection_anchor = Some(anchor_path.clone());
+        }
+        let start = self
+            .visible_index_of_path(side, &anchor_path, cx)
+            .unwrap_or(end);
+        let (lo, hi) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        let mut paths = Vec::new();
+        for vi in lo..=hi {
+            if let Some(path) = self.entry_path_at(side, vi, cx) {
+                paths.push(path);
+            }
+        }
+        if let Some(tab) = self.active_tab_mut() {
+            tab.selection.selected_paths = paths;
+        }
+        self.scroll_handle(side)
+            .scroll_to_item(end, ScrollStrategy::Top);
+        cx.notify();
+    }
+
+    pub(crate) fn move_selection_extend(
+        &mut self,
+        side: PaneSide,
+        offset: isize,
+        cx: &mut Context<Self>,
+    ) {
+        let entry_count = self.entry_count(side, cx);
+        if entry_count == 0 {
+            return;
+        }
+        let current = self.selected_index(side, cx).unwrap_or(0);
+        let edge = self
+            .selection_edge_visible_index(side, cx)
+            .unwrap_or(current);
+        let next = (edge as isize + offset).clamp(0, entry_count as isize - 1) as usize;
+        self.extend_selection_to(side, next, cx);
+    }
+
+    pub(crate) fn select_all_visible(&mut self, side: PaneSide, cx: &mut Context<Self>) {
+        let n = self.entry_count(side, cx);
+        let mut paths = Vec::new();
+        for i in 0..n {
+            if let Some(path) = self.entry_path_at(side, i, cx) {
+                paths.push(path);
+            }
+        }
+        if let Some(first) = paths.first() {
+            self.selection_anchor = Some(first.clone());
+        }
+        if let Some(tab) = self.active_tab_mut() {
+            tab.selection.selected_paths = paths;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn page_selection(
+        &mut self,
+        side: PaneSide,
+        direction: isize,
+        cx: &mut Context<Self>,
+    ) {
+        let entry_count = self.entry_count(side, cx);
+        if entry_count == 0 {
+            return;
+        }
+        let current = self.selected_index(side, cx).unwrap_or(0);
+        let next = (current as isize + direction * PAGE_SIZE as isize)
+            .clamp(0, entry_count as isize - 1) as usize;
+        self.select_index(side, next, cx);
     }
 
     pub(crate) fn open_entry_at(
