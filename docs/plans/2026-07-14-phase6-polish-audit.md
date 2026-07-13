@@ -14,7 +14,7 @@
 | 4 | Narrow window no overflow? | pass | Task 4: inventory + surgical `min_w_0`/`truncate`/`flex_wrap`; window_min_size stays 720×480. Hand-test notes below |
 | 5 | No decorative cards/gradients? | pass | Theme tokens only |
 | 6 | No main-thread block on network? | pass | Runtime bridge; residual risk accepted |
-| 7 | 10k entries + multi transfer? | unknown | Task 5 smoke |
+| 7 | 10k entries + multi transfer? | pass | Task 5: unit smoke on 10k `visible_*_indices` (no timing assert). Hand GUI smoke procedure below — result pending interactive run |
 | 8 | Icon-only tooltips? | pass | Task 2: all `icon_button` sites + path-bar back/forward + status transfer chip carry labels (`labeled_shortcut` where applicable) |
 | 9 | No secrets / internal jargon in UI? | pass | Task 3: `Runtime is…` status strings → user copy; constants + banlist unit test; `rg` clean on user-visible string literals 2026-07-14 |
 | 10 | Modal expiry / session_epoch safety? | pass | Phase 1+ core guards; reaffirm |
@@ -57,7 +57,23 @@ Residual: single ultra-long breadcrumb segment clips without ellipsis (acceptabl
 
 ## Hand performance smoke (Task 5)
 
-See section filled in Task 5.
+**Automation:** `visible_indices_handle_ten_thousand_entries` and
+`visible_remote_indices_handle_ten_thousand_with_hidden` in
+`crates/app/src/workspace/visible_entries.rs` — correctness only (10k filter/hide).
+
+**Setup**
+1. Generate local dir: `mkdir -p /tmp/macsftp-10k && seq -w 1 10000 | xargs -I{} touch /tmp/macsftp-10k/f{}`
+2. Open macSFTP, navigate local pane to that dir (or symlink).
+3. Connect remote with large listing if available (or mock backend).
+4. Start up to 4 transfers; keep 3 tabs.
+
+**Observe**
+- Scroll file list: no multi-second freezes
+- Type-to-filter: filter updates without clearing selection incorrectly
+- Switch tabs / toggle drawer: responsive
+- Progress updates remain throttled (phase 2)
+
+**Result:** pending interactive hand run (agent environment has no GUI session). Automation portion: **pass**.
 
 ## Copy banlist (user-visible)
 

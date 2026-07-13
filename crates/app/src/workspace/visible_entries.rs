@@ -129,4 +129,50 @@ mod tests {
         );
         assert_eq!(visible_local_indices(&entries, true, "zzz"), Vec::<usize>::new());
     }
+
+    #[test]
+    fn visible_indices_handle_ten_thousand_entries() {
+        let entries: Vec<LocalEntry> = (0..10_000)
+            .map(|i| LocalEntry {
+                name: format!("file-{i:05}.txt"),
+                path: LocalPath::new(format!("/tmp/bulk/file-{i:05}.txt")),
+                kind: FileKind::File,
+                size: Some(i as u64),
+                permissions: None,
+                modified_at: None,
+                link_target: None,
+            })
+            .collect();
+        let all = visible_local_indices(&entries, true, "");
+        assert_eq!(all.len(), 10_000);
+
+        let filtered = visible_local_indices(&entries, true, "file-099");
+        assert!(
+            !filtered.is_empty() && filtered.len() < 10_000,
+            "substring filter must reduce 10k set"
+        );
+        // Correctness only — do not assert elapsed time (flaky on CI)
+    }
+
+    #[test]
+    fn visible_remote_indices_handle_ten_thousand_with_hidden() {
+        let entries: Vec<RemoteEntry> = (0..10_000)
+            .map(|i| RemoteEntry {
+                name: if i % 50 == 0 {
+                    format!(".hidden-{i}")
+                } else {
+                    format!("entry-{i}")
+                },
+                path: RemotePath::new(format!("/data/{i}")),
+                kind: FileKind::File,
+                size: None,
+                permissions: None,
+                modified_at: None,
+                link_target: None,
+            })
+            .collect();
+        let shown = visible_remote_indices(&entries, false, "");
+        assert_eq!(shown.len(), 10_000 - (10_000 / 50));
+        let _ = visible_remote_indices(&entries, true, "entry-1");
+    }
 }
