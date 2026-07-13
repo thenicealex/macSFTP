@@ -17,6 +17,10 @@ pub use transfer_history::TransferHistoryStore;
 pub mod residual_temp;
 pub use residual_temp::ResidualTempStore;
 
+/// Restorable workspace session tabs (plan §18 / Phase 5): `session.json`.
+pub mod session;
+pub use session::{SessionFile, SessionStore, SessionTabSnapshot};
+
 pub fn crate_name() -> &'static str {
     "macsftp-storage"
 }
