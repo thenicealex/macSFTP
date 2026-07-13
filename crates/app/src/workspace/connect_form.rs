@@ -43,7 +43,7 @@ pub(crate) struct ConnectForm {
     pub(crate) profile_name: InputState,
     /// Whether the inline profile picker panel is expanded.
     pub(crate) profile_picker_open: bool,
-    // Populated now so open/reset is correct; filter UI and Save-as expand land next.
+    // Populated now so open/reset is correct; filter UI lands next.
     #[allow(dead_code)]
     pub(crate) profile_picker_filter: InputState,
     #[allow(dead_code)]
@@ -231,6 +231,16 @@ impl ConnectForm {
             AuthMethodKind::PrivateKey => true,
         }
     }
+
+    /// Detach from the selected profile and clear secret fields for manual
+    /// editing. Host/port/username/key_path and auth method stay so the user
+    /// can tweak without retyping connection metadata.
+    pub(crate) fn switch_to_manual_entry(&mut self) {
+        self.source_profile_id = None;
+        self.password = InputState::new();
+        self.passphrase = InputState::new();
+        self.profile_picker_open = false;
+    }
 }
 
 impl crate::workspace::Workspace {
@@ -341,7 +351,25 @@ impl crate::workspace::Workspace {
                 }
             }
         }
+        // from_profile starts from empty() which already closes the picker;
+        // set explicitly so callers that mutate flags before assignment stay correct.
+        form.profile_picker_open = false;
         self.connect_form = Some(form);
+        cx.notify();
+    }
+
+    /// Apply a profile from the Connect picker: prefill via `use_profile`,
+    /// then ensure the popover is closed and the filter is cleared.
+    pub(crate) fn select_connect_profile(
+        &mut self,
+        profile_id: ProfileId,
+        cx: &mut Context<Self>,
+    ) {
+        self.use_profile(profile_id, cx);
+        if let Some(form) = &mut self.connect_form {
+            form.profile_picker_open = false;
+            form.profile_picker_filter = InputState::new();
+        }
         cx.notify();
     }
 

@@ -2590,6 +2590,116 @@ mod tests {
     }
 
     #[gpui::test]
+    fn connect_picker_select_profile_prefills_form(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.open_connect_form(window, cx);
+        });
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            let form = workspace.connect_form.as_mut().expect("form is open");
+            form.host.set_value("example.com");
+            form.username.set_value("alex");
+            form.password.set_value("hunter2");
+            form.profile_name.set_value("Work");
+            workspace.save_current_profile(cx);
+        });
+
+        let saved_id = workspace.read_with(&cx, |_workspace, cx| {
+            let profiles = cx.resources().profiles.profiles();
+            assert_eq!(profiles.len(), 1, "one profile saved");
+            assert_eq!(profiles[0].name, "Work");
+            profiles[0].id
+        });
+
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            let form = workspace.connect_form.as_mut().expect("form is open");
+            form.host.set_value("other.example.com");
+            form.username.set_value("other");
+            form.password = macsftp_ui::InputState::new();
+            form.profile_picker_open = true;
+            form.profile_picker_filter.set_value("work");
+            workspace.select_connect_profile(saved_id, cx);
+        });
+
+        workspace.read_with(&cx, |workspace, _| {
+            let form = workspace
+                .connect_form
+                .as_ref()
+                .expect("form open after select");
+            assert_eq!(form.source_profile_id, Some(saved_id));
+            assert_eq!(form.host.value(), "example.com");
+            assert_eq!(form.username.value(), "alex");
+            assert_eq!(
+                form.password.value(),
+                "hunter2",
+                "secret restored from Keychain"
+            );
+            assert!(
+                !form.profile_picker_open,
+                "selecting a profile must close the picker"
+            );
+            assert!(
+                form.profile_picker_filter.value().is_empty(),
+                "selecting a profile must clear the picker filter"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn connect_manual_entry_clears_profile_link_and_secrets(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.open_connect_form(window, cx);
+        });
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            let form = workspace.connect_form.as_mut().expect("form is open");
+            form.host.set_value("example.com");
+            form.username.set_value("alex");
+            form.password.set_value("hunter2");
+            form.profile_name.set_value("Work");
+            workspace.save_current_profile(cx);
+        });
+
+        let saved_id = workspace.read_with(&cx, |_workspace, cx| {
+            cx.resources().profiles.profiles()[0].id
+        });
+
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            workspace.select_connect_profile(saved_id, cx);
+            let form = workspace.connect_form.as_mut().expect("form is open");
+            form.profile_picker_open = true;
+            form.switch_to_manual_entry();
+        });
+
+        workspace.read_with(&cx, |workspace, _| {
+            let form = workspace
+                .connect_form
+                .as_ref()
+                .expect("form stays open after manual entry");
+            assert!(
+                form.source_profile_id.is_none(),
+                "manual entry must clear source_profile_id"
+            );
+            assert!(
+                form.password.value().is_empty(),
+                "manual entry must clear password"
+            );
+            assert_eq!(
+                form.host.value(),
+                "example.com",
+                "manual entry keeps host metadata"
+            );
+            assert_eq!(form.username.value(), "alex");
+            assert!(
+                !form.profile_picker_open,
+                "manual entry must close the picker"
+            );
+        });
+    }
+
+    #[gpui::test]
     fn connect_form_validates_before_sending(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
         workspace.update_in(&mut cx, |workspace, window, cx| {

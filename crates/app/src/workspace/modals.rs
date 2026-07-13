@@ -649,17 +649,39 @@ impl crate::workspace::Workspace {
                 );
             } else {
                 picker_panel = picker_panel.children(profiles.iter().map(|profile| {
+                    let profile_id = profile.id;
                     div()
                         .id(("profile-picker-row", profile.id.0))
                         .px_2()
                         .py_1()
                         .min_w_0()
                         .truncate()
+                        .cursor_pointer()
                         .text_size(px(12.0))
                         .text_color(theme.colors.text)
+                        .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                            workspace.select_connect_profile(profile_id, cx);
+                        }))
                         .child(profile.name.clone())
                 }));
             }
+            picker_panel = picker_panel.child(
+                div()
+                    .id("profile-picker-manual-entry")
+                    .px_2()
+                    .py_1()
+                    .min_w_0()
+                    .cursor_pointer()
+                    .text_size(px(12.0))
+                    .text_color(theme.colors.text_muted)
+                    .on_click(cx.listener(|workspace, _event, _window, cx| {
+                        if let Some(form) = &mut workspace.connect_form {
+                            form.switch_to_manual_entry();
+                            cx.notify();
+                        }
+                    }))
+                    .child("Manual entry"),
+            );
             card = card.child(picker_panel);
         }
 
