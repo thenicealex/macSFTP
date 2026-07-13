@@ -822,14 +822,15 @@ impl crate::workspace::Workspace {
                 bytes_done,
                 bytes_total,
                 ..
-            } => format!(
-                "{} / {} · — MB/s · ETA —",
-                format_size(Some(*bytes_done)),
-                bytes_total
-                    .map(|total| format_size(Some(total)).to_string())
-                    .unwrap_or_else(|| "?".to_string())
-            )
-            .into(),
+            } => {
+                let snap = cx.rates().snapshot(
+                    job_id,
+                    *bytes_done,
+                    *bytes_total,
+                    std::time::Instant::now(),
+                );
+                crate::rate_sampler::format_running_detail(*bytes_done, *bytes_total, &snap).into()
+            }
             TransferState::Completed if !job.warnings.is_empty() => job
                 .warnings
                 .last()
