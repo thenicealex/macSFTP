@@ -19,13 +19,15 @@ use tracing::warn;
 
 use crate::app_actions::{
     ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, CopyPath, CopyVersionInfo,
-    DeleteSelection, DownloadSelection, FocusLocalPane, FocusRemotePane, MinimizeWindow, NewFolder,
-    NewTab, OpenLogFolder, OpenSelectedEntry, OpenSettings, ParentDirectory, ReconnectTab,
-    RefreshPane, RenameEntry, SelectNextEntry, SelectPrevEntry, ShowAbout, ShowTransferDrawer,
-    ToggleHiddenFiles, UploadSelection, ZoomWindow,
+    DeleteSelection, DownloadSelection, FocusLocalPane, FocusRemotePane, MinimizeWindow,
+    NavigateBack, NavigateForward, NewFolder, NewTab, OpenLogFolder, OpenSelectedEntry,
+    OpenSettings, ParentDirectory, ReconnectTab, RefreshPane, RenameEntry, SelectNextEntry,
+    SelectPrevEntry, ShowAbout, ShowTransferDrawer, ToggleHiddenFiles, UploadSelection,
+    ZoomWindow,
 };
 use crate::resources::ActiveResources;
 use crate::workspace::file_ops::{ContextMenuState, DeleteConfirmState, InlineEditState};
+use crate::workspace::nav::{HistoryOp, TabNavState};
 
 /// Which file pane an action targets. Local is the default focus side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +77,8 @@ pub struct Workspace {
     /// Session credentials per tab, kept in memory only so Reconnect
     /// works without re-typing. Replaced by Keychain-backed profiles.
     tab_settings: HashMap<TabId, ConnectionSettings>,
+    /// Per-tab local/remote back-forward history (session-only).
+    tab_nav: HashMap<TabId, TabNavState>,
     /// Guards against double-flushing history if the quit hook fires
     /// more than once.
     transfer_history_flushed: bool,
@@ -150,6 +154,7 @@ impl Workspace {
             inline_edit: None,
             context_menu: None,
             tab_settings: HashMap::new(),
+            tab_nav: HashMap::new(),
             transfer_history_flushed: false,
             _appearance_subscription: appearance_subscription,
             _event_drain: event_drain,
@@ -199,6 +204,7 @@ impl Workspace {
         if self.state.tabs.close_tab(tab_id).is_none() {
             return;
         }
+        self.tab_nav.remove(&tab_id);
         // Tell the runtime to cancel the tab's actor and reject its
         // pending trust requests; late events are dropped by the stale
         // event guard because the tab no longer exists.
@@ -469,6 +475,12 @@ impl Render for Workspace {
             .on_action(cx.listener(|workspace, _: &ParentDirectory, window, cx| {
                 workspace.go_to_parent_directory(window, cx);
             }))
+            .on_action(cx.listener(|workspace, _: &NavigateBack, window, cx| {
+                workspace.navigate_focused(HistoryOp::Back, window, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &NavigateForward, window, cx| {
+                workspace.navigate_focused(HistoryOp::Forward, window, cx);
+            }))
             .on_action(cx.listener(|workspace, _: &CopyPath, _window, cx| {
                 workspace.copy_focused_path(cx);
             }))
@@ -540,6 +552,7 @@ mod event_handling;
 mod file_ops;
 mod helpers;
 mod modals;
+mod nav;
 mod panes;
 mod render;
 #[cfg(test)]

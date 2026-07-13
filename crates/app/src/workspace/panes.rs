@@ -39,6 +39,7 @@ use crate::app_actions::*;
 use crate::resources::ActiveResources;
 use crate::workspace::connect_form::*;
 use crate::workspace::helpers::*;
+use crate::workspace::nav::HistoryOp;
 use crate::workspace::visible_entries::{visible_local_indices, visible_remote_indices};
 use crate::workspace::*;
 
@@ -171,7 +172,7 @@ impl crate::workspace::Workspace {
                 };
                 if entry.kind == FileKind::Directory {
                     let path = entry.path.clone();
-                    self.set_local_path(path, window, cx);
+                    self.navigate_pane_local(path, HistoryOp::Push, window, cx);
                 }
             }
             PaneSide::Remote => {
@@ -182,7 +183,7 @@ impl crate::workspace::Workspace {
                     .filter(|entry| entry.kind == FileKind::Directory)
                     .map(|entry| entry.path.clone());
                 if let Some(path) = remote_directory {
-                    self.request_remote_directory(tab.id, path, cx);
+                    self.navigate_pane_remote(path, HistoryOp::Push, cx);
                 }
             }
         }
@@ -296,16 +297,18 @@ impl crate::workspace::Workspace {
         match side {
             PaneSide::Local => {
                 if let Some(parent) = tab.local.path.as_ref().and_then(LocalPath::parent) {
-                    self.set_local_path(parent, window, cx);
+                    self.navigate_pane_local(parent, HistoryOp::Push, window, cx);
                 }
             }
             PaneSide::Remote => {
                 if let Some(parent) = tab.remote.path.as_ref().and_then(RemotePath::parent) {
-                    self.request_remote_directory(tab.id, parent, cx);
+                    self.navigate_pane_remote(parent, HistoryOp::Push, cx);
                 }
             }
         }
     }
+
+    /// Refresh reloads the current path without pushing history.
     pub(crate) fn refresh_focused_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let side = self.focused_side;
         let Some(tab) = self.active_tab() else {
@@ -322,6 +325,151 @@ impl crate::workspace::Workspace {
                     self.request_remote_directory(tab.id, path, cx);
                 }
             }
+        }
+    }
+
+    /// Type-to-filter lands in a later task; clear is a no-op until then.
+    pub(crate) fn clear_filter(&mut self, _side: PaneSide) {}
+
+    pub(crate) fn navigate_focused(
+        &mut self,
+        op: HistoryOp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.focused_side {
+            PaneSide::Local => {
+                // Path is ignored for Back/Forward; required for Push/Replace.
+                self.navigate_pane_local(LocalPath::new(String::new()), op, window, cx);
+            }
+            PaneSide::Remote => {
+                self.navigate_pane_remote(RemotePath::new(String::new()), op, cx);
+            }
+        }
+    }
+
+    pub(crate) fn navigate_pane_local(
+        &mut self,
+        path: LocalPath,
+        op: HistoryOp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab_id) = self.active_tab().map(|tab| tab.id) else {
+            return;
+        };
+        let current = self
+            .active_tab()
+            .and_then(|tab| tab.local.path.clone());
+
+        let target = match op {
+            HistoryOp::Push => {
+                let nav = self.tab_nav.entry(tab_id).or_default();
+                nav.local.push_navigating_from(
+                    current.as_ref().map(|path| path.as_str()),
+                    path.as_str(),
+                );
+                path
+            }
+            HistoryOp::Replace => path,
+            HistoryOp::Back => {
+                let Some(current_path) = current.as_ref() else {
+                    return;
+                };
+                let nav = self.tab_nav.entry(tab_id).or_default();
+                let Some(target) = nav.local.go_back(current_path.as_str()) else {
+                    return;
+                };
+                LocalPath::new(target)
+            }
+            HistoryOp::Forward => {
+                let Some(current_path) = current.as_ref() else {
+                    return;
+                };
+                let nav = self.tab_nav.entry(tab_id).or_default();
+                let Some(target) = nav.local.go_forward(current_path.as_str()) else {
+                    return;
+                };
+                LocalPath::new(target)
+            }
+        };
+
+        self.set_local_path(target, window, cx);
+        self.clear_filter(PaneSide::Local);
+    }
+
+    pub(crate) fn navigate_pane_remote(
+        &mut self,
+        path: RemotePath,
+        op: HistoryOp,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab_id) = self.active_tab().map(|tab| tab.id) else {
+            return;
+        };
+        let current = self
+            .active_tab()
+            .and_then(|tab| tab.remote.path.clone());
+
+        let target = match op {
+            HistoryOp::Push => {
+                let nav = self.tab_nav.entry(tab_id).or_default();
+                nav.remote.push_navigating_from(
+                    current.as_ref().map(|path| path.as_str()),
+                    path.as_str(),
+                );
+                path
+            }
+            HistoryOp::Replace => path,
+            HistoryOp::Back => {
+                let Some(current_path) = current.as_ref() else {
+                    return;
+                };
+                let nav = self.tab_nav.entry(tab_id).or_default();
+                let Some(target) = nav.remote.go_back(current_path.as_str()) else {
+                    return;
+                };
+                RemotePath::new(target)
+            }
+            HistoryOp::Forward => {
+                let Some(current_path) = current.as_ref() else {
+                    return;
+                };
+                let nav = self.tab_nav.entry(tab_id).or_default();
+                let Some(target) = nav.remote.go_forward(current_path.as_str()) else {
+                    return;
+                };
+                RemotePath::new(target)
+            }
+        };
+
+        self.request_remote_directory(tab_id, target, cx);
+        self.clear_filter(PaneSide::Remote);
+    }
+
+    pub(crate) fn pane_can_navigate_back(&self, side: PaneSide) -> bool {
+        let Some(tab_id) = self.active_tab().map(|tab| tab.id) else {
+            return false;
+        };
+        let Some(nav) = self.tab_nav.get(&tab_id) else {
+            return false;
+        };
+        match side {
+            PaneSide::Local => nav.local.can_back(),
+            PaneSide::Remote => nav.remote.can_back(),
+        }
+    }
+
+    pub(crate) fn pane_can_navigate_forward(&self, side: PaneSide) -> bool {
+        let Some(tab_id) = self.active_tab().map(|tab| tab.id) else {
+            return false;
+        };
+        let Some(nav) = self.tab_nav.get(&tab_id) else {
+            return false;
+        };
+        match side {
+            PaneSide::Local => nav.local.can_forward(),
+            PaneSide::Remote => nav.remote.can_forward(),
         }
     }
     pub(crate) fn copy_focused_path(&mut self, cx: &mut Context<Self>) {

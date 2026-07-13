@@ -60,10 +60,12 @@ mod tests {
 
     use super::{AppPaths, PaneSide, Workspace, WorkspaceSurface};
     use crate::app_actions::{
-        self, ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, NewTab, OpenSettings,
-        SelectNextEntry, SelectPrevEntry, ShowAbout, ShowTransferDrawer, ToggleHiddenFiles,
+        self, ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, NavigateBack, NewTab,
+        OpenSettings, SelectNextEntry, SelectPrevEntry, ShowAbout, ShowTransferDrawer,
+        ToggleHiddenFiles,
     };
     use crate::resources::{ActiveResources, ActiveTransfers};
+    use crate::workspace::nav::HistoryOp;
 
     const TEST_REMOTE_ROOT: &str = "/home/tester";
 
@@ -983,6 +985,137 @@ mod tests {
                 .collect();
             assert_eq!(names, ["alpha-dir", "alpha.txt", "zeta.txt"]);
         });
+    }
+
+    #[gpui::test]
+    fn navigate_back_restores_previous_local_path(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        let (fixture, parent) = temp_local_fixture("nav-back");
+        let child_dir = fixture.join("child");
+        std::fs::create_dir(&child_dir).expect("child dir");
+        std::fs::write(child_dir.join("note.txt"), b"hi").expect("child file");
+        let child = LocalPath::new(child_dir.to_string_lossy().into_owned());
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            // Seed current path without history (same as open_new_tab / refresh).
+            workspace.set_local_path(parent.clone(), window, cx);
+            assert_eq!(
+                workspace
+                    .active_tab()
+                    .and_then(|tab| tab.local.path.clone())
+                    .as_ref()
+                    .map(LocalPath::as_str),
+                Some(parent.as_str())
+            );
+
+            workspace.navigate_pane_local(child.clone(), HistoryOp::Push, window, cx);
+            assert_eq!(
+                workspace
+                    .active_tab()
+                    .and_then(|tab| tab.local.path.clone())
+                    .as_ref()
+                    .map(LocalPath::as_str),
+                Some(child.as_str())
+            );
+            assert!(
+                workspace.pane_can_navigate_back(PaneSide::Local),
+                "push must enable back"
+            );
+            assert!(
+                !workspace.pane_can_navigate_forward(PaneSide::Local),
+                "push clears forward"
+            );
+
+            workspace.navigate_pane_local(LocalPath::new(String::new()), HistoryOp::Back, window, cx);
+            assert_eq!(
+                workspace
+                    .active_tab()
+                    .and_then(|tab| tab.local.path.clone())
+                    .as_ref()
+                    .map(LocalPath::as_str),
+                Some(parent.as_str()),
+                "back restores parent"
+            );
+            assert!(
+                workspace.pane_can_navigate_forward(PaneSide::Local),
+                "back enables forward"
+            );
+
+            workspace.navigate_pane_local(
+                LocalPath::new(String::new()),
+                HistoryOp::Forward,
+                window,
+                cx,
+            );
+            assert_eq!(
+                workspace
+                    .active_tab()
+                    .and_then(|tab| tab.local.path.clone())
+                    .as_ref()
+                    .map(LocalPath::as_str),
+                Some(child.as_str()),
+                "forward restores child"
+            );
+        });
+
+        // Keyboard action path (cmd-[).
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.focused_side = PaneSide::Local;
+            workspace.navigate_pane_local(child.clone(), HistoryOp::Push, window, cx);
+        });
+        cx.dispatch_action(NavigateBack);
+        workspace.read_with(&cx, |workspace, _| {
+            assert_eq!(
+                workspace
+                    .active_tab()
+                    .and_then(|tab| tab.local.path.as_ref().map(LocalPath::as_str)),
+                Some(parent.as_str()),
+                "NavigateBack action restores previous local path"
+            );
+        });
+
+        // Refresh must not push history.
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.focused_side = PaneSide::Local;
+            let back_len_before = workspace
+                .tab_nav
+                .get(
+                    &workspace
+                        .active_tab()
+                        .expect("tab")
+                        .id,
+                )
+                .map(|nav| nav.local.back.len())
+                .unwrap_or(0);
+            workspace.refresh_focused_pane(window, cx);
+            let back_len_after = workspace
+                .tab_nav
+                .get(
+                    &workspace
+                        .active_tab()
+                        .expect("tab")
+                        .id,
+                )
+                .map(|nav| nav.local.back.len())
+                .unwrap_or(0);
+            assert_eq!(
+                back_len_before, back_len_after,
+                "refresh must not push history"
+            );
+        });
+
+        // Closing the tab drops its nav state.
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            let tab_id = workspace.active_tab().expect("tab").id;
+            assert!(workspace.tab_nav.contains_key(&tab_id));
+            workspace.close_tab_by_id(tab_id, window, cx);
+            assert!(
+                !workspace.tab_nav.contains_key(&tab_id),
+                "close_tab must remove tab_nav entry"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&fixture);
     }
 
     #[gpui::test]

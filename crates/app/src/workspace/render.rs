@@ -15,6 +15,7 @@ use macsftp_ui::{
 
 use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::helpers::*;
+use crate::workspace::nav::HistoryOp;
 use crate::workspace::{PaneSide, WorkspaceSurface};
 use macsftp_storage::AppearancePreference;
 
@@ -109,22 +110,29 @@ impl crate::workspace::Workspace {
             (None, _) => (None, Default::default()),
         };
 
-        let (pane_name, up_id, refresh_id, copy_id, list_container_id) = match side {
-            PaneSide::Local => (
-                "Local",
-                "local-up",
-                "local-refresh",
-                "local-copy-path",
-                "local-list-container",
-            ),
-            PaneSide::Remote => (
-                "Remote",
-                "remote-up",
-                "remote-refresh",
-                "remote-copy-path",
-                "remote-list-container",
-            ),
-        };
+        let (pane_name, back_id, forward_id, up_id, refresh_id, copy_id, list_container_id) =
+            match side {
+                PaneSide::Local => (
+                    "Local",
+                    "local-back",
+                    "local-forward",
+                    "local-up",
+                    "local-refresh",
+                    "local-copy-path",
+                    "local-list-container",
+                ),
+                PaneSide::Remote => (
+                    "Remote",
+                    "remote-back",
+                    "remote-forward",
+                    "remote-up",
+                    "remote-refresh",
+                    "remote-copy-path",
+                    "remote-list-container",
+                ),
+            };
+        let can_navigate_back = self.pane_can_navigate_back(side);
+        let can_navigate_forward = self.pane_can_navigate_forward(side);
 
         // Transfer affordances: enabled only when the tab is connected and
         // the relevant pane has a selection. This surfaces the previously
@@ -165,6 +173,72 @@ impl crate::workspace::Workspace {
                 theme.colors.border_focused
             } else {
                 theme.colors.border
+            })
+            .child({
+                let hover_background = theme.colors.element_hover;
+                let active_background = theme.colors.element_active;
+                let label_color = if can_navigate_back {
+                    theme.colors.text_muted
+                } else {
+                    theme.colors.text_disabled
+                };
+                div()
+                    .id(back_id)
+                    .size(px(22.0))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .rounded_sm()
+                    .tooltip(text_tooltip("Back (⌘[)"))
+                    .when(can_navigate_back, |button| {
+                        button
+                            .hover(|style| style.bg(hover_background))
+                            .active(|style| style.bg(active_background))
+                            .on_click(cx.listener(move |workspace, _event, window, cx| {
+                                workspace.focused_side = side;
+                                workspace.navigate_focused(HistoryOp::Back, window, cx);
+                            }))
+                    })
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(label_color)
+                            .child("◀"),
+                    )
+            })
+            .child({
+                let hover_background = theme.colors.element_hover;
+                let active_background = theme.colors.element_active;
+                let label_color = if can_navigate_forward {
+                    theme.colors.text_muted
+                } else {
+                    theme.colors.text_disabled
+                };
+                div()
+                    .id(forward_id)
+                    .size(px(22.0))
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .rounded_sm()
+                    .tooltip(text_tooltip("Forward (⌘])"))
+                    .when(can_navigate_forward, |button| {
+                        button
+                            .hover(|style| style.bg(hover_background))
+                            .active(|style| style.bg(active_background))
+                            .on_click(cx.listener(move |workspace, _event, window, cx| {
+                                workspace.focused_side = side;
+                                workspace.navigate_focused(HistoryOp::Forward, window, cx);
+                            }))
+                    })
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(label_color)
+                            .child("▶"),
+                    )
             })
             .child(
                 icon_button(up_id, IconName::ArrowUp, "Parent Directory (⌘↑)").on_click(
