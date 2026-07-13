@@ -39,7 +39,7 @@ use crate::workspace::connect_form::*;
 use crate::workspace::helpers::*;
 use crate::workspace::*;
 
-impl Workspace {
+impl crate::workspace::Workspace {
     pub(crate) fn focus_pane(
         &mut self,
         side: PaneSide,

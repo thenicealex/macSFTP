@@ -20,6 +20,7 @@ macsftp-ui = { path = "../ui" }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tracing-appender = "0.2.5"
+tokio = "1.52.3"
 
 [dev-dependencies]
 gpui = { version = "=0.2.2", features = ["test-support"] }

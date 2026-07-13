@@ -51,6 +51,7 @@ impl std::fmt::Display for ConfigError {
 }
 
 /// Owns the config path and its current in-memory snapshot.
+#[derive(Clone)]
 pub struct ConfigStore {
     path: LocalPath,
     config: AppConfig,

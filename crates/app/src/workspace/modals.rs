@@ -35,11 +35,12 @@ use macsftp_ui::{
 use tracing::{debug, warn};
 
 use crate::app_actions::*;
+use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::connect_form::*;
 use crate::workspace::helpers::*;
 use crate::workspace::*;
 
-impl Workspace {
+impl crate::workspace::Workspace {
     pub(crate) fn active_host_key_prompt(&self) -> Option<&HostKeyPrompt> {
         let active_tab_id = self.state.tabs.active_tab_id?;
         self.state
@@ -69,13 +70,16 @@ impl Workspace {
             .active
             .retain(|modal| modal.request_id() != Some(ModalRequestId::Trust(request_id)));
     }
-    pub(crate) fn remove_conflict_modal(&mut self, request_id: ConflictRequestId) {
+    pub(crate) fn remove_conflict_modal(
+        &mut self,
+        request_id: ConflictRequestId,
+        cx: &mut Context<Self>,
+    ) {
         self.state
             .modals
             .active
             .retain(|modal| modal.request_id() != Some(ModalRequestId::Conflict(request_id)));
-        self.state
-            .transfers
+        cx.transfers_mut()
             .pending_conflicts
             .retain(|conflict| conflict.id != request_id);
         self.conflict_rename_error = None;
@@ -95,7 +99,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.remove_conflict_modal(prompt.request_id);
+        self.remove_conflict_modal(prompt.request_id, cx);
         self.send_command(
             AppCommand::ResolveTransferConflict(ConflictDecisionCommand {
                 plan_id: prompt.plan_id,
@@ -328,7 +332,8 @@ impl Workspace {
         }
 
         // Saved profiles: pick one to prefill the form, or delete it.
-        let saved_profiles: Vec<(ProfileId, String, String)> = self
+        let saved_profiles: Vec<(ProfileId, String, String)> = cx
+            .resources()
             .profiles
             .profiles()
             .iter()

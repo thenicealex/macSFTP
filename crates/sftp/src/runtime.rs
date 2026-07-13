@@ -85,28 +85,67 @@ impl RuntimeClient {
 /// GPUI-facing handle for draining events produced by the Tokio runtime.
 ///
 /// The drain task runs on the GPUI executor and must only await
-/// `recv_async()` — never network, file IO, or other blocking work.
+/// `recv()` — never network, file IO, or other blocking work.
+///
+/// Backed by a `tokio::sync::broadcast` receiver so every open window can
+/// hold its own independent subscription and see the full event stream
+/// (a flume clone would be a competing consumer, splitting events between
+/// windows instead of fanning out to all of them).
 pub struct EventReceiver {
-    event_rx: flume::Receiver<AppEvent>,
+    event_rx: tokio::sync::broadcast::Receiver<AppEvent>,
 }
 
 impl EventReceiver {
-    pub fn new(event_rx: flume::Receiver<AppEvent>) -> Self {
+    pub fn new(event_rx: tokio::sync::broadcast::Receiver<AppEvent>) -> Self {
         Self { event_rx }
     }
 
     /// Async receive. Safe to await on the GPUI executor.
     ///
-    /// Returns `None` when the event channel is empty and all senders have
-    /// been dropped (i.e. the runtime has shut down).
-    pub async fn recv(&self) -> Option<AppEvent> {
-        self.event_rx.recv_async().await.ok()
+    /// Returns `None` when all senders have been dropped (i.e. the runtime
+    /// has shut down). A lagged subscriber (this window's drain task fell
+    /// behind and the channel overwrote unread events) is logged and
+    /// skipped, not treated as fatal.
+    pub async fn recv(&mut self) -> Option<AppEvent> {
+        use tokio::sync::broadcast::error::RecvError;
+        loop {
+            match self.event_rx.recv().await {
+                Ok(event) => return Some(event),
+                Err(RecvError::Lagged(skipped)) => {
+                    warn!(skipped, "event receiver lagged; some events were dropped");
+                    continue;
+                }
+                Err(RecvError::Closed) => return None,
+            }
+        }
     }
 
     /// Non-blocking try-receive, for coalescing fallback in the drain loop.
-    pub fn try_recv(&self) -> Option<AppEvent> {
-        self.event_rx.try_recv().ok()
+    pub fn try_recv(&mut self) -> Option<AppEvent> {
+        use tokio::sync::broadcast::error::TryRecvError;
+        loop {
+            match self.event_rx.try_recv() {
+                Ok(event) => return Some(event),
+                Err(TryRecvError::Lagged(skipped)) => {
+                    warn!(skipped, "event receiver lagged; some events were dropped");
+                    continue;
+                }
+                Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => return None,
+            }
+        }
     }
+}
+
+/// Build a standalone event-broadcast pair without a full
+/// [`RuntimeController`] (its Tokio runtime, dispatch loop, trust
+/// registry, ...). Exists so callers outside this crate — e.g. the
+/// `macsftp-app` `Workspace` test harness — never need to name
+/// `tokio::sync::broadcast` directly.
+pub fn test_event_channel(
+    capacity: usize,
+) -> (tokio::sync::broadcast::Sender<AppEvent>, EventReceiver) {
+    let (tx, rx) = tokio::sync::broadcast::channel(capacity);
+    (tx, EventReceiver::new(rx))
 }
 
 /// Owns the Tokio runtime and the bridge channels.
@@ -121,6 +160,14 @@ pub struct RuntimeController {
     runtime: Option<Runtime>,
     channels: BridgeChannels,
     command_loop_handle: Option<JoinHandle<()>>,
+    /// Re-publishes every event from the internal flume channel onto
+    /// `broadcast_tx`, so each window's `EventReceiver` sees the full
+    /// stream. Aborted on shutdown alongside the command loop.
+    event_fanout_handle: Option<JoinHandle<()>>,
+    /// Fan-out source for per-window [`EventReceiver`]s. Held so
+    /// `event_receiver()` can hand out fresh `.subscribe()`d receivers at
+    /// any time (including after zero windows briefly existed).
+    broadcast_tx: tokio::sync::broadcast::Sender<AppEvent>,
     trust_registry: Arc<TrustRegistry>,
     config: RuntimeBridgeConfig,
     shutdown_initiated: bool,
@@ -156,10 +203,26 @@ impl RuntimeController {
             loop_config,
         ));
 
+        // Fan-out stage: the internal flume channel stays a single-consumer
+        // pipe drained here, and each event is re-published to a
+        // `broadcast` sender that every window subscribes to independently.
+        let (broadcast_tx, _) = tokio::sync::broadcast::channel(config.event_channel_capacity);
+        let fanout_event_rx = channels.event_rx.clone();
+        let fanout_tx = broadcast_tx.clone();
+        let event_fanout_handle = runtime.spawn(async move {
+            while let Ok(event) = fanout_event_rx.recv_async().await {
+                // `Err` only means "no subscribers right now" (all windows
+                // closed) — fine to drop; a future window resubscribes.
+                let _ = fanout_tx.send(event);
+            }
+        });
+
         Self {
             runtime: Some(runtime),
             channels,
             command_loop_handle: Some(command_loop_handle),
+            event_fanout_handle: Some(event_fanout_handle),
+            broadcast_tx,
             trust_registry,
             config,
             shutdown_initiated: false,
@@ -171,9 +234,11 @@ impl RuntimeController {
         RuntimeClient::new(self.channels.command_tx.clone())
     }
 
-    /// Return the GPUI-facing event receiver.
+    /// Return a fresh GPUI-facing event receiver. Each call yields an
+    /// independent broadcast subscription, so multiple windows each drain
+    /// the complete event stream.
     pub fn event_receiver(&self) -> EventReceiver {
-        EventReceiver::new(self.channels.event_rx.clone())
+        EventReceiver::new(self.broadcast_tx.subscribe())
     }
 
     /// Explicit shutdown. Sends `Shutdown`, waits for the command loop to
@@ -194,6 +259,9 @@ impl RuntimeController {
 
         if let Some(handle) = self.command_loop_handle.take() {
             // Abort ensures we don't hang if the loop is stuck on a send.
+            handle.abort();
+        }
+        if let Some(handle) = self.event_fanout_handle.take() {
             handle.abort();
         }
 
@@ -228,6 +296,9 @@ impl Drop for RuntimeController {
     fn drop(&mut self) {
         if !self.shutdown_initiated {
             if let Some(handle) = self.command_loop_handle.take() {
+                handle.abort();
+            }
+            if let Some(handle) = self.event_fanout_handle.take() {
                 handle.abort();
             }
             self.trust_registry.reject_all();
@@ -856,7 +927,7 @@ mod tests {
         let config = RuntimeBridgeConfig::default();
         let controller =
             RuntimeController::start(config, SessionBackend::Mock(MockSessionConfig::default()));
-        let event_rx = controller.event_receiver();
+        let mut event_rx = controller.event_receiver();
         let event_tx = controller.event_sender().clone();
 
         // Run the async send/receive on the controller's own runtime.
@@ -953,13 +1024,12 @@ mod tests {
 
     #[test]
     fn event_receiver_returns_none_when_channel_disconnected() {
-        let (event_tx, event_rx) = flume::bounded::<AppEvent>(4);
-        let receiver = EventReceiver::new(event_rx);
+        let (event_tx, mut receiver) = test_event_channel(4);
 
         // Drop the sender — channel is now empty and disconnected.
         drop(event_tx);
 
-        // Use a helper thread to run the async recv, since recv_async on a
+        // Use a helper thread to run the async recv, since recv on a
         // disconnected empty channel returns immediately.
         let helper = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -977,8 +1047,7 @@ mod tests {
 
     #[test]
     fn event_receiver_try_recv_drains_without_blocking() {
-        let (event_tx, event_rx) = flume::bounded::<AppEvent>(4);
-        let receiver = EventReceiver::new(event_rx);
+        let (event_tx, mut receiver) = test_event_channel(4);
 
         // No events yet — try_recv should return None immediately.
         assert!(receiver.try_recv().is_none());
@@ -988,7 +1057,7 @@ mod tests {
             .send(AppEvent::TransferSkipped {
                 transfer_id: TransferId(7),
             })
-            .expect("send should succeed on non-full channel");
+            .expect("send should succeed with a live subscriber");
 
         let event = receiver
             .try_recv()
@@ -1063,7 +1132,7 @@ mod tests {
         };
         let controller =
             RuntimeController::start(config, SessionBackend::Mock(MockSessionConfig::default()));
-        let event_rx = controller.event_receiver();
+        let mut event_rx = controller.event_receiver();
         let event_tx = controller.event_sender().clone();
 
         controller.runtime().block_on(async move {
@@ -1103,7 +1172,7 @@ mod tests {
             SessionBackend::Mock(MockSessionConfig::default()),
         );
         let client = controller.client();
-        let events = controller.event_receiver();
+        let mut events = controller.event_receiver();
 
         controller.runtime().block_on(async {
             client
@@ -1121,7 +1190,7 @@ mod tests {
                 }))
                 .expect("start transfer should send");
 
-            let started = recv_timeout(&events, "TransferPlanStarted").await;
+            let started = recv_timeout(&mut events, "TransferPlanStarted").await;
             let plan_id = match started {
                 AppEvent::TransferPlanStarted(snapshot) => {
                     assert_eq!(snapshot.plan.state, TransferPlanState::Planning);
@@ -1130,13 +1199,13 @@ mod tests {
                 }
                 other => panic!("expected TransferPlanStarted, got {other:?}"),
             };
-            let progress = recv_timeout(&events, "TransferPlanProgress").await;
+            let progress = recv_timeout(&mut events, "TransferPlanProgress").await;
             assert!(matches!(
                 progress,
                 AppEvent::TransferPlanProgress(progress)
                     if progress.plan_id == plan_id && progress.planned_count == 1
             ));
-            let completed = recv_timeout(&events, "TransferPlanCompleted").await;
+            let completed = recv_timeout(&mut events, "TransferPlanCompleted").await;
             assert!(matches!(
                 completed,
                 AppEvent::TransferPlanCompleted { plan_id: completed_plan_id }
@@ -1152,7 +1221,7 @@ mod tests {
 
     /// Helper: receive an event within a timeout, panicking if it
     /// doesn't arrive.
-    async fn recv_timeout(rx: &EventReceiver, label: &str) -> AppEvent {
+    async fn recv_timeout(rx: &mut EventReceiver, label: &str) -> AppEvent {
         match tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
             Ok(Some(event)) => event,
             Ok(None) => panic!("{label}: event channel closed"),
@@ -1166,7 +1235,7 @@ mod tests {
     /// may still be in flight; the app-side stale event guard drops
     /// them, so they are not a failure here. What must never happen is
     /// the old session connecting.
-    async fn assert_no_tab_connected(rx: &EventReceiver, label: &str) {
+    async fn assert_no_tab_connected(rx: &mut EventReceiver, label: &str) {
         let deadline = Instant::now() + Duration::from_millis(150);
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -1192,7 +1261,7 @@ mod tests {
             SessionBackend::Mock(MockSessionConfig::default()),
         );
         let client = controller.client();
-        let event_rx = controller.event_receiver();
+        let mut event_rx = controller.event_receiver();
 
         controller.runtime().block_on(async {
             // 1. Send ConnectTab.
@@ -1207,14 +1276,14 @@ mod tests {
                 .expect("connect command should send");
 
             // 2. Expect TabConnecting.
-            let event = recv_timeout(&event_rx, "TabConnecting").await;
+            let event = recv_timeout(&mut event_rx, "TabConnecting").await;
             assert!(
                 matches!(event, AppEvent::TabConnecting { tab_id: TabId(1) }),
                 "expected TabConnecting, got {event:?}"
             );
 
             // 3. Expect HostKeyUnknown.
-            let event = recv_timeout(&event_rx, "HostKeyUnknown").await;
+            let event = recv_timeout(&mut event_rx, "HostKeyUnknown").await;
             let prompt = match event {
                 AppEvent::HostKeyUnknown(prompt) => prompt,
                 other => panic!("expected HostKeyUnknown, got {other:?}"),
@@ -1230,7 +1299,7 @@ mod tests {
                 .expect("accept command should send");
 
             // 5. Expect TabConnected.
-            let event = recv_timeout(&event_rx, "TabConnected").await;
+            let event = recv_timeout(&mut event_rx, "TabConnected").await;
             match event {
                 AppEvent::TabConnected(scoped) => {
                     assert_eq!(scoped.scope.tab_id, TabId(1));
@@ -1250,7 +1319,7 @@ mod tests {
             SessionBackend::Mock(MockSessionConfig::default()),
         );
         let client = controller.client();
-        let event_rx = controller.event_receiver();
+        let mut event_rx = controller.event_receiver();
 
         controller.runtime().block_on(async {
             client
@@ -1264,10 +1333,10 @@ mod tests {
                 .expect("connect command should send");
 
             // Skip TabConnecting.
-            let _ = recv_timeout(&event_rx, "TabConnecting").await;
+            let _ = recv_timeout(&mut event_rx, "TabConnecting").await;
 
             // Get HostKeyUnknown.
-            let event = recv_timeout(&event_rx, "HostKeyUnknown").await;
+            let event = recv_timeout(&mut event_rx, "HostKeyUnknown").await;
             let prompt = match event {
                 AppEvent::HostKeyUnknown(prompt) => prompt,
                 other => panic!("expected HostKeyUnknown, got {other:?}"),
@@ -1281,7 +1350,7 @@ mod tests {
                 .expect("reject command should send");
 
             // Expect TabDisconnected.
-            let event = recv_timeout(&event_rx, "TabDisconnected").await;
+            let event = recv_timeout(&mut event_rx, "TabDisconnected").await;
             assert!(
                 matches!(event, AppEvent::TabDisconnected(_)),
                 "expected TabDisconnected after reject, got {event:?}"
@@ -1298,7 +1367,7 @@ mod tests {
             SessionBackend::Mock(MockSessionConfig::default()),
         );
         let client = controller.client();
-        let event_rx = controller.event_receiver();
+        let mut event_rx = controller.event_receiver();
 
         controller.runtime().block_on(async {
             // First connection.
@@ -1312,8 +1381,8 @@ mod tests {
                 }))
                 .expect("first connect");
 
-            let _ = recv_timeout(&event_rx, "first TabConnecting").await;
-            let event = recv_timeout(&event_rx, "first HostKeyUnknown").await;
+            let _ = recv_timeout(&mut event_rx, "first TabConnecting").await;
+            let event = recv_timeout(&mut event_rx, "first HostKeyUnknown").await;
             let first_prompt = match event {
                 AppEvent::HostKeyUnknown(prompt) => prompt,
                 other => panic!("expected first HostKeyUnknown, got {other:?}"),
@@ -1338,7 +1407,7 @@ mod tests {
             let mut got_new_prompt = false;
             let deadline = Instant::now() + Duration::from_secs(3);
             while Instant::now() < deadline && !got_new_prompt {
-                let event = recv_timeout(&event_rx, "reconnect events").await;
+                let event = recv_timeout(&mut event_rx, "reconnect events").await;
                 match event {
                     AppEvent::TabConnecting { tab_id: TabId(1) } => {}
                     AppEvent::HostKeyUnknown(prompt) => {
@@ -1362,7 +1431,7 @@ mod tests {
                 }))
                 .expect("old accept command should send");
 
-            assert_no_tab_connected(&event_rx, "old accept must not connect the old session").await;
+            assert_no_tab_connected(&mut event_rx, "old accept must not connect the old session").await;
         });
 
         controller.shutdown();
@@ -1375,7 +1444,7 @@ mod tests {
             SessionBackend::Mock(MockSessionConfig::default()),
         );
         let client = controller.client();
-        let event_rx = controller.event_receiver();
+        let mut event_rx = controller.event_receiver();
 
         controller.runtime().block_on(async {
             // Connect — actor starts and awaits host key decision.
@@ -1389,8 +1458,8 @@ mod tests {
                 }))
                 .expect("connect");
 
-            let _ = recv_timeout(&event_rx, "TabConnecting").await;
-            let event = recv_timeout(&event_rx, "HostKeyUnknown").await;
+            let _ = recv_timeout(&mut event_rx, "TabConnecting").await;
+            let event = recv_timeout(&mut event_rx, "HostKeyUnknown").await;
             let prompt = match event {
                 AppEvent::HostKeyUnknown(prompt) => prompt,
                 other => panic!("expected HostKeyUnknown, got {other:?}"),
@@ -1425,7 +1494,7 @@ mod tests {
                 }))
                 .expect("accept command should send");
 
-            assert_no_tab_connected(&event_rx, "expired trust accept must not connect").await;
+            assert_no_tab_connected(&mut event_rx, "expired trust accept must not connect").await;
         });
 
         controller.shutdown();
@@ -1438,7 +1507,7 @@ mod tests {
             SessionBackend::Mock(MockSessionConfig::default()),
         );
         let client = controller.client();
-        let event_rx = controller.event_receiver();
+        let mut event_rx = controller.event_receiver();
 
         controller.runtime().block_on(async {
             // Start a connection but don't resolve the host key prompt.
@@ -1452,8 +1521,8 @@ mod tests {
                 }))
                 .expect("connect");
 
-            let _ = recv_timeout(&event_rx, "TabConnecting").await;
-            let _ = recv_timeout(&event_rx, "HostKeyUnknown").await;
+            let _ = recv_timeout(&mut event_rx, "TabConnecting").await;
+            let _ = recv_timeout(&mut event_rx, "HostKeyUnknown").await;
 
             // Verify the trust registry has a pending request.
             assert_eq!(
@@ -1479,7 +1548,7 @@ mod tests {
             SessionBackend::Mock(MockSessionConfig::default()),
         );
         let client = controller.client();
-        let event_rx = controller.event_receiver();
+        let mut event_rx = controller.event_receiver();
 
         controller.runtime().block_on(async {
             // Connect tab 1.
@@ -1513,7 +1582,7 @@ mod tests {
             while Instant::now() < deadline
                 && (connecting_tabs.len() < 2 || host_key_tabs.len() < 2)
             {
-                let event = recv_timeout(&event_rx, "multi-tab events").await;
+                let event = recv_timeout(&mut event_rx, "multi-tab events").await;
                 match event {
                     AppEvent::TabConnecting { tab_id } => connecting_tabs.push(tab_id),
                     AppEvent::HostKeyUnknown(prompt) => host_key_tabs.push(prompt.tab_id),

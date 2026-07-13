@@ -100,7 +100,7 @@ async fn next_event(fixture: &ActorFixture, label: &str) -> AppEvent {
     }
 }
 
-async fn next_runtime_event(events: &EventReceiver, label: &str) -> AppEvent {
+async fn next_runtime_event(events: &mut EventReceiver, label: &str) -> AppEvent {
     match tokio::time::timeout(Duration::from_secs(15), events.recv()).await {
         Ok(Some(event)) => event,
         Ok(None) => panic!("{label}: event channel closed"),
@@ -817,7 +817,7 @@ async fn runtime_plans_and_executes_single_file_upload_and_download() {
         SessionBackend::Real(HostTrustConfig::new(known_hosts_path, None)),
     );
     let client = controller.client();
-    let events = controller.event_receiver();
+    let mut events = controller.event_receiver();
 
     client
         .try_send(AppCommand::ConnectTab(ConnectCommand {
@@ -833,8 +833,8 @@ async fn runtime_plans_and_executes_single_file_upload_and_download() {
             },
         }))
         .expect("connect command should send");
-    let _ = next_runtime_event(&events, "TabConnecting").await;
-    let _ = next_runtime_event(&events, "TabConnected").await;
+    let _ = next_runtime_event(&mut events, "TabConnecting").await;
+    let _ = next_runtime_event(&mut events, "TabConnected").await;
 
     let upload_source = server.fixture_dir.join("runtime-upload-source.txt");
     let upload_destination = server.fixture_dir.join("runtime-uploaded.txt");
@@ -921,7 +921,7 @@ async fn runtime_executes_directory_upload_with_a_bounded_session_queue() {
         SessionBackend::Real(HostTrustConfig::new(known_hosts_path, None)),
     );
     let client = controller.client();
-    let events = controller.event_receiver();
+    let mut events = controller.event_receiver();
 
     client
         .try_send(AppCommand::ConnectTab(ConnectCommand {
@@ -937,8 +937,8 @@ async fn runtime_executes_directory_upload_with_a_bounded_session_queue() {
             },
         }))
         .expect("connect command should send");
-    let _ = next_runtime_event(&events, "TabConnecting").await;
-    let _ = next_runtime_event(&events, "TabConnected").await;
+    let _ = next_runtime_event(&mut events, "TabConnecting").await;
+    let _ = next_runtime_event(&mut events, "TabConnected").await;
 
     client
         .try_send(AppCommand::StartTransfer(
@@ -962,7 +962,7 @@ async fn runtime_executes_directory_upload_with_a_bounded_session_queue() {
     let mut planned_jobs = 0;
     let mut completed_jobs = 0;
     while completed_jobs < 3 {
-        match next_runtime_event(&events, "directory upload event").await {
+        match next_runtime_event(&mut events, "directory upload event").await {
             AppEvent::TransferPlanStarted(_) | AppEvent::TransferPlanCompleted { .. } => {}
             AppEvent::TransferPlanProgress(_) => planned_jobs += 1,
             AppEvent::TransferRunning(_) | AppEvent::TransferProgress(_) => {}
@@ -1017,7 +1017,7 @@ async fn runtime_streams_and_executes_directory_download() {
         SessionBackend::Real(HostTrustConfig::new(known_hosts_path, None)),
     );
     let client = controller.client();
-    let events = controller.event_receiver();
+    let mut events = controller.event_receiver();
 
     client
         .try_send(AppCommand::ConnectTab(ConnectCommand {
@@ -1033,8 +1033,8 @@ async fn runtime_streams_and_executes_directory_download() {
             },
         }))
         .expect("connect command should send");
-    let _ = next_runtime_event(&events, "TabConnecting").await;
-    let _ = next_runtime_event(&events, "TabConnected").await;
+    let _ = next_runtime_event(&mut events, "TabConnecting").await;
+    let _ = next_runtime_event(&mut events, "TabConnected").await;
 
     client
         .try_send(AppCommand::StartTransfer(
@@ -1058,7 +1058,7 @@ async fn runtime_streams_and_executes_directory_download() {
     let mut planned_jobs = 0;
     let mut completed_jobs = 0;
     while completed_jobs < 4 {
-        match next_runtime_event(&events, "directory download event").await {
+        match next_runtime_event(&mut events, "directory download event").await {
             AppEvent::TransferPlanStarted(_) | AppEvent::TransferPlanCompleted { .. } => {}
             AppEvent::TransferPlanProgress(_) => planned_jobs += 1,
             AppEvent::TransferRunning(_) | AppEvent::TransferProgress(_) => {}
@@ -1150,7 +1150,7 @@ async fn runtime_routes_read_dir_to_real_actor() {
         SessionBackend::Real(HostTrustConfig::new(known_hosts_path, None)),
     );
     let client = controller.client();
-    let events = controller.event_receiver();
+    let mut events = controller.event_receiver();
 
     client
         .try_send(AppCommand::ConnectTab(ConnectCommand {
@@ -1167,11 +1167,11 @@ async fn runtime_routes_read_dir_to_real_actor() {
         }))
         .expect("connect command should send");
     assert!(matches!(
-        next_runtime_event(&events, "TabConnecting").await,
+        next_runtime_event(&mut events, "TabConnecting").await,
         AppEvent::TabConnecting { tab_id: TAB }
     ));
     assert!(matches!(
-        next_runtime_event(&events, "TabConnected").await,
+        next_runtime_event(&mut events, "TabConnected").await,
         AppEvent::TabConnected(_)
     ));
 
@@ -1183,10 +1183,10 @@ async fn runtime_routes_read_dir_to_real_actor() {
         })
         .expect("read directory command should send");
     assert!(matches!(
-        next_runtime_event(&events, "RemoteDirLoading").await,
+        next_runtime_event(&mut events, "RemoteDirLoading").await,
         AppEvent::RemoteDirLoading(scoped) if scoped.payload.path == path
     ));
-    let loaded = next_runtime_event(&events, "RemoteDirLoaded").await;
+    let loaded = next_runtime_event(&mut events, "RemoteDirLoaded").await;
     assert!(matches!(
         loaded,
         AppEvent::RemoteDirLoaded(scoped)
@@ -1222,7 +1222,7 @@ async fn tabs_browse_independently_after_another_tab_disconnects() {
         SessionBackend::Real(HostTrustConfig::new(known_hosts_path, None)),
     );
     let client = controller.client();
-    let events = controller.event_receiver();
+    let mut events = controller.event_receiver();
 
     for (tab_id, session_id) in [(TAB, SESSION), (SECOND_TAB, SECOND_SESSION)] {
         client
@@ -1240,11 +1240,11 @@ async fn tabs_browse_independently_after_another_tab_disconnects() {
             }))
             .expect("connect command should send");
         assert!(matches!(
-            next_runtime_event(&events, "TabConnecting").await,
+            next_runtime_event(&mut events, "TabConnecting").await,
             AppEvent::TabConnecting { tab_id: event_tab_id } if event_tab_id == tab_id
         ));
         assert!(matches!(
-            next_runtime_event(&events, "TabConnected").await,
+            next_runtime_event(&mut events, "TabConnected").await,
             AppEvent::TabConnected(scoped)
                 if scoped.scope.tab_id == tab_id && scoped.scope.session_id == session_id
         ));
@@ -1258,12 +1258,12 @@ async fn tabs_browse_independently_after_another_tab_disconnects() {
         })
         .expect("first tab request should send");
     assert!(matches!(
-        next_runtime_event(&events, "first tab loading").await,
+        next_runtime_event(&mut events, "first tab loading").await,
         AppEvent::RemoteDirLoading(scoped)
             if scoped.scope.tab_id == TAB && scoped.payload.path == first_path
     ));
     assert!(matches!(
-        next_runtime_event(&events, "first tab listing").await,
+        next_runtime_event(&mut events, "first tab listing").await,
         AppEvent::RemoteDirLoaded(scoped)
             if scoped.scope.tab_id == TAB
                 && scoped.payload.entries.iter().any(|entry| entry.name == "first.txt")
@@ -1277,12 +1277,12 @@ async fn tabs_browse_independently_after_another_tab_disconnects() {
         })
         .expect("second tab request should send");
     assert!(matches!(
-        next_runtime_event(&events, "second tab loading").await,
+        next_runtime_event(&mut events, "second tab loading").await,
         AppEvent::RemoteDirLoading(scoped)
             if scoped.scope.tab_id == SECOND_TAB && scoped.payload.path == second_path
     ));
     assert!(matches!(
-        next_runtime_event(&events, "second tab listing").await,
+        next_runtime_event(&mut events, "second tab listing").await,
         AppEvent::RemoteDirLoaded(scoped)
             if scoped.scope.tab_id == SECOND_TAB
                 && scoped.payload.entries.iter().any(|entry| entry.name == "second.txt")
@@ -1298,12 +1298,12 @@ async fn tabs_browse_independently_after_another_tab_disconnects() {
         })
         .expect("second tab refresh should send");
     assert!(matches!(
-        next_runtime_event(&events, "second tab refresh loading").await,
+        next_runtime_event(&mut events, "second tab refresh loading").await,
         AppEvent::RemoteDirLoading(scoped)
             if scoped.scope.tab_id == SECOND_TAB && scoped.payload.path == second_path
     ));
     assert!(matches!(
-        next_runtime_event(&events, "second tab refresh listing").await,
+        next_runtime_event(&mut events, "second tab refresh listing").await,
         AppEvent::RemoteDirLoaded(scoped)
             if scoped.scope.tab_id == SECOND_TAB
                 && scoped.payload.entries.iter().any(|entry| entry.name == "second.txt")

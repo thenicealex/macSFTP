@@ -5,18 +5,15 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use macsftp_core::{
-    AppEvent, AuthCredential, AuthFailure, ConflictDecision, ConflictPolicy, ConflictRequestId,
-    ConnectionSettings, DisconnectReason, ErrorCode, FileKind, HostKeyMismatch, HostKeyPrompt,
+    AppEvent, ConflictDecision, ConflictPolicy, ConflictRequestId, ErrorCode, FileKind,
     LocalPath, RemoteDirLoading, RemoteDirSnapshot, RemoteEntry, RemoteEventScope,
     RemoteOperationFailure, RemotePath, RemoteScoped, RenameStrategy, ResidualTempRecord,
-    SessionId, StartTransferCommand, TabConnected, TabDisconnected, TabId, Timestamp,
+    SessionId, StartTransferCommand, TabId, Timestamp,
     TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferFailure, TransferId,
     TransferJob, TransferPlanId, TransferPlanProgress, TransferProgress, TransferSnapshot,
-    TransferState, TransferWarning, TrustDecision, TrustRequestId, UserFacingError,
+    TransferState, TransferWarning, UserFacingError,
 };
 use russh::client;
-use crate::physical_connection::ClientHandler;
-use russh::keys::{PrivateKeyWithHashAlg, load_secret_key};
 use russh_sftp::client::SftpSession;
 use russh_sftp::client::error::Error as SftpError;
 use russh_sftp::client::fs::DirEntry;
@@ -25,9 +22,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use crate::known_hosts::{HostKeyCheckResult, KnownHostsStore, fingerprint_sha256, key_algorithm};
-use crate::trust::{TrustRegistry, TrustRegistryEntry};
-use tracing::{debug, info, warn};
+use crate::known_hosts::KnownHostsStore;
+use tracing::warn;
 
 /// Host trust file locations and prompt policy (plan §10).
 #[derive(Debug, Clone)]
@@ -298,7 +294,7 @@ impl RemoteSessionActor {
     /// server disconnect. Cancellation exits silently — the dispatch
     /// loop owns cleanup, matching the mock actor's contract.
     pub async fn run(
-        mut self,
+        self,
         cancel: CancellationToken,
         request_rx: flume::Receiver<RemoteSessionRequest>,
     ) {

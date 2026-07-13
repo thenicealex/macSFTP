@@ -1,14 +1,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
+use std::sync::atomic::AtomicUsize;
 
 use macsftp_core::{ConnectionKey, ConnectionSettings, RemoteEventScope, TrustRequestId, AppEvent, UserFacingError, ErrorCode};
 use russh::client;
 use russh_sftp::client::SftpSession;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
 
 use crate::physical_connection::{ClientHandler, ConnectFailure, establish_physical_connection};
 use crate::known_hosts::KnownHostsStore;
@@ -74,7 +73,7 @@ impl ConnectionManager {
         let key_clone = key.clone();
         tokio::spawn(async move {
             let result = async {
-                let mut handle = establish_physical_connection(
+                let handle = establish_physical_connection(
                     &settings,
                     &scope,
                     trust_request_id,

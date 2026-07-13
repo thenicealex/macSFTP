@@ -63,32 +63,34 @@ mod tests {
         self, ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, NewTab, OpenSettings,
         SelectNextEntry, SelectPrevEntry, ShowAbout, ShowTransferDrawer,
     };
+    use crate::resources::{ActiveResources, ActiveTransfers};
 
     const TEST_REMOTE_ROOT: &str = "/home/tester";
 
     fn init_workspace(
         cx: &mut TestAppContext,
     ) -> (Entity<Workspace>, VisualTestContext, BridgeChannels) {
+        let app_paths = temp_app_paths();
+        let config = macsftp_storage::ConfigStore::with_defaults(app_paths.config_file.clone());
         cx.update(|cx| {
             cx.set_global(Theme::dark());
             app_actions::init(cx);
-        });
-        let channels = BridgeChannels::new(&RuntimeBridgeConfig::default());
-        let client = RuntimeClient::new(channels.command_tx.clone());
-        let receiver = EventReceiver::new(channels.event_rx.clone());
-        let app_paths = temp_app_paths();
-        let config = macsftp_storage::ConfigStore::with_defaults(app_paths.config_file.clone());
-        let window = cx.add_window(|window, cx| {
-            Workspace::new(
-                client,
-                receiver,
+            // Shared globals must exist before `Workspace::new` (which reads
+            // them). A fresh `AppResources` per test → fresh tab-id counter
+            // starting at 1, keeping each test isolated.
+            cx.set_global(crate::resources::AppResources::load(
                 app_paths,
                 config,
                 macsftp_storage::KeychainStore::new_memory(),
-                window,
-                cx,
-            )
+            ));
+            cx.set_global(crate::resources::SharedTransfers::default());
         });
+        let channels = BridgeChannels::new(&RuntimeBridgeConfig::default());
+        let client = RuntimeClient::new(channels.command_tx.clone());
+        let (_event_tx, receiver) = macsftp_sftp::test_event_channel(
+            RuntimeBridgeConfig::default().event_channel_capacity,
+        );
+        let window = cx.add_window(|window, cx| Workspace::new(client, receiver, window, cx));
         let workspace = window
             .root(cx)
             .expect("workspace root view should be available");
@@ -299,9 +301,9 @@ mod tests {
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.set_appearance(AppearancePreference::Light, window, cx);
         });
-        workspace.read_with(&cx, |workspace, cx| {
+        workspace.read_with(&cx, |_workspace, cx| {
             assert_eq!(
-                workspace.config.config().appearance,
+                cx.resources().config.config().appearance,
                 AppearancePreference::Light
             );
             assert_eq!(cx.global::<Theme>().appearance, Appearance::Light);
@@ -459,9 +461,7 @@ mod tests {
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.handle_app_event(AppEvent::TransferConflict(prompt.clone()), window, cx);
             assert_eq!(workspace.conflict_rename.value(), "existing (copy).txt");
-            let pending = workspace
-                .state
-                .transfers
+            let pending = cx.transfers()
                 .pending_conflicts
                 .last()
                 .expect("conflict should be recorded for the drawer");
@@ -1218,8 +1218,8 @@ mod tests {
             workspace.save_current_profile(cx);
         });
 
-        let saved_id = workspace.read_with(&cx, |workspace, _| {
-            let profiles = workspace.profiles.profiles();
+        let saved_id = workspace.read_with(&cx, |_workspace, cx| {
+            let profiles = cx.resources().profiles.profiles();
             assert_eq!(profiles.len(), 1, "one profile saved");
             assert_eq!(profiles[0].name, "My Server");
             assert_eq!(profiles[0].host, "example.com");
@@ -1228,7 +1228,8 @@ mod tests {
         });
 
         // The save also flushed to disk: reopening the store reads it back.
-        let path = workspace.read_with(&cx, |workspace, _| workspace.profiles.path().clone());
+        let path =
+            workspace.read_with(&cx, |_workspace, cx| cx.resources().profiles.path().clone());
         let reloaded =
             macsftp_storage::ProfileStore::open(path).expect("reload saved profiles.json");
         assert_eq!(reloaded.profiles().len(), 1, "profile persisted to disk");
@@ -1236,8 +1237,8 @@ mod tests {
         // The secret was written to the Keychain, not just the profile
         // file (plan §11). The profile on disk holds only the SecretRef.
         let secret_ref = macsftp_core::SecretRef::keychain_ref(saved_id, "password");
-        let stored = workspace.read_with(&cx, |workspace, _| {
-            workspace.keychain.load(&secret_ref).expect("load secret")
+        let stored = workspace.read_with(&cx, |_workspace, cx| {
+            cx.resources().keychain.load(&secret_ref).expect("load secret")
         });
         assert_eq!(
             stored,
@@ -1269,9 +1270,9 @@ mod tests {
         workspace.update_in(&mut cx, |workspace, _window, cx| {
             workspace.save_current_profile(cx);
         });
-        workspace.read_with(&cx, |workspace, _| {
+        workspace.read_with(&cx, |_workspace, cx| {
             assert_eq!(
-                workspace.profiles.profiles().len(),
+                cx.resources().profiles.profiles().len(),
                 1,
                 "re-save updates, does not duplicate"
             );
@@ -1281,13 +1282,14 @@ mod tests {
         workspace.update_in(&mut cx, |workspace, _window, cx| {
             workspace.delete_profile(saved_id, cx);
         });
-        workspace.read_with(&cx, |workspace, _| {
+        workspace.read_with(&cx, |_workspace, cx| {
             assert!(
-                workspace.profiles.profiles().is_empty(),
+                cx.resources().profiles.profiles().is_empty(),
                 "profile deleted from store"
             );
         });
-        let path = workspace.read_with(&cx, |workspace, _| workspace.profiles.path().clone());
+        let path =
+            workspace.read_with(&cx, |_workspace, cx| cx.resources().profiles.path().clone());
         let reloaded = macsftp_storage::ProfileStore::open(path).expect("reload after delete");
         assert!(reloaded.profiles().is_empty(), "profile deleted from disk");
     }
@@ -1355,53 +1357,45 @@ mod tests {
         let _ = channels.command_rx.try_recv();
 
         // Simulate an in-flight upload plan in the live transfer store.
-        workspace.update_in(&mut cx, |workspace, _window, _cx| {
+        workspace.update_in(&mut cx, |_workspace, _window, cx| {
             let plan_id = macsftp_core::TransferPlanId(7);
             let root_job_id = macsftp_core::TransferId(7);
             let now = macsftp_core::Timestamp::unix_epoch();
-            workspace
-                .state
-                .transfers
-                .plans
-                .push(macsftp_core::TransferPlan {
-                    id: plan_id,
-                    root_job_id,
-                    source_root: TransferEndpoint::Local(LocalPath::new("/tmp/report.pdf")),
-                    destination_root: TransferEndpoint::Remote(RemotePath::new("/srv/report.pdf")),
-                    state: macsftp_core::TransferPlanState::Running,
-                    planned_count: 1,
-                    total_bytes: None,
-                    child_jobs: vec![root_job_id],
-                    conflict_policy: ConflictPolicy::Ask,
-                });
-            workspace
-                .state
-                .transfers
-                .jobs
-                .push(macsftp_core::TransferJob {
-                    id: root_job_id,
-                    direction: TransferDirection::Upload,
-                    source: TransferEndpoint::Local(LocalPath::new("/tmp/report.pdf")),
-                    destination: TransferEndpoint::Remote(RemotePath::new("/srv/report.pdf")),
-                    state: macsftp_core::TransferState::Running {
-                        bytes_done: 0,
-                        bytes_total: None,
-                        started_at: now,
-                    },
-                    metadata_policy: MetadataPolicy::default(),
-                    conflict_policy: ConflictPolicy::Ask,
-                    warnings: Vec::new(),
-                    created_at: now,
-                });
+            cx.transfers_mut().plans.push(macsftp_core::TransferPlan {
+                id: plan_id,
+                root_job_id,
+                source_root: TransferEndpoint::Local(LocalPath::new("/tmp/report.pdf")),
+                destination_root: TransferEndpoint::Remote(RemotePath::new("/srv/report.pdf")),
+                state: macsftp_core::TransferPlanState::Running,
+                planned_count: 1,
+                total_bytes: None,
+                child_jobs: vec![root_job_id],
+                conflict_policy: ConflictPolicy::Ask,
+            });
+            cx.transfers_mut().jobs.push(macsftp_core::TransferJob {
+                id: root_job_id,
+                direction: TransferDirection::Upload,
+                source: TransferEndpoint::Local(LocalPath::new("/tmp/report.pdf")),
+                destination: TransferEndpoint::Remote(RemotePath::new("/srv/report.pdf")),
+                state: macsftp_core::TransferState::Running {
+                    bytes_done: 0,
+                    bytes_total: None,
+                    started_at: now,
+                },
+                metadata_policy: MetadataPolicy::default(),
+                conflict_policy: ConflictPolicy::Ask,
+                warnings: Vec::new(),
+                created_at: now,
+            });
         });
 
         // The quit hook path: flush the live transfers to disk.
-        workspace.update_in(&mut cx, |workspace, _window, _cx| {
-            workspace.flush_transfer_history();
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            workspace.flush_transfer_history(cx);
         });
 
-        workspace.read_with(&cx, |workspace, _| {
-            let records = workspace.transfer_history.records();
+        workspace.read_with(&cx, |_workspace, cx| {
+            let records = cx.resources().transfer_history.records();
             assert_eq!(records.len(), 1, "one in-flight plan persisted");
             assert!(matches!(
                 records[0].status,
@@ -1417,8 +1411,8 @@ mod tests {
 
         // And it survives a reload from disk.
         let reopened = macsftp_storage::TransferHistoryStore::open_or_empty(
-            workspace.read_with(&cx, |workspace, _| {
-                workspace.transfer_history.path().clone()
+            workspace.read_with(&cx, |_workspace, cx| {
+                cx.resources().transfer_history.path().clone()
             }),
         );
         assert_eq!(reopened.records().len(), 1);
@@ -1427,11 +1421,11 @@ mod tests {
             TransferHistoryStatus::Unfinished
         ));
         // A second flush must not duplicate (guarded by the flushed flag).
-        workspace.update_in(&mut cx, |workspace, _window, _cx| {
-            workspace.flush_transfer_history();
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            workspace.flush_transfer_history(cx);
         });
-        workspace.read_with(&cx, |workspace, _| {
-            assert_eq!(workspace.transfer_history.records().len(), 1);
+        workspace.read_with(&cx, |_workspace, cx| {
+            assert_eq!(cx.resources().transfer_history.records().len(), 1);
         });
     }
 
@@ -1463,8 +1457,8 @@ mod tests {
 
         // Seed a retryable (unfinished) history record.
         let record_id = macsftp_core::TransferHistoryId(11);
-        workspace.update_in(&mut cx, |workspace, _window, _cx| {
-            workspace
+        workspace.update_in(&mut cx, |_workspace, _window, cx| {
+            cx.resources_mut()
                 .transfer_history
                 .append(vec![TransferHistoryRecord {
                     id: record_id,
@@ -1509,8 +1503,8 @@ mod tests {
         }
 
         // The record is removed from history once retried.
-        workspace.read_with(&cx, |workspace, _| {
-            assert!(workspace.transfer_history.find(record_id).is_none());
+        workspace.read_with(&cx, |_workspace, cx| {
+            assert!(cx.resources().transfer_history.find(record_id).is_none());
         });
     }
 
@@ -1520,8 +1514,8 @@ mod tests {
         let _ = channels.command_rx.try_recv();
 
         let record_id = macsftp_core::TransferHistoryId(12);
-        workspace.update_in(&mut cx, |workspace, _window, _cx| {
-            workspace
+        workspace.update_in(&mut cx, |_workspace, _window, cx| {
+            cx.resources_mut()
                 .transfer_history
                 .append(vec![TransferHistoryRecord {
                     id: record_id,
@@ -1544,8 +1538,8 @@ mod tests {
         assert!(!enqueued);
         assert!(channels.command_rx.try_recv().is_err());
         // Record remains so the user can retry later.
-        workspace.read_with(&cx, |workspace, _| {
-            assert!(workspace.transfer_history.find(record_id).is_some());
+        workspace.read_with(&cx, |_workspace, cx| {
+            assert!(cx.resources().transfer_history.find(record_id).is_some());
         });
     }
 
@@ -1591,17 +1585,13 @@ mod tests {
 
             // Without children, planning completion should finalize the root
             // job immediately so it does not linger in the Queued section.
-            let root_job = workspace
-                .state
-                .transfers
+            let root_job = cx.transfers()
                 .jobs
                 .iter()
                 .find(|job| job.id == root_job_id)
                 .expect("root job exists");
             assert_eq!(root_job.state, TransferState::Completed);
-            let plan = workspace
-                .state
-                .transfers
+            let plan = cx.transfers()
                 .plans
                 .iter()
                 .find(|p| p.id == plan_id)
@@ -1644,9 +1634,7 @@ mod tests {
             workspace.handle_app_event(AppEvent::TransferPlanCompleted { plan_id }, window, cx);
 
             // Plan completion with children keeps root in Queued.
-            let root_job = workspace
-                .state
-                .transfers
+            let root_job = cx.transfers()
                 .jobs
                 .iter()
                 .find(|job| job.id == root_job_id)
@@ -1683,17 +1671,13 @@ mod tests {
             );
 
             // After the last child completes, the root plan/job must finalize.
-            let root_job = workspace
-                .state
-                .transfers
+            let root_job = cx.transfers()
                 .jobs
                 .iter()
                 .find(|job| job.id == root_job_id)
                 .expect("root job exists");
             assert_eq!(root_job.state, TransferState::Completed);
-            let plan = workspace
-                .state
-                .transfers
+            let plan = cx.transfers()
                 .plans
                 .iter()
                 .find(|p| p.id == plan_id)

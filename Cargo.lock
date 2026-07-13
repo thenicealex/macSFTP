@@ -3682,6 +3682,7 @@ dependencies = [
  "macsftp-sftp",
  "macsftp-storage",
  "macsftp-ui",
+ "tokio",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",

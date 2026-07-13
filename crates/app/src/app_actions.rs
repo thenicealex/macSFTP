@@ -6,6 +6,7 @@ use gpui::{App, KeyBinding, actions};
 actions!(
     macsftp,
     [
+        NewWindow,
         NewTab,
         CloseTab,
         ReconnectTab,
@@ -42,6 +43,7 @@ actions!(
 /// `main` agree on them.
 pub fn init(cx: &mut App) {
     cx.bind_keys([
+        KeyBinding::new("cmd-n", NewWindow, None),
         KeyBinding::new("cmd-t", NewTab, Some("Workspace")),
         KeyBinding::new("cmd-w", CloseTab, Some("Workspace")),
         KeyBinding::new("cmd-shift-]", ActivateNextTab, Some("Workspace")),

@@ -35,11 +35,12 @@ use macsftp_ui::{
 use tracing::{debug, warn};
 
 use crate::app_actions::*;
+use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::connect_form::*;
 use crate::workspace::helpers::*;
 use crate::workspace::*;
 
-impl Workspace {
+impl crate::workspace::Workspace {
     pub(crate) fn handle_app_event(
         &mut self,
         event: AppEvent,
@@ -181,14 +182,12 @@ impl Workspace {
                 );
             }
             AppEvent::TransferPlanStarted(snapshot) => {
-                self.state.transfers.plans.push(snapshot.plan);
-                self.state.transfers.jobs.push(snapshot.root_job);
+                cx.transfers_mut().plans.push(snapshot.plan);
+                cx.transfers_mut().jobs.push(snapshot.root_job);
             }
             AppEvent::TransferConflict(prompt) => {
                 let default_rename = copy_name(&prompt.destination);
-                if let Some(job) = self
-                    .state
-                    .transfers
+                if let Some(job) = cx.transfers_mut()
                     .jobs
                     .iter_mut()
                     .find(|job| job.id == prompt.transfer_id)
@@ -198,7 +197,7 @@ impl Workspace {
                         request_id: prompt.request_id,
                     };
                 }
-                self.state.transfers.pending_conflicts.push(
+                cx.transfers_mut().pending_conflicts.push(
                     ConflictRequest::new(
                         prompt.request_id,
                         prompt.plan_id,
@@ -218,9 +217,7 @@ impl Workspace {
                 window.focus(&self.modal_focus);
             }
             AppEvent::TransferPlanProgress(progress) => {
-                if let Some(plan) = self
-                    .state
-                    .transfers
+                if let Some(plan) = cx.transfers_mut()
                     .plans
                     .iter_mut()
                     .find(|plan| plan.id == progress.plan_id)
@@ -229,20 +226,17 @@ impl Workspace {
                     plan.total_bytes = progress.total_bytes;
                     plan.child_jobs.push(progress.child_job.id);
                 }
-                self.state.transfers.jobs.push(progress.child_job);
+                cx.transfers_mut().jobs.push(progress.child_job);
             }
             AppEvent::TransferPlanCompleted { plan_id } => {
-                if let Some(plan) = self
-                    .state
-                    .transfers
+                let transfers = cx.transfers_mut();
+                if let Some(plan) = transfers
                     .plans
                     .iter_mut()
                     .find(|plan| plan.id == plan_id)
                 {
                     plan.state = macsftp_core::TransferPlanState::Queued;
-                    if let Some(root_job) = self
-                        .state
-                        .transfers
+                    if let Some(root_job) = transfers
                         .jobs
                         .iter_mut()
                         .find(|job| job.id == plan.root_job_id)
@@ -251,9 +245,7 @@ impl Workspace {
                     }
                     if plan.child_jobs.is_empty() {
                         plan.state = macsftp_core::TransferPlanState::Completed;
-                        if let Some(root_job) = self
-                            .state
-                            .transfers
+                        if let Some(root_job) = transfers
                             .jobs
                             .iter_mut()
                             .find(|job| job.id == plan.root_job_id)
@@ -264,17 +256,14 @@ impl Workspace {
                 }
             }
             AppEvent::TransferPlanCancelled { plan_id } => {
-                if let Some(plan) = self
-                    .state
-                    .transfers
+                let transfers = cx.transfers_mut();
+                if let Some(plan) = transfers
                     .plans
                     .iter_mut()
                     .find(|plan| plan.id == plan_id)
                 {
                     plan.state = macsftp_core::TransferPlanState::Cancelled;
-                    if let Some(root_job) = self
-                        .state
-                        .transfers
+                    if let Some(root_job) = transfers
                         .jobs
                         .iter_mut()
                         .find(|job| job.id == plan.root_job_id)
@@ -284,9 +273,8 @@ impl Workspace {
                 }
             }
             AppEvent::TransferPlanFailed { plan_id, error } => {
-                if let Some(plan) = self
-                    .state
-                    .transfers
+                let transfers = cx.transfers_mut();
+                if let Some(plan) = transfers
                     .plans
                     .iter_mut()
                     .find(|plan| plan.id == plan_id)
@@ -294,9 +282,7 @@ impl Workspace {
                     plan.state = macsftp_core::TransferPlanState::Failed {
                         error: error.clone(),
                     };
-                    if let Some(root_job) = self
-                        .state
-                        .transfers
+                    if let Some(root_job) = transfers
                         .jobs
                         .iter_mut()
                         .find(|job| job.id == plan.root_job_id)
@@ -309,22 +295,18 @@ impl Workspace {
                 }
             }
             AppEvent::TransferQueued(snapshot) | AppEvent::TransferRunning(snapshot) => {
-                if let Some(existing_job) = self
-                    .state
-                    .transfers
+                if let Some(existing_job) = cx.transfers_mut()
                     .jobs
                     .iter_mut()
                     .find(|job| job.id == snapshot.job.id)
                 {
                     *existing_job = snapshot.job;
                 } else {
-                    self.state.transfers.jobs.push(snapshot.job);
+                    cx.transfers_mut().jobs.push(snapshot.job);
                 }
             }
             AppEvent::TransferProgress(progress) => {
-                if let Some(job) = self
-                    .state
-                    .transfers
+                if let Some(job) = cx.transfers_mut()
                     .jobs
                     .iter_mut()
                     .find(|job| job.id == progress.transfer_id)
@@ -341,9 +323,7 @@ impl Workspace {
                 }
             }
             AppEvent::TransferWarning(warning) => {
-                if let Some(job) = self
-                    .state
-                    .transfers
+                if let Some(job) = cx.transfers_mut()
                     .jobs
                     .iter_mut()
                     .find(|job| job.id == warning.transfer_id)
@@ -352,33 +332,27 @@ impl Workspace {
                 }
             }
             AppEvent::TransferCompleted { transfer_id } => {
-                if let Some(job) = self
-                    .state
-                    .transfers
+                if let Some(job) = cx.transfers_mut()
                     .jobs
                     .iter_mut()
                     .find(|job| job.id == transfer_id)
                 {
                     job.state = TransferState::Completed;
                 }
-                self.finalize_plan(transfer_id);
+                self.finalize_plan(transfer_id, cx);
             }
             AppEvent::TransferSkipped { transfer_id } => {
-                if let Some(job) = self
-                    .state
-                    .transfers
+                if let Some(job) = cx.transfers_mut()
                     .jobs
                     .iter_mut()
                     .find(|job| job.id == transfer_id)
                 {
                     job.state = TransferState::Skipped;
                 }
-                self.finalize_plan(transfer_id);
+                self.finalize_plan(transfer_id, cx);
             }
             AppEvent::TransferFailed(failure) => {
-                if let Some(job) = self
-                    .state
-                    .transfers
+                if let Some(job) = cx.transfers_mut()
                     .jobs
                     .iter_mut()
                     .find(|job| job.id == failure.transfer_id)
@@ -388,17 +362,17 @@ impl Workspace {
                         error: failure.error,
                     };
                 }
-                self.finalize_plan(failure.transfer_id);
+                self.finalize_plan(failure.transfer_id, cx);
             }
             AppEvent::ResidualTempCreated(record) => {
-                self.residual_temps.add(record);
-                if let Err(error) = self.residual_temps.save() {
+                cx.resources_mut().residual_temps.add(record);
+                if let Err(error) = cx.resources_mut().residual_temps.save() {
                     warn!(error = %error, "could not persist residual temp record");
                 }
             }
             AppEvent::ResidualTempCleared { transfer_id, path } => {
-                self.residual_temps.remove(transfer_id, &path);
-                if let Err(error) = self.residual_temps.save() {
+                cx.resources_mut().residual_temps.remove(transfer_id, &path);
+                if let Err(error) = cx.resources_mut().residual_temps.save() {
                     warn!(error = %error, "could not update residual temp store");
                 }
             }

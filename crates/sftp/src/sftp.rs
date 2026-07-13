@@ -13,7 +13,7 @@ pub use known_hosts::{
 pub use mock_actor::{MockRemoteSessionActor, MockSessionConfig, MockTransferJob};
 pub use runtime::{
     BridgeChannels, EventReceiver, ProgressThrottle, RuntimeClient, RuntimeController,
-    SessionBackend,
+    SessionBackend, test_event_channel,
 };
 pub use session_actor::{HostTrustConfig, RemoteSessionActor, RemoteSessionRequest};
 pub use trust::{TrustRegistry, TrustRegistryEntry};

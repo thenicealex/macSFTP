@@ -446,7 +446,6 @@ impl RemoteEventScope {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AppState {
     pub tabs: TabStore,
-    pub transfers: TransferStore,
     pub modals: ModalStore,
     /// Monotonic source for `SessionId`s. Session identity is allocated
     /// here (UI side) at connect time and carried in `ConnectCommand`,
@@ -569,13 +568,6 @@ impl TabStore {
         }
 
         Some(removed)
-    }
-
-    /// Generate the next tab id. Simple sequential allocation; suitable
-    /// for single-window MVP where all tab creation goes through this.
-    pub fn next_tab_id(&self) -> TabId {
-        let max = self.tabs.iter().map(|tab| tab.id.0).max().unwrap_or(0);
-        TabId(max + 1)
     }
 }
 
@@ -1871,7 +1863,6 @@ mod tests {
         };
 
         assert_eq!(active_tab.id, TabId(1));
-        assert!(state.transfers.jobs.is_empty());
         assert!(state.modals.active.is_empty());
     }
 
@@ -2198,18 +2189,6 @@ mod tests {
 
         // Close non-existent tab — returns None.
         assert!(store.close_tab(TabId(99)).is_none());
-    }
-
-    #[test]
-    fn tab_store_next_tab_id_is_sequential() {
-        let mut store = super::TabStore::default();
-        assert_eq!(store.next_tab_id(), TabId(1));
-
-        store.open_tab(TabState::new(TabId(1), "a"));
-        assert_eq!(store.next_tab_id(), TabId(2));
-
-        store.open_tab(TabState::new(TabId(5), "b"));
-        assert_eq!(store.next_tab_id(), TabId(6));
     }
 
     #[test]

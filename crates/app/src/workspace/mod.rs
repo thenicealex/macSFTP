@@ -1,37 +1,21 @@
-#![allow(unused_imports)]
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::SystemTime;
 
 use gpui::{
-    App, ClickEvent, ClipboardItem, Context, FocusHandle, Focusable, FontWeight, Hsla, IntoElement,
-    KeyDownEvent, ParentElement, Render, ScrollStrategy, SharedString, Styled, Subscription, Task,
-    UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+    App, ClipboardItem, Context, FocusHandle, Focusable, IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Task,
+    UniformListScrollHandle, Window, div, prelude::*,
 };
 use macsftp_core::{
-    AppCommand, AppEvent, AppState, AuthCredential, AuthMethod, AuthMethodKind,
-    CommandDispatchError, ConflictDecision, ConflictDecisionCommand, ConflictRequest,
-    ConflictRequestId, ConnectCommand, ConnectionProfile, ConnectionSettings, ConnectionState,
-    DisconnectReason, EntryPath, ErrorCode, FileKind, HostKeyDecisionCommand, HostKeyPrompt,
-    LocalPath, ModalRequest, ModalRequestId, ProfileId, RemotePath, SecretRef, TabId, TabState,
-    Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferHistoryId,
-    TransferHistoryRecord, TransferHistoryStatus, TransferJob, TransferState, TrustRequestId,
-    UserFacingError, history_status_for_plan, sort_entries,
+    AppCommand, AppState,
+    CommandDispatchError, ConnectCommand, ConnectionSettings, ConnectionState,
+    LocalPath, ProfileId, TabId, TabState,
 };
-use macsftp_platform::{AppPaths, read_local_directory};
 use macsftp_sftp::{EventReceiver, RuntimeClient};
-use macsftp_storage::{
-    AppearancePreference, ConfigStore, KeychainError, KeychainStore, ProfileStore,
-    ResidualTempStore, TransferHistoryStore,
-};
+use macsftp_storage::AppearancePreference;
 use macsftp_ui::{
-    ActiveTheme, DragPreview, FileRowModel, IconName, InputKeyResult, InputState, TextFieldModel,
-    Theme, TransferRow, connection_status, copy_name, empty_state, file_row, file_table_header,
-    format_size, format_timestamp, icon, icon_button, section_header_static, tab, text_button,
-    text_field, text_tooltip, transfer_history_detail, transfer_history_title, transfer_row,
-    transfer_title,
+    ActiveTheme, InputState, Theme, empty_state, text_button,
 };
-use tracing::{debug, warn};
+use tracing::warn;
 
 use crate::app_actions::{
     ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, CopyPath, CopyVersionInfo,
@@ -39,7 +23,7 @@ use crate::app_actions::{
     OpenSelectedEntry, OpenSettings, ParentDirectory, ReconnectTab, RefreshPane, SelectNextEntry,
     SelectPrevEntry, ShowAbout, ShowTransferDrawer, UploadSelection, ZoomWindow,
 };
-use crate::workspace::helpers::connection_in_flight;
+use crate::resources::ActiveResources;
 
 /// Which file pane an action targets. Local is the default focus side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,7 +56,6 @@ pub struct Workspace {
     default_local_path: LocalPath,
     status_message: Option<SharedString>,
     config_error: Option<SharedString>,
-    config: ConfigStore,
     log_file: LocalPath,
     connect_form: Option<ConnectForm>,
     connect_form_focus: FocusHandle,
@@ -84,18 +67,6 @@ pub struct Workspace {
     /// Session credentials per tab, kept in memory only so Reconnect
     /// works without re-typing. Replaced by Keychain-backed profiles.
     tab_settings: HashMap<TabId, ConnectionSettings>,
-    /// Disk-backed saved-connection profiles. Loaded at startup; the
-    /// connect dialog reads and writes through this store.
-    profiles: ProfileStore,
-    /// Credential store (macOS Keychain). Profile secrets are written
-    /// here; `profiles.json` only ever holds the `SecretRef` handle.
-    keychain: KeychainStore,
-    /// Persisted transfer history (plan §18). Loaded at startup so
-    /// unfinished transfers from the last app close can be retried.
-    transfer_history: TransferHistoryStore,
-    /// Residual `.macsftp-part-*` temp files from a previous run,
-    /// reconciled on launch (local) and on reconnect (remote). Plan M5/M6.
-    residual_temps: ResidualTempStore,
     /// Guards against double-flushing history if the quit hook fires
     /// more than once.
     transfer_history_flushed: bool,
@@ -107,10 +78,7 @@ pub struct Workspace {
 impl Workspace {
     pub fn new(
         runtime_client: RuntimeClient,
-        event_receiver: EventReceiver,
-        app_paths: AppPaths,
-        config: ConfigStore,
-        keychain: KeychainStore,
+        mut event_receiver: EventReceiver,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -118,13 +86,16 @@ impl Workspace {
             LocalPath::new(std::env::var("HOME").unwrap_or_else(|_| "/Users/alex".to_string()));
 
         let state = AppState::new();
-        let config_error = config
+        let config_error = cx
+            .resources()
+            .config
             .initial_error()
             .map(|_| SharedString::from("Could not load config.json; using defaults."));
+        let log_file = cx.resources().app_paths.log_file.clone();
 
         let appearance_subscription =
-            cx.observe_window_appearance(window, |workspace, window, cx| {
-                if workspace.config.config().appearance == AppearancePreference::System {
+            cx.observe_window_appearance(window, |_workspace, window, cx| {
+                if cx.resources().config.config().appearance == AppearancePreference::System {
                     cx.set_global(Theme::for_appearance(window.appearance()));
                     cx.notify();
                 }
@@ -162,29 +133,20 @@ impl Workspace {
             default_local_path,
             status_message: None,
             config_error,
-            config,
-            log_file: app_paths.log_file.clone(),
+            log_file,
             connect_form: None,
             connect_form_focus: cx.focus_handle(),
             conflict_rename: InputState::new(),
             conflict_rename_error: None,
             tab_settings: HashMap::new(),
-            profiles: ProfileStore::open_or_empty(app_paths.profiles_file.clone()),
-            keychain,
-            transfer_history: TransferHistoryStore::open_or_empty(
-                app_paths.transfer_history_file.clone(),
-            ),
-            residual_temps: Self::reconcile_local_residual_temps(ResidualTempStore::open_or_empty(
-                app_paths.residual_temp_file.clone(),
-            )),
             transfer_history_flushed: false,
             _appearance_subscription: appearance_subscription,
             _event_drain: event_drain,
         };
         // Persist in-flight transfers to disk when the app quits (plan §18)
         // so they can be shown and retried on next launch.
-        cx.on_app_quit(|workspace, _cx| {
-            workspace.flush_transfer_history();
+        cx.on_app_quit(|workspace, cx| {
+            workspace.flush_transfer_history(cx);
             async {}
         })
         .detach();
@@ -211,7 +173,7 @@ impl Workspace {
         }
     }
     pub(crate) fn open_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let tab_id = self.state.tabs.next_tab_id();
+        let tab_id = cx.resources().next_tab_id();
         let mut tab = TabState::new(tab_id, "New Connection");
         if let Some(message) = Self::load_local_directory(&self.default_local_path, &mut tab) {
             self.status_message = Some(message.into());
@@ -222,12 +184,7 @@ impl Workspace {
         self.focus_pane(PaneSide::Local, window, cx);
         cx.notify();
     }
-    pub(crate) fn close_tab_by_id(
-        &mut self,
-        tab_id: TabId,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn close_tab_by_id(&mut self, tab_id: TabId, window: &mut Window, cx: &mut Context<Self>) {
         if self.state.tabs.close_tab(tab_id).is_none() {
             return;
         }
@@ -290,7 +247,7 @@ impl Workspace {
         let Some(tab) = self.active_tab() else {
             return;
         };
-        if connection_in_flight(&tab.connection) {
+        if crate::workspace::helpers::connection_in_flight(&tab.connection) {
             return;
         }
         let tab_id = tab.id;
@@ -308,7 +265,7 @@ impl Workspace {
         let Some(tab) = self.active_tab() else {
             return;
         };
-        if connection_in_flight(&tab.connection) {
+        if crate::workspace::helpers::connection_in_flight(&tab.connection) {
             return;
         }
         let tab_id = tab.id;
@@ -358,7 +315,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match self.config.set_appearance(appearance) {
+        match cx.resources_mut().config.set_appearance(appearance) {
             Ok(()) => self.config_error = None,
             Err(error) => {
                 warn!(error = %error, "could not save app config");

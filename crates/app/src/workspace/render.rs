@@ -1,45 +1,23 @@
-#![allow(unused_imports)]
-use std::collections::HashMap;
-use std::path::Path;
-use std::time::SystemTime;
-
 use gpui::{
-    App, ClickEvent, ClipboardItem, Context, FocusHandle, Focusable, FontWeight, Hsla, IntoElement,
-    KeyDownEvent, ParentElement, Render, ScrollStrategy, SharedString, Styled, Subscription, Task,
-    UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
+    AppContext, Context, FontWeight, Hsla, IntoElement, ParentElement, SharedString, Styled,
+    Window, div, prelude::*, px, uniform_list,
 };
-use macsftp_core::{
-    AppCommand, AppEvent, AppState, AuthCredential, AuthMethod, AuthMethodKind,
-    CommandDispatchError, ConflictDecision, ConflictDecisionCommand, ConflictRequest,
-    ConflictRequestId, ConnectCommand, ConnectionProfile, ConnectionSettings, ConnectionState,
-    DisconnectReason, EntryPath, ErrorCode, FileKind, HostKeyDecisionCommand, HostKeyPrompt,
-    LocalPath, ModalRequest, ModalRequestId, ProfileId, RemotePath, SecretRef, TabId, TabState,
-    Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferHistoryId,
-    TransferHistoryRecord, TransferHistoryStatus, TransferJob, TransferState, TrustRequestId,
-    UserFacingError, history_status_for_plan, sort_entries,
+use macsftp_core::{ EntryPath, ConnectionState, TransferHistoryRecord,
+    TransferHistoryStatus, TransferJob, TransferState,
 };
-use macsftp_platform::{AppPaths, read_local_directory};
-use macsftp_sftp::{EventReceiver, RuntimeClient};
-use macsftp_storage::{
-    AppearancePreference, ConfigStore, KeychainError, KeychainStore, ProfileStore,
-    ResidualTempStore, TransferHistoryStore,
-};
-use macsftp_ui::{
-    ActiveTheme, DragPreview, FileRowModel, IconName, InputKeyResult, InputState, TextFieldModel,
-    Theme, TransferRow, connection_status, copy_name, empty_state, file_row, file_table_header,
-    format_size, format_timestamp, icon, icon_button, section_header_static, tab, text_button,
-    text_field, text_tooltip, transfer_history_detail, transfer_history_title, transfer_row,
-    transfer_title,
+use macsftp_ui::{ DragPreview,
+    ActiveTheme, FileRowModel, IconName, empty_state, file_row, file_table_header,
+    format_size, format_timestamp, icon, icon_button, tab, text_button, text_tooltip,
+    transfer_row, connection_status, transfer_history_title, transfer_history_detail, transfer_title,
+    section_header_static,
 };
 
-use tracing::{debug, warn};
-
-use crate::app_actions::*;
-use crate::workspace::connect_form::*;
+use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::helpers::*;
-use crate::workspace::*;
+use crate::workspace::{PaneSide, WorkspaceSurface};
+use macsftp_storage::AppearancePreference;
 
-impl Workspace {
+impl crate::workspace::Workspace {
     pub(crate) fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
         let active_tab_id = self.state.tabs.active_tab_id;
@@ -399,10 +377,10 @@ impl Workspace {
                                         drag_item,
                                         |value: &EntryPath, _position, _window, cx| {
                                             let label = match value {
-                                                EntryPath::Local(p) => Path::new(p.as_str())
+                                                EntryPath::Local(p) => std::path::Path::new(p.as_str())
                                                     .file_name()
                                                     .map(|n| n.to_string_lossy().to_string()),
-                                                EntryPath::Remote(p) => Path::new(p.as_str())
+                                                EntryPath::Remote(p) => std::path::Path::new(p.as_str())
                                                     .file_name()
                                                     .map(|n| n.to_string_lossy().to_string()),
                                             }
@@ -451,12 +429,12 @@ impl Workspace {
             .child(file_table_header(&sort, cx))
             .child(div().flex_1().min_h_0().child(list))
     }
-    pub(crate) fn render_transfer_drawer(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement + use<> {
+    pub(crate) fn render_transfer_drawer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
-        let jobs = &self.state.transfers.jobs;
+        // Cloned (not borrowed) so the shared transfer store isn't held
+        // borrowed across the `render_transfer_job(job, cx)` calls below.
+        let jobs = cx.transfers().jobs.clone();
+        let jobs = &jobs;
 
         let active_jobs: Vec<&TransferJob> = jobs
             .iter()
@@ -516,7 +494,7 @@ impl Workspace {
                 )),
         );
 
-        if jobs.is_empty() && self.transfer_history.records().is_empty() {
+        if jobs.is_empty() && cx.resources().transfer_history.records().is_empty() {
             return drawer.child(
                 div()
                     .flex()
@@ -602,8 +580,8 @@ impl Workspace {
         // History (plan §18): persisted transfers from prior sessions,
         // including unfinished ones captured at the last app close. Only
         // shown when there is something to retry or review.
-        let mut history_records: Vec<&TransferHistoryRecord> =
-            self.transfer_history.records().iter().collect();
+        let mut history_records: Vec<TransferHistoryRecord> =
+            cx.resources().transfer_history.records().to_vec();
         history_records.sort_by_key(|record| std::cmp::Reverse(record.last_updated));
         if !history_records.is_empty() {
             drawer = drawer.child(section_header_static(
@@ -611,7 +589,7 @@ impl Workspace {
                 history_records.len(),
                 &theme,
             ));
-            for record in history_records {
+            for record in &history_records {
                 drawer = drawer.child(self.render_history_record(record, cx));
             }
         }
@@ -622,7 +600,7 @@ impl Workspace {
         &self,
         record: &TransferHistoryRecord,
         cx: &mut Context<Self>,
-    ) -> TransferRow {
+    ) -> macsftp_ui::TransferRow {
         let theme = cx.theme().clone();
         let title = transfer_history_title(record);
         let (state_label, state_color): (SharedString, Hsla) = match &record.status {
@@ -656,11 +634,7 @@ impl Workspace {
         }
         row
     }
-    pub(crate) fn render_transfer_job(
-        &self,
-        job: &TransferJob,
-        cx: &mut Context<Self>,
-    ) -> TransferRow {
+    pub(crate) fn render_transfer_job(&self, job: &TransferJob, cx: &mut Context<Self>) -> macsftp_ui::TransferRow {
         let theme = cx.theme().clone();
         let job_id = job.id;
         let title = transfer_title(job);
@@ -691,9 +665,8 @@ impl Workspace {
         };
 
         let detail: SharedString = match &job.state {
-            TransferState::Planning => self
-                .state
-                .transfers
+            TransferState::Planning => cx
+                .transfers()
                 .plans
                 .iter()
                 .find(|plan| plan.root_job_id == job.id)
@@ -760,9 +733,8 @@ impl Workspace {
             _ => row,
         };
 
-        let is_plan_root = self
-            .state
-            .transfers
+        let is_plan_root = cx
+            .transfers()
             .plans
             .iter()
             .any(|plan| plan.root_job_id == job_id);
@@ -802,7 +774,8 @@ impl Workspace {
             None => (theme.colors.text_disabled, "No connection".to_string()),
         };
 
-        let jobs = &self.state.transfers.jobs;
+        let transfers = cx.transfers();
+        let jobs = &transfers.jobs;
         let active_count = jobs
             .iter()
             .filter(|job| {
@@ -886,7 +859,7 @@ impl Workspace {
     }
     pub(crate) fn render_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme().clone();
-        let selected_appearance = self.config.config().appearance;
+        let selected_appearance = cx.resources().config.config().appearance;
         let appearance_button = |id: &'static str,
                                  label: &'static str,
                                  appearance: AppearancePreference,

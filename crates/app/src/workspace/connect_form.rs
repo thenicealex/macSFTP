@@ -1,5 +1,4 @@
-#![allow(unused_imports)]
-use gpui::{Context, FocusHandle, KeyDownEvent, SharedString, Window};
+use gpui::{App, Context, KeyDownEvent, SharedString, Window};
 use macsftp_core::{
     AuthCredential, AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionSettings, ProfileId,
     SecretRef,
@@ -8,6 +7,7 @@ use macsftp_storage::KeychainError;
 use macsftp_ui::{InputKeyResult, InputState};
 use tracing::warn;
 
+use crate::resources::ActiveResources;
 use crate::workspace::helpers::{expand_home, secret_refs_for_profile, secret_refs_for_settings};
 
 /// One field of the connect form, in Tab-cycle order.
@@ -199,7 +199,7 @@ impl ConnectForm {
     }
 }
 
-impl super::Workspace {
+impl crate::workspace::Workspace {
     /// Open the connect form for the active tab, prefilling any cached
     /// session credentials.
     pub(crate) fn open_connect_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -241,8 +241,9 @@ impl super::Workspace {
 
     /// Allocate a fresh profile id: one past the current maximum so
     /// saved profiles never collide even after deletes.
-    pub(crate) fn next_profile_id(&self) -> ProfileId {
-        let max = self
+    pub(crate) fn next_profile_id(&self, cx: &App) -> ProfileId {
+        let max = cx
+            .resources()
             .profiles
             .profiles()
             .iter()
@@ -257,12 +258,12 @@ impl super::Workspace {
     /// Keychain is unavailable, the form still opens with metadata filled
     /// and the user re-enters the secret — saving is never blocked.
     pub(crate) fn use_profile(&mut self, profile_id: ProfileId, cx: &mut Context<Self>) {
-        let Some(profile) = self.profiles.find_profile(profile_id).cloned() else {
+        let Some(profile) = cx.resources().profiles.find_profile(profile_id).cloned() else {
             return;
         };
         let mut form = ConnectForm::from_profile(&profile);
         match &profile.auth {
-            AuthMethod::Password { secret_ref } => match self.keychain.load(secret_ref) {
+            AuthMethod::Password { secret_ref } => match cx.resources().keychain.load(secret_ref) {
                 Ok(Some(password)) => form.password.set_value(password),
                 Ok(None) => {
                     self.status_message = Some("Saved password not found — re-enter it.".into());
@@ -275,7 +276,7 @@ impl super::Workspace {
             },
             AuthMethod::PrivateKey { passphrase_ref, .. } => {
                 if let Some(secret_ref) = passphrase_ref {
-                    match self.keychain.load(secret_ref) {
+                    match cx.resources().keychain.load(secret_ref) {
                         Ok(Some(passphrase)) => form.passphrase.set_value(passphrase),
                         Ok(None) => {
                             self.status_message =
@@ -331,19 +332,20 @@ impl super::Workspace {
             name
         };
         let profile_id = match source_profile_id {
-            Some(id) if self.profiles.find_profile(id).is_some() => id,
-            _ => self.next_profile_id(),
+            Some(id) if cx.resources().profiles.find_profile(id).is_some() => id,
+            _ => self.next_profile_id(cx),
         };
 
         // When updating, the previous profile may have used a different
         // auth method; capture it so we can drop its now-orphaned
         // Keychain entries after storing the new ones.
-        let previous = source_profile_id.and_then(|id| self.profiles.find_profile(id).cloned());
+        let previous =
+            source_profile_id.and_then(|id| cx.resources().profiles.find_profile(id).cloned());
 
         // Write the secret to the Keychain first. If this fails we do not
         // persist the profile, so a disk entry never points at a missing
         // secret.
-        if let Err(error) = self.store_profile_secrets(profile_id, &settings) {
+        if let Err(error) = self.store_profile_secrets(profile_id, &settings, cx) {
             self.status_message =
                 Some(format!("Could not save credentials to Keychain: {error}").into());
             cx.notify();
@@ -358,14 +360,14 @@ impl super::Workspace {
                     .iter()
                     .any(|current| current == &orphan);
                 if !still_used {
-                    let _ = self.keychain.delete(&orphan);
+                    let _ = cx.resources().keychain.delete(&orphan);
                 }
             }
         }
 
         let profile =
             ConnectionProfile::from_connection_settings(profile_id, name.clone(), &settings);
-        match self.profiles.save_profile(profile) {
+        match cx.resources_mut().profiles.save_profile(profile) {
             Ok(saved) => {
                 if let Some(form) = self.connect_form.as_mut() {
                     form.source_profile_id = Some(saved.id);
@@ -379,7 +381,7 @@ impl super::Workspace {
                 // Best-effort cleanup so we don't leave an orphan
                 // credential behind.
                 for secret_ref in secret_refs_for_settings(profile_id, &settings.auth) {
-                    let _ = self.keychain.delete(&secret_ref);
+                    let _ = cx.resources().keychain.delete(&secret_ref);
                 }
                 self.status_message = Some(format!("Could not save profile: {error}").into());
             }
@@ -393,16 +395,17 @@ impl super::Workspace {
         &self,
         profile_id: ProfileId,
         settings: &ConnectionSettings,
+        cx: &App,
     ) -> Result<(), KeychainError> {
         match &settings.auth {
             AuthCredential::Password { password } => {
                 let secret_ref = SecretRef::keychain_ref(profile_id, "password");
-                self.keychain.store(&secret_ref, password)
+                cx.resources().keychain.store(&secret_ref, password)
             }
             AuthCredential::PrivateKey { passphrase, .. } => match passphrase {
                 Some(passphrase) => {
                     let secret_ref = SecretRef::keychain_ref(profile_id, "passphrase");
-                    self.keychain.store(&secret_ref, passphrase)
+                    cx.resources().keychain.store(&secret_ref, passphrase)
                 }
                 None => Ok(()),
             },
@@ -413,11 +416,12 @@ impl super::Workspace {
     pub(crate) fn delete_profile_secrets(
         &self,
         profile: &ConnectionProfile,
+        cx: &App,
     ) -> Result<(), KeychainError> {
         match &profile.auth {
-            AuthMethod::Password { secret_ref } => self.keychain.delete(secret_ref),
+            AuthMethod::Password { secret_ref } => cx.resources().keychain.delete(secret_ref),
             AuthMethod::PrivateKey { passphrase_ref, .. } => match passphrase_ref {
-                Some(secret_ref) => self.keychain.delete(secret_ref),
+                Some(secret_ref) => cx.resources().keychain.delete(secret_ref),
                 None => Ok(()),
             },
         }
@@ -427,8 +431,8 @@ impl super::Workspace {
     /// remove its Keychain entries. Drops the link from any open form
     /// that pointed at it.
     pub(crate) fn delete_profile(&mut self, profile_id: ProfileId, cx: &mut Context<Self>) {
-        let previous = self.profiles.find_profile(profile_id).cloned();
-        match self.profiles.delete_profile(profile_id) {
+        let previous = cx.resources().profiles.find_profile(profile_id).cloned();
+        match cx.resources_mut().profiles.delete_profile(profile_id) {
             Ok(()) => {
                 if let Some(form) = self.connect_form.as_mut()
                     && form.source_profile_id == Some(profile_id)
@@ -436,7 +440,7 @@ impl super::Workspace {
                     form.source_profile_id = None;
                 }
                 if let Some(profile) = previous
-                    && let Err(error) = self.delete_profile_secrets(&profile)
+                    && let Err(error) = self.delete_profile_secrets(&profile, cx)
                 {
                     warn!(
                         "could not remove Keychain secret for deleted profile {profile_id:?}: {error}"

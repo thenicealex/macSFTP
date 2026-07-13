@@ -2,13 +2,12 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use macsftp_core::{
-    AppEvent, AuthCredential, AuthFailure, ConnectionSettings, DisconnectReason,
+    AppEvent, AuthCredential, AuthFailure, ConnectionSettings,
     HostKeyMismatch, HostKeyPrompt, RemoteEventScope, RemoteScoped, TrustDecision,
-    TrustRequestId, UserFacingError, ErrorCode, TabDisconnected
+    TrustRequestId, UserFacingError, ErrorCode
 };
 use russh::client;
 use russh::keys::{PrivateKeyWithHashAlg, load_secret_key};
-use russh_sftp::client::SftpSession;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -17,7 +16,7 @@ use crate::known_hosts::{HostKeyCheckResult, KnownHostsStore, fingerprint_sha256
 use crate::trust::{TrustRegistry, TrustRegistryEntry};
 use crate::session_actor::HostTrustConfig;
 
-pub fn lock_store(store: &Mutex<KnownHostsStore>) -> MutexGuard<KnownHostsStore> {
+pub fn lock_store(store: &Mutex<KnownHostsStore>) -> MutexGuard<'_, KnownHostsStore> {
     store.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 

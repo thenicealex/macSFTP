@@ -1,6 +1,7 @@
 mod app_actions;
 mod assets;
 mod m7_regression;
+mod resources;
 mod workspace;
 
 use gpui::{
@@ -21,10 +22,12 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::app_actions::{
     CloseTab, CopyVersionInfo, DownloadSelection, FocusLocalPane, FocusRemotePane, HideApplication,
-    HideOtherApplications, MinimizeWindow, NewTab, OpenLogFolder, OpenSettings, Quit, ReconnectTab,
-    RefreshPane, ShowAbout, ShowAllApplications, ShowTransferDrawer, UploadSelection, ZoomWindow,
+    HideOtherApplications, MinimizeWindow, NewTab, NewWindow, OpenLogFolder, OpenSettings, Quit,
+    ReconnectTab, RefreshPane, ShowAbout, ShowAllApplications, ShowTransferDrawer, UploadSelection,
+    ZoomWindow,
 };
 use crate::assets::Assets;
+use crate::resources::{AppResources, SharedTransfers};
 use crate::workspace::Workspace;
 
 /// Owns the Tokio runtime controller for the app's lifetime so it can
@@ -80,7 +83,17 @@ fn init_logging(log_path: &str) -> WorkerGuard {
 }
 
 fn main() {
-    Application::new().with_assets(Assets).run(|cx: &mut App| {
+    let app = Application::new().with_assets(Assets);
+    // Native macOS behavior: the app stays alive with no windows open;
+    // clicking the Dock icon opens a fresh window. gpui only fires this
+    // when zero windows are open. Registered on the builder (not `App`);
+    // the callback runs later, once the globals it reads are set.
+    app.on_reopen(|cx: &mut App| {
+        if let Err(error) = open_workspace_window(cx) {
+            error!(error = ?error, "failed to reopen window");
+        }
+    });
+    app.run(|cx: &mut App| {
         app_actions::init(cx);
 
         // Host trust files (plan §10): read the user's known_hosts if
@@ -116,8 +129,6 @@ fn main() {
             RuntimeBridgeConfig::default(),
             SessionBackend::Real(trust_config),
         );
-        let runtime_client = controller.client();
-        let event_receiver = controller.event_receiver();
         cx.set_global(RuntimeHandle {
             controller: Some(controller),
             _log_guard: log_guard,
@@ -131,6 +142,24 @@ fn main() {
             async {}
         })
         .detach();
+
+        // Shared, process-wide app state: one instance per process, read
+        // and written by every window (Cmd+N). Set before any window opens.
+        cx.set_global(AppResources::load(
+            app_paths,
+            config_store,
+            KeychainStore::new_os(),
+        ));
+        cx.set_global(SharedTransfers::default());
+
+        // Cmd+N (and File > New Window) opens another independent window.
+        // Registered at the App level so it fires regardless of which
+        // window — if any — is focused.
+        cx.on_action(|_: &NewWindow, cx: &mut App| {
+            if let Err(error) = open_workspace_window(cx) {
+                error!(error = ?error, "failed to open new window");
+            }
+        });
 
         cx.set_menus(vec![
             Menu {
@@ -151,6 +180,7 @@ fn main() {
             Menu {
                 name: "File".into(),
                 items: vec![
+                    MenuItem::action("New Window", NewWindow),
                     MenuItem::action("New Connection", NewTab),
                     MenuItem::action("Close Tab", CloseTab),
                     MenuItem::separator(),
@@ -185,38 +215,56 @@ fn main() {
             },
         ]);
 
-        let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
-        let open_result = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(720.0), px(480.0))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("macSFTP".into()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            |window, cx| {
-                cx.new(|cx| {
-                    Workspace::new(
-                        runtime_client,
-                        event_receiver,
-                        app_paths,
-                        config_store,
-                        KeychainStore::new_os(),
-                        window,
-                        cx,
-                    )
-                })
-            },
-        );
-
-        match open_result {
-            Ok(_) => cx.activate(true),
-            Err(error) => {
-                error!(error = ?error, "failed to open macSFTP window");
-                cx.quit();
-            }
+        if let Err(error) = open_workspace_window(cx) {
+            error!(error = ?error, "failed to open macSFTP window");
+            cx.quit();
         }
     });
+}
+
+/// Open a new top-level workspace window. Shared by the initial launch,
+/// the `NewWindow` action (Cmd+N / File > New Window), and the Dock-icon
+/// reopen hook so all three construct a window identically.
+///
+/// Each window mints its own `RuntimeClient` and broadcast `EventReceiver`
+/// from the one process-wide [`RuntimeController`], and shares the
+/// `AppResources`/`SharedTransfers` globals with every other window.
+fn open_workspace_window(cx: &mut App) -> gpui::Result<()> {
+    let (runtime_client, event_receiver) = {
+        let handle = cx.global::<RuntimeHandle>();
+        let controller = handle
+            .controller
+            .as_ref()
+            .expect("runtime controller must be running while opening a window");
+        (controller.client(), controller.event_receiver())
+    };
+
+    // The first window (including one reopened after the last closed) opens
+    // centered at the default size. Additional windows pass `None` so gpui
+    // cascades them off the active window instead of stacking exactly on
+    // top of it.
+    let window_bounds = if cx.windows().is_empty() {
+        Some(WindowBounds::Windowed(Bounds::centered(
+            None,
+            size(px(1200.0), px(800.0)),
+            cx,
+        )))
+    } else {
+        None
+    };
+
+    cx.open_window(
+        WindowOptions {
+            window_bounds,
+            window_min_size: Some(size(px(720.0), px(480.0))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("macSFTP".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        |window, cx| cx.new(|cx| Workspace::new(runtime_client, event_receiver, window, cx)),
+    )?;
+    cx.activate(true);
+    Ok(())
 }

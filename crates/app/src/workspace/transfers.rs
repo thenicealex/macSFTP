@@ -35,11 +35,12 @@ use macsftp_ui::{
 use tracing::{debug, warn};
 
 use crate::app_actions::*;
+use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::connect_form::*;
 use crate::workspace::helpers::*;
 use crate::workspace::*;
 
-impl Workspace {
+impl crate::workspace::Workspace {
     pub(crate) fn begin_upload(&mut self, sources: Vec<LocalPath>, cx: &mut Context<Self>) {
         let Some(tab) = self.active_tab() else {
             return;
@@ -174,9 +175,8 @@ impl Workspace {
         transfer_id: macsftp_core::TransferId,
         cx: &mut Context<Self>,
     ) {
-        if let Some(job) = self
-            .state
-            .transfers
+        if let Some(job) = cx
+            .transfers_mut()
             .jobs
             .iter_mut()
             .find(|job| job.id == transfer_id)
@@ -197,23 +197,20 @@ impl Workspace {
     ) {
         self.send_command(AppCommand::RetryTransfer { transfer_id }, cx);
     }
-    pub(crate) fn finalize_plan(&mut self, _job_id: macsftp_core::TransferId) {
-        let Some(plan_id) = self
-            .state
-            .transfers
+    pub(crate) fn finalize_plan(
+        &mut self,
+        _job_id: macsftp_core::TransferId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(plan_id) = cx
+            .transfers()
             .plans
             .iter()
             .find_map(|plan| plan.child_jobs.contains(&_job_id).then_some(plan.id))
         else {
             return;
         };
-        let Some(plan) = self
-            .state
-            .transfers
-            .plans
-            .iter()
-            .find(|plan| plan.id == plan_id)
-        else {
+        let Some(plan) = cx.transfers().plans.iter().find(|plan| plan.id == plan_id) else {
             return;
         };
         if matches!(
@@ -224,15 +221,11 @@ impl Workspace {
         ) {
             return;
         }
+        let child_jobs = plan.child_jobs.clone();
+        let root_job_id = plan.root_job_id;
         let mut any_failed = false;
-        for child_id in &plan.child_jobs {
-            let Some(job) = self
-                .state
-                .transfers
-                .jobs
-                .iter()
-                .find(|job| job.id == *child_id)
-            else {
+        for child_id in &child_jobs {
+            let Some(job) = cx.transfers().jobs.iter().find(|job| job.id == *child_id) else {
                 return;
             };
             match job.state {
@@ -242,7 +235,6 @@ impl Workspace {
             }
         }
 
-        let root_job_id = plan.root_job_id;
         let plan_state = if any_failed {
             macsftp_core::TransferPlanState::Failed {
                 error: UserFacingError::new(
@@ -254,18 +246,16 @@ impl Workspace {
         } else {
             macsftp_core::TransferPlanState::Completed
         };
-        if let Some(plan) = self
-            .state
-            .transfers
+        if let Some(plan) = cx
+            .transfers_mut()
             .plans
             .iter_mut()
             .find(|plan| plan.id == plan_id)
         {
             plan.state = plan_state;
         }
-        if let Some(root_job) = self
-            .state
-            .transfers
+        if let Some(root_job) = cx
+            .transfers_mut()
             .jobs
             .iter_mut()
             .find(|job| job.id == root_job_id)
@@ -284,64 +274,54 @@ impl Workspace {
             };
         }
     }
-    pub(crate) fn flush_transfer_history(&mut self) {
+    pub(crate) fn flush_transfer_history(&mut self, cx: &mut Context<Self>) {
         if self.transfer_history_flushed {
             return;
         }
         let now = Timestamp(SystemTime::now());
+        // Snapshot the shared transfer store first so its (immutable)
+        // borrow of the App is released before we mutably borrow the
+        // resources global to allocate ids and append.
+        let plans: Vec<(macsftp_core::TransferPlan, Option<TransferJob>)> = {
+            let transfers = cx.transfers();
+            transfers
+                .plans
+                .iter()
+                .map(|plan| {
+                    let root_job = transfers.find_job(plan.root_job_id).cloned();
+                    (plan.clone(), root_job)
+                })
+                .collect()
+        };
         let mut new_records: Vec<TransferHistoryRecord> = Vec::new();
-        for plan in &self.state.transfers.plans {
-            let root_job = self.state.transfers.find_job(plan.root_job_id);
+        for (plan, root_job) in &plans {
             let record = TransferHistoryRecord {
-                id: self.transfer_history.allocate_id(),
+                id: cx.resources_mut().transfer_history.allocate_id(),
                 profile_id: None,
                 direction: root_job
+                    .as_ref()
                     .map(|job| job.direction)
                     .unwrap_or(TransferDirection::Upload),
                 sources: vec![plan.source_root.clone()],
                 destination: plan.destination_root.clone(),
                 metadata_policy: root_job
+                    .as_ref()
                     .map(|job| job.metadata_policy.clone())
                     .unwrap_or_default(),
                 conflict_policy: plan.conflict_policy.clone(),
-                status: history_status_for_plan(plan.state.clone(), root_job),
-                started_at: root_job.map(|job| job.created_at).unwrap_or(now),
+                status: history_status_for_plan(plan.state.clone(), root_job.as_ref()),
+                started_at: root_job.as_ref().map(|job| job.created_at).unwrap_or(now),
                 last_updated: now,
             };
             new_records.push(record);
         }
-        self.transfer_history.append(new_records);
-        self.transfer_history.prune(now);
-        if let Err(error) = self.transfer_history.save() {
+        let history = &mut cx.resources_mut().transfer_history;
+        history.append(new_records);
+        history.prune(now);
+        if let Err(error) = history.save() {
             warn!(error = %error, "could not persist transfer history on quit");
         }
         self.transfer_history_flushed = true;
-    }
-    pub(crate) fn reconcile_local_residual_temps(
-        mut store: ResidualTempStore,
-    ) -> ResidualTempStore {
-        let local: Vec<_> = store.local_records().cloned().collect();
-        for record in local {
-            match std::fs::remove_file(&record.path) {
-                Ok(()) => {
-                    store.remove(record.transfer_id, &record.path);
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    store.remove(record.transfer_id, &record.path);
-                }
-                Err(error) => {
-                    warn!(
-                        path = %record.path,
-                        error = %error,
-                        "local residual temp file could not be removed at launch"
-                    );
-                }
-            }
-        }
-        if let Err(error) = store.save() {
-            warn!(error = %error, "could not persist residual temp store at launch");
-        }
-        store
     }
     pub(crate) fn clean_remote_residual_temps(&mut self, tab_id: TabId, cx: &mut Context<Self>) {
         let connection_key = {
@@ -351,12 +331,13 @@ impl Workspace {
             let Some(profile_id) = tab.profile_id else {
                 return;
             };
-            let Some(profile) = self.profiles.find_profile(profile_id) else {
+            let Some(profile) = cx.resources().profiles.find_profile(profile_id) else {
                 return;
             };
             format!("{}:{}", profile.host, profile.port)
         };
-        let pending: Vec<_> = self
+        let pending: Vec<_> = cx
+            .resources()
             .residual_temps
             .remote_records_for(&connection_key)
             .cloned()
@@ -377,7 +358,7 @@ impl Workspace {
         record_id: TransferHistoryId,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(record) = self.transfer_history.find(record_id).cloned() else {
+        let Some(record) = cx.resources().transfer_history.find(record_id).cloned() else {
             return false;
         };
         let Some(tab) = self.active_tab() else {
@@ -393,8 +374,8 @@ impl Workspace {
         let command = record.to_start_command(tab.id, session_epoch, profile_id);
         let enqueued = self.send_command(AppCommand::StartTransfer(command), cx);
         if enqueued {
-            self.transfer_history.remove(record_id);
-            if let Err(error) = self.transfer_history.save() {
+            cx.resources_mut().transfer_history.remove(record_id);
+            if let Err(error) = cx.resources_mut().transfer_history.save() {
                 warn!(error = %error, "could not update transfer history after retry");
             }
             self.drawer_open = true;
