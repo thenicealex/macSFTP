@@ -11,7 +11,7 @@
 - UI 风格：Zed 风格，高性能自绘 UI。
 - SFTP 后端：`russh + russh-sftp`，不使用 `ssh2`。
 - 项目性质：从零开发 Rust 产品。
-- 窗口模型：第一版只做单窗口，多窗口是后续能力。
+- 窗口模型：第一版只做单窗口，多窗口是后续能力。**（2026-07-13 更新：多窗口已作为 post-MVP 能力交付 —— Cmd+N / File › New Window 打开独立窗口，各窗口独立标签页、共享传输列表与设置。详见 `docs/progress-analysis-2026-07-13-multiwindow.md`。）**
 - 第一版认证：密码、私钥。
 - Host key policy：OpenSSH-compatible。
 - known_hosts 兼容目标：第一版读写 OpenSSH-compatible 子集，完整 OpenSSH grammar 不作为 MVP 承诺。
@@ -58,7 +58,7 @@
 - 多协议支持，包括 FTP、S3、WebDAV。
 - App Store 发布。
 - 自动更新。
-- 多窗口。
+- ~~多窗口。~~ **→ 已于 2026-07-13 作为 post-MVP 能力交付（见 §1 更新说明）。**
 - 完整 OpenSSH config 解析。
 - 完整 OpenSSH known_hosts grammar。
 - jump host / ProxyCommand。
@@ -1331,6 +1331,13 @@ remote readlink
 ## 15. UI 规划
 
 第一版只做单窗口。多窗口会改变 `AppModel`、event routing 和 modal ownership，不进入 MVP。
+
+> **2026-07-13 更新 —— 多窗口已交付（post-MVP）。** 上述三点担忧均已解决：
+> - **event routing**：`RuntimeController` 内新增一个 fan-out 任务，把内部 flume 事件流转发到 `tokio::sync::broadcast`，每个窗口 `.subscribe()` 一份完整事件流；跨窗口的 tab 事件由既有的 `TabStore::accepts_remote_event`（按 `tab_id` 过滤）天然分流，无需新增过滤逻辑。
+> - **AppModel**：`TransferStore` 与五个磁盘存储（config/profiles/keychain/transfer_history/residual_temps）+ `AppPaths` + tab-id 计数器提升为进程级 GPUI global（`SharedTransfers` / `AppResources`），所有窗口共享同一实例；tab 集合、模态、焦点仍为每窗口私有。
+> - **modal ownership**：host-key 模态携带 `tab_id`，只在拥有该 tab 的窗口弹出，保持每窗口私有。
+> - `TabId` 由每实例 `max+1` 改为共享 `Arc<AtomicU64>`，跨窗口绝不冲突（runtime 的 session 注册表按 `TabId` 索引）。
+> - 关闭全部窗口后 app 常驻（原生 macOS 行为），Cmd+N / Dock 图标可重新开窗口。
 
 ### 主布局
 

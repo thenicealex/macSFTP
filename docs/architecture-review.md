@@ -222,7 +222,7 @@ fn check_server_key(&mut self, key: &PublicKey) -> Result<bool, Self::Error> {
 | # | 关切 | 严重度 | 说明 |
 |---|------|--------|------|
 | C8 | Keychain crate 未选型 | 低 | macOS 用 `security-framework` crate，需 pin。文档说"用 Keychain"但没说怎么用。 |
-| C9 | 单窗口 vs 多窗口未定义 | 低 | `crates/app` 职责列了"主窗口创建"，但没说是否支持多窗口。多窗口会显著影响 AppModel 结构。MVP 建议单窗口。 |
+| C9 | ~~单窗口 vs 多窗口未定义~~ **→ 已解决（2026-07-13）** | 低 | MVP 选定单窗口；多窗口后于 2026-07-13 作为 post-MVP 交付（共享 global 化的 `AppModel`、broadcast event routing、每窗口私有 modal）。详见 `docs/progress-analysis-2026-07-13-multiwindow.md`。 |
 | C10 | Accessibility 未提 | 中 | macOS 用户期望 VoiceOver。GPUI 的 a11y 支持有限，可能需要在文档里显式列为"第一版不达标"。 |
 | C11 | 日志策略不完整 | 低 | 提了 log 路径，没说用 `tracing` 还是 `log`，没说分级、轮转、敏感字段过滤。建议 `tracing` + `tracing-subscriber` + `tracing-appender`。 |
 | C12 | keyboard-interactive 留扩展点但无机制 | 低 | 文档说"保留扩展点"但 `AuthMethod` enum 没有这个 variant。建议加 `KeyboardInteractive { /* placeholder */ }` 或文档说明扩展点在哪。 |
