@@ -1,6 +1,7 @@
 mod app_actions;
 mod assets;
 mod m7_regression;
+mod palette_commands;
 mod rate_sampler;
 mod resources;
 mod workspace;
