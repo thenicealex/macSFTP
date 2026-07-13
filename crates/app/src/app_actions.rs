@@ -90,6 +90,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("f2", RenameEntry, Some("FilePane")),
         KeyBinding::new("cmd-shift-n", NewFolder, Some("FilePane")),
         KeyBinding::new("cmd-shift-.", ToggleHiddenFiles, Some("Workspace")),
+        KeyBinding::new("cmd-shift-p", OpenCommandPalette, Some("Workspace")),
         KeyBinding::new("cmd-,", OpenSettings, Some("Workspace")),
         KeyBinding::new("cmd-m", MinimizeWindow, Some("Workspace")),
         KeyBinding::new("escape", CancelActiveModal, Some("HostKeyModal")),
@@ -99,6 +100,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("escape", CancelActiveModal, Some("ConnectForm")),
         KeyBinding::new("escape", CancelActiveModal, Some("Settings")),
         KeyBinding::new("escape", CancelActiveModal, Some("About")),
+        KeyBinding::new("escape", CancelActiveModal, Some("CommandPalette")),
         KeyBinding::new("cmd-q", Quit, None),
     ]);
 

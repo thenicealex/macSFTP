@@ -221,8 +221,12 @@ impl crate::workspace::Workspace {
         cx.notify();
     }
     pub(crate) fn cancel_active_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Go to Path is highest priority so Esc always dismisses the path
-        // field even if another surface is also "open" in theory.
+        // Command palette sits above other modals (phase 4 design §2.3).
+        if self.palette_open {
+            self.close_command_palette(window, cx);
+            return;
+        }
+        // Go to Path next so Esc dismisses the path field when palette is closed.
         if self.go_to_path_open {
             self.close_go_to_path(window, cx);
             return;

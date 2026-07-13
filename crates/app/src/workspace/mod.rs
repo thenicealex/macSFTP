@@ -20,11 +20,11 @@ use tracing::warn;
 use crate::app_actions::{
     ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, CopyPath, CopyVersionInfo,
     DeleteSelection, DownloadSelection, FilterPane, FocusLocalPane, FocusRemotePane, GoToPath,
-    MinimizeWindow, NavigateBack, NavigateForward, NewFolder, NewTab, OpenLogFolder,
-    OpenSelectedEntry, OpenSettings, PageDown, PageUp, ParentDirectory, ReconnectTab, RefreshPane,
-    RenameEntry, SelectAllEntries, SelectFirstEntry, SelectLastEntry, SelectNextEntry,
-    SelectNextEntryExtend, SelectPrevEntry, SelectPrevEntryExtend, ShowAbout, ShowTransferDrawer,
-    ToggleHiddenFiles, UploadSelection, ZoomWindow,
+    MinimizeWindow, NavigateBack, NavigateForward, NewFolder, NewTab, OpenCommandPalette,
+    OpenLogFolder, OpenSelectedEntry, OpenSettings, PageDown, PageUp, ParentDirectory,
+    ReconnectTab, RefreshPane, RenameEntry, SelectAllEntries, SelectFirstEntry, SelectLastEntry,
+    SelectNextEntry, SelectNextEntryExtend, SelectPrevEntry, SelectPrevEntryExtend, ShowAbout,
+    ShowTransferDrawer, ToggleHiddenFiles, UploadSelection, ZoomWindow,
 };
 use crate::resources::ActiveResources;
 use crate::workspace::file_ops::{ContextMenuState, DeleteConfirmState, InlineEditState};
@@ -100,6 +100,10 @@ pub struct Workspace {
     go_to_path_open: bool,
     go_to_path_input: InputState,
     go_to_path_error: Option<SharedString>,
+    /// Command palette (`cmd-shift-p`).
+    palette_open: bool,
+    palette_input: InputState,
+    palette_selected: usize,
     /// Active-tab type-to-filter state (cleared on tab switch / navigate).
     local_filter: PaneFilter,
     remote_filter: PaneFilter,
@@ -187,6 +191,9 @@ impl Workspace {
             go_to_path_open: false,
             go_to_path_input: InputState::new(),
             go_to_path_error: None,
+            palette_open: false,
+            palette_input: InputState::new(),
+            palette_selected: 0,
             local_filter: PaneFilter::default(),
             remote_filter: PaneFilter::default(),
             selection_anchor: None,
@@ -499,6 +506,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|workspace, _: &ReconnectTab, window, cx| {
                 workspace.request_connect(window, cx);
             }))
+            .on_action(cx.listener(|workspace, _: &OpenCommandPalette, window, cx| {
+                workspace.open_command_palette(window, cx);
+            }))
             .on_action(cx.listener(|workspace, _: &CancelActiveModal, window, cx| {
                 workspace.cancel_active_modal(window, cx);
             }))
@@ -618,9 +628,11 @@ impl Render for Workspace {
             .children(self.render_go_to_path_modal(cx))
             .children(self.render_context_menu(cx))
             .children(self.render_about(cx))
+            .children(self.render_command_palette(cx))
     }
 }
 
+mod command_palette;
 mod connect_form;
 mod event_handling;
 mod file_ops;

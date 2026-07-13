@@ -2570,6 +2570,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&fixture);
     }
 
+    #[gpui::test]
+    fn command_palette_filters_and_runs_new_tab(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _) = init_workspace(cx);
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            assert_eq!(ws.state.tabs.tabs.len(), 1);
+            ws.open_command_palette(window, cx);
+            assert!(ws.palette_open);
+            ws.palette_input.set_value("new tab");
+            // rebuild selection to first hit
+            ws.palette_selected = 0;
+            ws.execute_palette_selected(window, cx);
+            assert!(!ws.palette_open);
+            assert_eq!(ws.state.tabs.tabs.len(), 2);
+        });
+    }
+
+    #[gpui::test]
+    fn command_palette_esc_closes_before_other_modals(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _) = init_workspace(cx);
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            ws.open_go_to_path(window, cx);
+            assert!(ws.go_to_path_open);
+            ws.open_command_palette(window, cx);
+            assert!(ws.palette_open);
+            ws.cancel_active_modal(window, cx);
+            assert!(!ws.palette_open, "Esc closes palette first");
+            assert!(ws.go_to_path_open, "underlying go-to-path stays open");
+            ws.cancel_active_modal(window, cx);
+            assert!(!ws.go_to_path_open);
+        });
+    }
+
     /// App-level wiring: after workspace init, `SharedTransfers.rates` is
     /// reachable via `ActiveTransfers` and produces speed from observes.
     #[gpui::test]
