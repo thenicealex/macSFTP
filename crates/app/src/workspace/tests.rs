@@ -456,6 +456,48 @@ mod tests {
     }
 
     #[gpui::test]
+    fn transfer_drawer_min_height_does_not_close(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        workspace.update(&mut cx, |workspace, _cx| {
+            // Simulate dragging the handle all the way down.
+            workspace.set_drawer_height(gpui::px(1.0), gpui::px(900.0));
+        });
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(
+                workspace.drawer_open,
+                "clamping to min height must not auto-close the drawer"
+            );
+            assert_eq!(
+                workspace.drawer_height,
+                crate::workspace::drawer_height::MIN_DRAWER_HEIGHT
+            );
+            assert!(workspace.drawer_resize.is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn transfer_drawer_resize_delta_grows_when_dragging_up(cx: &mut TestAppContext) {
+        // Logic mirror of on_drag_move: new_height = start_height + (start_y - current_y).
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        workspace.update(&mut cx, |workspace, _cx| {
+            let start = crate::workspace::drawer_height::TransferDrawerResize {
+                start_height: gpui::px(240.0),
+                start_y: gpui::px(500.0),
+            };
+            workspace.drawer_resize = Some(start.clone());
+            let current_y = gpui::px(400.0); // drag up → taller
+            let new_height = start.start_height + (start.start_y - current_y);
+            workspace.set_drawer_height(new_height, gpui::px(900.0));
+            workspace.drawer_resize = None;
+        });
+        workspace.read_with(&cx, |workspace, _| {
+            assert_eq!(workspace.drawer_height, gpui::px(340.0));
+            assert!(workspace.drawer_resize.is_none());
+            assert!(workspace.drawer_open);
+        });
+    }
+
+    #[gpui::test]
     fn settings_action_switches_surface_and_persists_appearance(cx: &mut TestAppContext) {
         let (workspace, mut cx, _channels) = init_workspace(cx);
 

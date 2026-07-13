@@ -1,6 +1,7 @@
 use gpui::{
-    AppContext, ClickEvent, Context, FontWeight, Hsla, IntoElement, ParentElement, SharedString,
-    Styled, Window, div, prelude::*, px, uniform_list,
+    AppContext, ClickEvent, Context, CursorStyle, DragMoveEvent, FontWeight, Hsla, IntoElement,
+    MouseButton, MouseDownEvent, ParentElement, SharedString, Styled, Window, div, prelude::*, px,
+    uniform_list,
 };
 use macsftp_core::{
     ConnectionState, EntryPath, LocalPath, RemotePath, TransferHistoryRecord,
@@ -1080,13 +1081,16 @@ impl crate::workspace::Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        use crate::workspace::drawer_height::{MIN_DRAWER_HEIGHT, RESIZE_HANDLE_HEIGHT};
+        use crate::workspace::drawer_height::{
+            MIN_DRAWER_HEIGHT, RESIZE_HANDLE_HEIGHT, ResizeDragGhost, TransferDrawerResize,
+        };
 
         // Reclamp after window shrink so stored height never exceeds max.
         self.reclamp_drawer_height(window.viewport_size().height);
         let height = self.drawer_height;
 
         let theme = cx.theme().clone();
+        let workspace_entity = cx.entity();
         // Cloned (not borrowed) so the shared transfer store isn't held
         // borrowed across the `render_transfer_job(job, cx)` calls below.
         let jobs = cx.transfers().jobs.clone();
@@ -1166,7 +1170,9 @@ impl crate::workspace::Workspace {
             .border_t_1()
             .border_color(theme.colors.border);
 
-        // Static resize chrome; drag/double-click wired in Task 4.
+        // Resize handle: drag to change height; double-click resets to default.
+        // Never auto-closes the drawer when clamped to min height.
+        let hover_background = theme.colors.element_hover;
         drawer = drawer.child(
             div()
                 .id("transfer-drawer-resize-handle")
@@ -1174,7 +1180,55 @@ impl crate::workspace::Workspace {
                 .w_full()
                 .h(RESIZE_HANDLE_HEIGHT)
                 .cursor_row_resize()
-                .bg(theme.colors.border),
+                .bg(theme.colors.border)
+                .hover(|style| style.bg(hover_background))
+                .tooltip(text_tooltip("Drag to resize · Double-click to reset"))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|workspace, event: &MouseDownEvent, window, cx| {
+                        // Prefer mouse_down double-click so drag threshold
+                        // does not steal the reset gesture.
+                        if event.click_count >= 2 {
+                            workspace
+                                .reset_drawer_height(window.viewport_size().height);
+                            workspace.drawer_resize = None;
+                            cx.notify();
+                        }
+                    }),
+                )
+                .on_drag(
+                    TransferDrawerResize {
+                        start_height: self.drawer_height,
+                        start_y: px(0.0),
+                    },
+                    move |value, _cursor_offset, window, cx| {
+                        let start_y = window.mouse_position().y;
+                        let start_height = value.start_height;
+                        workspace_entity.update(cx, |workspace, _cx| {
+                            workspace.drawer_resize = Some(TransferDrawerResize {
+                                start_height,
+                                start_y,
+                            });
+                        });
+                        cx.new(|_| ResizeDragGhost)
+                    },
+                )
+                .on_drag_move(cx.listener(
+                    |workspace, event: &DragMoveEvent<TransferDrawerResize>, window, cx| {
+                        let Some(start) = workspace.drawer_resize.clone() else {
+                            return;
+                        };
+                        let current_y = event.event.position.y;
+                        let new_height =
+                            start.start_height + (start.start_y - current_y);
+                        workspace.set_drawer_height(
+                            new_height,
+                            window.viewport_size().height,
+                        );
+                        cx.set_active_drag_cursor_style(CursorStyle::ResizeRow, window);
+                        cx.notify();
+                    },
+                )),
         );
 
         drawer = drawer.child(

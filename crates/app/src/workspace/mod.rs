@@ -94,6 +94,8 @@ pub struct Workspace {
     about_open: bool,
     drawer_open: bool,
     drawer_height: Pixels,
+    /// Active transfer-drawer resize drag (session-only; cleared on mouse up).
+    drawer_resize: Option<drawer_height::TransferDrawerResize>,
     completed_section_expanded: bool,
     failed_section_expanded: bool,
     local_scroll: UniformListScrollHandle,
@@ -203,6 +205,7 @@ impl Workspace {
             about_open: false,
             drawer_open: true,
             drawer_height: drawer_height::DEFAULT_DRAWER_HEIGHT,
+            drawer_resize: None,
             completed_section_expanded: false,
             failed_section_expanded: false,
             local_scroll: UniformListScrollHandle::new(),
@@ -887,6 +890,16 @@ impl Render for Workspace {
             .id("workspace")
             .key_context("Workspace")
             .track_focus(&self.workspace_focus)
+            .when(self.drawer_resize.is_some(), |root| {
+                root.on_mouse_up(
+                    gpui::MouseButton::Left,
+                    cx.listener(|workspace, _event, _window, cx| {
+                        if workspace.drawer_resize.take().is_some() {
+                            cx.notify();
+                        }
+                    }),
+                )
+            })
             .on_action(cx.listener(|workspace, _: &NewTab, window, cx| {
                 workspace.open_new_tab(window, cx);
             }))
