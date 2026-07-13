@@ -60,7 +60,7 @@ mod tests {
     };
     use macsftp_ui::{Appearance, Theme};
 
-    use super::{AppPaths, PaneSide, Workspace, WorkspaceSurface};
+    use super::{AppPaths, PaneSide, RestoredTabTarget, Workspace, WorkspaceSurface};
     use crate::app_actions::{
         self, ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, FilterPane, GoToPath,
         NavigateBack, NewTab, OpenSettings, PageDown, SelectAllEntries, SelectNextEntry,
@@ -732,6 +732,112 @@ mod tests {
     }
 
     #[gpui::test]
+    fn tab_connected_prefers_restored_remote_path(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.restored_targets.insert(
+                TabId(1),
+                RestoredTabTarget {
+                    host: "mock.example.com".into(),
+                    port: 22,
+                    username: "tester".into(),
+                    profile_id: None,
+                    remote_path: Some(RemotePath::new("/home/restored")),
+                },
+            );
+            workspace.connect_with(test_settings(), None, window, cx);
+        });
+        let _ = channels.command_rx.try_recv();
+
+        let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                AppEvent::TabConnected(RemoteScoped::new(
+                    scope,
+                    TabConnected {
+                        remote_root: RemotePath::new("/home/root"),
+                    },
+                )),
+                window,
+                cx,
+            );
+        });
+
+        workspace.read_with(&cx, |workspace, _| {
+            let tab = workspace.state.tabs.active_tab().expect("tab must exist");
+            assert_eq!(
+                tab.remote.path,
+                Some(RemotePath::new("/home/restored")),
+                "TabConnected must navigate to the restored path, not remote_root"
+            );
+            assert!(
+                workspace
+                    .restored_targets
+                    .get(&TabId(1))
+                    .and_then(|target| target.remote_path.as_ref())
+                    .is_none(),
+                "restored path preference must be cleared after first connect"
+            );
+        });
+
+        assert!(matches!(
+            channels.command_rx.try_recv(),
+            Ok(AppCommand::ReadRemoteDir { tab_id: TabId(1), path })
+                if path == RemotePath::new("/home/restored")
+        ));
+    }
+
+    #[gpui::test]
+    fn disconnect_preserves_last_remote_path_for_session_restore(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
+        });
+        let _ = channels.command_rx.try_recv();
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                AppEvent::TabConnected(RemoteScoped::new(
+                    RemoteEventScope::new(TabId(1), SessionId(1), 1),
+                    TabConnected {
+                        remote_root: RemotePath::new(TEST_REMOTE_ROOT),
+                    },
+                )),
+                window,
+                cx,
+            );
+        });
+        while channels.command_rx.try_recv().is_ok() {}
+
+        // User navigated deeper while connected.
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            let tab = workspace.active_tab_mut().expect("tab must exist");
+            tab.remote.path = Some(RemotePath::new("/home/tester/projects"));
+            workspace.handle_app_event(
+                AppEvent::TabDisconnected(RemoteScoped::new(
+                    RemoteEventScope::new(TabId(1), SessionId(1), 1),
+                    TabDisconnected {
+                        reason: DisconnectReason::UserRequested,
+                    },
+                )),
+                window,
+                cx,
+            );
+            let tab = workspace.active_tab().expect("tab must exist");
+            assert!(
+                tab.remote.path.is_none(),
+                "live remote path is cleared on disconnect"
+            );
+            let snapshot = workspace.build_session_snapshot();
+            assert_eq!(
+                snapshot.tabs[0].remote_path.as_deref(),
+                Some("/home/tester/projects"),
+                "session snapshot must keep the last remote path after disconnect"
+            );
+        });
+    }
+
+    #[gpui::test]
     fn tab_connected_upserts_recents(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
         workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -793,8 +899,11 @@ mod tests {
         });
         while channels.command_rx.try_recv().is_ok() {}
 
-        // Disconnect then connect again with the same host/user/port.
+        // Navigate, disconnect, then connect again with the same host/user/port.
+        // Disconnect stashes the last live remote path for reconnect/recents.
         workspace.update_in(&mut cx, |workspace, window, cx| {
+            let tab = workspace.active_tab_mut().expect("tab must exist");
+            tab.remote.path = Some(RemotePath::new("/tmp"));
             workspace.handle_app_event(
                 AppEvent::TabDisconnected(RemoteScoped::new(
                     RemoteEventScope::new(TabId(1), SessionId(1), 1),
@@ -815,7 +924,8 @@ mod tests {
                 AppEvent::TabConnected(RemoteScoped::new(
                     scope,
                     TabConnected {
-                        remote_root: RemotePath::new("/tmp"),
+                        // Actor root differs; reconnect must prefer the stashed path.
+                        remote_root: RemotePath::new(TEST_REMOTE_ROOT),
                     },
                 )),
                 window,

@@ -130,7 +130,38 @@ impl crate::workspace::Workspace {
                 self.record_recent_for_tab(tab_id, cx);
             }
             AppEvent::TabDisconnected(scoped) => {
-                if let Some(tab) = self.state.tabs.find_tab_mut(scoped.scope.tab_id) {
+                let tab_id = scoped.scope.tab_id;
+                // Before clearing the live remote path, stash it in
+                // restored_targets so build_session_snapshot still records
+                // the last browsing location after disconnect-then-quit.
+                // TabConnected clears this preference once it is consumed.
+                let last_remote_path = self
+                    .state
+                    .tabs
+                    .find_tab(tab_id)
+                    .and_then(|tab| tab.remote.path.clone());
+                if let Some(remote_path) = last_remote_path {
+                    if let Some(target) = self.restored_targets.get_mut(&tab_id) {
+                        target.remote_path = Some(remote_path);
+                    } else if let Some(settings) = self.tab_settings.get(&tab_id) {
+                        let profile_id = self
+                            .state
+                            .tabs
+                            .find_tab(tab_id)
+                            .and_then(|tab| tab.profile_id);
+                        self.restored_targets.insert(
+                            tab_id,
+                            RestoredTabTarget {
+                                host: settings.host.clone(),
+                                port: settings.port,
+                                username: settings.username.clone(),
+                                profile_id,
+                                remote_path: Some(remote_path),
+                            },
+                        );
+                    }
+                }
+                if let Some(tab) = self.state.tabs.find_tab_mut(tab_id) {
                     tab.disconnect(scoped.payload.reason);
                     tab.remote.entries.clear();
                     tab.remote.path = None;

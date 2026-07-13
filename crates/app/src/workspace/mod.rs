@@ -437,6 +437,7 @@ impl Workspace {
         }
         self.tab_mru.retain(|id| *id != tab_id);
         self.tab_nav.remove(&tab_id);
+        self.restored_targets.remove(&tab_id);
         // Keep MRU front aligned with the newly active tab after close
         // (TabStore promotes another tab without going through activate_tab).
         if let Some(active_id) = self.state.tabs.active_tab_id {
