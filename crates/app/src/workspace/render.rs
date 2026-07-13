@@ -3,11 +3,11 @@ use gpui::{
     Styled, Window, div, prelude::*, px, uniform_list,
 };
 use macsftp_core::{
-    ConnectionState, EntryPath, LocalPath, RemotePath, TransferHistoryRecord,
+    AuthMethodKind, ConnectionState, EntryPath, LocalPath, RemotePath, TransferHistoryRecord,
     TransferHistoryStatus, TransferId, TransferJob, TransferState,
 };
 use macsftp_ui::{
-    ActiveTheme, DragPreview, FileRowModel, IconName, TextFieldModel, connection_status,
+    ActiveTheme, DragPreview, FileRowModel, IconName, InputState, TextFieldModel, connection_status,
     empty_state, file_row, file_table_header, format_size, format_timestamp, icon, icon_button,
     loading_state, section_header_static, tab, text_button, text_field, text_tooltip,
     transfer_history_detail, transfer_history_title, transfer_row, transfer_title,
@@ -17,7 +17,9 @@ use crate::palette_commands::labeled_shortcut;
 use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::helpers::*;
 use crate::workspace::nav::{HistoryOp, breadcrumb_display_indices, breadcrumb_segments};
-use crate::workspace::profiles::{SettingsSection, profile_list_label};
+use crate::workspace::profiles::{
+    ProfileEditorField, SettingsSection, profile_list_label,
+};
 use crate::workspace::{PaneSide, WorkspaceSurface};
 use macsftp_storage::AppearancePreference;
 
@@ -1814,63 +1816,52 @@ impl crate::workspace::Workspace {
             .into_any_element()
     }
 
-    /// Settings → Profiles: list on the left, read-only summary on the right.
+    /// Settings → Profiles: list on the left, editor form on the right.
     pub(crate) fn render_settings_profiles(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme().clone();
         let profiles = cx.resources().profiles.profiles().to_vec();
         let filtered = self.filtered_profiles(&profiles);
         let selected_id = self.selected_profile_id;
-        let selected = selected_id.and_then(|id| profiles.iter().find(|p| p.id == id).cloned());
+        let editing_new = self
+            .profile_editor
+            .as_ref()
+            .is_some_and(|editor| editor.is_new);
 
-        let list_rows = filtered.into_iter().map(|profile| {
-            let profile_id = profile.id;
-            let selected = selected_id == Some(profile_id);
-            let label = profile_list_label(profile);
+        // Materialize rows before the editor borrow of `cx` (listeners capture).
+        let list_rows: Vec<_> = filtered
+            .into_iter()
+            .map(|profile| {
+                let profile_id = profile.id;
+                let selected = selected_id == Some(profile_id) && !editing_new;
+                let label = profile_list_label(profile);
+                div()
+                    .id(("settings-profile-row", profile_id.0))
+                    .px_2()
+                    .py_2()
+                    .rounded_sm()
+                    .bg(if selected {
+                        theme.colors.element_selected
+                    } else {
+                        theme.colors.background
+                    })
+                    .text_size(px(12.0))
+                    .text_color(theme.colors.text)
+                    .hover(|style| style.bg(theme.colors.element_hover))
+                    .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                        workspace.select_profile_in_settings(profile_id, cx);
+                    }))
+                    .child(label)
+            })
+            .collect();
+
+        let detail = if self.profile_editor.is_some() {
+            self.render_profile_editor(cx)
+        } else {
             div()
-                .id(("settings-profile-row", profile_id.0))
-                .px_2()
-                .py_2()
-                .rounded_sm()
-                .bg(if selected {
-                    theme.colors.element_selected
-                } else {
-                    theme.colors.background
-                })
-                .text_size(px(12.0))
-                .text_color(theme.colors.text)
-                .hover(|style| style.bg(theme.colors.element_hover))
-                .on_click(cx.listener(move |workspace, _event, _window, cx| {
-                    workspace.select_profile_in_settings(profile_id, cx);
-                }))
-                .child(label)
-        });
-
-        let detail = match selected {
-            Some(profile) => div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(
-                    div()
-                        .text_size(px(16.0))
-                        .font_weight(FontWeight::MEDIUM)
-                        .child(profile.name.clone()),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(theme.colors.text_muted)
-                        .child(format!(
-                            "{}@{}:{}",
-                            profile.username, profile.host, profile.port
-                        )),
-                )
-                .into_any_element(),
-            None => div()
                 .text_size(px(13.0))
                 .text_color(theme.colors.text_muted)
-                .child("Select a profile")
-                .into_any_element(),
+                .child("Select a profile or create a new one")
+                .into_any_element()
         };
 
         div()
@@ -1890,8 +1881,8 @@ impl crate::workspace::Workspace {
                     .border_color(theme.colors.border)
                     .child(
                         text_button("settings-new-profile", "New Profile").on_click(cx.listener(
-                            |_workspace, _event, _window, _cx| {
-                                // Task 2: open editor for a new profile.
+                            |workspace, _event, _window, cx| {
+                                workspace.start_new_profile(cx);
                             },
                         )),
                     )
@@ -1906,6 +1897,246 @@ impl crate::workspace::Workspace {
             )
             .child(div().flex_1().min_w_0().p_6().child(detail))
             .into_any_element()
+    }
+
+    pub(crate) fn render_profile_editor(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(editor) = self.profile_editor.as_ref() else {
+            return div().into_any_element();
+        };
+        let theme = cx.theme().clone();
+
+        let field_row = |label: &'static str,
+                         field: ProfileEditorField,
+                         state: &InputState,
+                         placeholder: &'static str,
+                         masked: bool,
+                         focused: ProfileEditorField,
+                         cx: &mut Context<Self>| {
+            div()
+                .id(("profile-editor-field", field as usize))
+                .flex()
+                .items_center()
+                .gap_2()
+                .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                    if let Some(editor) = workspace.profile_editor.as_mut() {
+                        editor.focused_field = field;
+                        cx.notify();
+                    }
+                }))
+                .child(
+                    div()
+                        .w(px(120.0))
+                        .flex_none()
+                        .text_size(px(11.0))
+                        .text_color(theme.colors.text_muted)
+                        .child(label),
+                )
+                .child(div().flex_1().min_w_0().child(text_field(
+                    ("profile-editor-input", field as usize),
+                    TextFieldModel {
+                        state,
+                        placeholder,
+                        focused: focused == field,
+                        masked,
+                    },
+                    cx,
+                )))
+        };
+
+        let auth_toggle = |label: &'static str,
+                           method: AuthMethodKind,
+                           id: &'static str,
+                           active: AuthMethodKind,
+                           cx: &mut Context<Self>| {
+            text_button(id, label)
+                .primary(active == method)
+                .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                    if let Some(editor) = workspace.profile_editor.as_mut() {
+                        editor.set_auth_method(method);
+                        cx.notify();
+                    }
+                }))
+        };
+
+        let focused = editor.focused_field;
+        let auth_method = editor.auth_method;
+        let title = if editor.is_new {
+            "New Profile"
+        } else {
+            "Edit Profile"
+        };
+
+        let mut form = div()
+            .id("profile-editor")
+            .key_context("ProfileEditor")
+            .track_focus(&self.modal_focus)
+            .on_key_down(cx.listener(Self::handle_profile_editor_key))
+            .flex()
+            .flex_col()
+            .gap_3()
+            .w_full()
+            .max_w(px(560.0))
+            .child(
+                div()
+                    .text_size(px(16.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.colors.text)
+                    .child(title),
+            );
+
+        if let Some(error) = &editor.error {
+            form = form.child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme.colors.error)
+                    .child(error.clone()),
+            );
+        }
+
+        form = form
+            .child(field_row(
+                "Name",
+                ProfileEditorField::Name,
+                &editor.name,
+                "optional",
+                false,
+                focused,
+                cx,
+            ))
+            .child(field_row(
+                "Host",
+                ProfileEditorField::Host,
+                &editor.host,
+                "example.com",
+                false,
+                focused,
+                cx,
+            ))
+            .child(field_row(
+                "Port",
+                ProfileEditorField::Port,
+                &editor.port,
+                "22",
+                false,
+                focused,
+                cx,
+            ))
+            .child(field_row(
+                "Username",
+                ProfileEditorField::Username,
+                &editor.username,
+                "user",
+                false,
+                focused,
+                cx,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(120.0))
+                            .flex_none()
+                            .text_size(px(11.0))
+                            .text_color(theme.colors.text_muted)
+                            .child("Auth"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(auth_toggle(
+                                "Password",
+                                AuthMethodKind::Password,
+                                "profile-auth-password",
+                                auth_method,
+                                cx,
+                            ))
+                            .child(auth_toggle(
+                                "Private Key",
+                                AuthMethodKind::PrivateKey,
+                                "profile-auth-private-key",
+                                auth_method,
+                                cx,
+                            )),
+                    ),
+            );
+
+        form = match auth_method {
+            AuthMethodKind::Password => form.child(field_row(
+                "Password",
+                ProfileEditorField::Password,
+                &editor.password,
+                if editor.secret_present_hint {
+                    "leave blank to keep"
+                } else {
+                    ""
+                },
+                true,
+                focused,
+                cx,
+            )),
+            AuthMethodKind::PrivateKey => form
+                .child(field_row(
+                    "Key path",
+                    ProfileEditorField::KeyPath,
+                    &editor.key_path,
+                    "~/.ssh/id_ed25519",
+                    false,
+                    focused,
+                    cx,
+                ))
+                .child(field_row(
+                    "Passphrase",
+                    ProfileEditorField::Passphrase,
+                    &editor.passphrase,
+                    if editor.secret_present_hint {
+                        "leave blank to keep"
+                    } else {
+                        ""
+                    },
+                    true,
+                    focused,
+                    cx,
+                )),
+        };
+
+        form = form.child(field_row(
+            "Remote path",
+            ProfileEditorField::DefaultRemotePath,
+            &editor.default_remote_path,
+            "/home/user",
+            false,
+            focused,
+            cx,
+        ));
+
+        if editor.secret_present_hint {
+            form = form.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme.colors.text_muted)
+                    .child("Credentials are stored in the Keychain. Leave blank to keep."),
+            );
+        }
+
+        form = form.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    text_button("settings-save-profile", "Save")
+                        .primary(true)
+                        .on_click(cx.listener(|workspace, _event, _window, cx| {
+                            workspace.save_profile_editor(cx);
+                        })),
+                ),
+        );
+
+        form.into_any_element()
     }
     pub(crate) fn render_about(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         if !self.about_open {

@@ -65,6 +65,7 @@ mod tests {
         STATUS_BUSY_TRY_AGAIN, STATUS_CONNECTION_SERVICE_UNAVAILABLE,
     };
     use crate::workspace::profiles::{SettingsSection, profile_matches_filter};
+    use macsftp_ui::InputState;
     use crate::app_actions::{
         self, ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, FilterPane, GoToPath,
         NavigateBack, NewTab, OpenSettings, PageDown, SelectAllEntries, SelectNextEntry,
@@ -478,6 +479,171 @@ mod tests {
                 ws.selected_profile_id,
                 Some(ProfileId(1)),
                 "first saved profile is selected"
+            );
+            assert!(
+                ws.profile_editor.is_some(),
+                "entering Profiles with a selection opens the editor"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn settings_new_profile_save_persists(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        workspace.update_in(&mut cx, |ws, _window, cx| {
+            ws.surface = WorkspaceSurface::Settings;
+            ws.set_settings_section(SettingsSection::Profiles, cx);
+            ws.start_new_profile(cx);
+
+            let editor = ws
+                .profile_editor
+                .as_mut()
+                .expect("start_new_profile opens editor");
+            assert!(editor.is_new);
+            editor.name = InputState::with_value("Prod");
+            editor.host = InputState::with_value("sftp.example.com");
+            editor.port = InputState::with_value("22");
+            editor.username = InputState::with_value("deploy");
+            editor.password = InputState::with_value("s3cret");
+            editor.default_remote_path = InputState::with_value("/var/www");
+
+            ws.save_profile_editor(cx);
+
+            assert_eq!(
+                cx.resources().profiles.profiles().len(),
+                1,
+                "save must persist one profile"
+            );
+            let profile = &cx.resources().profiles.profiles()[0];
+            assert_eq!(profile.name, "Prod");
+            assert_eq!(profile.host, "sftp.example.com");
+            assert_eq!(profile.username, "deploy");
+            assert_eq!(
+                profile.default_remote_path.as_ref().map(|p| p.as_str()),
+                Some("/var/www")
+            );
+
+            let AuthMethod::Password { secret_ref } = &profile.auth else {
+                panic!("expected password auth");
+            };
+            let loaded = cx
+                .resources()
+                .keychain
+                .load(secret_ref)
+                .expect("keychain load must succeed");
+            assert_eq!(
+                loaded.as_deref(),
+                Some("s3cret"),
+                "password must be stored in Keychain"
+            );
+
+            let editor = ws
+                .profile_editor
+                .as_ref()
+                .expect("editor remains after save");
+            assert!(!editor.is_new, "saved editor is no longer new");
+            assert!(editor.secret_present_hint);
+            assert!(editor.error.is_none());
+            assert_eq!(ws.selected_profile_id, Some(profile.id));
+        });
+    }
+
+    #[gpui::test]
+    fn settings_edit_host_keeps_keychain_secret_when_password_blank(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        workspace.update_in(&mut cx, |ws, _window, cx| {
+            let profile_id = ProfileId(1);
+            let secret_ref = macsftp_core::SecretRef::keychain_ref(profile_id, "password");
+            match cx.resources().keychain.store(&secret_ref, "original-pass") {
+                Ok(()) => {}
+                Err(error) => panic!("seed keychain: {error}"),
+            }
+            let profile = macsftp_core::ConnectionProfile::new(
+                profile_id,
+                "Work",
+                "old.example.com",
+                "alex",
+                AuthMethod::Password {
+                    secret_ref: secret_ref.clone(),
+                },
+            );
+            match cx.resources_mut().profiles.save_profile(profile) {
+                Ok(_) => {}
+                Err(error) => panic!("seed profile: {error}"),
+            }
+
+            ws.surface = WorkspaceSurface::Settings;
+            ws.load_profile_editor(profile_id, cx);
+
+            let editor = ws
+                .profile_editor
+                .as_mut()
+                .expect("load_profile_editor opens editor");
+            assert!(!editor.is_new);
+            assert!(
+                editor.password.value().is_empty(),
+                "password must not be prefilled"
+            );
+            editor.host = InputState::with_value("new.example.com");
+            // password left empty on purpose
+
+            ws.save_profile_editor(cx);
+
+            let profile = cx
+                .resources()
+                .profiles
+                .find_profile(profile_id)
+                .expect("profile still present");
+            assert_eq!(profile.host, "new.example.com");
+            let AuthMethod::Password {
+                secret_ref: saved_ref,
+            } = &profile.auth
+            else {
+                panic!("expected password auth retained");
+            };
+            let loaded = cx
+                .resources()
+                .keychain
+                .load(saved_ref)
+                .expect("keychain load must succeed");
+            assert_eq!(
+                loaded.as_deref(),
+                Some("original-pass"),
+                "blank password on edit must keep existing Keychain secret"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn settings_new_password_profile_requires_password(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        workspace.update_in(&mut cx, |ws, _window, cx| {
+            ws.surface = WorkspaceSurface::Settings;
+            ws.start_new_profile(cx);
+
+            let editor = ws
+                .profile_editor
+                .as_mut()
+                .expect("start_new_profile opens editor");
+            editor.host = InputState::with_value("example.com");
+            editor.username = InputState::with_value("alex");
+            // password left empty
+
+            ws.save_profile_editor(cx);
+
+            assert!(
+                cx.resources().profiles.profiles().is_empty(),
+                "validation failure must not write profiles.json"
+            );
+            let editor = ws.profile_editor.as_ref().expect("editor remains");
+            assert!(editor.is_new);
+            assert_eq!(
+                editor.error.as_ref().map(|s| s.as_ref()),
+                Some("Password is required."),
+                "empty password on new profile is a validation error"
             );
         });
     }

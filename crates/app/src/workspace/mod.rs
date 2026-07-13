@@ -30,7 +30,7 @@ use crate::app_actions::{
 use crate::resources::ActiveResources;
 use crate::workspace::file_ops::{ContextMenuState, DeleteConfirmState, InlineEditState};
 use crate::workspace::nav::{HistoryOp, TabNavState};
-use crate::workspace::profiles::SettingsSection;
+use crate::workspace::profiles::{ProfileEditorState, SettingsSection};
 
 /// Status bar copy when the command channel is full (non-blocking drop).
 pub(crate) const STATUS_BUSY_TRY_AGAIN: &str = "Busy — try again in a moment.";
@@ -98,6 +98,8 @@ pub struct Workspace {
     profile_filter: String,
     /// Selected profile in Settings → Profiles (None when the list is empty).
     selected_profile_id: Option<ProfileId>,
+    /// Draft for New / Edit profile in Settings → Profiles.
+    profile_editor: Option<ProfileEditorState>,
     about_open: bool,
     drawer_open: bool,
     completed_section_expanded: bool,
@@ -209,6 +211,7 @@ impl Workspace {
             settings_section: SettingsSection::General,
             profile_filter: String::new(),
             selected_profile_id: None,
+            profile_editor: None,
             about_open: false,
             drawer_open: true,
             completed_section_expanded: false,
