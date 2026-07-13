@@ -16,7 +16,7 @@
 | 6 | No main-thread block on network? | pass | Runtime bridge; residual risk accepted |
 | 7 | 10k entries + multi transfer? | unknown | Task 5 smoke |
 | 8 | Icon-only tooltips? | pass | Task 2: all `icon_button` sites + path-bar back/forward + status transfer chip carry labels (`labeled_shortcut` where applicable) |
-| 9 | No secrets / internal jargon in UI? | unknown | Task 3 |
+| 9 | No secrets / internal jargon in UI? | pass | Task 3: `Runtime is…` status strings → user copy; constants + banlist unit test; `rg` clean on user-visible string literals 2026-07-14 |
 | 10 | Modal expiry / session_epoch safety? | pass | Phase 1+ core guards; reaffirm |
 
 Status values: `pass` | `fail` | `unknown` | `accepted risk` (with reason).
@@ -49,6 +49,8 @@ See section filled in Task 5.
 
 Forbidden substrings (case-insensitive) in UI labels/status: `runtime`, `actor`, `channel`, `session epoch`, `AppCommand`, `crate`.
 Allowed: `Keychain`, host/port/profile/transfer/permission.
+
+**Task 3 (2026-07-14):** Grepped `crates/app/src` (`runtime|actor|channel|session.epoch|AppCommand`); only user-visible hits were `send_command` status strings in `workspace/mod.rs` — rewritten to `STATUS_BUSY_TRY_AGAIN` / `STATUS_CONNECTION_SERVICE_UNAVAILABLE`. Remaining hits are identifiers, comments, or logs. Guard: `user_status_strings_avoid_internal_jargon`.
 
 ## Spot-check log (PR0 / Task 1)
 

@@ -60,7 +60,10 @@ mod tests {
     };
     use macsftp_ui::{Appearance, Theme};
 
-    use super::{AppPaths, PaneSide, RestoredTabTarget, Workspace, WorkspaceSurface};
+    use super::{
+        AppPaths, PaneSide, RestoredTabTarget, Workspace, WorkspaceSurface,
+        STATUS_BUSY_TRY_AGAIN, STATUS_CONNECTION_SERVICE_UNAVAILABLE,
+    };
     use crate::app_actions::{
         self, ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, FilterPane, GoToPath,
         NavigateBack, NewTab, OpenSettings, PageDown, SelectAllEntries, SelectNextEntry,
@@ -3543,6 +3546,25 @@ mod tests {
             cx.window_title().as_deref(),
             Some("macSFTP"),
             "empty workspace falls back to product name"
+        );
+    }
+
+    #[test]
+    fn user_status_strings_avoid_internal_jargon() {
+        let banlist = ["runtime", "actor", "channel", "session epoch", "appcommand", "crate"];
+        for message in [STATUS_BUSY_TRY_AGAIN, STATUS_CONNECTION_SERVICE_UNAVAILABLE] {
+            let lower = message.to_lowercase();
+            for word in banlist {
+                assert!(
+                    !lower.contains(word),
+                    "status string {message:?} must not contain internal jargon {word:?}"
+                );
+            }
+        }
+        assert_eq!(STATUS_BUSY_TRY_AGAIN, "Busy — try again in a moment.");
+        assert_eq!(
+            STATUS_CONNECTION_SERVICE_UNAVAILABLE,
+            "Connection service is unavailable."
         );
     }
 }

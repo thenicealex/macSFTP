@@ -31,6 +31,12 @@ use crate::resources::ActiveResources;
 use crate::workspace::file_ops::{ContextMenuState, DeleteConfirmState, InlineEditState};
 use crate::workspace::nav::{HistoryOp, TabNavState};
 
+/// Status bar copy when the command channel is full (non-blocking drop).
+pub(crate) const STATUS_BUSY_TRY_AGAIN: &str = "Busy — try again in a moment.";
+/// Status bar copy when the connection service can no longer accept commands.
+pub(crate) const STATUS_CONNECTION_SERVICE_UNAVAILABLE: &str =
+    "Connection service is unavailable.";
+
 /// Which file pane an action targets. Local is the default focus side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaneSide {
@@ -573,12 +579,12 @@ impl Workspace {
         match self.runtime_client.try_send(command) {
             Ok(()) => true,
             Err(CommandDispatchError::ChannelFull) => {
-                self.status_message = Some("Runtime is busy — action dropped, try again".into());
+                self.status_message = Some(STATUS_BUSY_TRY_AGAIN.into());
                 cx.notify();
                 false
             }
             Err(CommandDispatchError::ChannelClosed) => {
-                self.status_message = Some("Runtime is unavailable".into());
+                self.status_message = Some(STATUS_CONNECTION_SERVICE_UNAVAILABLE.into());
                 cx.notify();
                 false
             }
