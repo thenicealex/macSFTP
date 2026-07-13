@@ -648,6 +648,129 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn delete_profile_requires_confirmation(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        let profile_id = ProfileId(1);
+        let secret_ref = macsftp_core::SecretRef::keychain_ref(profile_id, "password");
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            match cx.resources().keychain.store(&secret_ref, "hunter2") {
+                Ok(()) => {}
+                Err(error) => panic!("seed keychain: {error}"),
+            }
+            let profile = macsftp_core::ConnectionProfile::new(
+                profile_id,
+                "Work Server",
+                "example.com",
+                "alex",
+                AuthMethod::Password {
+                    secret_ref: secret_ref.clone(),
+                },
+            );
+            match cx.resources_mut().profiles.save_profile(profile) {
+                Ok(_) => {}
+                Err(error) => panic!("seed profile: {error}"),
+            }
+
+            ws.surface = WorkspaceSurface::Settings;
+            ws.set_settings_section(SettingsSection::Profiles, cx);
+            assert_eq!(ws.selected_profile_id, Some(profile_id));
+
+            // Request only arms the confirm state — store and Keychain stay intact.
+            ws.request_delete_profile(profile_id, window, cx);
+            assert_eq!(ws.profile_delete_confirm, Some(profile_id));
+            assert!(
+                cx.resources().profiles.find_profile(profile_id).is_some(),
+                "request_delete must not remove the profile yet"
+            );
+            assert_eq!(
+                cx.resources()
+                    .keychain
+                    .load(&secret_ref)
+                    .expect("keychain load")
+                    .as_deref(),
+                Some("hunter2"),
+                "request_delete must not remove Keychain secrets yet"
+            );
+
+            // Cancel leaves everything as-is.
+            ws.cancel_delete_profile(cx);
+            assert!(ws.profile_delete_confirm.is_none());
+            assert!(
+                cx.resources().profiles.find_profile(profile_id).is_some(),
+                "cancel must keep the profile"
+            );
+
+            // Confirm deletes profile + Keychain entry and clears settings selection.
+            ws.request_delete_profile(profile_id, window, cx);
+            ws.confirm_delete_profile(window, cx);
+            assert!(ws.profile_delete_confirm.is_none());
+            assert!(
+                cx.resources().profiles.profiles().is_empty(),
+                "confirm must delete the profile from the store"
+            );
+            assert_eq!(
+                cx.resources()
+                    .keychain
+                    .load(&secret_ref)
+                    .expect("keychain load after delete")
+                    .as_deref(),
+                None,
+                "confirm must clear Keychain secret"
+            );
+            assert!(
+                ws.selected_profile_id.is_none(),
+                "deleted selection clears selected_profile_id when no profiles remain"
+            );
+            assert!(
+                ws.profile_editor.is_none(),
+                "editor closes when the selected profile is deleted and none remain"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn connect_form_delete_opens_confirm_not_immediate(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        let profile_id = ProfileId(7);
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            let profile = macsftp_core::ConnectionProfile::new(
+                profile_id,
+                "Prod",
+                "sftp.example.com",
+                "deploy",
+                AuthMethod::Password {
+                    secret_ref: macsftp_core::SecretRef::keychain_ref(profile_id, "password"),
+                },
+            );
+            match cx.resources_mut().profiles.save_profile(profile) {
+                Ok(_) => {}
+                Err(error) => panic!("seed profile: {error}"),
+            }
+
+            ws.open_connect_form(window, cx);
+            // Connect form Delete must request confirmation, not call delete_profile.
+            ws.request_delete_profile(profile_id, window, cx);
+
+            assert_eq!(
+                ws.profile_delete_confirm,
+                Some(profile_id),
+                "Delete arms profile_delete_confirm"
+            );
+            assert!(
+                cx.resources().profiles.find_profile(profile_id).is_some(),
+                "profile must remain until the user confirms"
+            );
+            assert_eq!(
+                cx.resources().profiles.profiles().len(),
+                1,
+                "store still has the profile"
+            );
+        });
+    }
+
     #[test]
     fn profile_matches_filter_name_host_user() {
         let profile = macsftp_core::ConnectionProfile::new(

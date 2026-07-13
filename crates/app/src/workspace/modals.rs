@@ -240,6 +240,12 @@ impl crate::workspace::Workspace {
             self.close_about(window, cx);
             return;
         }
+        // Profile-delete confirm sits above Settings / Connect so Esc dismisses
+        // the confirm first rather than leaving the parent surface.
+        if self.profile_delete_confirm.is_some() {
+            self.cancel_delete_profile(cx);
+            return;
+        }
         if self.surface == WorkspaceSurface::Settings {
             self.surface = WorkspaceSurface::Files;
             // Prefer pane focus so file-list keyboard nav works immediately after Esc.
@@ -639,8 +645,10 @@ impl crate::workspace::Workspace {
                                                     "Delete",
                                                 )
                                                 .on_click(cx.listener(
-                                                    move |workspace, _event, _window, _cx| {
-                                                        workspace.delete_profile(profile_id, _cx);
+                                                    move |workspace, _event, window, cx| {
+                                                        workspace.request_delete_profile(
+                                                            profile_id, window, cx,
+                                                        );
                                                     },
                                                 )),
                                             ),
@@ -1149,6 +1157,95 @@ impl crate::workspace::Workspace {
                                 )),
                         ),
                 )
+                .into_any_element(),
+        )
+    }
+
+    /// Confirm deleting a saved connection profile (Settings or Connect form).
+    pub(crate) fn render_profile_delete_confirm_modal(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let profile_id = self.profile_delete_confirm?;
+        let body = {
+            let profile = cx.resources().profiles.find_profile(profile_id)?;
+            format!(
+                "Delete \"{}\" ({}@{})? This cannot be undone.",
+                profile.name, profile.username, profile.host
+            )
+        };
+        let theme = cx.theme().clone();
+
+        let card = div()
+            .key_context("ProfileDeleteConfirmModal")
+            .track_focus(&self.modal_focus)
+            .on_key_down(cx.listener(|workspace, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    cx.stop_propagation();
+                    workspace.cancel_delete_profile(cx);
+                } else if event.keystroke.key == "enter"
+                    && event.keystroke.modifiers.platform
+                {
+                    cx.stop_propagation();
+                    workspace.confirm_delete_profile(window, cx);
+                }
+            }))
+            .flex()
+            .flex_col()
+            .gap_3()
+            .w(px(420.0))
+            .p_4()
+            .bg(theme.colors.elevated_surface)
+            .border_1()
+            .border_color(theme.colors.border)
+            .rounded_md()
+            .font_family(theme.fonts.ui_family.clone())
+            .child(
+                div()
+                    .text_size(px(14.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.colors.text)
+                    .child("Delete Profile?"),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme.colors.text_muted)
+                    .child(body),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        text_button("profile-delete-cancel", "Cancel")
+                            .primary(true)
+                            .on_click(cx.listener(|workspace, _event, _window, cx| {
+                                workspace.cancel_delete_profile(cx);
+                            })),
+                    )
+                    .child(
+                        text_button("profile-delete-confirm", "Delete")
+                            .danger(true)
+                            .on_click(cx.listener(|workspace, _event, window, cx| {
+                                workspace.confirm_delete_profile(window, cx);
+                            })),
+                    ),
+            );
+
+        Some(
+            div()
+                .id("profile-delete-confirm-scrim")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
+                .child(card)
                 .into_any_element(),
         )
     }

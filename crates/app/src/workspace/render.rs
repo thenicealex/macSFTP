@@ -2133,7 +2133,21 @@ impl crate::workspace::Workspace {
                         .on_click(cx.listener(|workspace, _event, _window, cx| {
                             workspace.save_profile_editor(cx);
                         })),
-                ),
+                )
+                .when(!editor.is_new, |row| {
+                    let profile_id = editor.profile_id;
+                    row.child(
+                        text_button("settings-delete-profile", "Delete…")
+                            .danger(true)
+                            .on_click(cx.listener(move |workspace, _event, window, cx| {
+                                if let Some(id) = profile_id {
+                                    workspace.request_delete_profile(id, window, cx);
+                                } else if let Some(id) = workspace.selected_profile_id {
+                                    workspace.request_delete_profile(id, window, cx);
+                                }
+                            })),
+                    )
+                }),
         );
 
         form.into_any_element()

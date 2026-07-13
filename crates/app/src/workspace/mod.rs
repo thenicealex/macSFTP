@@ -100,6 +100,8 @@ pub struct Workspace {
     selected_profile_id: Option<ProfileId>,
     /// Draft for New / Edit profile in Settings → Profiles.
     profile_editor: Option<ProfileEditorState>,
+    /// Pending profile delete confirmation (Settings / Connect). View-local.
+    profile_delete_confirm: Option<ProfileId>,
     about_open: bool,
     drawer_open: bool,
     completed_section_expanded: bool,
@@ -212,6 +214,7 @@ impl Workspace {
             profile_filter: String::new(),
             selected_profile_id: None,
             profile_editor: None,
+            profile_delete_confirm: None,
             about_open: false,
             drawer_open: true,
             completed_section_expanded: false,
@@ -1054,6 +1057,7 @@ impl Render for Workspace {
             .children(self.render_host_key_modal(cx))
             .children(self.render_transfer_conflict_modal(cx))
             .children(self.render_delete_confirm_modal(cx))
+            .children(self.render_profile_delete_confirm_modal(cx))
             .children(self.render_go_to_path_modal(cx))
             .children(self.render_context_menu(cx))
             .children(self.render_about(cx))

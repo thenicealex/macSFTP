@@ -447,6 +447,46 @@ impl crate::workspace::Workspace {
             .collect()
     }
 
+    /// Arm the profile-delete confirmation modal. Does not remove anything yet.
+    pub(crate) fn request_delete_profile(
+        &mut self,
+        id: ProfileId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.profile_delete_confirm = Some(id);
+        window.focus(&self.modal_focus);
+        cx.notify();
+    }
+
+    /// User confirmed: delete the profile (store + Keychain) and refresh settings selection.
+    pub(crate) fn confirm_delete_profile(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(id) = self.profile_delete_confirm.take() else {
+            return;
+        };
+        self.delete_profile(id, cx);
+        if self.selected_profile_id == Some(id) {
+            self.selected_profile_id = None;
+            self.profile_editor = None;
+            // Reselect the first remaining profile when Profiles is the active section.
+            if self.settings_section == SettingsSection::Profiles {
+                self.set_settings_section(SettingsSection::Profiles, cx);
+            }
+        }
+        self.focus_pane(self.focused_side, window, cx);
+        cx.notify();
+    }
+
+    /// Dismiss the profile-delete confirmation without deleting.
+    pub(crate) fn cancel_delete_profile(&mut self, cx: &mut Context<Self>) {
+        self.profile_delete_confirm = None;
+        cx.notify();
+    }
+
     pub(crate) fn handle_profile_editor_key(
         &mut self,
         event: &KeyDownEvent,
