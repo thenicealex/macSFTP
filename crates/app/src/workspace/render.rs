@@ -516,7 +516,14 @@ impl crate::workspace::Workspace {
                 ),
             )
             .child(path_bar)
-            .child(file_table_header(&sort, cx))
+            .child(file_table_header(&sort, cx, {
+                let entity = cx.entity();
+                move |field, _window, cx| {
+                    entity.update(cx, |workspace, cx| {
+                        workspace.apply_sort_field(field, cx);
+                    });
+                }
+            }))
             .when(inline_edit_active, |pane| {
                 let edit = self.inline_edit.as_ref().expect("checked active");
                 let label = match &edit.kind {

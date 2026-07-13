@@ -1,8 +1,9 @@
+use std::rc::Rc;
 use std::time::UNIX_EPOCH;
 
 use gpui::{
-    App, Div, ElementId, IntoElement, ParentElement, Pixels, SharedString, Stateful, Styled, div,
-    prelude::*, px,
+    App, Div, ElementId, IntoElement, ParentElement, Pixels, SharedString, Stateful, Styled,
+    Window, div, prelude::*, px,
 };
 use macsftp_core::{FileKind, FileSort, FileSortField, SortDirection, Timestamp};
 
@@ -26,19 +27,31 @@ pub struct FileRowModel {
 }
 
 /// Table header with the current sort state on the matching column.
-pub fn file_table_header(sort: &FileSort, cx: &App) -> impl IntoElement {
+/// Column labels are clickable; `on_field` receives the field that was clicked.
+pub fn file_table_header(
+    sort: &FileSort,
+    cx: &App,
+    on_field: impl Fn(FileSortField, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
     let theme = cx.theme();
     let sort_marker = match sort.direction {
         SortDirection::Ascending => " ↑",
         SortDirection::Descending => " ↓",
     };
+    let active_field = sort.field;
     let column_label = |label: &str, field: FileSortField| {
         let mut text = String::from(label);
-        if sort.field == field {
+        if active_field == field {
             text.push_str(sort_marker);
         }
         text
     };
+    let on_field = Rc::new(on_field);
+    let hover_background = theme.colors.element_hover;
+
+    let name_handler = on_field.clone();
+    let size_handler = on_field.clone();
+    let modified_handler = on_field;
 
     div()
         .flex()
@@ -55,20 +68,38 @@ pub fn file_table_header(sort: &FileSort, cx: &App) -> impl IntoElement {
         .font_family(theme.fonts.ui_family.clone())
         .child(
             div()
+                .id("sort-name")
                 .flex_1()
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover_background))
+                .on_click(move |_event, window, cx| {
+                    name_handler(FileSortField::Name, window, cx);
+                })
                 .child(column_label("Name", FileSortField::Name)),
         )
         .child(
             div()
+                .id("sort-size")
                 .w(SIZE_COLUMN_WIDTH)
                 .flex_none()
                 .text_right()
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover_background))
+                .on_click(move |_event, window, cx| {
+                    size_handler(FileSortField::Size, window, cx);
+                })
                 .child(column_label("Size", FileSortField::Size)),
         )
         .child(
             div()
+                .id("sort-modified")
                 .w(MODIFIED_COLUMN_WIDTH)
                 .flex_none()
+                .cursor_pointer()
+                .hover(move |style| style.bg(hover_background))
+                .on_click(move |_event, window, cx| {
+                    modified_handler(FileSortField::ModifiedAt, window, cx);
+                })
                 .child(column_label("Modified", FileSortField::ModifiedAt)),
         )
 }

@@ -46,10 +46,10 @@ mod tests {
     use macsftp_core::{
         AppCommand, AppEvent, AuthCredential, AuthMethodKind, ConflictDecision, ConflictPolicy,
         ConflictRequestId, ConnectionSettings, ConnectionState, DisconnectReason, EntryPath,
-        ErrorCode, FileKind, HostKeyPrompt, LocalPath, MetadataPolicy, ProfileId,
+        ErrorCode, FileKind, FileSortField, HostKeyPrompt, LocalPath, MetadataPolicy, ProfileId,
         RemoteDirSnapshot, RemoteEntry, RemoteEventScope, RemoteOperationFailure, RemotePath,
-        RemoteScoped, RuntimeBridgeConfig, SessionId, TabConnected, TabDisconnected, TabId,
-        Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint,
+        RemoteScoped, RuntimeBridgeConfig, SessionId, SortDirection, TabConnected, TabDisconnected,
+        TabId, Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint,
         TransferHistoryRecord, TransferHistoryStatus, TransferId, TransferJob, TransferPlanId,
         TransferPlanProgress, TransferPlanSnapshot, TransferPlanState, TransferState,
         TrustRequestId, UserFacingError,
@@ -1730,6 +1730,63 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("fixture dir");
         (dir.clone(), LocalPath::new(dir.to_string_lossy().into_owned()))
+    }
+
+    #[gpui::test]
+    fn local_directory_respects_tab_sort_by_size(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        let (fixture, base) = {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static SEQ: AtomicU64 = AtomicU64::new(0);
+            let seq = SEQ.fetch_add(1, Ordering::SeqCst);
+            let dir = std::env::temp_dir().join(format!(
+                "macsftp-sort-{}-{}",
+                std::process::id(),
+                seq
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("big.bin"), vec![0u8; 100]).unwrap();
+            std::fs::write(dir.join("small.bin"), vec![0u8; 1]).unwrap();
+            (dir.clone(), LocalPath::new(dir.to_string_lossy().into_owned()))
+        };
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            if let Some(tab) = workspace.active_tab_mut() {
+                tab.sort.field = FileSortField::Size;
+                tab.sort.direction = SortDirection::Ascending;
+            }
+            workspace.set_local_path(base, window, cx);
+            let names: Vec<_> = workspace
+                .active_tab()
+                .unwrap()
+                .local
+                .entries
+                .iter()
+                .map(|e| e.name.as_str())
+                .collect();
+            // directories_first: only files here — small before big when ascending size
+            let small_i = names.iter().position(|n| *n == "small.bin").unwrap();
+            let big_i = names.iter().position(|n| *n == "big.bin").unwrap();
+            assert!(small_i < big_i, "expected size ascending, got {names:?}");
+        });
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[gpui::test]
+    fn apply_sort_field_toggles_direction_on_same_column(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _) = init_workspace(cx);
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.apply_sort_field(FileSortField::Name, cx);
+            // default was already Name Ascending → becomes Descending
+            assert_eq!(
+                workspace.active_tab().unwrap().sort.direction,
+                SortDirection::Descending
+            );
+            workspace.apply_sort_field(FileSortField::Size, cx);
+            let sort = &workspace.active_tab().unwrap().sort;
+            assert_eq!(sort.field, FileSortField::Size);
+            assert_eq!(sort.direction, SortDirection::Ascending);
+        });
     }
 
     #[gpui::test]

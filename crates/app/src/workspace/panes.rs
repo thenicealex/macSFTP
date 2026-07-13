@@ -12,11 +12,12 @@ use macsftp_core::{
     AppCommand, AppEvent, AppState, AuthCredential, AuthMethod, AuthMethodKind,
     CommandDispatchError, ConflictDecision, ConflictDecisionCommand, ConflictRequest,
     ConflictRequestId, ConnectCommand, ConnectionProfile, ConnectionSettings, ConnectionState,
-    DisconnectReason, EntryPath, ErrorCode, FileKind, HostKeyDecisionCommand, HostKeyPrompt,
-    LocalPath, ModalRequest, ModalRequestId, ProfileId, RemotePath, SecretRef, TabId, TabState,
-    Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferHistoryId,
-    TransferHistoryRecord, TransferHistoryStatus, TransferJob, TransferState, TrustRequestId,
-    UserFacingError, history_status_for_plan, sort_entries,
+    DisconnectReason, EntryPath, ErrorCode, FileKind, FileSortField, HostKeyDecisionCommand,
+    HostKeyPrompt, LocalPath, ModalRequest, ModalRequestId, ProfileId, RemotePath, SecretRef,
+    SortDirection, TabId, TabState, Timestamp, TransferConflictPrompt, TransferDirection,
+    TransferEndpoint, TransferHistoryId, TransferHistoryRecord, TransferHistoryStatus,
+    TransferJob, TransferState, TrustRequestId, UserFacingError, history_status_for_plan,
+    sort_entries,
 };
 use macsftp_platform::{AppPaths, read_local_directory};
 use macsftp_sftp::{EventReceiver, RuntimeClient};
@@ -174,7 +175,7 @@ impl crate::workspace::Workspace {
     pub(crate) fn load_local_directory(path: &LocalPath, tab: &mut TabState) -> Option<String> {
         match read_local_directory(path) {
             Ok(mut entries) => {
-                macsftp_core::sort_entries(&mut entries, &Default::default());
+                macsftp_core::sort_entries(&mut entries, &tab.sort);
                 tab.local.entries = entries;
                 tab.local.path = Some(path.clone());
                 tab.local.error = None;
@@ -187,6 +188,25 @@ impl crate::workspace::Workspace {
                 Some(format!("Cannot open {}: {error}", path.as_str()))
             }
         }
+    }
+
+    pub(crate) fn apply_sort_field(&mut self, field: FileSortField, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab_mut() else {
+            return;
+        };
+        if tab.sort.field == field {
+            tab.sort.direction = match tab.sort.direction {
+                SortDirection::Ascending => SortDirection::Descending,
+                SortDirection::Descending => SortDirection::Ascending,
+            };
+        } else {
+            tab.sort.field = field;
+            tab.sort.direction = SortDirection::Ascending;
+        }
+        let sort = tab.sort.clone();
+        macsftp_core::sort_entries(&mut tab.local.entries, &sort);
+        macsftp_core::sort_entries(&mut tab.remote.entries, &sort);
+        cx.notify();
     }
     pub(crate) fn request_remote_directory(
         &mut self,
