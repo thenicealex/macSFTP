@@ -41,6 +41,13 @@ pub(crate) struct ConnectForm {
     pub(crate) source_profile_id: Option<ProfileId>,
     /// Name entered for saving the current connection as a profile.
     pub(crate) profile_name: InputState,
+    /// Whether the inline profile picker panel is expanded.
+    pub(crate) profile_picker_open: bool,
+    // Populated now so open/reset is correct; filter UI and Save-as expand land next.
+    #[allow(dead_code)]
+    pub(crate) profile_picker_filter: InputState,
+    #[allow(dead_code)]
+    pub(crate) save_as_expanded: bool,
 }
 
 impl ConnectForm {
@@ -57,7 +64,20 @@ impl ConnectForm {
             error: None,
             source_profile_id: None,
             profile_name: InputState::new(),
+            profile_picker_open: false,
+            profile_picker_filter: InputState::new(),
+            save_as_expanded: false,
         }
+    }
+
+    /// Label for the profile picker trigger: selected profile name, or manual entry.
+    pub(crate) fn profile_trigger_label(&self, profiles: &[ConnectionProfile]) -> String {
+        if let Some(id) = self.source_profile_id {
+            if let Some(profile) = profiles.iter().find(|profile| profile.id == id) {
+                return profile.name.clone();
+            }
+        }
+        "Manual entry".into()
     }
 
     pub(crate) fn prefilled(settings: &ConnectionSettings) -> Self {

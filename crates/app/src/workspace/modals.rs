@@ -568,95 +568,99 @@ impl crate::workspace::Workspace {
             );
         }
 
-        // Saved profiles: pick one to prefill the form, or delete it.
-        let saved_profiles: Vec<(ProfileId, String, String)> = cx
-            .resources()
-            .profiles
-            .profiles()
-            .iter()
-            .map(|profile| {
-                (
-                    profile.id,
-                    profile.name.clone(),
-                    format!("{}@{}:{}", profile.username, profile.host, profile.port),
+        let profiles = cx.resources().profiles.profiles().to_vec();
+        let trigger_label = form.profile_trigger_label(&profiles);
+        let profile_picker_open = form.profile_picker_open;
+
+        card = card.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(96.0))
+                        .flex_none()
+                        .text_size(px(11.0))
+                        .text_color(theme.colors.text_muted)
+                        .child("Profile"),
                 )
-            })
-            .collect();
-        if !saved_profiles.is_empty() {
-            card = card.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(theme.colors.text_muted)
-                            .child("Saved profiles"),
-                    )
-                    .children(
-                        saved_profiles
-                            .into_iter()
-                            .map(|(profile_id, name, summary)| {
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .flex_col()
-                                            .child(
-                                                div()
-                                                    .min_w_0()
-                                                    .truncate()
-                                                    .text_size(px(12.0))
-                                                    .text_color(theme.colors.text)
-                                                    .child(name),
-                                            )
-                                            .child(
-                                                div()
-                                                    .min_w_0()
-                                                    .truncate()
-                                                    .text_size(px(10.0))
-                                                    .text_color(theme.colors.text_muted)
-                                                    .child(summary),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_none()
-                                            .gap_1()
-                                            .child(
-                                                text_button(("use-profile", profile_id.0), "Use")
-                                                    .on_click(cx.listener(
-                                                        move |workspace, _event, _window, _cx| {
-                                                            workspace.use_profile(profile_id, _cx);
-                                                        },
-                                                    )),
-                                            )
-                                            .child(
-                                                text_button(
-                                                    ("delete-profile", profile_id.0),
-                                                    "Delete",
-                                                )
-                                                .on_click(cx.listener(
-                                                    move |workspace, _event, window, cx| {
-                                                        workspace.request_delete_profile(
-                                                            profile_id, window, cx,
-                                                        );
-                                                    },
-                                                )),
-                                            ),
-                                    )
-                            }),
-                    )
-                    .child(div().h(px(1.0)).bg(theme.colors.border).my_1()),
-            );
+                .child(
+                    div()
+                        .id("profile-picker-trigger")
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .border_1()
+                        .border_color(theme.colors.border)
+                        .rounded_md()
+                        .cursor_pointer()
+                        .on_click(cx.listener(|workspace, _event, _window, cx| {
+                            if let Some(form) = &mut workspace.connect_form {
+                                form.profile_picker_open = !form.profile_picker_open;
+                                cx.notify();
+                            }
+                        }))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(12.0))
+                                .text_color(theme.colors.text)
+                                .child(trigger_label),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(10.0))
+                                .text_color(theme.colors.text_muted)
+                                .child(if profile_picker_open { "▴" } else { "▾" }),
+                        ),
+                ),
+        );
+
+        if profile_picker_open {
+            let mut picker_panel = div()
+                .id("profile-picker-panel")
+                .flex()
+                .flex_col()
+                .gap_0()
+                .ml(px(104.0))
+                .max_h(px(200.0))
+                .overflow_y_scroll()
+                .border_1()
+                .border_color(theme.colors.border)
+                .rounded_md()
+                .bg(theme.colors.surface);
+            if profiles.is_empty() {
+                picker_panel = picker_panel.child(
+                    div()
+                        .px_2()
+                        .py_1()
+                        .text_size(px(12.0))
+                        .text_color(theme.colors.text_muted)
+                        .child("No saved profiles"),
+                );
+            } else {
+                picker_panel = picker_panel.children(profiles.iter().map(|profile| {
+                    div()
+                        .id(("profile-picker-row", profile.id.0))
+                        .px_2()
+                        .py_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.0))
+                        .text_color(theme.colors.text)
+                        .child(profile.name.clone())
+                }));
+            }
+            card = card.child(picker_panel);
         }
 
         // When prefilled from a saved profile, `use_profile` restores the

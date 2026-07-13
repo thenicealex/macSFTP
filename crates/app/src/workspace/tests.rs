@@ -2563,6 +2563,33 @@ mod tests {
     }
 
     #[gpui::test]
+    fn open_connect_form_resets_picker_and_save_as_flags(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _) = init_workspace(cx);
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            ws.open_connect_form(window, cx);
+            let form = ws.connect_form.as_mut().expect("form opens");
+            form.profile_picker_open = true;
+            form.save_as_expanded = true;
+            form.profile_picker_filter.set_value("partial");
+            ws.close_connect_form(window, cx);
+            ws.open_connect_form(window, cx);
+            let form = ws.connect_form.as_ref().expect("form reopens");
+            assert!(
+                !form.profile_picker_open,
+                "reopening connect form must reset profile_picker_open"
+            );
+            assert!(
+                !form.save_as_expanded,
+                "reopening connect form must reset save_as_expanded"
+            );
+            assert!(
+                form.profile_picker_filter.value().is_empty(),
+                "reopening connect form must clear profile_picker_filter"
+            );
+        });
+    }
+
+    #[gpui::test]
     fn connect_form_validates_before_sending(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
         workspace.update_in(&mut cx, |workspace, window, cx| {
