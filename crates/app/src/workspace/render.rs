@@ -8,19 +8,17 @@ use macsftp_core::{
     TransferHistoryStatus, TransferId, TransferJob, TransferState,
 };
 use macsftp_ui::{
-    ActiveTheme, DragPreview, FileRowModel, IconName, InputState, TextFieldModel, connection_status,
-    empty_state, file_row, file_table_header, format_size, format_timestamp, icon, icon_button,
-    loading_state, section_header_static, tab, text_button, text_field, text_tooltip,
-    transfer_history_detail, transfer_history_title, transfer_row, transfer_title,
+    ActiveTheme, DragPreview, FileRowModel, IconName, InputState, TextFieldModel,
+    connection_status, empty_state, file_row, file_table_header, format_size, format_timestamp,
+    icon, icon_button, loading_state, section_header_static, tab, text_button, text_field,
+    text_tooltip, transfer_history_detail, transfer_history_title, transfer_row, transfer_title,
 };
 
 use crate::palette_commands::labeled_shortcut;
 use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::helpers::*;
 use crate::workspace::nav::{HistoryOp, breadcrumb_display_indices, breadcrumb_segments};
-use crate::workspace::profiles::{
-    ProfileEditorField, SettingsSection, profile_list_label,
-};
+use crate::workspace::profiles::{ProfileEditorField, SettingsSection, profile_list_label};
 use crate::workspace::{PaneSide, WorkspaceSurface};
 use macsftp_storage::AppearancePreference;
 
@@ -65,85 +63,88 @@ impl crate::workspace::Workspace {
                     .overflow_x_scroll()
                     .children(tabs),
             )
-            .child(div().px_1().child(
-                icon_button(
-                    "new-tab",
-                    IconName::Plus,
-                    labeled_shortcut("New Tab", "NewTab"),
-                )
-                .on_click(cx.listener(|workspace, _event, window, cx| {
-                    workspace.open_new_tab(window, cx);
-                })),
-            ))
+            .child(
+                div().px_1().child(
+                    icon_button(
+                        "new-tab",
+                        IconName::Plus,
+                        labeled_shortcut("New Tab", "NewTab"),
+                    )
+                    .on_click(cx.listener(|workspace, _event, window, cx| {
+                        workspace.open_new_tab(window, cx);
+                    })),
+                ),
+            )
     }
 
     /// Elevated MRU list for ctrl-tab. Confirm with Enter; Esc cancels (no key-up required).
-    pub(crate) fn render_tab_switcher(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_tab_switcher(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         if !self.tab_switcher_open || self.tab_mru.is_empty() {
             return None;
         }
         let theme = cx.theme().clone();
         let selected = self.tab_switcher_index.min(self.tab_mru.len() - 1);
 
-        let rows = self.tab_mru.iter().enumerate().filter_map(|(index, tab_id)| {
-            let tab_state = self.state.tabs.find_tab(*tab_id)?;
-            let (status_color, status_label) = connection_status(&tab_state.connection, &theme);
-            let title: SharedString = tab_state.title.clone().into();
-            let is_selected = index == selected;
-            let background = if is_selected {
-                theme.colors.element_selected
-            } else {
-                theme.colors.elevated_surface
-            };
-            let hover_background = theme.colors.element_hover;
-            let tab_id = *tab_id;
+        let rows = self
+            .tab_mru
+            .iter()
+            .enumerate()
+            .filter_map(|(index, tab_id)| {
+                let tab_state = self.state.tabs.find_tab(*tab_id)?;
+                let (status_color, status_label) = connection_status(&tab_state.connection, &theme);
+                let title: SharedString = tab_state.title.clone().into();
+                let is_selected = index == selected;
+                let background = if is_selected {
+                    theme.colors.element_selected
+                } else {
+                    theme.colors.elevated_surface
+                };
+                let hover_background = theme.colors.element_hover;
+                let tab_id = *tab_id;
 
-            Some(
-                div()
-                    .id(("tab-switcher-row", tab_id.0))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_2()
-                    .py_1()
-                    .rounded_sm()
-                    .bg(background)
-                    .when(!is_selected, |row| {
-                        row.hover(move |style| style.bg(hover_background))
-                    })
-                    .on_click(cx.listener(move |workspace, _event, window, cx| {
-                        // Click selects that tab immediately (same as Enter on that row).
-                        workspace.tab_switcher_index = index;
-                        workspace.confirm_tab_switcher(window, cx);
-                    }))
-                    .child(
-                        div()
-                            .size(px(8.0))
-                            .rounded_full()
-                            .bg(status_color)
-                            .flex_none(),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(13.0))
-                            .text_color(theme.colors.text)
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(11.0))
-                            .text_color(theme.colors.text_muted)
-                            .child(status_label),
-                    ),
-            )
-        });
+                Some(
+                    div()
+                        .id(("tab-switcher-row", tab_id.0))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(background)
+                        .when(!is_selected, |row| {
+                            row.hover(move |style| style.bg(hover_background))
+                        })
+                        .on_click(cx.listener(move |workspace, _event, window, cx| {
+                            // Click selects that tab immediately (same as Enter on that row).
+                            workspace.tab_switcher_index = index;
+                            workspace.confirm_tab_switcher(window, cx);
+                        }))
+                        .child(
+                            div()
+                                .size(px(8.0))
+                                .rounded_full()
+                                .bg(status_color)
+                                .flex_none(),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(13.0))
+                                .text_color(theme.colors.text)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(11.0))
+                                .text_color(theme.colors.text_muted)
+                                .child(status_label),
+                        ),
+                )
+            });
 
         Some(
             div()
@@ -323,12 +324,7 @@ impl crate::workspace::Workspace {
                                 workspace.navigate_focused(HistoryOp::Back, window, cx);
                             }))
                     })
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(label_color)
-                            .child("◀"),
-                    )
+                    .child(div().text_size(px(11.0)).text_color(label_color).child("◀"))
             })
             .child({
                 let hover_background = theme.colors.element_hover;
@@ -346,10 +342,7 @@ impl crate::workspace::Workspace {
                     .items_center()
                     .justify_center()
                     .rounded_sm()
-                    .tooltip(text_tooltip(labeled_shortcut(
-                        "Forward",
-                        "NavigateForward",
-                    )))
+                    .tooltip(text_tooltip(labeled_shortcut("Forward", "NavigateForward")))
                     .when(can_navigate_forward, |button| {
                         button
                             .hover(|style| style.bg(hover_background))
@@ -359,12 +352,7 @@ impl crate::workspace::Workspace {
                                 workspace.navigate_focused(HistoryOp::Forward, window, cx);
                             }))
                     })
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(label_color)
-                            .child("▶"),
-                    )
+                    .child(div().text_size(px(11.0)).text_color(label_color).child("▶"))
             })
             .child(
                 icon_button(
@@ -460,10 +448,8 @@ impl crate::workspace::Workspace {
                                     }
                                     let label = label.clone();
                                     let absolute = absolute.clone();
-                                    let element_id = (
-                                        "breadcrumb-seg",
-                                        side_tag as usize * 1000 + display_i,
-                                    );
+                                    let element_id =
+                                        ("breadcrumb-seg", side_tag as usize * 1000 + display_i);
                                     trail = trail.child(
                                         div()
                                             .id(element_id)
@@ -589,10 +575,12 @@ impl crate::workspace::Workspace {
                         labeled_shortcut("Upload Selection", "UploadSelection"),
                     )
                     .disabled(!can_upload)
-                    .on_click(cx.listener(move |workspace, _event, _window, cx| {
-                        workspace.focused_side = PaneSide::Local;
-                        workspace.upload_selection(cx);
-                    })),
+                    .on_click(cx.listener(
+                        move |workspace, _event, _window, cx| {
+                            workspace.focused_side = PaneSide::Local;
+                            workspace.upload_selection(cx);
+                        },
+                    )),
                 )
             })
             .when(side == PaneSide::Remote, |bar| {
@@ -646,18 +634,15 @@ impl crate::workspace::Workspace {
                 .recents
                 .entries()
                 .iter()
-                .map(|entry| {
-                    (
-                        entry.id,
-                        SharedString::from(format_recent_label(entry)),
-                    )
-                })
+                .map(|entry| (entry.id, SharedString::from(format_recent_label(entry))))
                 .collect()
         } else {
             Vec::new()
         };
         let remote_empty_with_recents =
-            |message: SharedString, actions: Vec<macsftp_ui::TextButton>, cx: &mut Context<Self>| {
+            |message: SharedString,
+             actions: Vec<macsftp_ui::TextButton>,
+             cx: &mut Context<Self>| {
                 let theme = cx.theme();
                 let rows = recent_rows.clone();
                 div()
@@ -677,22 +662,16 @@ impl crate::workspace::Workspace {
                                     .font_family(theme.fonts.ui_family.clone())
                                     .child("Recent connections"),
                             )
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .items_center()
-                                    .gap_2()
-                                    .children(rows.into_iter().map(|(id, label)| {
-                                        text_button(
-                                            SharedString::from(format!("recent-{id}")),
-                                            label,
-                                        )
-                                        .on_click(cx.listener(move |workspace, _event, window, cx| {
-                                            workspace.open_recent_connection(id, window, cx);
-                                        }))
-                                    })),
-                            )
+                            .child(div().flex().flex_col().items_center().gap_2().children(
+                                rows.into_iter().map(|(id, label)| {
+                                    text_button(SharedString::from(format!("recent-{id}")), label)
+                                        .on_click(cx.listener(
+                                            move |workspace, _event, window, cx| {
+                                                workspace.open_recent_connection(id, window, cx);
+                                            },
+                                        ))
+                                }),
+                            ))
                     })
                     .into_any_element()
             };
@@ -707,11 +686,13 @@ impl crate::workspace::Workspace {
                     Some(
                         empty_state(
                             format!("Connecting to {target_host}…"),
-                            vec![text_button("cancel-connect", "Cancel").on_click(cx.listener(
-                                |workspace, _event, window, cx| {
-                                    workspace.cancel_connect(window, cx);
-                                },
-                            ))],
+                            vec![
+                                text_button("cancel-connect", "Cancel").on_click(cx.listener(
+                                    |workspace, _event, window, cx| {
+                                        workspace.cancel_connect(window, cx);
+                                    },
+                                )),
+                            ],
                             cx,
                         )
                         .into_any_element(),
@@ -720,11 +701,13 @@ impl crate::workspace::Workspace {
                 Some(ConnectionState::AwaitingHostKey { .. }) => Some(
                     empty_state(
                         format!("Waiting for host key · {target_host}"),
-                        vec![text_button("cancel-host-key", "Cancel").on_click(cx.listener(
-                            |workspace, _event, window, cx| {
-                                workspace.cancel_connect(window, cx);
-                            },
-                        ))],
+                        vec![
+                            text_button("cancel-host-key", "Cancel").on_click(cx.listener(
+                                |workspace, _event, window, cx| {
+                                    workspace.cancel_connect(window, cx);
+                                },
+                            )),
+                        ],
                         cx,
                     )
                     .into_any_element(),
@@ -761,17 +744,11 @@ impl crate::workspace::Workspace {
                 }),
                 None => None,
             }
-        } else if let Some(error) = local_error.as_ref() {
-            Some(
-                empty_state(
-                    format!("{} — {}", error.title, error.message),
-                    vec![],
-                    cx,
-                )
-                .into_any_element(),
-            )
         } else {
-            None
+            local_error.as_ref().map(|error| {
+                empty_state(format!("{} — {}", error.title, error.message), vec![], cx)
+                    .into_any_element()
+            })
         };
 
         let list: gpui::AnyElement = if let Some(placeholder) = connection_placeholder {
@@ -848,12 +825,16 @@ impl crate::workspace::Workspace {
                                         drag_item,
                                         |value: &EntryPath, _position, _window, cx| {
                                             let label = match value {
-                                                EntryPath::Local(p) => std::path::Path::new(p.as_str())
-                                                    .file_name()
-                                                    .map(|n| n.to_string_lossy().to_string()),
-                                                EntryPath::Remote(p) => std::path::Path::new(p.as_str())
-                                                    .file_name()
-                                                    .map(|n| n.to_string_lossy().to_string()),
+                                                EntryPath::Local(p) => {
+                                                    std::path::Path::new(p.as_str())
+                                                        .file_name()
+                                                        .map(|n| n.to_string_lossy().to_string())
+                                                }
+                                                EntryPath::Remote(p) => {
+                                                    std::path::Path::new(p.as_str())
+                                                        .file_name()
+                                                        .map(|n| n.to_string_lossy().to_string())
+                                                }
                                             }
                                             .unwrap_or_else(|| "file".to_string());
                                             cx.new(|_| DragPreview {
@@ -899,12 +880,14 @@ impl crate::workspace::Workspace {
             } else {
                 "remote-file-pane"
             })
-            .on_click(cx.listener(move |workspace, event: &ClickEvent, window, cx| {
-                if event.is_right_click() {
-                    workspace.focus_pane(side, window, cx);
-                    workspace.open_context_menu(side, None, cx);
-                }
-            }))
+            .on_click(
+                cx.listener(move |workspace, event: &ClickEvent, window, cx| {
+                    if event.is_right_click() {
+                        workspace.focus_pane(side, window, cx);
+                        workspace.open_context_menu(side, None, cx);
+                    }
+                }),
+            )
             .on_drop(
                 cx.listener(
                     move |workspace, path: &EntryPath, _window, cx| match (side, path) {
@@ -1050,9 +1033,11 @@ impl crate::workspace::Workspace {
                             },
                             "OK",
                         )
-                        .on_click(cx.listener(|workspace, _event, window, cx| {
-                            workspace.submit_inline_edit(window, cx);
-                        })),
+                        .on_click(cx.listener(
+                            |workspace, _event, window, cx| {
+                                workspace.submit_inline_edit(window, cx);
+                            },
+                        )),
                     )
                     .child(
                         text_button(
@@ -1063,9 +1048,11 @@ impl crate::workspace::Workspace {
                             },
                             "Cancel",
                         )
-                        .on_click(cx.listener(|workspace, _event, _window, cx| {
-                            workspace.cancel_inline_edit(cx);
-                        })),
+                        .on_click(cx.listener(
+                            |workspace, _event, _window, cx| {
+                                workspace.cancel_inline_edit(cx);
+                            },
+                        )),
                     );
                 if let Some(error) = &edit.error {
                     banner = banner.child(
@@ -1192,8 +1179,7 @@ impl crate::workspace::Workspace {
                         // Prefer mouse_down double-click so drag threshold
                         // does not steal the reset gesture.
                         if event.click_count >= 2 {
-                            workspace
-                                .reset_drawer_height(window.viewport_size().height);
+                            workspace.reset_drawer_height(window.viewport_size().height);
                             workspace.drawer_resize = None;
                             cx.notify();
                         }
@@ -1224,12 +1210,8 @@ impl crate::workspace::Workspace {
                             return;
                         };
                         let current_y = event.event.position.y;
-                        let new_height =
-                            start.start_height + (start.start_y - current_y);
-                        workspace.set_drawer_height(
-                            new_height,
-                            window.viewport_size().height,
-                        );
+                        let new_height = start.start_height + (start.start_y - current_y);
+                        workspace.set_drawer_height(new_height, window.viewport_size().height);
                         cx.set_active_drag_cursor_style(CursorStyle::ResizeRow, window);
                         cx.notify();
                     },
@@ -1407,7 +1389,11 @@ impl crate::workspace::Workspace {
         }
         row
     }
-    pub(crate) fn render_transfer_job(&self, job: &TransferJob, cx: &mut Context<Self>) -> macsftp_ui::TransferRow {
+    pub(crate) fn render_transfer_job(
+        &self,
+        job: &TransferJob,
+        cx: &mut Context<Self>,
+    ) -> macsftp_ui::TransferRow {
         let theme = cx.theme().clone();
         let job_id = job.id;
         let title = transfer_title(job);
@@ -1545,10 +1531,12 @@ impl crate::workspace::Workspace {
         tab.selection
             .selected_paths
             .iter()
-            .filter(|path| match (self.focused_side, path) {
-                (PaneSide::Local, EntryPath::Local(_)) => true,
-                (PaneSide::Remote, EntryPath::Remote(_)) => true,
-                _ => false,
+            .filter(|path| {
+                matches!(
+                    (self.focused_side, path),
+                    (PaneSide::Local, EntryPath::Local(_))
+                        | (PaneSide::Remote, EntryPath::Remote(_))
+                )
             })
             .count()
     }
@@ -1619,12 +1607,11 @@ impl crate::workspace::Workspace {
                                 .child(format!("{selected_count} selected")),
                         )
                     })
-                    .children(self.status_message.clone().map(|message| {
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .child(format!("— {message}"))
-                    })),
+                    .children(
+                        self.status_message.clone().map(|message| {
+                            div().min_w_0().truncate().child(format!("— {message}"))
+                        }),
+                    ),
             )
             .child(
                 div()
@@ -1758,9 +1745,7 @@ impl crate::workspace::Workspace {
                                     div()
                                         .text_size(px(12.0))
                                         .text_color(theme.colors.text_muted)
-                                        .child(
-                                            "Choose how macSFTP follows the macOS appearance.",
-                                        ),
+                                        .child("Choose how macSFTP follows the macOS appearance."),
                                 ),
                         )
                         .child(
@@ -1947,11 +1932,11 @@ impl crate::workspace::Workspace {
             empty_state(
                 "No saved profiles",
                 vec![
-                    text_button("settings-empty-new-profile", "New Profile").on_click(
-                        cx.listener(|workspace, _event, _window, cx| {
+                    text_button("settings-empty-new-profile", "New Profile").on_click(cx.listener(
+                        |workspace, _event, _window, cx| {
                             workspace.start_new_profile(cx);
-                        }),
-                    ),
+                        },
+                    )),
                 ],
                 cx,
             )
@@ -2001,13 +1986,11 @@ impl crate::workspace::Workspace {
                     .border_color(theme.colors.border)
                     .track_focus(&self.workspace_focus)
                     .on_key_down(cx.listener(Self::handle_profile_filter_key))
-                    .child(
-                        text_button("settings-new-profile", "New Profile").on_click(cx.listener(
-                            |workspace, _event, _window, cx| {
-                                workspace.start_new_profile(cx);
-                            },
-                        )),
-                    )
+                    .child(text_button("settings-new-profile", "New Profile").on_click(
+                        cx.listener(|workspace, _event, _window, cx| {
+                            workspace.start_new_profile(cx);
+                        }),
+                    ))
                     .child(
                         div()
                             .id("settings-profile-filter")

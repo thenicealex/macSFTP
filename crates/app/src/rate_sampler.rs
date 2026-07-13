@@ -48,7 +48,10 @@ impl TransferRateBook {
             sampler.last_bytes_change_at = Some(now);
             sampler.last_bytes = Some(bytes_done);
         }
-        sampler.samples.push_back(RateSample { at: now, bytes_done });
+        sampler.samples.push_back(RateSample {
+            at: now,
+            bytes_done,
+        });
         let cutoff = now - std::time::Duration::from_secs_f64(WINDOW_SECS);
         while sampler
             .samples
@@ -107,7 +110,11 @@ impl TransferRateBook {
 
     pub fn aggregate(
         &self,
-        running: &[(TransferId, u64 /* done */, Option<u64> /* total */)],
+        running: &[(
+            TransferId,
+            u64,         /* done */
+            Option<u64>, /* total */
+        )],
         now: Instant,
     ) -> AggregateRate {
         let mut sum_speed = 0.0;
@@ -116,11 +123,11 @@ impl TransferRateBook {
         let mut any_remaining = false;
         for &(id, done, total) in running {
             let snap = self.snapshot(id, done, total, now);
-            if let Some(s) = snap.speed_bps {
-                if !snap.stalled {
-                    sum_speed += s;
-                    any_speed = true;
-                }
+            if let Some(s) = snap.speed_bps
+                && !snap.stalled
+            {
+                sum_speed += s;
+                any_speed = true;
             }
             if let Some(t) = total {
                 remaining = remaining.saturating_add(t.saturating_sub(done));
@@ -132,7 +139,10 @@ impl TransferRateBook {
             (Some(s), true) if s > f64::EPSILON => Some(remaining as f64 / s),
             _ => None,
         };
-        AggregateRate { speed_bps, eta_secs }
+        AggregateRate {
+            speed_bps,
+            eta_secs,
+        }
     }
 }
 
@@ -212,6 +222,7 @@ pub fn format_running_detail(done: u64, total: Option<u64>, snap: &RateSnapshot)
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::time::Duration;
@@ -226,7 +237,12 @@ mod tests {
         let mut book = TransferRateBook::default();
         book.observe(id(1), 0, t0);
         book.observe(id(1), 1_000_000, t0 + Duration::from_secs(1));
-        let snap = book.snapshot(id(1), 1_000_000, Some(10_000_000), t0 + Duration::from_secs(1));
+        let snap = book.snapshot(
+            id(1),
+            1_000_000,
+            Some(10_000_000),
+            t0 + Duration::from_secs(1),
+        );
         assert!(snap.speed_bps.unwrap() > 900_000.0 && snap.speed_bps.unwrap() < 1_100_000.0);
         assert!(!snap.stalled);
         assert!(snap.eta_secs.unwrap() > 8.0 && snap.eta_secs.unwrap() < 12.0);

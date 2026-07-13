@@ -236,7 +236,7 @@ mod tests {
     use macsftp_core::{FileKind, LocalPath, Timestamp};
 
     use super::{
-        AppPaths, LocalEntryDraft, core_crate_name, create_directory, crate_name, delete_entry,
+        AppPaths, LocalEntryDraft, core_crate_name, crate_name, create_directory, delete_entry,
         read_local_directory, rename_entry,
     };
 
@@ -357,18 +357,12 @@ mod tests {
         let empty = dir.join("empty");
         std::fs::create_dir(&empty).expect("create empty");
 
-        delete_entry(
-            &LocalPath::new(file.to_string_lossy().into_owned()),
-            false,
-        )
-        .expect("delete file");
+        delete_entry(&LocalPath::new(file.to_string_lossy().into_owned()), false)
+            .expect("delete file");
         assert!(!file.exists());
 
-        delete_entry(
-            &LocalPath::new(empty.to_string_lossy().into_owned()),
-            true,
-        )
-        .expect("delete empty dir");
+        delete_entry(&LocalPath::new(empty.to_string_lossy().into_owned()), true)
+            .expect("delete empty dir");
         assert!(!empty.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -380,11 +374,8 @@ mod tests {
         std::fs::create_dir_all(&nested).expect("nested");
         std::fs::write(nested.join("a.txt"), b"a").expect("write nested");
 
-        delete_entry(
-            &LocalPath::new(dir.to_string_lossy().into_owned()),
-            true,
-        )
-        .expect("recursive delete");
+        delete_entry(&LocalPath::new(dir.to_string_lossy().into_owned()), true)
+            .expect("recursive delete");
         assert!(!dir.exists());
     }
 
@@ -406,10 +397,7 @@ mod tests {
 
     #[test]
     fn delete_missing_path_returns_error() {
-        let result = delete_entry(
-            &LocalPath::new("/nonexistent/macsftp/delete-me"),
-            false,
-        );
+        let result = delete_entry(&LocalPath::new("/nonexistent/macsftp/delete-me"), false);
         assert!(result.is_err());
     }
 }

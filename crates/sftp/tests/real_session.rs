@@ -14,11 +14,11 @@ use macsftp_core::{
     RuntimeBridgeConfig, SessionId, TabId, Timestamp, TransferDirection, TransferEndpoint,
     TransferId, TransferJob, TransferState, TrustDecision, TrustRequestId,
 };
+use macsftp_sftp::pool::ConnectionManager;
 use macsftp_sftp::{
     EventReceiver, HostTrustConfig, KnownHostsStore, RemoteSessionActor, RemoteSessionRequest,
     RuntimeController, SessionBackend, TrustRegistry,
 };
-use macsftp_sftp::pool::ConnectionManager;
 use macsftp_test_support::SshTestServer;
 use tokio_util::sync::CancellationToken;
 

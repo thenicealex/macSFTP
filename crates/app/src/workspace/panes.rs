@@ -15,9 +15,8 @@ use macsftp_core::{
     DisconnectReason, EntryPath, ErrorCode, FileKind, FileSortField, HostKeyDecisionCommand,
     HostKeyPrompt, LocalPath, ModalRequest, ModalRequestId, ProfileId, RemotePath, SecretRef,
     SortDirection, TabId, TabState, Timestamp, TransferConflictPrompt, TransferDirection,
-    TransferEndpoint, TransferHistoryId, TransferHistoryRecord, TransferHistoryStatus,
-    TransferJob, TransferState, TrustRequestId, UserFacingError, history_status_for_plan,
-    sort_entries,
+    TransferEndpoint, TransferHistoryId, TransferHistoryRecord, TransferHistoryStatus, TransferJob,
+    TransferState, TrustRequestId, UserFacingError, history_status_for_plan, sort_entries,
 };
 use macsftp_platform::{AppPaths, read_local_directory};
 use macsftp_sftp::{EventReceiver, RuntimeClient};
@@ -238,9 +237,10 @@ impl crate::workspace::Workspace {
             return;
         }
         let end = visible_index.min(visible.len() - 1);
-        let anchor_path = self.selection_anchor.clone().or_else(|| {
-            self.entry_path_at(side, self.selected_index(side, cx).unwrap_or(0), cx)
-        });
+        let anchor_path = self
+            .selection_anchor
+            .clone()
+            .or_else(|| self.entry_path_at(side, self.selected_index(side, cx).unwrap_or(0), cx));
         let Some(anchor_path) = anchor_path else {
             return;
         };
@@ -601,15 +601,15 @@ impl crate::workspace::Workspace {
             return;
         }
 
-        if let Some(key_char) = &keystroke.key_char {
-            if !key_char.chars().any(char::is_control) {
-                let filter = self.pane_filter_mut(side);
-                filter.query.push_str(key_char);
-                filter.input.set_value(filter.query.clone());
-                filter.explicit_focus = false;
-                cx.stop_propagation();
-                cx.notify();
-            }
+        if let Some(key_char) = &keystroke.key_char
+            && !key_char.chars().any(char::is_control)
+        {
+            let filter = self.pane_filter_mut(side);
+            filter.query.push_str(key_char);
+            filter.input.set_value(filter.query.clone());
+            filter.explicit_focus = false;
+            cx.stop_propagation();
+            cx.notify();
         }
     }
 
@@ -640,9 +640,7 @@ impl crate::workspace::Workspace {
         let Some(tab_id) = self.active_tab().map(|tab| tab.id) else {
             return;
         };
-        let current = self
-            .active_tab()
-            .and_then(|tab| tab.local.path.clone());
+        let current = self.active_tab().and_then(|tab| tab.local.path.clone());
 
         let target = match op {
             HistoryOp::Push => {
@@ -690,9 +688,7 @@ impl crate::workspace::Workspace {
         let Some(tab_id) = self.active_tab().map(|tab| tab.id) else {
             return;
         };
-        let current = self
-            .active_tab()
-            .and_then(|tab| tab.remote.path.clone());
+        let current = self.active_tab().and_then(|tab| tab.remote.path.clone());
 
         // Peek history targets for Back/Forward without mutating stacks until
         // the ReadRemoteDir command is successfully enqueued (review fix).

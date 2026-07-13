@@ -307,7 +307,9 @@ impl RemoteSessionActor {
             .send_async(AppEvent::TabConnected(RemoteScoped::new(
                 scope.clone(),
                 macsftp_core::TabConnected {
-                    remote_root: macsftp_core::RemotePath::new(self.shared_connection.remote_root.clone()),
+                    remote_root: macsftp_core::RemotePath::new(
+                        self.shared_connection.remote_root.clone(),
+                    ),
                 },
             )))
             .await;
@@ -315,9 +317,11 @@ impl RemoteSessionActor {
         let (transfer_complete_tx, transfer_complete_rx) = flume::bounded(16);
         let mut transfer_queue = TransferQueue::new();
         let conflict_waiters = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
-        
-        self.shared_connection.active_channels.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        
+
+        self.shared_connection
+            .active_channels
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -355,9 +359,16 @@ impl RemoteSessionActor {
                 }
             }
         }
-        
-        self.shared_connection.active_channels.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        *self.shared_connection.last_used.lock().unwrap() = std::time::Instant::now();
+
+        self.shared_connection
+            .active_channels
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        *self
+            .shared_connection
+            .last_used
+            .lock()
+            .expect("shared connection last_used mutex must not be poisoned") =
+            std::time::Instant::now();
     }
 
     #[cfg(any())]
@@ -387,8 +398,13 @@ impl RemoteSessionActor {
             port: 22,
             scope: scope.clone(),
             trust_request_id: TrustRequestId(0),
-            known_hosts: Arc::new(Mutex::new(KnownHostsStore::load(&std::path::PathBuf::from(""), None))).clone(),
-            trust_config: Arc::new(HostTrustConfig::new(std::path::PathBuf::from(""), None)).clone(),
+            known_hosts: Arc::new(Mutex::new(KnownHostsStore::load(
+                &std::path::PathBuf::from(""),
+                None,
+            )))
+            .clone(),
+            trust_config: Arc::new(HostTrustConfig::new(std::path::PathBuf::from(""), None))
+                .clone(),
             trust_registry: Arc::new(crate::trust::TrustRegistry::new()).clone(),
             event_tx: self.event_tx.clone(),
             rejection: rejection.clone(),
@@ -413,11 +429,9 @@ impl RemoteSessionActor {
                     Some(HostKeyRejection::Mismatch) => ConnectFailure::HostKeyMismatch,
                     Some(HostKeyRejection::UserRejected) => ConnectFailure::TrustRejected,
                     Some(HostKeyRejection::PromptTimeout) => ConnectFailure::TrustTimeout,
-                    None => ConnectFailure::Connection(connection_error(
-                        &String::new(),
-                        22,
-                        &error,
-                    )),
+                    None => {
+                        ConnectFailure::Connection(connection_error(&String::new(), 22, &error))
+                    }
                 });
             }
         };
@@ -428,26 +442,23 @@ impl RemoteSessionActor {
         // M3 so "connected" means a usable SFTP session, not just auth.
         let sftp_result: Result<(SftpSession, String), UserFacingError> = async {
             let channel = handle.channel_open_session().await.map_err(|error| {
-                subsystem_error("Could not open an SSH channel.", &error.to_string())
+                subsystem_error("Could not open an SSH channel.", error.to_string())
             })?;
             channel
                 .request_subsystem(true, "sftp")
                 .await
                 .map_err(|error| {
-                    subsystem_error(
-                        "The server rejected the SFTP subsystem.",
-                        &error.to_string(),
-                    )
+                    subsystem_error("The server rejected the SFTP subsystem.", error.to_string())
                 })?;
             let sftp = SftpSession::new(channel.into_stream())
                 .await
                 .map_err(|error| {
-                    subsystem_error("Could not start the SFTP session.", &error.to_string())
+                    subsystem_error("Could not start the SFTP session.", error.to_string())
                 })?;
             let root = sftp.canonicalize(".").await.map_err(|error| {
                 subsystem_error(
                     "Could not resolve the remote home directory.",
-                    &error.to_string(),
+                    error.to_string(),
                 )
             })?;
             Ok((sftp, root))
@@ -599,8 +610,7 @@ impl RemoteSessionActor {
                     Ok(()) => {
                         // Re-list using the actor's live remote scope so
                         // RemoteDirLoaded passes the stale-event guard.
-                        self.read_remote_dir(&self.sftp, scope, refresh_path)
-                            .await;
+                        self.read_remote_dir(&self.sftp, scope, refresh_path).await;
                     }
                     Err(failure) => {
                         let _ = self
@@ -738,7 +748,9 @@ impl RemoteSessionActor {
     ) -> Result<(), ConnectFailure> {
         // Log only the method kind — never the secret itself
         // (password / key passphrase live in `AuthCredential::Password { password: String::new() }`).
-        let method = match &(AuthCredential::Password { password: String::new() }) {
+        let method = match &(AuthCredential::Password {
+            password: String::new(),
+        }) {
             AuthCredential::Password { .. } => "password",
             AuthCredential::PrivateKey { .. } => "private_key",
         };
@@ -748,16 +760,14 @@ impl RemoteSessionActor {
             method,
             "authenticating with server"
         );
-        let auth_result = match &(AuthCredential::Password { password: String::new() }) {
+        let auth_result = match &(AuthCredential::Password {
+            password: String::new(),
+        }) {
             AuthCredential::Password { password } => handle
                 .authenticate_password(String::new().clone(), password.clone())
                 .await
                 .map_err(|error| {
-                    ConnectFailure::Connection(connection_error(
-                        &String::new(),
-                        22,
-                        &error,
-                    ))
+                    ConnectFailure::Connection(connection_error(&String::new(), 22, &error))
                 })?,
             AuthCredential::PrivateKey {
                 key_path,
@@ -769,11 +779,7 @@ impl RemoteSessionActor {
                     .best_supported_rsa_hash()
                     .await
                     .map_err(|error| {
-                        ConnectFailure::Connection(connection_error(
-                            &String::new(),
-                            22,
-                            &error,
-                        ))
+                        ConnectFailure::Connection(connection_error(&String::new(), 22, &error))
                     })?
                     .flatten();
                 handle
@@ -783,11 +789,7 @@ impl RemoteSessionActor {
                     )
                     .await
                     .map_err(|error| {
-                        ConnectFailure::Connection(connection_error(
-                            &String::new(),
-                            22,
-                            &error,
-                        ))
+                        ConnectFailure::Connection(connection_error(&String::new(), 22, &error))
                     })?
             }
         };
@@ -803,8 +805,12 @@ impl RemoteSessionActor {
                     .contains(&russh::MethodKind::KeyboardInteractive)
                     && !remaining_methods.contains(&russh::MethodKind::Password);
                 let error = if wants_keyboard_interactive
-                    && matches!(AuthCredential::Password { password: String::new() }, AuthCredential::Password { .. })
-                {
+                    && matches!(
+                        AuthCredential::Password {
+                            password: String::new()
+                        },
+                        AuthCredential::Password { .. }
+                    ) {
                     UserFacingError::new(
                         ErrorCode::AuthFailed,
                         "Authentication method not supported",
@@ -834,7 +840,7 @@ async fn open_transfer_sftp(
             ErrorCode::ChannelClosed,
             "Could not start transfer",
             "Could not open a transfer channel. Reconnect and try again.",
-            &error.to_string(),
+            error.to_string(),
         )
     })?;
     channel
@@ -845,7 +851,7 @@ async fn open_transfer_sftp(
                 ErrorCode::ChannelClosed,
                 "Could not start transfer",
                 "The server rejected the SFTP subsystem for this transfer.",
-                &error.to_string(),
+                error.to_string(),
             )
         })?;
     SftpSession::new(channel.into_stream())
@@ -855,7 +861,7 @@ async fn open_transfer_sftp(
                 ErrorCode::ChannelClosed,
                 "Could not start transfer",
                 "Could not start the transfer SFTP session.",
-                &error.to_string(),
+                error.to_string(),
             )
         })
 }
@@ -1106,7 +1112,7 @@ fn remote_planning_error(title: &str, error: &SftpError) -> UserFacingError {
         code,
         title,
         "Check the remote source and permissions, then try again.",
-        &error.to_string(),
+        error.to_string(),
     )
 }
 
@@ -1359,7 +1365,7 @@ async fn destination_exists(
                 ErrorCode::Unknown,
                 "Could not inspect remote destination",
                 "The remote destination could not be checked. Try again.",
-                &error.to_string(),
+                error.to_string(),
             )),
         },
         TransferEndpoint::Local(destination) => {
@@ -1586,7 +1592,7 @@ async fn verify_remote_hardlink(
             ErrorCode::Unknown,
             "Atomic upload is not supported",
             "The server could not verify the required atomic upload commit. Try again.",
-            &error.to_string(),
+            error.to_string(),
         )),
     }
 }
@@ -1757,7 +1763,7 @@ async fn create_remote_directory(
                                 ErrorCode::Unknown,
                                 "Could not create remote directory",
                                 "The remote directory could not be created. Check permissions and try again.",
-                                &error.to_string(),
+                                error.to_string(),
                             )
                         })?;
                     }
@@ -1766,7 +1772,7 @@ async fn create_remote_directory(
                             ErrorCode::Unknown,
                             "Could not create remote directory",
                             "The remote directory could not be created. Check permissions and try again.",
-                            &error.to_string(),
+                            error.to_string(),
                         ));
                     }
                 }
@@ -1776,7 +1782,7 @@ async fn create_remote_directory(
                     ErrorCode::Unknown,
                     "Could not inspect remote directory",
                     "The remote destination could not be checked. Try again.",
-                    &error.to_string(),
+                    error.to_string(),
                 ));
             }
         }
@@ -1808,7 +1814,7 @@ async fn download_single_file(
                 ErrorCode::Unknown,
                 "Could not read remote file",
                 "The remote file could not be read. Check permissions and try again.",
-                &error.to_string(),
+                error.to_string(),
             )
         })?;
     if source_metadata.file_type() == SftpFileType::Symlink {
@@ -1847,7 +1853,7 @@ async fn download_single_file(
                 ErrorCode::Unknown,
                 "Could not open remote file",
                 "The remote file could not be opened. Check permissions and try again.",
-                &error.to_string(),
+                error.to_string(),
             )
         })?;
         let mut destination_file = tokio::fs::OpenOptions::new()
@@ -1953,7 +1959,7 @@ async fn upload_symlink(
                 ErrorCode::UnsupportedSymlink,
                 "Could not create remote symlink",
                 "The remote symlink could not be created. Check server support and try again.",
-                &error.to_string(),
+                error.to_string(),
             )
         })
 }
@@ -1982,7 +1988,7 @@ async fn download_symlink(
             ErrorCode::UnsupportedSymlink,
             "Could not read remote symlink",
             "The remote symlink target could not be read. Check server support and try again.",
-            &error.to_string(),
+            error.to_string(),
         )
     })?;
     if matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
@@ -2038,7 +2044,7 @@ async fn remove_remote_destination(
             ErrorCode::Unknown,
             "Could not replace remote file",
             "The existing remote file could not be removed. Check permissions and try again.",
-            &error.to_string(),
+            error.to_string(),
         )),
     }
 }
@@ -2057,7 +2063,7 @@ fn remote_destination_create_error(error: SftpError) -> UserFacingError {
         code,
         "Could not create remote file",
         "The remote destination already exists or could not be created. Refresh and try again.",
-        &error.to_string(),
+        error.to_string(),
     )
 }
 
@@ -2348,13 +2354,18 @@ fn local_transfer_error(title: &str, error: &std::io::Error) -> UserFacingError 
         code,
         title,
         "Check the local file and permissions, then try again.",
-        &error.to_string(),
+        error.to_string(),
     )
 }
 
-fn transfer_error(code: ErrorCode, title: &str, message: &str, detail: &str) -> UserFacingError {
+fn transfer_error(
+    code: ErrorCode,
+    title: &str,
+    message: &str,
+    detail: impl Into<String>,
+) -> UserFacingError {
     let mut error = UserFacingError::new(code, title, message).with_retryable(true);
-    error.detail = Some(detail.to_string());
+    error.detail = Some(detail.into());
     error
 }
 
@@ -2413,7 +2424,10 @@ async fn execute_remote_fs_op(sftp: &SftpSession, op: &FsOp) -> Result<(), UserF
     }
 }
 
-fn require_remote_path<'a>(path: &'a FsPath, label: &str) -> Result<&'a RemotePath, UserFacingError> {
+fn require_remote_path<'a>(
+    path: &'a FsPath,
+    label: &str,
+) -> Result<&'a RemotePath, UserFacingError> {
     path.as_remote().ok_or_else(|| {
         UserFacingError::new(
             ErrorCode::Unknown,

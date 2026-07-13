@@ -468,20 +468,16 @@ impl crate::workspace::Workspace {
                                 .flex_wrap()
                                 .justify_end()
                                 .gap_2()
-                                .child(
-                                    text_button("go-to-path-cancel", "Cancel").on_click(
-                                        cx.listener(|workspace, _event, window, cx| {
-                                            workspace.close_go_to_path(window, cx);
-                                        }),
-                                    ),
-                                )
-                                .child(
-                                    text_button("go-to-path-go", "Go")
-                                        .primary(true)
-                                        .on_click(cx.listener(|workspace, _event, window, cx| {
-                                            workspace.submit_go_to_path(window, cx);
-                                        })),
-                                ),
+                                .child(text_button("go-to-path-cancel", "Cancel").on_click(
+                                    cx.listener(|workspace, _event, window, cx| {
+                                        workspace.close_go_to_path(window, cx);
+                                    }),
+                                ))
+                                .child(text_button("go-to-path-go", "Go").primary(true).on_click(
+                                    cx.listener(|workspace, _event, window, cx| {
+                                        workspace.submit_go_to_path(window, cx);
+                                    }),
+                                )),
                         ),
                 )
                 .into_any_element(),
@@ -580,73 +576,71 @@ impl crate::workspace::Workspace {
         let trigger_label = form.profile_trigger_label(&profiles);
         let profile_picker_open = form.profile_picker_open;
 
-        card = card.child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .w(px(96.0))
-                        .flex_none()
-                        .text_size(px(11.0))
-                        .text_color(theme.colors.text_muted)
-                        .child("Profile"),
-                )
-                .child(
-                    div()
-                        .id("profile-picker-trigger")
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .px_2()
-                        .py_1()
-                        .border_1()
-                        .border_color(theme.colors.border)
-                        .rounded_md()
-                        .cursor_pointer()
-                        .on_click(cx.listener(|workspace, _event, _window, cx| {
-                            if let Some(form) = &mut workspace.connect_form {
-                                form.profile_picker_open = !form.profile_picker_open;
-                                cx.notify();
-                            }
-                        }))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(12.0))
-                                .text_color(theme.colors.text)
-                                .child(trigger_label),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_size(px(10.0))
-                                .text_color(theme.colors.text_muted)
-                                .child(if profile_picker_open { "▴" } else { "▾" }),
-                        ),
-                )
-                .child(
-                    text_button("connect-manage-profiles", "Manage…").on_click(cx.listener(
-                        |workspace, _event, window, cx| {
+        card =
+            card.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(96.0))
+                            .flex_none()
+                            .text_size(px(11.0))
+                            .text_color(theme.colors.text_muted)
+                            .child("Profile"),
+                    )
+                    .child(
+                        div()
+                            .id("profile-picker-trigger")
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .border_1()
+                            .border_color(theme.colors.border)
+                            .rounded_md()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|workspace, _event, _window, cx| {
+                                if let Some(form) = &mut workspace.connect_form {
+                                    form.profile_picker_open = !form.profile_picker_open;
+                                    cx.notify();
+                                }
+                            }))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(12.0))
+                                    .text_color(theme.colors.text)
+                                    .child(trigger_label),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(10.0))
+                                    .text_color(theme.colors.text_muted)
+                                    .child(if profile_picker_open { "▴" } else { "▾" }),
+                            ),
+                    )
+                    .child(text_button("connect-manage-profiles", "Manage…").on_click(
+                        cx.listener(|workspace, _event, window, cx| {
                             // OpenProfiles is gated on connect_form being closed;
                             // dismiss Connect first so Settings Profiles can open.
                             workspace.close_connect_form(window, cx);
                             workspace.about_open = false;
                             workspace.surface = WorkspaceSurface::Settings;
-                            workspace
-                                .set_settings_section(SettingsSection::Profiles, cx);
+                            workspace.set_settings_section(SettingsSection::Profiles, cx);
                             workspace.workspace_focus.focus(window);
                             cx.notify();
-                        },
+                        }),
                     )),
-                ),
-        );
+            );
 
         if profile_picker_open {
             let filtered = self.filtered_connect_profiles(cx);
@@ -1283,9 +1277,7 @@ impl crate::workspace::Workspace {
                 if event.keystroke.key == "escape" {
                     cx.stop_propagation();
                     workspace.cancel_delete_profile(cx);
-                } else if event.keystroke.key == "enter"
-                    && event.keystroke.modifiers.platform
-                {
+                } else if event.keystroke.key == "enter" && event.keystroke.modifiers.platform {
                     cx.stop_propagation();
                     workspace.confirm_delete_profile(window, cx);
                 }

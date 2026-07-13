@@ -464,8 +464,8 @@ pub struct ConnectionKey {
 
 impl ConnectionSettings {
     pub fn connection_key(&self) -> ConnectionKey {
-        use std::hash::{Hash, Hasher};
         use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
         let mut hasher = DefaultHasher::new();
         self.auth.hash(&mut hasher);
         ConnectionKey {
@@ -531,8 +531,6 @@ impl AuthFingerprint {
         }
     }
 }
-
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransferSessionMode {
@@ -1887,8 +1885,7 @@ mod tests {
         RemoteEventScope, RemotePath, RemoteScoped, RuntimeBridgeConfig, SecretRef, SessionId,
         TabId, TabState, Timestamp, TransferDirection, TransferEndpoint, TransferHistoryId,
         TransferHistoryRecord, TransferHistoryStatus, TransferId, TransferJob, TransferPlanId,
-        TransferPlanState, ConnectionKey, TransferState, TrustRequest, TrustRequestId,
-        UserFacingError,
+        TransferPlanState, TransferState, TrustRequest, TrustRequestId, UserFacingError,
     };
 
     #[test]
@@ -1981,8 +1978,6 @@ mod tests {
         assert_eq!(fingerprint.profile_revision, 3);
         assert_eq!(fingerprint.secret_ref, Some(SecretRef::new("secret-ref")));
     }
-
-    #[test]
 
     #[test]
     fn trust_request_prompt_preserves_session_binding() {

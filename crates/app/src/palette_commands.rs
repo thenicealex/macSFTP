@@ -227,10 +227,7 @@ pub fn labeled_shortcut(label: &str, command_id: &str) -> String {
 
 /// Filter the registry by `when` and case-insensitive title/keyword substring.
 /// Empty query returns every command that passes the context predicate.
-pub fn filter_palette_commands(
-    query: &str,
-    ctx: &PaletteContext,
-) -> Vec<&'static PaletteCommand> {
+pub fn filter_palette_commands(query: &str, ctx: &PaletteContext) -> Vec<&'static PaletteCommand> {
     let needle = query.trim().to_lowercase();
     all_palette_commands()
         .iter()
@@ -361,28 +358,59 @@ mod tests {
         let cases = [
             ("New Tab", "NewTab", "New Tab (⌘T)"),
             ("Refresh", "RefreshPane", "Refresh (⌘R)"),
-            ("Parent Directory", "ParentDirectory", "Parent Directory (⌘↑)"),
+            (
+                "Parent Directory",
+                "ParentDirectory",
+                "Parent Directory (⌘↑)",
+            ),
             ("Back", "NavigateBack", "Back (⌘[)"),
             ("Forward", "NavigateForward", "Forward (⌘])"),
             ("New Folder", "NewFolder", "New Folder (⌘⇧N)"),
-            ("Delete Selection", "DeleteSelection", "Delete Selection (⌘⌫)"),
-            ("Toggle Transfers", "ShowTransferDrawer", "Toggle Transfers (⌘J)"),
-            ("Show Hidden Files", "ToggleHiddenFiles", "Show Hidden Files (⌘⇧.)"),
-            ("Hide Hidden Files", "ToggleHiddenFiles", "Hide Hidden Files (⌘⇧.)"),
-            ("Upload Selection", "UploadSelection", "Upload Selection (⌘U)"),
-            ("Download Selection", "DownloadSelection", "Download Selection (⌘D)"),
+            (
+                "Delete Selection",
+                "DeleteSelection",
+                "Delete Selection (⌘⌫)",
+            ),
+            (
+                "Toggle Transfers",
+                "ShowTransferDrawer",
+                "Toggle Transfers (⌘J)",
+            ),
+            (
+                "Show Hidden Files",
+                "ToggleHiddenFiles",
+                "Show Hidden Files (⌘⇧.)",
+            ),
+            (
+                "Hide Hidden Files",
+                "ToggleHiddenFiles",
+                "Hide Hidden Files (⌘⇧.)",
+            ),
+            (
+                "Upload Selection",
+                "UploadSelection",
+                "Upload Selection (⌘U)",
+            ),
+            (
+                "Download Selection",
+                "DownloadSelection",
+                "Download Selection (⌘D)",
+            ),
             ("Copy Path", "CopyPath", "Copy Path (⌘⇧C)"),
             ("Reconnect", "ReconnectTab", "Reconnect (⌘⇧R)"),
         ];
         for (label, id, expected) in cases {
             assert_eq!(labeled_shortcut(label, id), expected, "tooltip for {id}");
-            assert_eq!(keybinding_for(id).is_some(), true, "key present for {id}");
+            assert!(keybinding_for(id).is_some(), "key present for {id}");
         }
     }
 
     #[test]
     fn labeled_shortcut_falls_back_without_key() {
-        assert_eq!(labeled_shortcut("About macSFTP", "ShowAbout"), "About macSFTP");
+        assert_eq!(
+            labeled_shortcut("About macSFTP", "ShowAbout"),
+            "About macSFTP"
+        );
         assert_eq!(labeled_shortcut("Unknown", "NotACommand"), "Unknown");
     }
 }

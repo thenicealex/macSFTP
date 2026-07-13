@@ -107,10 +107,10 @@ macSFTP 已从「可连接的文件浏览器原型」演进为 **可当主力使
 | 项 | 现状 |
 | --- | --- |
 | `macsftp-app` 二进制测试 | **133 passed**（2026-07-14 实测） |
-| 覆盖面 | core/sftp/storage/app 分层均有；gpui 集成测在 app |
+| 覆盖面 | core/sftp/storage/app 分层均有；gpui 集成测在 app；`real_session` 集成测 21 |
 | Phase 6 性能 | **10k visible indices 单元 smoke**；完整 10k GUI + 4 transfer 手测 **未系统签字** |
-| CI | 仓库有 workflow；需本地以 `scripts/check.sh` / fmt+clippy 为准持续守门 |
-| 文档 | 计划与 design/impl 较完整；**ux-improvement-plan §0 地面真相已过时**（见下节更新） |
+| **Verify gate** | **`bash scripts/check.sh` 全绿**（fmt + workspace test + clippy `-D warnings`，2026-07-14 P0 修通） |
+| 文档 | 计划与 design/impl 较完整；`ux-improvement-plan` 已标阶段完成 |
 
 ---
 
@@ -163,7 +163,7 @@ macSFTP 已从「可连接的文件浏览器原型」演进为 **可当主力使
 
 ## 6. 建议的下一步优先级
 
-1. **P0 — 工程守门：** 确认 `scripts/check.sh`（或 CI 等价步骤）在 clean tree 全绿；有未提交 WIP 时避免与 master 混交。  
+1. ~~**P0 — 工程守门**~~ **已完成（2026-07-14）：** `scripts/check.sh` 全绿（fmt / test / clippy `-D warnings`）。  
 2. **P1 — Connect/Profile 小 polish：** picker 行标签 + Enter 行为 + Settings 草稿丢弃（一天内可交付）。  
 3. **P1 — 手测签字：** 按 phase6 audit 手测清单跑一轮，把 accepted risk 收敛为 pass 或具体 bug 单。  
 4. **P2 — 共享 profile 保存路径**，降低 Keychain 逻辑分叉。  
@@ -203,3 +203,4 @@ macSFTP 已从「可连接的文件浏览器原型」演进为 **可当主力使
 | 日期 | 说明 |
 | --- | --- |
 | 2026-07-14 | 初版：六阶段完成态 + Profile/Connect/Drawer 专项 + 改进 backlog |
+| 2026-07-14 | P0：`scripts/check.sh` 全绿；core 重复 `#[test]`、sftp clippy、app lint 清理 |

@@ -2,19 +2,17 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use gpui::{
-    App, ClipboardItem, Context, FocusHandle, Focusable, IntoElement, ParentElement, Pixels, Render,
-    SharedString, Styled, Subscription, Task, UniformListScrollHandle, Window, div, prelude::*,
+    App, ClipboardItem, Context, FocusHandle, Focusable, IntoElement, ParentElement, Pixels,
+    Render, SharedString, Styled, Subscription, Task, UniformListScrollHandle, Window, div,
+    prelude::*,
 };
 use macsftp_core::{
-    AppCommand, AppState,
-    CommandDispatchError, ConnectCommand, ConnectionSettings, ConnectionState,
-    EntryPath, LocalPath, ProfileId, RemotePath, TabId, TabState,
+    AppCommand, AppState, CommandDispatchError, ConnectCommand, ConnectionSettings,
+    ConnectionState, EntryPath, LocalPath, ProfileId, RemotePath, TabId, TabState,
 };
 use macsftp_sftp::{EventReceiver, RuntimeClient};
 use macsftp_storage::{AppearancePreference, RecentEntryInput, SessionFile, SessionTabSnapshot};
-use macsftp_ui::{
-    ActiveTheme, InputState, Theme, empty_state, text_button,
-};
+use macsftp_ui::{ActiveTheme, InputState, Theme, empty_state, text_button};
 use tracing::warn;
 
 use crate::app_actions::{
@@ -22,9 +20,8 @@ use crate::app_actions::{
     CopyVersionInfo, DeleteSelection, DownloadSelection, FilterPane, FocusLocalPane,
     FocusRemotePane, GoToPath, MinimizeWindow, NavigateBack, NavigateForward, NewFolder, NewTab,
     OpenCommandPalette, OpenLogFolder, OpenProfiles, OpenSelectedEntry, OpenSettings, PageDown,
-    PageUp,
-    ParentDirectory, ReconnectTab, RefreshPane, RenameEntry, SelectAllEntries, SelectFirstEntry,
-    SelectLastEntry, SelectNextEntry, SelectNextEntryExtend, SelectPrevEntry,
+    PageUp, ParentDirectory, ReconnectTab, RefreshPane, RenameEntry, SelectAllEntries,
+    SelectFirstEntry, SelectLastEntry, SelectNextEntry, SelectNextEntryExtend, SelectPrevEntry,
     SelectPrevEntryExtend, ShowAbout, ShowTransferDrawer, TabSwitcherNext, TabSwitcherPrev,
     ToggleHiddenFiles, UploadSelection, ZoomWindow,
 };
@@ -36,8 +33,7 @@ use crate::workspace::profiles::{ProfileEditorState, SettingsSection};
 /// Status bar copy when the command channel is full (non-blocking drop).
 pub(crate) const STATUS_BUSY_TRY_AGAIN: &str = "Busy — try again in a moment.";
 /// Status bar copy when the connection service can no longer accept commands.
-pub(crate) const STATUS_CONNECTION_SERVICE_UNAVAILABLE: &str =
-    "Connection service is unavailable.";
+pub(crate) const STATUS_CONNECTION_SERVICE_UNAVAILABLE: &str = "Connection service is unavailable.";
 
 /// Which file pane an action targets. Local is the default focus side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -288,9 +284,8 @@ impl Workspace {
     }
 
     pub(crate) fn update_window_title(&self, window: &mut Window) {
-        let title = Self::window_title_for_active_tab(
-            self.active_tab().map(|tab| tab.title.as_str()),
-        );
+        let title =
+            Self::window_title_for_active_tab(self.active_tab().map(|tab| tab.title.as_str()));
         window.set_window_title(&title);
     }
 
@@ -400,9 +395,7 @@ impl Workspace {
                         .map(|p| p.as_str().to_string())
                         .or_else(|| {
                             restored.and_then(|r| {
-                                r.remote_path
-                                    .as_ref()
-                                    .map(|path| path.as_str().to_string())
+                                r.remote_path.as_ref().map(|path| path.as_str().to_string())
                             })
                         }),
                 }
@@ -475,7 +468,12 @@ impl Workspace {
         self.update_window_title(window);
         cx.notify();
     }
-    pub(crate) fn close_tab_by_id(&mut self, tab_id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_tab_by_id(
+        &mut self,
+        tab_id: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.state.tabs.close_tab(tab_id).is_none() {
             return;
         }
@@ -940,9 +938,11 @@ impl Render for Workspace {
             .on_action(cx.listener(|workspace, _: &TabSwitcherPrev, window, cx| {
                 workspace.tab_switcher_prev(window, cx);
             }))
-            .on_action(cx.listener(|workspace, _: &ConfirmTabSwitcher, window, cx| {
-                workspace.confirm_tab_switcher(window, cx);
-            }))
+            .on_action(
+                cx.listener(|workspace, _: &ConfirmTabSwitcher, window, cx| {
+                    workspace.confirm_tab_switcher(window, cx);
+                }),
+            )
             .on_action(cx.listener(|workspace, _: &FocusLocalPane, window, cx| {
                 workspace.focus_pane(PaneSide::Local, window, cx);
             }))
@@ -969,9 +969,11 @@ impl Render for Workspace {
             .on_action(cx.listener(|workspace, _: &ReconnectTab, window, cx| {
                 workspace.request_connect(window, cx);
             }))
-            .on_action(cx.listener(|workspace, _: &OpenCommandPalette, window, cx| {
-                workspace.open_command_palette(window, cx);
-            }))
+            .on_action(
+                cx.listener(|workspace, _: &OpenCommandPalette, window, cx| {
+                    workspace.open_command_palette(window, cx);
+                }),
+            )
             .on_action(cx.listener(|workspace, _: &CancelActiveModal, window, cx| {
                 workspace.cancel_active_modal(window, cx);
             }))
@@ -981,12 +983,16 @@ impl Render for Workspace {
             .on_action(cx.listener(|workspace, _: &SelectPrevEntry, _window, cx| {
                 workspace.move_selection(workspace.focused_side, -1, cx);
             }))
-            .on_action(cx.listener(|workspace, _: &SelectNextEntryExtend, _window, cx| {
-                workspace.move_selection_extend(workspace.focused_side, 1, cx);
-            }))
-            .on_action(cx.listener(|workspace, _: &SelectPrevEntryExtend, _window, cx| {
-                workspace.move_selection_extend(workspace.focused_side, -1, cx);
-            }))
+            .on_action(
+                cx.listener(|workspace, _: &SelectNextEntryExtend, _window, cx| {
+                    workspace.move_selection_extend(workspace.focused_side, 1, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|workspace, _: &SelectPrevEntryExtend, _window, cx| {
+                    workspace.move_selection_extend(workspace.focused_side, -1, cx);
+                }),
+            )
             .on_action(cx.listener(|workspace, _: &PageDown, _window, cx| {
                 workspace.page_selection(workspace.focused_side, 1, cx);
             }))
@@ -1037,9 +1043,11 @@ impl Render for Workspace {
             .on_action(cx.listener(|workspace, _: &NewFolder, window, cx| {
                 workspace.begin_new_folder(window, cx);
             }))
-            .on_action(cx.listener(|workspace, _: &ToggleHiddenFiles, _window, cx| {
-                workspace.toggle_hidden_files(cx);
-            }))
+            .on_action(
+                cx.listener(|workspace, _: &ToggleHiddenFiles, _window, cx| {
+                    workspace.toggle_hidden_files(cx);
+                }),
+            )
             .on_action(cx.listener(|workspace, _: &OpenSettings, window, cx| {
                 if workspace.connect_form.is_none()
                     && workspace.active_host_key_prompt().is_none()

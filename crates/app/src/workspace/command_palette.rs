@@ -5,9 +5,7 @@ use gpui::{
     div, prelude::*, px,
 };
 use macsftp_core::ConnectionState;
-use macsftp_ui::{
-    ActiveTheme, InputKeyResult, TextFieldModel, text_field,
-};
+use macsftp_ui::{ActiveTheme, InputKeyResult, TextFieldModel, text_field};
 
 use crate::palette_commands::{PaletteCommand, PaletteContext, filter_palette_commands};
 use crate::workspace::nav::HistoryOp;

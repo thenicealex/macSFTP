@@ -483,8 +483,9 @@ async fn command_dispatch_loop(
                 let (join, request_tx) = match (&backend, &known_hosts) {
                     (SessionBackend::Real(_), Some((store, trust_config))) => {
                         let (request_tx, request_rx) = flume::bounded(16);
-                        
-                        let scope = RemoteEventScope::new(cmd.tab_id, cmd.session_id, cmd.session_epoch);
+
+                        let scope =
+                            RemoteEventScope::new(cmd.tab_id, cmd.session_id, cmd.session_epoch);
                         let mut receiver = connection_manager.get_or_connect(
                             &cmd.settings,
                             &scope,
@@ -500,19 +501,19 @@ async fn command_dispatch_loop(
                         let next_conflict_id_clone = next_conflict_id.clone();
                         let cancel_clone = cancel.clone();
                         let host_clone = cmd.settings.host.clone();
-                        
+
                         let join = tokio::spawn(async move {
                             match receiver.recv().await {
                                 Ok(Ok(shared_connection)) => {
                                     let channel_result = async {
                                         let channel = shared_connection.handle.channel_open_session().await.map_err(|error| {
-                                            crate::physical_connection::ConnectFailure::Connection(UserFacingError::new(ErrorCode::ChannelClosed, "Could not open SFTP channel on shared connection", &error.to_string()))
+                                            crate::physical_connection::ConnectFailure::Connection(UserFacingError::new(ErrorCode::ChannelClosed, "Could not open SFTP channel on shared connection", error.to_string()))
                                         })?;
                                         channel.request_subsystem(true, "sftp").await.map_err(|error| {
-                                            crate::physical_connection::ConnectFailure::Connection(UserFacingError::new(ErrorCode::ChannelClosed, "The server rejected the SFTP subsystem.", &error.to_string()))
+                                            crate::physical_connection::ConnectFailure::Connection(UserFacingError::new(ErrorCode::ChannelClosed, "The server rejected the SFTP subsystem.", error.to_string()))
                                         })?;
                                         russh_sftp::client::SftpSession::new(channel.into_stream()).await.map_err(|error| {
-                                            crate::physical_connection::ConnectFailure::Connection(UserFacingError::new(ErrorCode::ChannelClosed, "Could not start the SFTP session.", &error.to_string()))
+                                            crate::physical_connection::ConnectFailure::Connection(UserFacingError::new(ErrorCode::ChannelClosed, "Could not start the SFTP session.", error.to_string()))
                                         })
                                     }.await;
 
@@ -530,7 +531,10 @@ async fn command_dispatch_loop(
                                             actor.run(cancel_clone, request_rx).await;
                                         }
                                         Err(failure) => {
-                                            crate::physical_connection::log_connect_failure(&host_clone, &failure);
+                                            crate::physical_connection::log_connect_failure(
+                                                &host_clone,
+                                                &failure,
+                                            );
                                             let event = match failure {
                                                 crate::physical_connection::ConnectFailure::HostKeyMismatch => None,
                                                 crate::physical_connection::ConnectFailure::TrustRejected => {
@@ -560,7 +564,10 @@ async fn command_dispatch_loop(
                                     }
                                 }
                                 Ok(Err(failure)) => {
-                                    crate::physical_connection::log_connect_failure(&host_clone, &failure);
+                                    crate::physical_connection::log_connect_failure(
+                                        &host_clone,
+                                        &failure,
+                                    );
                                     let event = match failure {
                                         crate::physical_connection::ConnectFailure::HostKeyMismatch => None,
                                         crate::physical_connection::ConnectFailure::TrustRejected => {
@@ -1521,7 +1528,8 @@ mod tests {
                 }))
                 .expect("old accept command should send");
 
-            assert_no_tab_connected(&mut event_rx, "old accept must not connect the old session").await;
+            assert_no_tab_connected(&mut event_rx, "old accept must not connect the old session")
+                .await;
         });
 
         controller.shutdown();

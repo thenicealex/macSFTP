@@ -121,10 +121,7 @@ mod tests {
         history.forward.push("/x".into()); // simulate leftover forward
         history.push_navigating_from(Some("/b"), "/c");
         assert!(history.forward.is_empty());
-        assert_eq!(
-            history.back,
-            vec!["/a".to_string(), "/b".to_string()]
-        );
+        assert_eq!(history.back, vec!["/a".to_string(), "/b".to_string()]);
     }
 
     #[test]
@@ -174,20 +171,17 @@ mod tests {
 
     #[test]
     fn breadcrumb_segments_root_and_nested() {
-        assert_eq!(
-            breadcrumb_segments("/"),
-            vec![("/".into(), "/".into())]
-        );
-        assert_eq!(
-            breadcrumb_segments(""),
-            vec![("/".into(), "/".into())]
-        );
+        assert_eq!(breadcrumb_segments("/"), vec![("/".into(), "/".into())]);
+        assert_eq!(breadcrumb_segments(""), vec![("/".into(), "/".into())]);
         let segs = breadcrumb_segments("/Users/alex/Projects");
         assert_eq!(segs[0].0, "/");
         assert_eq!(segs[0].1, "/");
         assert_eq!(segs[1], ("Users".into(), "/Users".into()));
         assert_eq!(segs[2], ("alex".into(), "/Users/alex".into()));
-        assert_eq!(segs.last().map(|s| s.1.as_str()), Some("/Users/alex/Projects"));
+        assert_eq!(
+            segs.last().map(|s| s.1.as_str()),
+            Some("/Users/alex/Projects")
+        );
         assert_eq!(segs.len(), 4);
     }
 
@@ -201,9 +195,6 @@ mod tests {
             breadcrumb_display_indices(6),
             vec![Some(0), None, Some(4), Some(5)]
         );
-        assert_eq!(
-            breadcrumb_display_indices(1),
-            vec![Some(0)]
-        );
+        assert_eq!(breadcrumb_display_indices(1), vec![Some(0)]);
     }
 }

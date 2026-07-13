@@ -96,11 +96,7 @@ impl crate::workspace::Workspace {
         }
     }
 
-    pub(crate) fn request_delete_selection(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn request_delete_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let side = self.focused_side;
         let entries = self.selected_fs_entries(side);
         if entries.is_empty() {
@@ -168,11 +164,7 @@ impl crate::workspace::Workspace {
         cx.notify();
     }
 
-    pub(crate) fn begin_rename_selection(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn begin_rename_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let side = self.focused_side;
         let mut entries = self.selected_fs_entries(side);
         if entries.len() != 1 {
@@ -385,8 +377,7 @@ impl crate::workspace::Workspace {
                         cx,
                     );
                 };
-                rename_entry(from, to)
-                    .map_err(|error| local_fs_error("Could not rename", &error))
+                rename_entry(from, to).map_err(|error| local_fs_error("Could not rename", &error))
             }
             FsOp::CreateDirectory { parent, name } => {
                 let Some(parent) = parent.as_local() else {
@@ -520,9 +511,7 @@ impl crate::workspace::Workspace {
                 if event.keystroke.key == "escape" {
                     cx.stop_propagation();
                     workspace.cancel_delete_confirm(window, cx);
-                } else if event.keystroke.key == "enter"
-                    && event.keystroke.modifiers.platform
-                {
+                } else if event.keystroke.key == "enter" && event.keystroke.modifiers.platform {
                     // cmd-enter confirms; bare enter stays on Cancel (default).
                     cx.stop_propagation();
                     workspace.confirm_delete(window, cx);
@@ -643,10 +632,7 @@ impl crate::workspace::Workspace {
         )
     }
 
-    pub(crate) fn render_context_menu(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_context_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let menu = self.context_menu.as_ref()?;
         let theme = cx.theme().clone();
         let side = menu.side;

@@ -22,7 +22,11 @@ pub(crate) fn visible_local_indices(
     show_hidden: bool,
     query: &str,
 ) -> Vec<usize> {
-    visible_indices(entries.iter().map(|entry| entry.name.as_str()), show_hidden, query)
+    visible_indices(
+        entries.iter().map(|entry| entry.name.as_str()),
+        show_hidden,
+        query,
+    )
 }
 
 /// Indices into `entries` that should appear in the remote file list.
@@ -31,7 +35,11 @@ pub(crate) fn visible_remote_indices(
     show_hidden: bool,
     query: &str,
 ) -> Vec<usize> {
-    visible_indices(entries.iter().map(|entry| entry.name.as_str()), show_hidden, query)
+    visible_indices(
+        entries.iter().map(|entry| entry.name.as_str()),
+        show_hidden,
+        query,
+    )
 }
 
 fn visible_indices<'a>(
@@ -127,7 +135,10 @@ mod tests {
             vec![0, 1, 2],
             "substring hits every name that contains e/E"
         );
-        assert_eq!(visible_local_indices(&entries, true, "zzz"), Vec::<usize>::new());
+        assert_eq!(
+            visible_local_indices(&entries, true, "zzz"),
+            Vec::<usize>::new()
+        );
     }
 
     #[test]

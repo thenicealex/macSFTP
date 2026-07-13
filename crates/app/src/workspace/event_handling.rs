@@ -265,7 +265,8 @@ impl crate::workspace::Workspace {
             }
             AppEvent::TransferConflict(prompt) => {
                 let default_rename = copy_name(&prompt.destination);
-                if let Some(job) = cx.transfers_mut()
+                if let Some(job) = cx
+                    .transfers_mut()
                     .jobs
                     .iter_mut()
                     .find(|job| job.id == prompt.transfer_id)
@@ -295,7 +296,8 @@ impl crate::workspace::Workspace {
                 window.focus(&self.modal_focus);
             }
             AppEvent::TransferPlanProgress(progress) => {
-                if let Some(plan) = cx.transfers_mut()
+                if let Some(plan) = cx
+                    .transfers_mut()
                     .plans
                     .iter_mut()
                     .find(|plan| plan.id == progress.plan_id)
@@ -308,11 +310,7 @@ impl crate::workspace::Workspace {
             }
             AppEvent::TransferPlanCompleted { plan_id } => {
                 let transfers = cx.transfers_mut();
-                if let Some(plan) = transfers
-                    .plans
-                    .iter_mut()
-                    .find(|plan| plan.id == plan_id)
-                {
+                if let Some(plan) = transfers.plans.iter_mut().find(|plan| plan.id == plan_id) {
                     plan.state = macsftp_core::TransferPlanState::Queued;
                     if let Some(root_job) = transfers
                         .jobs
@@ -335,11 +333,7 @@ impl crate::workspace::Workspace {
             }
             AppEvent::TransferPlanCancelled { plan_id } => {
                 let transfers = cx.transfers_mut();
-                if let Some(plan) = transfers
-                    .plans
-                    .iter_mut()
-                    .find(|plan| plan.id == plan_id)
-                {
+                if let Some(plan) = transfers.plans.iter_mut().find(|plan| plan.id == plan_id) {
                     plan.state = macsftp_core::TransferPlanState::Cancelled;
                     if let Some(root_job) = transfers
                         .jobs
@@ -352,11 +346,7 @@ impl crate::workspace::Workspace {
             }
             AppEvent::TransferPlanFailed { plan_id, error } => {
                 let transfers = cx.transfers_mut();
-                if let Some(plan) = transfers
-                    .plans
-                    .iter_mut()
-                    .find(|plan| plan.id == plan_id)
-                {
+                if let Some(plan) = transfers.plans.iter_mut().find(|plan| plan.id == plan_id) {
                     plan.state = macsftp_core::TransferPlanState::Failed {
                         error: error.clone(),
                     };
@@ -402,11 +392,8 @@ impl crate::workspace::Workspace {
                     cx.transfers_mut().jobs.push(snapshot.job);
                 }
                 if let Some((transfer_id, bytes_done)) = rate_sample {
-                    cx.rates_mut().observe(
-                        transfer_id,
-                        bytes_done,
-                        std::time::Instant::now(),
-                    );
+                    cx.rates_mut()
+                        .observe(transfer_id, bytes_done, std::time::Instant::now());
                 }
             }
             AppEvent::TransferProgress(progress) => {

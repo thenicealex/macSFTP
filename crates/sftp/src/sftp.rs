@@ -1,7 +1,7 @@
 mod known_hosts;
+mod mock_actor;
 mod physical_connection;
 pub mod pool;
-mod mock_actor;
 mod runtime;
 mod session_actor;
 mod transfer_planner;

@@ -271,9 +271,7 @@ fn open_workspace_window(cx: &mut App) -> gpui::Result<()> {
             ..Default::default()
         },
         |window, cx| {
-            cx.new(|cx| {
-                Workspace::new(runtime_client, event_receiver, restore_session, window, cx)
-            })
+            cx.new(|cx| Workspace::new(runtime_client, event_receiver, restore_session, window, cx))
         },
     )?;
     cx.activate(true);

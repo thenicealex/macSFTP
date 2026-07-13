@@ -26,11 +26,7 @@ pub(crate) struct TransferDrawerResize {
 pub(crate) struct ResizeDragGhost;
 
 impl Render for ResizeDragGhost {
-    fn render(
-        &mut self,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div().w(px(1.0)).h(px(1.0))
     }
 }
@@ -103,9 +99,6 @@ mod tests {
 
     #[test]
     fn content_area_from_viewport_subtracts_chrome() {
-        assert_eq!(
-            content_area_height_from_viewport(px(864.0)),
-            px(800.0)
-        );
+        assert_eq!(content_area_height_from_viewport(px(864.0)), px(800.0));
     }
 }

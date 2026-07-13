@@ -1,5 +1,7 @@
 #![allow(unused_imports)]
 #![allow(clippy::module_inception)]
+// Tests use unwrap/expect for fixtures; production keeps unwrap_used deny.
+#![allow(clippy::unwrap_used)]
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::SystemTime;
@@ -44,28 +46,24 @@ use crate::workspace::*;
 mod tests {
     use gpui::{Entity, TestAppContext, VisualTestContext};
     use macsftp_core::{
-        AppCommand, AppEvent, AuthCredential, AuthMethod, AuthMethodKind, ConflictDecision, ConflictPolicy,
-        ConflictRequestId, ConnectionSettings, ConnectionState, DisconnectReason, EntryPath,
-        ErrorCode, FileKind, FileSortField, HostKeyPrompt, LocalPath, MetadataPolicy, ProfileId,
-        RemoteDirSnapshot, RemoteEntry, RemoteEventScope, RemoteOperationFailure, RemotePath,
-        RemoteScoped, RuntimeBridgeConfig, SessionId, SortDirection, TabConnected, TabDisconnected,
-        TabId, Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint,
-        TransferHistoryRecord, TransferHistoryStatus, TransferId, TransferJob, TransferPlanId,
-        TransferPlanProgress, TransferPlanSnapshot, TransferPlanState, TransferState,
-        TrustRequestId, UserFacingError,
+        AppCommand, AppEvent, AuthCredential, AuthMethod, AuthMethodKind, ConflictDecision,
+        ConflictPolicy, ConflictRequestId, ConnectionSettings, ConnectionState, DisconnectReason,
+        EntryPath, ErrorCode, FileKind, FileSortField, HostKeyPrompt, LocalPath, MetadataPolicy,
+        ProfileId, RemoteDirSnapshot, RemoteEntry, RemoteEventScope, RemoteOperationFailure,
+        RemotePath, RemoteScoped, RuntimeBridgeConfig, SessionId, SortDirection, TabConnected,
+        TabDisconnected, TabId, Timestamp, TransferConflictPrompt, TransferDirection,
+        TransferEndpoint, TransferHistoryRecord, TransferHistoryStatus, TransferId, TransferJob,
+        TransferPlanId, TransferPlanProgress, TransferPlanSnapshot, TransferPlanState,
+        TransferState, TrustRequestId, UserFacingError,
     };
     use macsftp_sftp::{BridgeChannels, EventReceiver, RuntimeClient};
-    use macsftp_storage::{
-        AppearancePreference, SessionFile, SessionStore, SessionTabSnapshot,
-    };
+    use macsftp_storage::{AppearancePreference, SessionFile, SessionStore, SessionTabSnapshot};
     use macsftp_ui::{Appearance, Theme};
 
     use super::{
-        AppPaths, PaneSide, RestoredTabTarget, Workspace, WorkspaceSurface,
-        STATUS_BUSY_TRY_AGAIN, STATUS_CONNECTION_SERVICE_UNAVAILABLE,
+        AppPaths, PaneSide, RestoredTabTarget, STATUS_BUSY_TRY_AGAIN,
+        STATUS_CONNECTION_SERVICE_UNAVAILABLE, Workspace, WorkspaceSurface,
     };
-    use crate::workspace::profiles::{SettingsSection, profile_matches_filter};
-    use macsftp_ui::InputState;
     use crate::app_actions::{
         self, ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, FilterPane, GoToPath,
         NavigateBack, NewTab, OpenProfiles, OpenSettings, PageDown, SelectAllEntries,
@@ -74,6 +72,8 @@ mod tests {
     };
     use crate::resources::{ActiveResources, ActiveTransfers};
     use crate::workspace::nav::HistoryOp;
+    use crate::workspace::profiles::{SettingsSection, profile_matches_filter};
+    use macsftp_ui::InputState;
 
     const TEST_REMOTE_ROOT: &str = "/home/tester";
 
@@ -104,12 +104,10 @@ mod tests {
         });
         let channels = BridgeChannels::new(&RuntimeBridgeConfig::default());
         let client = RuntimeClient::new(channels.command_tx.clone());
-        let (_event_tx, receiver) = macsftp_sftp::test_event_channel(
-            RuntimeBridgeConfig::default().event_channel_capacity,
-        );
-        let window = cx.add_window(|window, cx| {
-            Workspace::new(client, receiver, restore_session, window, cx)
-        });
+        let (_event_tx, receiver) =
+            macsftp_sftp::test_event_channel(RuntimeBridgeConfig::default().event_channel_capacity);
+        let window = cx
+            .add_window(|window, cx| Workspace::new(client, receiver, restore_session, window, cx));
         let workspace = window
             .root(cx)
             .expect("workspace root view should be available");
@@ -1134,7 +1132,8 @@ mod tests {
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.handle_app_event(AppEvent::TransferConflict(prompt.clone()), window, cx);
             assert_eq!(workspace.conflict_rename.value(), "existing (copy).txt");
-            let pending = cx.transfers()
+            let pending = cx
+                .transfers()
                 .pending_conflicts
                 .last()
                 .expect("conflict should be recorded for the drawer");
@@ -1378,7 +1377,11 @@ mod tests {
 
         workspace.read_with(&cx, |_workspace, cx| {
             let entries = cx.resources().recents.entries();
-            assert_eq!(entries.len(), 1, "successful connect must upsert one recent");
+            assert_eq!(
+                entries.len(),
+                1,
+                "successful connect must upsert one recent"
+            );
             assert_eq!(entries[0].host, "mock.example.com");
             assert_eq!(entries[0].port, 22);
             assert_eq!(entries[0].username, "tester");
@@ -1465,8 +1468,8 @@ mod tests {
 
     #[test]
     fn format_recent_label_uses_display_name_when_present() {
-        use macsftp_storage::RecentEntry;
         use super::format_recent_label;
+        use macsftp_storage::RecentEntry;
 
         let with_name = RecentEntry {
             id: 1,
@@ -1494,10 +1497,7 @@ mod tests {
             display_name: None,
             ..with_name
         };
-        assert_eq!(
-            format_recent_label(&custom_port),
-            "alex@example.com:2222"
-        );
+        assert_eq!(format_recent_label(&custom_port), "alex@example.com:2222");
     }
 
     #[gpui::test]
@@ -2123,7 +2123,12 @@ mod tests {
                 "push clears forward"
             );
 
-            workspace.navigate_pane_local(LocalPath::new(String::new()), HistoryOp::Back, window, cx);
+            workspace.navigate_pane_local(
+                LocalPath::new(String::new()),
+                HistoryOp::Back,
+                window,
+                cx,
+            );
             assert_eq!(
                 workspace
                     .active_tab()
@@ -2163,9 +2168,11 @@ mod tests {
         cx.dispatch_action(NavigateBack);
         workspace.read_with(&cx, |workspace, _| {
             assert_eq!(
-                workspace
-                    .active_tab()
-                    .and_then(|tab| tab.local.path.as_ref().map(LocalPath::as_str)),
+                workspace.active_tab().and_then(|tab| tab
+                    .local
+                    .path
+                    .as_ref()
+                    .map(LocalPath::as_str)),
                 Some(parent.as_str()),
                 "NavigateBack action restores previous local path"
             );
@@ -2176,23 +2183,13 @@ mod tests {
             workspace.focused_side = PaneSide::Local;
             let back_len_before = workspace
                 .tab_nav
-                .get(
-                    &workspace
-                        .active_tab()
-                        .expect("tab")
-                        .id,
-                )
+                .get(&workspace.active_tab().expect("tab").id)
                 .map(|nav| nav.local.back.len())
                 .unwrap_or(0);
             workspace.refresh_focused_pane(window, cx);
             let back_len_after = workspace
                 .tab_nav
-                .get(
-                    &workspace
-                        .active_tab()
-                        .expect("tab")
-                        .id,
-                )
+                .get(&workspace.active_tab().expect("tab").id)
                 .map(|nav| nav.local.back.len())
                 .unwrap_or(0);
             assert_eq!(
@@ -2232,9 +2229,11 @@ mod tests {
             workspace.submit_go_to_path(window, cx);
             assert!(!workspace.go_to_path_open);
             assert_eq!(
-                workspace
-                    .active_tab()
-                    .and_then(|tab| tab.local.path.as_ref().map(LocalPath::as_str)),
+                workspace.active_tab().and_then(|tab| tab
+                    .local
+                    .path
+                    .as_ref()
+                    .map(LocalPath::as_str)),
                 Some(child.as_str()),
                 "submit_go_to_path must navigate to entered local path"
             );
@@ -2260,9 +2259,11 @@ mod tests {
                 Some("Path not found")
             );
             assert_eq!(
-                workspace
-                    .active_tab()
-                    .and_then(|tab| tab.local.path.as_ref().map(LocalPath::as_str)),
+                workspace.active_tab().and_then(|tab| tab
+                    .local
+                    .path
+                    .as_ref()
+                    .map(LocalPath::as_str)),
                 Some(child.as_str()),
                 "failed go to path must not change current path"
             );
@@ -2312,9 +2313,11 @@ mod tests {
                 Some("Not a directory")
             );
             assert_eq!(
-                workspace
-                    .active_tab()
-                    .and_then(|tab| tab.local.path.as_ref().map(LocalPath::as_str)),
+                workspace.active_tab().and_then(|tab| tab
+                    .local
+                    .path
+                    .as_ref()
+                    .map(LocalPath::as_str)),
                 Some(child.as_str()),
                 "file path must not navigate"
             );
@@ -2406,7 +2409,7 @@ mod tests {
         assert!(matches!(
             channels.command_rx.try_recv(),
             Ok(AppCommand::ReadRemoteDir { tab_id: TabId(1), path })
-                if path.as_str() == &format!("{TEST_REMOTE_ROOT}/docs")
+                if path.as_str() == format!("{TEST_REMOTE_ROOT}/docs")
         ));
     }
 
@@ -2670,10 +2673,7 @@ mod tests {
                 .connect_form
                 .as_ref()
                 .expect("form stays open after save");
-            assert!(
-                !form.save_as_expanded,
-                "successful save collapses Save as"
-            );
+            assert!(!form.save_as_expanded, "successful save collapses Save as");
             assert_eq!(
                 form.source_profile_id,
                 Some(profiles[0].id),
@@ -2976,7 +2976,10 @@ mod tests {
         // file (plan §11). The profile on disk holds only the SecretRef.
         let secret_ref = macsftp_core::SecretRef::keychain_ref(saved_id, "password");
         let stored = workspace.read_with(&cx, |_workspace, cx| {
-            cx.resources().keychain.load(&secret_ref).expect("load secret")
+            cx.resources()
+                .keychain
+                .load(&secret_ref)
+                .expect("load secret")
         });
         assert_eq!(
             stored,
@@ -3302,13 +3305,15 @@ mod tests {
 
             // Without children, planning completion should finalize the root
             // job immediately so it does not linger in the Queued section.
-            let root_job = cx.transfers()
+            let root_job = cx
+                .transfers()
                 .jobs
                 .iter()
                 .find(|job| job.id == root_job_id)
                 .expect("root job exists");
             assert_eq!(root_job.state, TransferState::Completed);
-            let plan = cx.transfers()
+            let plan = cx
+                .transfers()
                 .plans
                 .iter()
                 .find(|p| p.id == plan_id)
@@ -3351,7 +3356,8 @@ mod tests {
             workspace.handle_app_event(AppEvent::TransferPlanCompleted { plan_id }, window, cx);
 
             // Plan completion with children keeps root in Queued.
-            let root_job = cx.transfers()
+            let root_job = cx
+                .transfers()
                 .jobs
                 .iter()
                 .find(|job| job.id == root_job_id)
@@ -3388,13 +3394,15 @@ mod tests {
             );
 
             // After the last child completes, the root plan/job must finalize.
-            let root_job = cx.transfers()
+            let root_job = cx
+                .transfers()
                 .jobs
                 .iter()
                 .find(|job| job.id == root_job_id)
                 .expect("root job exists");
             assert_eq!(root_job.state, TransferState::Completed);
-            let plan = cx.transfers()
+            let plan = cx
+                .transfers()
                 .plans
                 .iter()
                 .find(|p| p.id == plan_id)
@@ -3413,7 +3421,10 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("fixture dir");
-        (dir.clone(), LocalPath::new(dir.to_string_lossy().into_owned()))
+        (
+            dir.clone(),
+            LocalPath::new(dir.to_string_lossy().into_owned()),
+        )
     }
 
     #[gpui::test]
@@ -3560,16 +3571,16 @@ mod tests {
             use std::sync::atomic::{AtomicU64, Ordering};
             static SEQ: AtomicU64 = AtomicU64::new(0);
             let seq = SEQ.fetch_add(1, Ordering::SeqCst);
-            let dir = std::env::temp_dir().join(format!(
-                "macsftp-sort-{}-{}",
-                std::process::id(),
-                seq
-            ));
+            let dir =
+                std::env::temp_dir().join(format!("macsftp-sort-{}-{}", std::process::id(), seq));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("big.bin"), vec![0u8; 100]).unwrap();
             std::fs::write(dir.join("small.bin"), vec![0u8; 1]).unwrap();
-            (dir.clone(), LocalPath::new(dir.to_string_lossy().into_owned()))
+            (
+                dir.clone(),
+                LocalPath::new(dir.to_string_lossy().into_owned()),
+            )
         };
         workspace.update_in(&mut cx, |workspace, window, cx| {
             if let Some(tab) = workspace.active_tab_mut() {
@@ -3789,9 +3800,11 @@ mod tests {
 
             if let Some(tab) = workspace.active_tab_mut() {
                 tab.selection.selected_paths = local_paths.clone();
-                tab.selection.selected_paths.push(EntryPath::Remote(
-                    RemotePath::new(format!("{TEST_REMOTE_ROOT}/remote-only.txt")),
-                ));
+                tab.selection
+                    .selected_paths
+                    .push(EntryPath::Remote(RemotePath::new(format!(
+                        "{TEST_REMOTE_ROOT}/remote-only.txt"
+                    ))));
             }
 
             workspace.focused_side = PaneSide::Local;
@@ -4056,10 +4069,7 @@ mod tests {
             assert_eq!(workspace.state.tabs.tabs.len(), 2);
             assert_eq!(workspace.state.tabs.tabs[0].title, "alpha.example");
             assert_eq!(workspace.state.tabs.tabs[1].title, "beta.example");
-            assert_eq!(
-                workspace.state.tabs.tabs[0].profile_id,
-                Some(ProfileId(3))
-            );
+            assert_eq!(workspace.state.tabs.tabs[0].profile_id, Some(ProfileId(3)));
             assert_eq!(
                 workspace.state.tabs.tabs[0].remote.path,
                 Some(RemotePath::new("/home/alice/proj"))
@@ -4117,16 +4127,10 @@ mod tests {
             assert_eq!(snapshot.tabs.len(), 2);
             assert_eq!(snapshot.tabs[0].title, "first-host");
             assert_eq!(snapshot.tabs[0].profile_id, Some(9));
-            assert_eq!(
-                snapshot.tabs[0].local_path.as_deref(),
-                Some("/tmp/local-a")
-            );
+            assert_eq!(snapshot.tabs[0].local_path.as_deref(), Some("/tmp/local-a"));
             assert_eq!(snapshot.tabs[0].remote_path.as_deref(), Some("/home/a"));
             assert_eq!(snapshot.tabs[1].title, "second-host");
-            assert_eq!(
-                snapshot.tabs[1].local_path.as_deref(),
-                Some("/tmp/local-b")
-            );
+            assert_eq!(snapshot.tabs[1].local_path.as_deref(), Some("/tmp/local-b"));
             assert_eq!(snapshot.tabs[1].remote_path.as_deref(), Some("/home/b"));
         });
     }
@@ -4135,8 +4139,7 @@ mod tests {
     fn flush_session_writes_session_json(cx: &mut TestAppContext) {
         let app_paths = temp_app_paths();
         let session_path = app_paths.session_file.clone();
-        let (workspace, mut cx, _channels) =
-            init_workspace_with_paths(cx, app_paths, false);
+        let (workspace, mut cx, _channels) = init_workspace_with_paths(cx, app_paths, false);
 
         workspace.update_in(&mut cx, |workspace, _window, cx| {
             {
@@ -4210,7 +4213,10 @@ mod tests {
                 detail.contains("MB/s") || detail.contains("KB/s"),
                 "detail should include speed: {detail}"
             );
-            assert!(detail.contains("ETA"), "detail should include ETA: {detail}");
+            assert!(
+                detail.contains("ETA"),
+                "detail should include ETA: {detail}"
+            );
         });
     }
 
@@ -4240,10 +4246,7 @@ mod tests {
             }
             workspace.update_window_title(window);
         });
-        assert_eq!(
-            cx.window_title().as_deref(),
-            Some("example.com — macSFTP")
-        );
+        assert_eq!(cx.window_title().as_deref(), Some("example.com — macSFTP"));
 
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.open_new_tab(window, cx);
@@ -4285,7 +4288,14 @@ mod tests {
 
     #[test]
     fn user_status_strings_avoid_internal_jargon() {
-        let banlist = ["runtime", "actor", "channel", "session epoch", "appcommand", "crate"];
+        let banlist = [
+            "runtime",
+            "actor",
+            "channel",
+            "session epoch",
+            "appcommand",
+            "crate",
+        ];
         for message in [STATUS_BUSY_TRY_AGAIN, STATUS_CONNECTION_SERVICE_UNAVAILABLE] {
             let lower = message.to_lowercase();
             for word in banlist {

@@ -2,9 +2,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use macsftp_core::{
-    AppEvent, AuthCredential, AuthFailure, ConnectionSettings,
-    HostKeyMismatch, HostKeyPrompt, RemoteEventScope, RemoteScoped, TrustDecision,
-    TrustRequestId, UserFacingError, ErrorCode
+    AppEvent, AuthCredential, AuthFailure, ConnectionSettings, ErrorCode, HostKeyMismatch,
+    HostKeyPrompt, RemoteEventScope, RemoteScoped, TrustDecision, TrustRequestId, UserFacingError,
 };
 use russh::client;
 use russh::keys::{PrivateKeyWithHashAlg, load_secret_key};
@@ -13,11 +12,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::known_hosts::{HostKeyCheckResult, KnownHostsStore, fingerprint_sha256, key_algorithm};
-use crate::trust::{TrustRegistry, TrustRegistryEntry};
 use crate::session_actor::HostTrustConfig;
+use crate::trust::{TrustRegistry, TrustRegistryEntry};
 
 pub fn lock_store(store: &Mutex<KnownHostsStore>) -> MutexGuard<'_, KnownHostsStore> {
-    store.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    store
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,18 +209,12 @@ async fn authenticate(
     );
 
     let auth_result = match &settings.auth {
-        AuthCredential::Password { password } => {
-            handle
-                .authenticate_password(settings.username.clone(), password.clone())
-                .await
-                .map_err(|error| {
-                    ConnectFailure::Connection(connection_error(
-                        &settings.host,
-                        settings.port,
-                        &error,
-                    ))
-                })?
-        }
+        AuthCredential::Password { password } => handle
+            .authenticate_password(settings.username.clone(), password.clone())
+            .await
+            .map_err(|error| {
+                ConnectFailure::Connection(connection_error(&settings.host, settings.port, &error))
+            })?,
         AuthCredential::PrivateKey {
             key_path,
             passphrase,
@@ -234,7 +229,7 @@ async fn authenticate(
                     let reason = UserFacingError::new(
                         ErrorCode::AuthFailed,
                         "Could not load private key",
-                        &error.to_string(),
+                        error.to_string(),
                     );
                     let _ = event_tx
                         .send_async(AppEvent::AuthFailed(RemoteScoped::new(
@@ -259,7 +254,10 @@ async fn authenticate(
                 })?
                 .flatten();
             handle
-                .authenticate_publickey(settings.username.clone(), PrivateKeyWithHashAlg::new(Arc::new(key), best_hash))
+                .authenticate_publickey(
+                    settings.username.clone(),
+                    PrivateKeyWithHashAlg::new(Arc::new(key), best_hash),
+                )
                 .await
                 .map_err(|error| {
                     ConnectFailure::Connection(connection_error(
@@ -277,7 +275,11 @@ async fn authenticate(
             Ok(())
         }
         russh::client::AuthResult::Failure { .. } => {
-            let reason = UserFacingError::new(ErrorCode::AuthFailed, "Authentication failed", "The server rejected the credentials.");
+            let reason = UserFacingError::new(
+                ErrorCode::AuthFailed,
+                "Authentication failed",
+                "The server rejected the credentials.",
+            );
             warn!(method, "authentication rejected by server");
             let _ = event_tx
                 .send_async(AppEvent::AuthFailed(RemoteScoped::new(
@@ -292,7 +294,8 @@ async fn authenticate(
     }
 }
 
-
+/// Trust registry, known_hosts, and event_tx are co-required for host-key flow.
+#[allow(clippy::too_many_arguments)]
 pub async fn establish_physical_connection(
     settings: &ConnectionSettings,
     scope: &RemoteEventScope,

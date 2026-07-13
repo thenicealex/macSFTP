@@ -105,7 +105,11 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("escape", CancelActiveModal, Some("HostKeyModal")),
         KeyBinding::new("escape", CancelActiveModal, Some("TransferConflictModal")),
         KeyBinding::new("escape", CancelActiveModal, Some("DeleteConfirmModal")),
-        KeyBinding::new("escape", CancelActiveModal, Some("ProfileDeleteConfirmModal")),
+        KeyBinding::new(
+            "escape",
+            CancelActiveModal,
+            Some("ProfileDeleteConfirmModal"),
+        ),
         KeyBinding::new("escape", CancelActiveModal, Some("GoToPath")),
         KeyBinding::new("escape", CancelActiveModal, Some("ConnectForm")),
         KeyBinding::new("escape", CancelActiveModal, Some("Settings")),

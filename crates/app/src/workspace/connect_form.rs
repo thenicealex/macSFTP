@@ -72,10 +72,10 @@ impl ConnectForm {
 
     /// Label for the profile picker trigger: selected profile name, or manual entry.
     pub(crate) fn profile_trigger_label(&self, profiles: &[ConnectionProfile]) -> String {
-        if let Some(id) = self.source_profile_id {
-            if let Some(profile) = profiles.iter().find(|profile| profile.id == id) {
-                return profile.name.clone();
-            }
+        if let Some(id) = self.source_profile_id
+            && let Some(profile) = profiles.iter().find(|profile| profile.id == id)
+        {
+            return profile.name.clone();
         }
         "Manual entry".into()
     }
@@ -255,10 +255,10 @@ impl crate::workspace::Workspace {
                 let id = tab_id?;
                 let restored = self.restored_targets.get(&id)?;
                 // Prefer live profile if still present.
-                if let Some(profile_id) = restored.profile_id {
-                    if let Some(profile) = cx.resources().profiles.find_profile(profile_id) {
-                        return Some(ConnectForm::from_profile(profile));
-                    }
+                if let Some(profile_id) = restored.profile_id
+                    && let Some(profile) = cx.resources().profiles.find_profile(profile_id)
+                {
+                    return Some(ConnectForm::from_profile(profile));
                 }
                 let mut form = ConnectForm::empty();
                 form.host = InputState::with_value(restored.host.clone());
@@ -360,11 +360,7 @@ impl crate::workspace::Workspace {
 
     /// Apply a profile from the Connect picker: prefill via `use_profile`,
     /// then ensure the popover is closed and the filter is cleared.
-    pub(crate) fn select_connect_profile(
-        &mut self,
-        profile_id: ProfileId,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn select_connect_profile(&mut self, profile_id: ProfileId, cx: &mut Context<Self>) {
         self.use_profile(profile_id, cx);
         if let Some(form) = &mut self.connect_form {
             form.profile_picker_open = false;

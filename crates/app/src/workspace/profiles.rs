@@ -218,11 +218,7 @@ impl crate::workspace::Workspace {
         cx.notify();
     }
 
-    pub(crate) fn select_profile_in_settings(
-        &mut self,
-        id: ProfileId,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn select_profile_in_settings(&mut self, id: ProfileId, cx: &mut Context<Self>) {
         self.profile_filter_focused = false;
         self.load_profile_editor(id, cx);
     }
@@ -268,8 +264,7 @@ impl crate::workspace::Workspace {
                 Ok(port) if port > 0 => port,
                 _ => {
                     if let Some(editor) = self.profile_editor.as_mut() {
-                        editor.error =
-                            Some("Port must be a number between 1 and 65535.".into());
+                        editor.error = Some("Port must be a number between 1 and 65535.".into());
                     }
                     cx.notify();
                     return;
@@ -345,9 +340,8 @@ impl crate::workspace::Workspace {
                 } else {
                     let secret_ref = SecretRef::keychain_ref(profile_id, "password");
                     if let Err(error) = cx.resources().keychain.store(&secret_ref, &password) {
-                        self.status_message = Some(
-                            format!("Could not save credentials to Keychain: {error}").into(),
-                        );
+                        self.status_message =
+                            Some(format!("Could not save credentials to Keychain: {error}").into());
                         cx.notify();
                         return;
                     }
@@ -377,9 +371,8 @@ impl crate::workspace::Workspace {
                 } else {
                     let secret_ref = SecretRef::keychain_ref(profile_id, "passphrase");
                     if let Err(error) = cx.resources().keychain.store(&secret_ref, &passphrase) {
-                        self.status_message = Some(
-                            format!("Could not save credentials to Keychain: {error}").into(),
-                        );
+                        self.status_message =
+                            Some(format!("Could not save credentials to Keychain: {error}").into());
                         cx.notify();
                         return;
                     }
@@ -409,8 +402,7 @@ impl crate::workspace::Workspace {
             }
         }
 
-        let mut profile =
-            ConnectionProfile::new(profile_id, name.clone(), host, username, auth);
+        let mut profile = ConnectionProfile::new(profile_id, name.clone(), host, username, auth);
         profile.port = port;
         profile.default_remote_path = default_remote_path;
         if let Some(previous) = &previous {
@@ -451,11 +443,7 @@ impl crate::workspace::Workspace {
     }
 
     /// Focus the Profiles list filter field (click or explicit focus).
-    pub(crate) fn focus_profile_filter(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn focus_profile_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.profile_filter_focused = true;
         window.focus(&self.workspace_focus);
         cx.notify();
@@ -498,11 +486,7 @@ impl crate::workspace::Workspace {
     }
 
     /// User confirmed: delete the profile (store + Keychain) and refresh settings selection.
-    pub(crate) fn confirm_delete_profile(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn confirm_delete_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(id) = self.profile_delete_confirm.take() else {
             return;
         };
