@@ -147,8 +147,8 @@ mod tests {
         workspace: &Entity<Workspace>,
         cx: &mut VisualTestContext,
     ) -> HostKeyPrompt {
-        workspace.update_in(cx, |workspace, _window, cx| {
-            workspace.connect_with(test_settings(), None, cx);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
         });
         let prompt = HostKeyPrompt {
             request_id: TrustRequestId(1),
@@ -455,8 +455,8 @@ mod tests {
     fn connect_sends_command_with_ui_allocated_session(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
 
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            workspace.connect_with(test_settings(), None, cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
         });
 
         // The command carries the identity the tab now exposes.
@@ -486,8 +486,8 @@ mod tests {
         });
 
         // A second connect while in flight must be a no-op.
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            workspace.connect_with(test_settings(), None, cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
         });
         assert!(
             channels.command_rx.try_recv().is_err(),
@@ -574,7 +574,7 @@ mod tests {
         let (workspace, mut cx, channels) = init_workspace(cx);
 
         workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.connect_with(test_settings(), None, cx);
+            workspace.connect_with(test_settings(), None, window, cx);
             assert!(matches!(
                 workspace.active_tab().expect("tab").connection,
                 ConnectionState::Connecting { .. }
@@ -661,8 +661,8 @@ mod tests {
     #[gpui::test]
     fn stale_host_key_prompt_is_dropped(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            workspace.connect_with(test_settings(), None, cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
         });
         let _ = channels.command_rx.try_recv();
 
@@ -697,8 +697,8 @@ mod tests {
     #[gpui::test]
     fn tab_connected_event_requests_the_real_remote_root(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            workspace.connect_with(test_settings(), None, cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
         });
         let _ = channels.command_rx.try_recv();
 
@@ -734,8 +734,8 @@ mod tests {
     #[gpui::test]
     fn tab_connected_upserts_recents(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            workspace.connect_with(test_settings(), None, cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
         });
         let _ = channels.command_rx.try_recv();
 
@@ -774,8 +774,8 @@ mod tests {
         let (workspace, mut cx, channels) = init_workspace(cx);
 
         // First successful connect.
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            workspace.connect_with(test_settings(), None, cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
         });
         let _ = channels.command_rx.try_recv();
         let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
@@ -805,7 +805,7 @@ mod tests {
                 window,
                 cx,
             );
-            workspace.connect_with(test_settings(), None, cx);
+            workspace.connect_with(test_settings(), None, window, cx);
         });
         let _ = channels.command_rx.try_recv();
         // begin_connect bumps session_epoch to 2.
@@ -876,8 +876,8 @@ mod tests {
     #[gpui::test]
     fn drag_local_file_onto_remote_pane_begins_upload(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            workspace.connect_with(test_settings(), None, cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
         });
         let _ = channels.command_rx.try_recv();
         let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
@@ -927,8 +927,8 @@ mod tests {
     #[gpui::test]
     fn drag_remote_file_onto_local_pane_begins_download(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            workspace.connect_with(test_settings(), None, cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
         });
         let _ = channels.command_rx.try_recv();
         let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
@@ -977,8 +977,8 @@ mod tests {
     #[gpui::test]
     fn directory_selection_starts_a_download_plan(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            workspace.connect_with(test_settings(), None, cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
         });
         let _ = channels.command_rx.try_recv();
 
@@ -1037,8 +1037,8 @@ mod tests {
     #[gpui::test]
     fn older_directory_result_does_not_replace_a_newer_requested_path(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            workspace.connect_with(test_settings(), None, cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
         });
         let _ = channels.command_rx.try_recv();
 
@@ -1102,8 +1102,8 @@ mod tests {
     #[gpui::test]
     fn current_directory_failure_shows_recoverable_pane_error(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            workspace.connect_with(test_settings(), None, cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
         });
         let _ = channels.command_rx.try_recv();
 
@@ -1176,8 +1176,8 @@ mod tests {
     #[gpui::test]
     fn remote_listing_applies_the_tab_sort(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            workspace.connect_with(test_settings(), None, cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
         });
         let _ = channels.command_rx.try_recv();
 
@@ -1522,8 +1522,8 @@ mod tests {
     #[gpui::test]
     fn go_to_path_remote_requests_directory_with_push(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            workspace.connect_with(test_settings(), None, cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
         });
         let _ = channels.command_rx.try_recv();
 
@@ -1579,8 +1579,8 @@ mod tests {
     #[gpui::test]
     fn remote_navigation_and_refresh_keep_the_previous_listing_visible(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            workspace.connect_with(test_settings(), None, cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
         });
         let _ = channels.command_rx.try_recv();
 
@@ -1921,8 +1921,8 @@ mod tests {
     #[gpui::test]
     fn host_key_mismatch_fails_tab_and_blocks(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            workspace.connect_with(test_settings(), None, cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
         });
         let _ = channels.command_rx.try_recv();
 
@@ -2734,11 +2734,11 @@ mod tests {
             assert_eq!(ws.tab_mru, vec![TabId(3), TabId(2), TabId(1)]);
         });
 
-        workspace.update(&mut cx, |ws, cx| {
-            ws.activate_tab(TabId(2), cx);
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            ws.activate_tab(TabId(2), window, cx);
         });
-        workspace.update(&mut cx, |ws, cx| {
-            ws.activate_tab(TabId(3), cx);
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            ws.activate_tab(TabId(3), window, cx);
         });
         workspace.read_with(&cx, |ws, _| {
             assert_eq!(ws.tab_mru[0], TabId(3), "most recent activation is front");
@@ -2762,11 +2762,11 @@ mod tests {
         cx.dispatch_action(NewTab); // 1, 2 active 2
         cx.dispatch_action(NewTab); // 1, 2, 3 active 3
         // Scramble MRU so it differs from creation order: activate 1, then 3.
-        workspace.update(&mut cx, |ws, cx| {
-            ws.activate_tab(TabId(1), cx);
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            ws.activate_tab(TabId(1), window, cx);
         });
-        workspace.update(&mut cx, |ws, cx| {
-            ws.activate_tab(TabId(3), cx);
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            ws.activate_tab(TabId(3), window, cx);
         });
         workspace.read_with(&cx, |ws, _| {
             assert_eq!(ws.tab_mru, vec![TabId(3), TabId(1), TabId(2)]);
@@ -2774,8 +2774,8 @@ mod tests {
         });
 
         // From tab 1 in creation order: ActivateNextTab → tab 2 (not MRU next).
-        workspace.update(&mut cx, |ws, cx| {
-            ws.activate_tab(TabId(1), cx);
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            ws.activate_tab(TabId(1), window, cx);
         });
         cx.dispatch_action(ActivateNextTab);
         workspace.read_with(&cx, |ws, _| {
@@ -2792,8 +2792,8 @@ mod tests {
         let (workspace, mut cx, _) = init_workspace(cx);
         cx.dispatch_action(NewTab);
         cx.dispatch_action(NewTab);
-        workspace.update(&mut cx, |ws, cx| {
-            ws.activate_tab(TabId(2), cx);
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            ws.activate_tab(TabId(2), window, cx);
         });
         workspace.read_with(&cx, |ws, _| {
             assert!(ws.tab_mru.contains(&TabId(3)));
@@ -3003,7 +3003,7 @@ mod tests {
             }
             // Activate the first tab so active index is 0.
             let first_id = workspace.state.tabs.tabs[0].id;
-            workspace.activate_tab(first_id, cx);
+            workspace.activate_tab(first_id, window, cx);
 
             let snapshot = workspace.build_session_snapshot();
             assert_eq!(snapshot.active_tab_index, 0);
@@ -3105,5 +3105,74 @@ mod tests {
             );
             assert!(detail.contains("ETA"), "detail should include ETA: {detail}");
         });
+    }
+
+    #[test]
+    fn window_title_format_helper() {
+        assert_eq!(
+            Workspace::window_title_for_active_tab(Some("example.com")),
+            "example.com — macSFTP"
+        );
+        assert_eq!(Workspace::window_title_for_active_tab(Some("")), "macSFTP");
+        assert_eq!(Workspace::window_title_for_active_tab(None), "macSFTP");
+    }
+
+    #[gpui::test]
+    fn window_title_follows_active_tab(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        assert_eq!(
+            cx.window_title().as_deref(),
+            Some("New Connection — macSFTP"),
+            "default tab title should appear in the window title"
+        );
+
+        workspace.update_in(&mut cx, |workspace, window, _cx| {
+            if let Some(tab) = workspace.active_tab_mut() {
+                tab.title = "example.com".into();
+            }
+            workspace.update_window_title(window);
+        });
+        assert_eq!(
+            cx.window_title().as_deref(),
+            Some("example.com — macSFTP")
+        );
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.open_new_tab(window, cx);
+        });
+        assert_eq!(
+            cx.window_title().as_deref(),
+            Some("New Connection — macSFTP"),
+            "new tab becomes active and should own the title"
+        );
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.activate_tab(TabId(1), window, cx);
+        });
+        assert_eq!(
+            cx.window_title().as_deref(),
+            Some("example.com — macSFTP"),
+            "activating a tab must refresh the window title"
+        );
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
+        });
+        assert_eq!(
+            cx.window_title().as_deref(),
+            Some("mock.example.com — macSFTP"),
+            "connect_with sets tab title to host"
+        );
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.close_tab_by_id(TabId(1), window, cx);
+            workspace.close_tab_by_id(TabId(2), window, cx);
+        });
+        assert_eq!(
+            cx.window_title().as_deref(),
+            Some("macSFTP"),
+            "empty workspace falls back to product name"
+        );
     }
 }

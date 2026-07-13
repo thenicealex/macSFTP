@@ -35,8 +35,8 @@ impl crate::workspace::Workspace {
                 status_label,
             )
             .active(active_tab_id == Some(tab_id))
-            .on_activate(cx.listener(move |workspace, _event, _window, cx| {
-                workspace.activate_tab(tab_id, cx);
+            .on_activate(cx.listener(move |workspace, _event, window, cx| {
+                workspace.activate_tab(tab_id, window, cx);
             }))
             .on_close(cx.listener(move |workspace, _event, window, cx| {
                 workspace.close_tab_by_id(tab_id, window, cx);

@@ -244,7 +244,23 @@ impl Workspace {
         if workspace.state.tabs.tabs.is_empty() {
             workspace.open_new_tab(window, cx);
         }
+        workspace.update_window_title(window);
         workspace
+    }
+
+    /// Pure format helper for the window title (unit-testable without GPUI).
+    pub(crate) fn window_title_for_active_tab(tab_title: Option<&str>) -> String {
+        match tab_title {
+            Some(title) if !title.is_empty() => format!("{title} — macSFTP"),
+            _ => "macSFTP".to_string(),
+        }
+    }
+
+    pub(crate) fn update_window_title(&self, window: &mut Window) {
+        let title = Self::window_title_for_active_tab(
+            self.active_tab().map(|tab| tab.title.as_str()),
+        );
+        window.set_window_title(&title);
     }
 
     /// Rebuild disconnected tabs from `session.json`. Does not send ConnectTab.
@@ -412,6 +428,7 @@ impl Workspace {
         self.clear_filters();
         self.reset_scroll_positions();
         self.focus_pane(PaneSide::Local, window, cx);
+        self.update_window_title(window);
         cx.notify();
     }
     pub(crate) fn close_tab_by_id(&mut self, tab_id: TabId, window: &mut Window, cx: &mut Context<Self>) {
@@ -444,9 +461,15 @@ impl Workspace {
             window.focus(&self.workspace_focus);
         }
         self.reset_scroll_positions();
+        self.update_window_title(window);
         cx.notify();
     }
-    pub(crate) fn activate_tab(&mut self, tab_id: TabId, cx: &mut Context<Self>) {
+    pub(crate) fn activate_tab(
+        &mut self,
+        tab_id: TabId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.state.tabs.find_tab(tab_id).is_some() {
             self.state.tabs.active_tab_id = Some(tab_id);
             self.touch_mru(tab_id);
@@ -457,6 +480,7 @@ impl Workspace {
             self.clear_filters();
             self.selection_anchor = None;
             self.reset_scroll_positions();
+            self.update_window_title(window);
             cx.notify();
         }
     }
@@ -466,7 +490,12 @@ impl Workspace {
         self.tab_mru.insert(0, tab_id);
     }
     /// Creation-order cycle for `cmd-shift-[` / `]`. Does **not** walk MRU.
-    pub(crate) fn activate_tab_in_direction(&mut self, offset: isize, cx: &mut Context<Self>) {
+    pub(crate) fn activate_tab_in_direction(
+        &mut self,
+        offset: isize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let tabs = &self.state.tabs.tabs;
         if tabs.is_empty() {
             return;
@@ -480,7 +509,7 @@ impl Workspace {
         let tab_count = tabs.len() as isize;
         let next_index = (current_index as isize + offset).rem_euclid(tab_count) as usize;
         let next_tab_id = tabs[next_index].id;
-        self.activate_tab(next_tab_id, cx);
+        self.activate_tab(next_tab_id, window, cx);
     }
     pub(crate) fn tab_switcher_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.tab_mru.is_empty() {
@@ -530,7 +559,7 @@ impl Workspace {
         self.tab_switcher_index = 0;
         if let Some(tab_id) = tab_id {
             // activate_tab also touch_mru's and would no-op the open flag.
-            self.activate_tab(tab_id, cx);
+            self.activate_tab(tab_id, window, cx);
         }
         self.focus_pane(self.focused_side, window, cx);
         cx.notify();
@@ -563,7 +592,7 @@ impl Workspace {
         }
         let tab_id = tab.id;
         match self.tab_settings.get(&tab_id).cloned() {
-            Some(settings) => self.connect_with(settings, tab.profile_id, cx),
+            Some(settings) => self.connect_with(settings, tab.profile_id, window, cx),
             None => self.open_connect_form(window, cx),
         }
     }
@@ -571,6 +600,7 @@ impl Workspace {
         &mut self,
         settings: ConnectionSettings,
         profile_id: Option<ProfileId>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(tab) = self.active_tab() else {
@@ -618,6 +648,7 @@ impl Workspace {
         self.tab_settings.insert(tab_id, settings);
         // The epoch bump invalidates any modal from a previous session.
         self.state.drain_expired_modals();
+        self.update_window_title(window);
         cx.notify();
     }
     pub(crate) fn set_appearance(
@@ -829,11 +860,11 @@ impl Render for Workspace {
                     workspace.close_tab_by_id(active_tab_id, window, cx);
                 }
             }))
-            .on_action(cx.listener(|workspace, _: &ActivateNextTab, _window, cx| {
-                workspace.activate_tab_in_direction(1, cx);
+            .on_action(cx.listener(|workspace, _: &ActivateNextTab, window, cx| {
+                workspace.activate_tab_in_direction(1, window, cx);
             }))
-            .on_action(cx.listener(|workspace, _: &ActivatePrevTab, _window, cx| {
-                workspace.activate_tab_in_direction(-1, cx);
+            .on_action(cx.listener(|workspace, _: &ActivatePrevTab, window, cx| {
+                workspace.activate_tab_in_direction(-1, window, cx);
             }))
             .on_action(cx.listener(|workspace, _: &TabSwitcherNext, window, cx| {
                 workspace.tab_switcher_next(window, cx);

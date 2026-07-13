@@ -244,7 +244,7 @@ impl crate::workspace::Workspace {
                 let profile_id = form.source_profile_id;
                 self.connect_form = None;
                 self.focus_pane(self.focused_side, window, cx);
-                self.connect_with(settings, profile_id, cx);
+                self.connect_with(settings, profile_id, window, cx);
             }
             Err(message) => {
                 form.error = Some(message);
