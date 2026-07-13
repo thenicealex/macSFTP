@@ -104,6 +104,11 @@ impl LocalPath {
     pub fn parent(&self) -> Option<Self> {
         parent_path(&self.0).map(Self)
     }
+
+    /// Join a single path component (not a multi-segment path).
+    pub fn join(&self, name: &str) -> Self {
+        Self(join_path_component(&self.0, name))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -122,6 +127,11 @@ impl RemotePath {
     pub fn parent(&self) -> Option<Self> {
         parent_path(&self.0).map(Self)
     }
+
+    /// Join a single path component (not a multi-segment path).
+    pub fn join(&self, name: &str) -> Self {
+        Self(join_path_component(&self.0, name))
+    }
 }
 
 /// Shared parent logic for slash-separated absolute paths.
@@ -135,6 +145,135 @@ fn parent_path(path: &str) -> Option<String> {
         Some(0) => Some("/".to_string()),
         Some(index) => Some(trimmed[..index].to_string()),
         None => None,
+    }
+}
+
+fn join_path_component(parent: &str, name: &str) -> String {
+    let name = name.trim_matches('/');
+    if parent.is_empty() || parent == "/" {
+        format!("/{name}")
+    } else {
+        format!("{}/{name}", parent.trim_end_matches('/'))
+    }
+}
+
+/// Operation target backend for unified file ops (phase 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FsSide {
+    Local,
+    Remote,
+}
+
+/// Pins an Fs op/event to a tab; remote also carries `session_epoch` for
+/// the stale-event guard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FsScope {
+    Local { tab_id: TabId },
+    Remote { tab_id: TabId, session_epoch: u64 },
+}
+
+impl FsScope {
+    pub fn tab_id(&self) -> TabId {
+        match self {
+            Self::Local { tab_id } | Self::Remote { tab_id, .. } => *tab_id,
+        }
+    }
+
+    pub fn session_epoch(&self) -> Option<u64> {
+        match self {
+            Self::Local { .. } => None,
+            Self::Remote { session_epoch, .. } => Some(*session_epoch),
+        }
+    }
+
+    pub fn side(&self) -> FsSide {
+        match self {
+            Self::Local { .. } => FsSide::Local,
+            Self::Remote { .. } => FsSide::Remote,
+        }
+    }
+}
+
+/// Path typed by backend so side and path kind stay a single source of truth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FsPath {
+    Local(LocalPath),
+    Remote(RemotePath),
+}
+
+impl FsPath {
+    pub fn as_local(&self) -> Option<&LocalPath> {
+        match self {
+            Self::Local(path) => Some(path),
+            Self::Remote(_) => None,
+        }
+    }
+
+    pub fn as_remote(&self) -> Option<&RemotePath> {
+        match self {
+            Self::Local(_) => None,
+            Self::Remote(path) => Some(path),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Local(path) => path.as_str(),
+            Self::Remote(path) => path.as_str(),
+        }
+    }
+
+    pub fn parent(&self) -> Option<Self> {
+        match self {
+            Self::Local(path) => path.parent().map(Self::Local),
+            Self::Remote(path) => path.parent().map(Self::Remote),
+        }
+    }
+
+    pub fn join(&self, name: &str) -> Self {
+        match self {
+            Self::Local(path) => Self::Local(path.join(name)),
+            Self::Remote(path) => Self::Remote(path.join(name)),
+        }
+    }
+
+    pub fn side(&self) -> FsSide {
+        match self {
+            Self::Local(_) => FsSide::Local,
+            Self::Remote(_) => FsSide::Remote,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FsEntryRef {
+    pub path: FsPath,
+    pub is_dir: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FsOp {
+    Delete { entries: Vec<FsEntryRef> },
+    Rename { from: FsPath, to: FsPath },
+    CreateDirectory { parent: FsPath, name: String },
+}
+
+/// Unified create/rename/delete command (phase 1). Read paths stay on the
+/// existing `ReadLocalDir` / `ReadRemoteDir` commands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FsCommand {
+    pub scope: FsScope,
+    pub op: FsOp,
+}
+
+impl FsOp {
+    /// Directory listing that should refresh after a successful mutation.
+    pub fn refresh_path(&self) -> Option<FsPath> {
+        match self {
+            Self::Delete { entries } => entries.first().and_then(|entry| entry.path.parent()),
+            Self::Rename { from, .. } => from.parent(),
+            Self::CreateDirectory { parent, .. } => Some(parent.clone()),
+        }
     }
 }
 
@@ -716,6 +855,8 @@ impl TabState {
 pub struct LocalPaneState {
     pub path: Option<LocalPath>,
     pub entries: Vec<LocalEntry>,
+    /// Latest recoverable local Fs error for the current path (phase 1).
+    pub error: Option<UserFacingError>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1021,6 +1162,8 @@ pub enum AppCommand {
         tab_id: TabId,
         path: LocalPath,
     },
+    /// Create / rename / delete for local or remote (phase 1).
+    Fs(FsCommand),
     StartTransfer(StartTransferCommand),
     CancelTransfer {
         transfer_id: TransferId,
@@ -1097,6 +1240,11 @@ pub enum AppEvent {
     RemoteDirLoaded(RemoteScoped<RemoteDirSnapshot>),
     RemoteOperationFailed(RemoteScoped<RemoteOperationFailure>),
     LocalDirLoaded(LocalDirSnapshot),
+    /// Create / rename / delete failure shared by local and remote.
+    FsOperationFailed {
+        scope: FsScope,
+        failure: UserFacingError,
+    },
     TransferPlanStarted(TransferPlanSnapshot),
     TransferPlanProgress(TransferPlanProgress),
     TransferPlanCompleted {
@@ -1173,6 +1321,9 @@ impl AppEvent {
                 prompt.session_id,
                 prompt.session_epoch,
             )),
+            // FsOperationFailed is filtered in the app by tab_id + epoch
+            // (FsScope has no session_id, so it cannot use the full remote
+            // guard without a false SessionId).
             _ => None,
         }
     }
@@ -1743,6 +1894,67 @@ mod tests {
     #[test]
     fn exposes_crate_name() {
         assert_eq!(super::crate_name(), "macsftp-core");
+    }
+
+    #[test]
+    fn path_join_and_parent_round_trip() {
+        assert_eq!(
+            LocalPath::new("/home/alex").join("docs").as_str(),
+            "/home/alex/docs"
+        );
+        assert_eq!(RemotePath::new("/").join("srv").as_str(), "/srv");
+        assert_eq!(
+            LocalPath::new("/home/alex/docs").parent(),
+            Some(LocalPath::new("/home/alex"))
+        );
+    }
+
+    #[test]
+    fn fs_scope_and_path_side_mapping() {
+        let local_scope = super::FsScope::Local { tab_id: TabId(1) };
+        assert_eq!(local_scope.tab_id(), TabId(1));
+        assert_eq!(local_scope.session_epoch(), None);
+        assert_eq!(local_scope.side(), super::FsSide::Local);
+
+        let remote_scope = super::FsScope::Remote {
+            tab_id: TabId(2),
+            session_epoch: 7,
+        };
+        assert_eq!(remote_scope.session_epoch(), Some(7));
+        assert_eq!(remote_scope.side(), super::FsSide::Remote);
+
+        let local_path = super::FsPath::Local(LocalPath::new("/tmp/a"));
+        let remote_path = super::FsPath::Remote(RemotePath::new("/srv/a"));
+        assert_eq!(local_path.side(), super::FsSide::Local);
+        assert_eq!(remote_path.side(), super::FsSide::Remote);
+        assert_eq!(local_path.as_local().map(LocalPath::as_str), Some("/tmp/a"));
+        assert_eq!(
+            remote_path.as_remote().map(RemotePath::as_str),
+            Some("/srv/a")
+        );
+    }
+
+    #[test]
+    fn fs_op_refresh_path_uses_parent_or_target_dir() {
+        let delete = super::FsOp::Delete {
+            entries: vec![super::FsEntryRef {
+                path: super::FsPath::Local(LocalPath::new("/tmp/dir/file.txt")),
+                is_dir: false,
+            }],
+        };
+        assert_eq!(
+            delete.refresh_path(),
+            Some(super::FsPath::Local(LocalPath::new("/tmp/dir")))
+        );
+
+        let create = super::FsOp::CreateDirectory {
+            parent: super::FsPath::Remote(RemotePath::new("/srv")),
+            name: "new".into(),
+        };
+        assert_eq!(
+            create.refresh_path(),
+            Some(super::FsPath::Remote(RemotePath::new("/srv")))
+        );
     }
 
     #[test]

@@ -184,11 +184,55 @@ fn trim_trailing_slashes(path: &str) -> &str {
     if trimmed.is_empty() { "/" } else { trimmed }
 }
 
+/// Delete a local file or directory. Directories use recursive
+/// `remove_dir_all` (phase 1: confirm-then-execute).
+pub fn delete_entry(path: &LocalPath, is_dir: bool) -> std::io::Result<()> {
+    if is_dir {
+        std::fs::remove_dir_all(path.as_str())
+    } else {
+        std::fs::remove_file(path.as_str())
+    }
+}
+
+/// Rename or move a local path.
+pub fn rename_entry(from: &LocalPath, to: &LocalPath) -> std::io::Result<()> {
+    std::fs::rename(from.as_str(), to.as_str())
+}
+
+/// Create a single directory under `parent` named `name` (not recursive).
+pub fn create_directory(parent: &LocalPath, name: &str) -> std::io::Result<LocalPath> {
+    let path = parent.join(name);
+    std::fs::create_dir(path.as_str())?;
+    Ok(path)
+}
+
+/// Map a local IO error into a user-facing error for Fs ops.
+pub fn local_fs_error(title: &str, error: &std::io::Error) -> macsftp_core::UserFacingError {
+    use macsftp_core::{ErrorCode, UserFacingError};
+    let code = match error.kind() {
+        std::io::ErrorKind::NotFound => ErrorCode::NotFound,
+        std::io::ErrorKind::PermissionDenied => ErrorCode::PermissionDenied,
+        std::io::ErrorKind::AlreadyExists => ErrorCode::FileExists,
+        _ => ErrorCode::Unknown,
+    };
+    let mut user_error = UserFacingError::new(
+        code,
+        title,
+        "Check the path and permissions, then try again.",
+    )
+    .with_retryable(true);
+    user_error.detail = Some(error.to_string());
+    user_error
+}
+
 #[cfg(test)]
 mod tests {
     use macsftp_core::{FileKind, LocalPath, Timestamp};
 
-    use super::{AppPaths, LocalEntryDraft, core_crate_name, crate_name, read_local_directory};
+    use super::{
+        AppPaths, LocalEntryDraft, core_crate_name, create_directory, crate_name, delete_entry,
+        read_local_directory, rename_entry,
+    };
 
     #[test]
     fn links_core_crate() {
@@ -274,6 +318,84 @@ mod tests {
         let result = read_local_directory(&LocalPath::new(
             "/nonexistent/macsftp/path/that/does/not/exist",
         ));
+        assert!(result.is_err());
+    }
+
+    fn temp_ops_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "macsftp-platform-ops-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp ops dir");
+        dir
+    }
+
+    #[test]
+    fn delete_file_and_empty_directory() {
+        let dir = temp_ops_dir("delete-simple");
+        let file = dir.join("note.txt");
+        std::fs::write(&file, b"hi").expect("write file");
+        let empty = dir.join("empty");
+        std::fs::create_dir(&empty).expect("create empty");
+
+        delete_entry(
+            &LocalPath::new(file.to_string_lossy().into_owned()),
+            false,
+        )
+        .expect("delete file");
+        assert!(!file.exists());
+
+        delete_entry(
+            &LocalPath::new(empty.to_string_lossy().into_owned()),
+            true,
+        )
+        .expect("delete empty dir");
+        assert!(!empty.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_non_empty_directory_recursively() {
+        let dir = temp_ops_dir("delete-recursive");
+        let nested = dir.join("nested");
+        std::fs::create_dir_all(&nested).expect("nested");
+        std::fs::write(nested.join("a.txt"), b"a").expect("write nested");
+
+        delete_entry(
+            &LocalPath::new(dir.to_string_lossy().into_owned()),
+            true,
+        )
+        .expect("recursive delete");
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn rename_and_create_directory() {
+        let dir = temp_ops_dir("rename-create");
+        let base = LocalPath::new(dir.to_string_lossy().into_owned());
+        let from = base.join("old.txt");
+        std::fs::write(from.as_str(), b"x").expect("write");
+        let to = base.join("new.txt");
+        rename_entry(&from, &to).expect("rename");
+        assert!(!std::path::Path::new(from.as_str()).exists());
+        assert!(std::path::Path::new(to.as_str()).exists());
+
+        let created = create_directory(&base, "folder").expect("create dir");
+        assert!(std::path::Path::new(created.as_str()).is_dir());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_missing_path_returns_error() {
+        let result = delete_entry(
+            &LocalPath::new("/nonexistent/macsftp/delete-me"),
+            false,
+        );
         assert!(result.is_err());
     }
 }

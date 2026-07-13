@@ -177,6 +177,7 @@ impl crate::workspace::Workspace {
                 macsftp_core::sort_entries(&mut entries, &Default::default());
                 tab.local.entries = entries;
                 tab.local.path = Some(path.clone());
+                tab.local.error = None;
                 None
             }
             Err(error) => {
@@ -281,6 +282,10 @@ impl crate::workspace::Workspace {
         cx: &mut Context<Self>,
     ) {
         self.focus_pane(side, window, cx);
+        if event.is_right_click() {
+            self.open_context_menu(side, Some(index), cx);
+            return;
+        }
         if event.click_count() >= 2 {
             self.open_entry_at(side, index, window, cx);
         } else {

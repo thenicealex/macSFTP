@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use macsftp_core::{
-    AppCommand, AppEvent, CommandDispatchError, ErrorCode, RemoteEventScope,
+    AppCommand, AppEvent, CommandDispatchError, ErrorCode, FsCommand, FsScope, RemoteEventScope,
     RemoteOperationFailure, RemoteScoped, RuntimeBridgeConfig, SessionId, TabId, Timestamp,
     TransferDirection, TransferId, TransferJob, TransferPlanId, TransferPlanSnapshot,
     TrustDecision, TrustRequestId, UserFacingError,
@@ -313,7 +313,6 @@ impl Drop for RuntimeController {
 struct RemoteSessionHandle {
     #[allow(dead_code)]
     session_id: SessionId,
-    #[allow(dead_code)]
     session_epoch: u64,
     /// Real actors receive directory requests through this bounded
     /// mailbox. Mock actors intentionally do not implement browsing.
@@ -321,6 +320,95 @@ struct RemoteSessionHandle {
     cancel: CancellationToken,
     #[allow(dead_code)]
     join: JoinHandle<()>,
+}
+
+/// Route `AppCommand::Fs`. Local mutations are owned by the app (platform
+/// APIs); the runtime only forwards remote ops to the browsing actor.
+async fn dispatch_fs_command(
+    command: FsCommand,
+    sessions: &HashMap<TabId, RemoteSessionHandle>,
+    event_tx: &flume::Sender<AppEvent>,
+) {
+    match command.scope {
+        FsScope::Local { .. } => {
+            warn!("local FsCommand reached runtime; local ops are handled in the app");
+        }
+        FsScope::Remote {
+            tab_id,
+            session_epoch,
+        } => {
+            let scope = command.scope.clone();
+            let Some(session) = sessions.get(&tab_id) else {
+                let _ = event_tx
+                    .send_async(AppEvent::FsOperationFailed {
+                        scope,
+                        failure: UserFacingError::new(
+                            ErrorCode::ChannelClosed,
+                            "Not connected",
+                            "Connect to the server before changing remote files.",
+                        )
+                        .with_retryable(true),
+                    })
+                    .await;
+                return;
+            };
+            if session.session_epoch != session_epoch {
+                // Stale command after reconnect — drop silently.
+                return;
+            }
+            let Some(request_tx) = &session.request_tx else {
+                let _ = event_tx
+                    .send_async(AppEvent::FsOperationFailed {
+                        scope,
+                        failure: UserFacingError::new(
+                            ErrorCode::Unknown,
+                            "Remote session unavailable",
+                            "This session does not support file operations.",
+                        )
+                        .with_retryable(true),
+                    })
+                    .await;
+                return;
+            };
+            let Some(refresh_path) = command
+                .op
+                .refresh_path()
+                .and_then(|path| path.as_remote().cloned())
+            else {
+                let _ = event_tx
+                    .send_async(AppEvent::FsOperationFailed {
+                        scope,
+                        failure: UserFacingError::new(
+                            ErrorCode::Unknown,
+                            "Invalid remote path",
+                            "Could not determine which directory to refresh after the operation.",
+                        ),
+                    })
+                    .await;
+                return;
+            };
+            if request_tx
+                .try_send(RemoteSessionRequest::Fs {
+                    scope: scope.clone(),
+                    op: command.op,
+                    refresh_path,
+                })
+                .is_err()
+            {
+                let _ = event_tx
+                    .send_async(AppEvent::FsOperationFailed {
+                        scope,
+                        failure: UserFacingError::new(
+                            ErrorCode::ChannelClosed,
+                            "Could not start file operation",
+                            "The remote session is busy or disconnected. Try again.",
+                        )
+                        .with_retryable(true),
+                    })
+                    .await;
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -815,6 +903,10 @@ async fn command_dispatch_loop(
                         }));
                     }
                 }
+            }
+
+            Ok(AppCommand::Fs(command)) => {
+                dispatch_fs_command(command, &sessions, &event_tx).await;
             }
 
             Ok(_) => {

@@ -19,11 +19,13 @@ use tracing::warn;
 
 use crate::app_actions::{
     ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, CopyPath, CopyVersionInfo,
-    DownloadSelection, FocusLocalPane, FocusRemotePane, MinimizeWindow, NewTab, OpenLogFolder,
-    OpenSelectedEntry, OpenSettings, ParentDirectory, ReconnectTab, RefreshPane, SelectNextEntry,
-    SelectPrevEntry, ShowAbout, ShowTransferDrawer, UploadSelection, ZoomWindow,
+    DeleteSelection, DownloadSelection, FocusLocalPane, FocusRemotePane, MinimizeWindow, NewFolder,
+    NewTab, OpenLogFolder, OpenSelectedEntry, OpenSettings, ParentDirectory, ReconnectTab,
+    RefreshPane, RenameEntry, SelectNextEntry, SelectPrevEntry, ShowAbout, ShowTransferDrawer,
+    UploadSelection, ZoomWindow,
 };
 use crate::resources::ActiveResources;
+use crate::workspace::file_ops::{ContextMenuState, DeleteConfirmState, InlineEditState};
 
 /// Which file pane an action targets. Local is the default focus side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +66,12 @@ pub struct Workspace {
     /// after the user submits it.
     conflict_rename: InputState,
     conflict_rename_error: Option<SharedString>,
+    /// Phase 1 delete confirmation modal (view-local).
+    delete_confirm: Option<DeleteConfirmState>,
+    /// Phase 1 inline rename / new-folder editor.
+    inline_edit: Option<InlineEditState>,
+    /// Phase 1 context menu for the focused file pane.
+    context_menu: Option<ContextMenuState>,
     /// Session credentials per tab, kept in memory only so Reconnect
     /// works without re-typing. Replaced by Keychain-backed profiles.
     tab_settings: HashMap<TabId, ConnectionSettings>,
@@ -138,6 +146,9 @@ impl Workspace {
             connect_form_focus: cx.focus_handle(),
             conflict_rename: InputState::new(),
             conflict_rename_error: None,
+            delete_confirm: None,
+            inline_edit: None,
+            context_menu: None,
             tab_settings: HashMap::new(),
             transfer_history_flushed: false,
             _appearance_subscription: appearance_subscription,
@@ -461,10 +472,20 @@ impl Render for Workspace {
             .on_action(cx.listener(|workspace, _: &CopyPath, _window, cx| {
                 workspace.copy_focused_path(cx);
             }))
+            .on_action(cx.listener(|workspace, _: &DeleteSelection, window, cx| {
+                workspace.request_delete_selection(window, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &RenameEntry, window, cx| {
+                workspace.begin_rename_selection(window, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &NewFolder, window, cx| {
+                workspace.begin_new_folder(window, cx);
+            }))
             .on_action(cx.listener(|workspace, _: &OpenSettings, window, cx| {
                 if workspace.connect_form.is_none()
                     && workspace.active_host_key_prompt().is_none()
                     && workspace.active_transfer_conflict_prompt().is_none()
+                    && workspace.delete_confirm.is_none()
                 {
                     workspace.about_open = false;
                     workspace.surface = WorkspaceSurface::Settings;
@@ -476,6 +497,7 @@ impl Render for Workspace {
                 if workspace.connect_form.is_none()
                     && workspace.active_host_key_prompt().is_none()
                     && workspace.active_transfer_conflict_prompt().is_none()
+                    && workspace.delete_confirm.is_none()
                 {
                     workspace.about_open = true;
                     cx.notify();
@@ -504,12 +526,15 @@ impl Render for Workspace {
             .children(self.render_connect_form_modal(cx))
             .children(self.render_host_key_modal(cx))
             .children(self.render_transfer_conflict_modal(cx))
+            .children(self.render_delete_confirm_modal(cx))
+            .children(self.render_context_menu(cx))
             .children(self.render_about(cx))
     }
 }
 
 mod connect_form;
 mod event_handling;
+mod file_ops;
 mod helpers;
 mod modals;
 mod panes;

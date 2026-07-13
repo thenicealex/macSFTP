@@ -1685,4 +1685,173 @@ mod tests {
             assert_eq!(plan.state, TransferPlanState::Completed);
         });
     }
+
+    fn temp_local_fixture(label: &str) -> (std::path::PathBuf, LocalPath) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "macsftp-fs-ops-{label}-{}-{seq}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        (dir.clone(), LocalPath::new(dir.to_string_lossy().into_owned()))
+    }
+
+    #[gpui::test]
+    fn delete_confirm_modal_lists_selection_and_dir_warning(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        let (fixture, base) = temp_local_fixture("delete-confirm");
+        std::fs::write(fixture.join("a.txt"), b"a").expect("file");
+        std::fs::create_dir(fixture.join("subdir")).expect("dir");
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.set_local_path(base, window, cx);
+            let paths: Vec<EntryPath> = workspace
+                .active_tab()
+                .expect("tab")
+                .local
+                .entries
+                .iter()
+                .map(|e| EntryPath::Local(e.path.clone()))
+                .collect();
+            if let Some(tab) = workspace.active_tab_mut() {
+                tab.selection.selected_paths = paths;
+            }
+            workspace.focused_side = PaneSide::Local;
+            workspace.request_delete_selection(window, cx);
+            let confirm = workspace
+                .delete_confirm
+                .as_ref()
+                .expect("confirm modal open");
+            assert_eq!(confirm.entries.len(), 2);
+            assert!(confirm.entries.iter().any(|e| e.is_dir));
+        });
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[gpui::test]
+    fn dont_ask_again_persists_and_skips_next_confirm(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        let (fixture, base) = temp_local_fixture("dont-ask");
+        std::fs::write(fixture.join("gone.txt"), b"x").expect("file");
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.set_local_path(base.clone(), window, cx);
+            let path = workspace
+                .active_tab()
+                .expect("tab")
+                .local
+                .entries
+                .iter()
+                .find(|e| e.name == "gone.txt")
+                .map(|e| e.path.clone())
+                .expect("gone.txt");
+            if let Some(tab) = workspace.active_tab_mut() {
+                tab.selection.selected_paths = vec![EntryPath::Local(path)];
+            }
+            workspace.focused_side = PaneSide::Local;
+            workspace.request_delete_selection(window, cx);
+            if let Some(state) = &mut workspace.delete_confirm {
+                state.dont_ask_again = true;
+            }
+            workspace.confirm_delete(window, cx);
+            assert!(!std::path::Path::new(fixture.join("gone.txt").as_path()).exists());
+            assert!(
+                !cx.resources().config.config().confirm_delete,
+                "confirm_delete should persist false"
+            );
+
+            // Create another file and delete without modal.
+            std::fs::write(fixture.join("second.txt"), b"y").expect("second");
+            workspace.set_local_path(base, window, cx);
+            let path = workspace
+                .active_tab()
+                .expect("tab")
+                .local
+                .entries
+                .iter()
+                .find(|e| e.name == "second.txt")
+                .map(|e| e.path.clone())
+                .expect("second.txt");
+            if let Some(tab) = workspace.active_tab_mut() {
+                tab.selection.selected_paths = vec![EntryPath::Local(path)];
+            }
+            workspace.request_delete_selection(window, cx);
+            assert!(workspace.delete_confirm.is_none());
+            assert!(!std::path::Path::new(fixture.join("second.txt").as_path()).exists());
+        });
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[gpui::test]
+    fn local_new_folder_and_rename_via_inline_edit(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        let (fixture, base) = temp_local_fixture("inline-edit");
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.set_local_path(base.clone(), window, cx);
+            workspace.focused_side = PaneSide::Local;
+            workspace.begin_new_folder(window, cx);
+            if let Some(edit) = &mut workspace.inline_edit {
+                edit.input.set_value("Created Folder");
+            }
+            workspace.submit_inline_edit(window, cx);
+            assert!(fixture.join("Created Folder").is_dir());
+
+            // Reload so listing includes the new folder, then rename it.
+            workspace.set_local_path(base, window, cx);
+            let path = workspace
+                .active_tab()
+                .expect("tab")
+                .local
+                .entries
+                .iter()
+                .find(|e| e.name == "Created Folder")
+                .map(|e| e.path.clone())
+                .expect("folder entry");
+            if let Some(tab) = workspace.active_tab_mut() {
+                tab.selection.selected_paths = vec![EntryPath::Local(path)];
+            }
+            workspace.begin_rename_selection(window, cx);
+            if let Some(edit) = &mut workspace.inline_edit {
+                edit.input.set_value("Renamed Folder");
+            }
+            workspace.submit_inline_edit(window, cx);
+            assert!(!fixture.join("Created Folder").exists());
+            assert!(fixture.join("Renamed Folder").is_dir());
+        });
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[gpui::test]
+    fn fs_operation_failed_sets_pane_error(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            let tab_id = workspace.active_tab().expect("tab").id;
+            let epoch = workspace.active_tab().expect("tab").session_epoch;
+            workspace.handle_app_event(
+                AppEvent::FsOperationFailed {
+                    scope: macsftp_core::FsScope::Remote {
+                        tab_id,
+                        session_epoch: epoch,
+                    },
+                    failure: UserFacingError::new(
+                        ErrorCode::PermissionDenied,
+                        "Could not delete",
+                        "Permission denied",
+                    ),
+                },
+                window,
+                cx,
+            );
+            assert!(
+                workspace
+                    .status_message
+                    .as_ref()
+                    .is_some_and(|m| m.contains("Could not delete"))
+            );
+        });
+    }
 }

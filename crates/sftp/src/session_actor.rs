@@ -5,13 +5,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use macsftp_core::{
-    AppEvent, ConflictDecision, ConflictPolicy, ConflictRequestId, ErrorCode, FileKind,
-    LocalPath, RemoteDirLoading, RemoteDirSnapshot, RemoteEntry, RemoteEventScope,
+    AppEvent, ConflictDecision, ConflictPolicy, ConflictRequestId, ErrorCode, FileKind, FsOp,
+    FsPath, FsScope, LocalPath, RemoteDirLoading, RemoteDirSnapshot, RemoteEntry, RemoteEventScope,
     RemoteOperationFailure, RemotePath, RemoteScoped, RenameStrategy, ResidualTempRecord,
-    SessionId, StartTransferCommand, TabId, Timestamp,
-    TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferFailure, TransferId,
-    TransferJob, TransferPlanId, TransferPlanProgress, TransferProgress, TransferSnapshot,
-    TransferState, TransferWarning, UserFacingError,
+    SessionId, StartTransferCommand, TabId, Timestamp, TransferConflictPrompt, TransferDirection,
+    TransferEndpoint, TransferFailure, TransferId, TransferJob, TransferPlanId,
+    TransferPlanProgress, TransferProgress, TransferSnapshot, TransferState, TransferWarning,
+    UserFacingError,
 };
 use russh::client;
 use russh_sftp::client::SftpSession;
@@ -112,6 +112,13 @@ pub enum RemoteSessionRequest {
     RemoveRemoteTempFile {
         transfer_id: TransferId,
         path: RemotePath,
+    },
+    /// Create / rename / delete against the live SFTP session. On success
+    /// the actor re-lists `refresh_path` so the UI refreshes in place.
+    Fs {
+        scope: FsScope,
+        op: FsOp,
+        refresh_path: RemotePath,
     },
 }
 
@@ -580,6 +587,29 @@ impl RemoteSessionActor {
                             ),
                         )
                         .await;
+                    }
+                }
+            }
+            RemoteSessionRequest::Fs {
+                scope: fs_scope,
+                op,
+                refresh_path,
+            } => {
+                match execute_remote_fs_op(&self.sftp, &op).await {
+                    Ok(()) => {
+                        // Re-list using the actor's live remote scope so
+                        // RemoteDirLoaded passes the stale-event guard.
+                        self.read_remote_dir(&self.sftp, scope, refresh_path)
+                            .await;
+                    }
+                    Err(failure) => {
+                        let _ = self
+                            .event_tx
+                            .send_async(AppEvent::FsOperationFailed {
+                                scope: fs_scope,
+                                failure,
+                            })
+                            .await;
                     }
                 }
             }
@@ -2347,6 +2377,100 @@ fn read_directory_error(error: &SftpError) -> UserFacingError {
         ),
     };
     let mut user_error = UserFacingError::new(code, title, message).with_retryable(true);
+    user_error.detail = Some(error.to_string());
+    user_error
+}
+
+async fn execute_remote_fs_op(sftp: &SftpSession, op: &FsOp) -> Result<(), UserFacingError> {
+    match op {
+        FsOp::Rename { from, to } => {
+            let from = require_remote_path(from, "rename source")?;
+            let to = require_remote_path(to, "rename destination")?;
+            sftp.rename(from.as_str(), to.as_str())
+                .await
+                .map_err(|error| remote_fs_error("Could not rename", &error))
+        }
+        FsOp::CreateDirectory { parent, name } => {
+            let parent = require_remote_path(parent, "create directory parent")?;
+            let path = parent.join(name);
+            sftp.create_dir(path.as_str())
+                .await
+                .map_err(|error| remote_fs_error("Could not create folder", &error))
+        }
+        FsOp::Delete { entries } => {
+            for entry in entries {
+                let path = require_remote_path(&entry.path, "delete path")?;
+                if entry.is_dir {
+                    remove_remote_dir_recursive(sftp, path).await?;
+                } else {
+                    sftp.remove_file(path.as_str())
+                        .await
+                        .map_err(|error| remote_fs_error("Could not delete", &error))?;
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn require_remote_path<'a>(path: &'a FsPath, label: &str) -> Result<&'a RemotePath, UserFacingError> {
+    path.as_remote().ok_or_else(|| {
+        UserFacingError::new(
+            ErrorCode::Unknown,
+            "Invalid remote path",
+            format!("The {label} was not a remote path."),
+        )
+    })
+}
+
+/// Depth-first recursive delete. Fail-fast on the first SFTP error.
+async fn remove_remote_dir_recursive(
+    sftp: &SftpSession,
+    path: &RemotePath,
+) -> Result<(), UserFacingError> {
+    let read_dir = sftp
+        .read_dir(path.as_str())
+        .await
+        .map_err(|error| remote_fs_error("Could not list directory for delete", &error))?;
+    for entry in read_dir {
+        let name = entry.file_name();
+        if name == "." || name == ".." {
+            continue;
+        }
+        let child = path.join(&name);
+        if entry.file_type() == SftpFileType::Dir {
+            Box::pin(remove_remote_dir_recursive(sftp, &child)).await?;
+        } else {
+            sftp.remove_file(child.as_str())
+                .await
+                .map_err(|error| remote_fs_error("Could not delete", &error))?;
+        }
+    }
+    sftp.remove_dir(path.as_str())
+        .await
+        .map_err(|error| remote_fs_error("Could not delete folder", &error))
+}
+
+fn remote_fs_error(title: &str, error: &SftpError) -> UserFacingError {
+    let code = match error {
+        SftpError::Status(status) if status.status_code == StatusCode::NoSuchFile => {
+            ErrorCode::NotFound
+        }
+        SftpError::Status(status) if status.status_code == StatusCode::PermissionDenied => {
+            ErrorCode::PermissionDenied
+        }
+        SftpError::Status(status) if status.status_code == StatusCode::Failure => {
+            // Often "file exists" for create_dir — keep generic with detail.
+            ErrorCode::Unknown
+        }
+        _ => ErrorCode::Unknown,
+    };
+    let mut user_error = UserFacingError::new(
+        code,
+        title,
+        "Check the remote path and permissions, then try again.",
+    )
+    .with_retryable(true);
     user_error.detail = Some(error.to_string());
     user_error
 }

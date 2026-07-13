@@ -15,6 +15,8 @@ pub enum AppearancePreference {
 pub struct AppConfig {
     pub version: u32,
     pub appearance: AppearancePreference,
+    /// When true, delete actions open a confirmation modal first.
+    pub confirm_delete: bool,
 }
 
 impl AppConfig {
@@ -26,6 +28,7 @@ impl Default for AppConfig {
         Self {
             version: Self::CURRENT_VERSION,
             appearance: AppearancePreference::System,
+            confirm_delete: true,
         }
     }
 }
@@ -124,6 +127,15 @@ impl ConfigStore {
         result
     }
 
+    pub fn set_confirm_delete(&mut self, confirm_delete: bool) -> Result<(), ConfigError> {
+        self.config.confirm_delete = confirm_delete;
+        let result = self.save();
+        if result.is_ok() {
+            self.initial_error = None;
+        }
+        result
+    }
+
     fn save(&self) -> Result<(), ConfigError> {
         let json =
             serde_json::to_string_pretty(&self.config).map_err(|error| ConfigError::Parse {
@@ -194,6 +206,28 @@ mod tests {
 
         let restored = ConfigStore::open(path.clone()).expect("saved config should reload");
         assert_eq!(restored.config().appearance, AppearancePreference::Dark);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn confirm_delete_defaults_true_and_round_trips() {
+        let path = temp_config_path("confirm-delete");
+        cleanup(&path);
+
+        let store = ConfigStore::open(path.clone()).expect("defaults");
+        assert!(store.config().confirm_delete);
+
+        // Missing field on disk still defaults to true.
+        std::fs::write(path.as_str(), r#"{"version":1,"appearance":"system"}"#)
+            .expect("write partial config");
+        let mut store = ConfigStore::open(path.clone()).expect("parse partial");
+        assert!(store.config().confirm_delete);
+        store
+            .set_confirm_delete(false)
+            .expect("persist confirm_delete");
+
+        let restored = ConfigStore::open(path.clone()).expect("reload");
+        assert!(!restored.config().confirm_delete);
         cleanup(&path);
     }
 

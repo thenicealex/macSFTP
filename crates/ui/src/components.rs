@@ -130,6 +130,7 @@ pub struct TextButton {
     id: ElementId,
     label: SharedString,
     primary: bool,
+    danger: bool,
     on_click: Option<ClickHandler>,
 }
 
@@ -138,6 +139,7 @@ pub fn text_button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> 
         id: id.into(),
         label: label.into(),
         primary: false,
+        danger: false,
         on_click: None,
     }
 }
@@ -146,6 +148,12 @@ impl TextButton {
     /// Accent-filled variant for a modal's main action.
     pub fn primary(mut self, primary: bool) -> Self {
         self.primary = primary;
+        self
+    }
+
+    /// Destructive action styling (e.g. Delete confirm).
+    pub fn danger(mut self, danger: bool) -> Self {
+        self.danger = danger;
         self
     }
 
@@ -163,7 +171,13 @@ impl RenderOnce for TextButton {
         let theme = cx.theme();
         let hover_background = theme.colors.element_hover;
         let active_background = theme.colors.element_active;
-        let (background, border_color, text_color) = if self.primary {
+        let (background, border_color, text_color) = if self.danger {
+            (
+                Some(theme.colors.error),
+                theme.colors.error,
+                theme.colors.background,
+            )
+        } else if self.primary {
             (
                 Some(theme.colors.accent),
                 theme.colors.accent,
@@ -184,12 +198,12 @@ impl RenderOnce for TextButton {
             .text_color(text_color)
             .font_family(theme.fonts.ui_family.clone())
             .when_some(background, |button, background| button.bg(background))
-            .when(!self.primary, |button| {
+            .when(!self.primary && !self.danger, |button| {
                 button
                     .hover(|style| style.bg(hover_background))
                     .active(|style| style.bg(active_background))
             })
-            .when(self.primary, |button| {
+            .when(self.primary || self.danger, |button| {
                 button.hover(|style| style.opacity(0.9))
             })
             .when_some(self.on_click, |element, handler| {

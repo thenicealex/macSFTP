@@ -231,6 +231,18 @@ impl crate::workspace::Workspace {
             cx.notify();
             return;
         }
+        if self.delete_confirm.is_some() {
+            self.cancel_delete_confirm(window, cx);
+            return;
+        }
+        if self.context_menu.is_some() {
+            self.close_context_menu(cx);
+            return;
+        }
+        if self.inline_edit.is_some() {
+            self.cancel_inline_edit(cx);
+            return;
+        }
         if self.connect_form.is_some() {
             self.close_connect_form(window, cx);
             return;

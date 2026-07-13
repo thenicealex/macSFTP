@@ -1,15 +1,16 @@
 use gpui::{
-    AppContext, Context, FontWeight, Hsla, IntoElement, ParentElement, SharedString, Styled,
-    Window, div, prelude::*, px, uniform_list,
+    AppContext, ClickEvent, Context, FontWeight, Hsla, IntoElement, ParentElement, SharedString,
+    Styled, Window, div, prelude::*, px, uniform_list,
 };
-use macsftp_core::{ EntryPath, ConnectionState, TransferHistoryRecord,
-    TransferHistoryStatus, TransferJob, TransferState,
+use macsftp_core::{
+    ConnectionState, EntryPath, TransferHistoryRecord, TransferHistoryStatus, TransferJob,
+    TransferState,
 };
-use macsftp_ui::{ DragPreview,
-    ActiveTheme, FileRowModel, IconName, empty_state, file_row, file_table_header,
-    format_size, format_timestamp, icon, icon_button, tab, text_button, text_tooltip,
-    transfer_row, connection_status, transfer_history_title, transfer_history_detail, transfer_title,
-    section_header_static,
+use macsftp_ui::{
+    ActiveTheme, DragPreview, FileRowModel, IconName, TextFieldModel, connection_status,
+    empty_state, file_row, file_table_header, format_size, format_timestamp, icon, icon_button,
+    section_header_static, tab, text_button, text_field, text_tooltip, transfer_history_detail,
+    transfer_history_title, transfer_row, transfer_title,
 };
 
 use crate::resources::{ActiveResources, ActiveTransfers};
@@ -80,6 +81,13 @@ impl crate::workspace::Workspace {
         let remote_error = (side == PaneSide::Remote)
             .then(|| tab_state.and_then(|tab| tab.remote.error.clone()))
             .flatten();
+        let local_error = (side == PaneSide::Local)
+            .then(|| tab_state.and_then(|tab| tab.local.error.clone()))
+            .flatten();
+        let inline_edit_active = self
+            .inline_edit
+            .as_ref()
+            .is_some_and(|edit| edit.side == side);
 
         let (path_label, sort) = match (tab_state, side) {
             (Some(tab), PaneSide::Local) => (
@@ -203,6 +211,36 @@ impl crate::workspace::Workspace {
                     },
                 )),
             )
+            .child(
+                icon_button(
+                    if side == PaneSide::Local {
+                        "local-new-folder"
+                    } else {
+                        "remote-new-folder"
+                    },
+                    IconName::Plus,
+                    "New Folder (⌘⇧N)",
+                )
+                .on_click(cx.listener(move |workspace, _event, window, cx| {
+                    workspace.focused_side = side;
+                    workspace.begin_new_folder(window, cx);
+                })),
+            )
+            .child(
+                icon_button(
+                    if side == PaneSide::Local {
+                        "local-delete"
+                    } else {
+                        "remote-delete"
+                    },
+                    IconName::Close,
+                    "Delete Selection (⌘⌫)",
+                )
+                .on_click(cx.listener(move |workspace, _event, window, cx| {
+                    workspace.focused_side = side;
+                    workspace.request_delete_selection(window, cx);
+                })),
+            )
             .when(side == PaneSide::Local, |bar| {
                 bar.child(
                     icon_button("local-upload", IconName::Upload, "Upload Selection (⌘U)")
@@ -307,6 +345,15 @@ impl crate::workspace::Workspace {
                 }),
                 None => None,
             }
+        } else if let Some(error) = local_error.as_ref() {
+            Some(
+                empty_state(
+                    format!("{} — {}", error.title, error.message),
+                    vec![],
+                    cx,
+                )
+                .into_any_element(),
+            )
         } else {
             None
         };
@@ -409,9 +456,29 @@ impl crate::workspace::Workspace {
             .min_w_0()
             .key_context("FilePane")
             .track_focus(self.pane_focus(side))
+            .on_key_down(cx.listener(move |workspace, event, window, cx| {
+                if workspace
+                    .inline_edit
+                    .as_ref()
+                    .is_some_and(|edit| edit.side == side)
+                {
+                    workspace.handle_inline_edit_key(event, window, cx);
+                }
+            }))
             .when(side == PaneSide::Local, |pane| {
                 pane.border_r_1().border_color(theme.colors.border)
             })
+            .id(if side == PaneSide::Local {
+                "local-file-pane"
+            } else {
+                "remote-file-pane"
+            })
+            .on_click(cx.listener(move |workspace, event: &ClickEvent, window, cx| {
+                if event.is_right_click() {
+                    workspace.focus_pane(side, window, cx);
+                    workspace.open_context_menu(side, None, cx);
+                }
+            }))
             .on_drop(
                 cx.listener(
                     move |workspace, path: &EntryPath, _window, cx| match (side, path) {
@@ -427,6 +494,78 @@ impl crate::workspace::Workspace {
             )
             .child(path_bar)
             .child(file_table_header(&sort, cx))
+            .when(inline_edit_active, |pane| {
+                let edit = self.inline_edit.as_ref().expect("checked active");
+                let label = match &edit.kind {
+                    crate::workspace::file_ops::InlineEditKind::Rename { .. } => "Rename",
+                    crate::workspace::file_ops::InlineEditKind::NewFolder { .. } => "New Folder",
+                };
+                let mut banner = div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(theme.colors.border_focused)
+                    .bg(theme.colors.surface)
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme.colors.text_muted)
+                            .child(label),
+                    )
+                    .child(div().flex_1().min_w_0().child(text_field(
+                        if side == PaneSide::Local {
+                            "local-inline-edit"
+                        } else {
+                            "remote-inline-edit"
+                        },
+                        TextFieldModel {
+                            state: &edit.input,
+                            placeholder: "name",
+                            focused: true,
+                            masked: false,
+                        },
+                        cx,
+                    )))
+                    .child(
+                        text_button(
+                            if side == PaneSide::Local {
+                                "local-inline-ok"
+                            } else {
+                                "remote-inline-ok"
+                            },
+                            "OK",
+                        )
+                        .on_click(cx.listener(|workspace, _event, window, cx| {
+                            workspace.submit_inline_edit(window, cx);
+                        })),
+                    )
+                    .child(
+                        text_button(
+                            if side == PaneSide::Local {
+                                "local-inline-cancel"
+                            } else {
+                                "remote-inline-cancel"
+                            },
+                            "Cancel",
+                        )
+                        .on_click(cx.listener(|workspace, _event, _window, cx| {
+                            workspace.cancel_inline_edit(cx);
+                        })),
+                    );
+                if let Some(error) = &edit.error {
+                    banner = banner.child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme.colors.error)
+                            .child(error.clone()),
+                    );
+                }
+                pane.child(banner)
+            })
             .child(div().flex_1().min_h_0().child(list))
     }
     pub(crate) fn render_transfer_drawer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {

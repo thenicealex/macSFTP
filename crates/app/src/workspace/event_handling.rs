@@ -181,6 +181,40 @@ impl crate::workspace::Workspace {
                     .into(),
                 );
             }
+            AppEvent::FsOperationFailed { scope, failure } => {
+                // FsScope has no session_id; filter by tab + epoch only.
+                // Phase 1 surfaces failures in the status bar (and keeps the
+                // listing visible). Phase 2 will add in-pane Retry UI.
+                let accept = match scope {
+                    macsftp_core::FsScope::Local { tab_id } => {
+                        self.state.tabs.find_tab(tab_id).is_some()
+                    }
+                    macsftp_core::FsScope::Remote {
+                        tab_id,
+                        session_epoch,
+                    } => self
+                        .state
+                        .tabs
+                        .find_tab(tab_id)
+                        .is_some_and(|tab| tab.session_epoch == session_epoch),
+                };
+                if accept {
+                    self.status_message =
+                        Some(format!("{}: {}", failure.title, failure.message).into());
+                }
+            }
+            AppEvent::LocalDirLoaded(snapshot) => {
+                if let Some(tab) = self.state.tabs.find_tab_mut(snapshot.tab_id)
+                    && tab.local.path.as_ref() == Some(&snapshot.path)
+                {
+                    let mut entries = snapshot.entries;
+                    sort_entries(&mut entries, &tab.sort);
+                    tab.local.entries = entries;
+                    tab.local.error = None;
+                    tab.selection.selected_paths.clear();
+                    self.local_scroll = UniformListScrollHandle::new();
+                }
+            }
             AppEvent::TransferPlanStarted(snapshot) => {
                 cx.transfers_mut().plans.push(snapshot.plan);
                 cx.transfers_mut().jobs.push(snapshot.root_job);
