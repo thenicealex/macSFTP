@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use gpui::{
-    App, ClipboardItem, Context, FocusHandle, Focusable, IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Task,
-    UniformListScrollHandle, Window, div, prelude::*,
+    App, ClipboardItem, Context, FocusHandle, Focusable, IntoElement, ParentElement, Pixels, Render,
+    SharedString, Styled, Subscription, Task, UniformListScrollHandle, Window, div, prelude::*,
 };
 use macsftp_core::{
     AppCommand, AppState,
@@ -107,6 +107,9 @@ pub struct Workspace {
     profile_delete_confirm: Option<ProfileId>,
     about_open: bool,
     drawer_open: bool,
+    drawer_height: Pixels,
+    /// Active transfer-drawer resize drag (session-only; cleared on mouse up).
+    drawer_resize: Option<drawer_height::TransferDrawerResize>,
     completed_section_expanded: bool,
     failed_section_expanded: bool,
     local_scroll: UniformListScrollHandle,
@@ -221,6 +224,8 @@ impl Workspace {
             profile_delete_confirm: None,
             about_open: false,
             drawer_open: true,
+            drawer_height: drawer_height::DEFAULT_DRAWER_HEIGHT,
+            drawer_resize: None,
             completed_section_expanded: false,
             failed_section_expanded: false,
             local_scroll: UniformListScrollHandle::new(),
@@ -287,6 +292,19 @@ impl Workspace {
             self.active_tab().map(|tab| tab.title.as_str()),
         );
         window.set_window_title(&title);
+    }
+
+    pub(crate) fn set_drawer_height(&mut self, height: Pixels, viewport_height: Pixels) {
+        let content = drawer_height::content_area_height_from_viewport(viewport_height);
+        self.drawer_height = drawer_height::clamp_drawer_height(height, content);
+    }
+
+    pub(crate) fn reset_drawer_height(&mut self, viewport_height: Pixels) {
+        self.set_drawer_height(drawer_height::DEFAULT_DRAWER_HEIGHT, viewport_height);
+    }
+
+    pub(crate) fn reclamp_drawer_height(&mut self, viewport_height: Pixels) {
+        self.set_drawer_height(self.drawer_height, viewport_height);
     }
 
     /// Rebuild disconnected tabs from `session.json`. Does not send ConnectTab.
@@ -882,7 +900,7 @@ impl Render for Workspace {
                 .child(self.render_tab_bar(cx))
                 .child(main_area)
                 .when(self.drawer_open, |workspace_root| {
-                    workspace_root.child(self.render_transfer_drawer(cx))
+                    workspace_root.child(self.render_transfer_drawer(window, cx))
                 })
                 .child(self.render_status_bar(cx))
                 .into_any_element()
@@ -892,6 +910,16 @@ impl Render for Workspace {
             .id("workspace")
             .key_context("Workspace")
             .track_focus(&self.workspace_focus)
+            // Always attach so clear works even before the tree re-renders
+            // after drag start (drawer_resize may still be None on last paint).
+            .on_mouse_up(
+                gpui::MouseButton::Left,
+                cx.listener(|workspace, _event, _window, cx| {
+                    if workspace.drawer_resize.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
             .on_action(cx.listener(|workspace, _: &NewTab, window, cx| {
                 workspace.open_new_tab(window, cx);
             }))
@@ -1086,6 +1114,7 @@ impl Render for Workspace {
 
 mod command_palette;
 mod connect_form;
+mod drawer_height;
 mod event_handling;
 mod file_ops;
 mod helpers;

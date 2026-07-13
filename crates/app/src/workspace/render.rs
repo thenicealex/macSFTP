@@ -1,6 +1,7 @@
 use gpui::{
-    AppContext, ClickEvent, Context, FontWeight, Hsla, IntoElement, ParentElement, SharedString,
-    Styled, Window, div, prelude::*, px, uniform_list,
+    AppContext, ClickEvent, Context, CursorStyle, DragMoveEvent, FontWeight, Hsla, IntoElement,
+    MouseButton, MouseDownEvent, ParentElement, SharedString, Styled, Window, div, prelude::*, px,
+    uniform_list,
 };
 use macsftp_core::{
     AuthMethodKind, ConnectionState, EntryPath, LocalPath, RemotePath, TransferHistoryRecord,
@@ -1078,8 +1079,21 @@ impl crate::workspace::Workspace {
             })
             .child(div().flex_1().min_h_0().child(list))
     }
-    pub(crate) fn render_transfer_drawer(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    pub(crate) fn render_transfer_drawer(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        use crate::workspace::drawer_height::{
+            MIN_DRAWER_HEIGHT, RESIZE_HANDLE_HEIGHT, ResizeDragGhost, TransferDrawerResize,
+        };
+
+        // Reclamp after window shrink so stored height never exceeds max.
+        self.reclamp_drawer_height(window.viewport_size().height);
+        let height = self.drawer_height;
+
         let theme = cx.theme().clone();
+        let workspace_entity = cx.entity();
         // Cloned (not borrowed) so the shared transfer store isn't held
         // borrowed across the `render_transfer_job(job, cx)` calls below.
         let jobs = cx.transfers().jobs.clone();
@@ -1153,11 +1167,74 @@ impl crate::workspace::Workspace {
             .flex()
             .flex_col()
             .flex_none()
-            .max_h(px(240.0))
-            .overflow_y_scroll()
+            .h(height)
+            .min_h(MIN_DRAWER_HEIGHT)
             .bg(theme.colors.surface)
             .border_t_1()
             .border_color(theme.colors.border);
+
+        // Resize handle: drag to change height; double-click resets to default.
+        // Never auto-closes the drawer when clamped to min height.
+        let hover_background = theme.colors.element_hover;
+        drawer = drawer.child(
+            div()
+                .id("transfer-drawer-resize-handle")
+                .flex_none()
+                .w_full()
+                .h(RESIZE_HANDLE_HEIGHT)
+                .cursor_row_resize()
+                .bg(theme.colors.border)
+                .hover(|style| style.bg(hover_background))
+                .tooltip(text_tooltip("Drag to resize · Double-click to reset"))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|workspace, event: &MouseDownEvent, window, cx| {
+                        // Prefer mouse_down double-click so drag threshold
+                        // does not steal the reset gesture.
+                        if event.click_count >= 2 {
+                            workspace
+                                .reset_drawer_height(window.viewport_size().height);
+                            workspace.drawer_resize = None;
+                            cx.notify();
+                        }
+                    }),
+                )
+                .on_drag(
+                    TransferDrawerResize {
+                        start_height: self.drawer_height,
+                        start_y: px(0.0),
+                    },
+                    move |_value, _cursor_offset, window, cx| {
+                        let start_y = window.mouse_position().y;
+                        // Use live drawer_height so double-click reset is not
+                        // overwritten by a stale payload built at element time.
+                        workspace_entity.update(cx, |workspace, cx| {
+                            workspace.drawer_resize = Some(TransferDrawerResize {
+                                start_height: workspace.drawer_height,
+                                start_y,
+                            });
+                            cx.notify();
+                        });
+                        cx.new(|_| ResizeDragGhost)
+                    },
+                )
+                .on_drag_move(cx.listener(
+                    |workspace, event: &DragMoveEvent<TransferDrawerResize>, window, cx| {
+                        let Some(start) = workspace.drawer_resize.clone() else {
+                            return;
+                        };
+                        let current_y = event.event.position.y;
+                        let new_height =
+                            start.start_height + (start.start_y - current_y);
+                        workspace.set_drawer_height(
+                            new_height,
+                            window.viewport_size().height,
+                        );
+                        cx.set_active_drag_cursor_style(CursorStyle::ResizeRow, window);
+                        cx.notify();
+                    },
+                )),
+        );
 
         drawer = drawer.child(
             div()
@@ -1182,22 +1259,31 @@ impl crate::workspace::Workspace {
                 ),
         );
 
+        let mut body = div()
+            .id("transfer-drawer-body")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll();
+
         if jobs.is_empty() && cx.resources().transfer_history.records().is_empty() {
-            return drawer.child(
+            body = body.child(
                 div()
                     .flex()
+                    .flex_1()
                     .items_center()
                     .justify_center()
-                    .h(px(60.0))
                     .text_size(px(12.0))
                     .text_color(theme.colors.text_muted)
                     .child("No transfers"),
             );
+            return drawer.child(body);
         }
 
         for (label, section_jobs) in [("Active", active_jobs), ("Queued", queued_jobs)] {
             if !section_jobs.is_empty() {
-                drawer = drawer
+                body = body
                     .child(section_header_static(label, section_jobs.len(), &theme))
                     .children(
                         section_jobs
@@ -1225,7 +1311,7 @@ impl crate::workspace::Workspace {
                 continue;
             }
             let is_completed_section = label == "Completed";
-            drawer = drawer.child(
+            body = body.child(
                 div()
                     .id(toggle_id)
                     .flex()
@@ -1257,7 +1343,7 @@ impl crate::workspace::Workspace {
                     .child(format!("{label} ({})", section_jobs.len())),
             );
             if expanded {
-                drawer = drawer.children(
+                body = body.children(
                     section_jobs
                         .into_iter()
                         .map(|job| self.render_transfer_job(job, cx)),
@@ -1272,17 +1358,17 @@ impl crate::workspace::Workspace {
             cx.resources().transfer_history.records().to_vec();
         history_records.sort_by_key(|record| std::cmp::Reverse(record.last_updated));
         if !history_records.is_empty() {
-            drawer = drawer.child(section_header_static(
+            body = body.child(section_header_static(
                 "History",
                 history_records.len(),
                 &theme,
             ));
             for record in &history_records {
-                drawer = drawer.child(self.render_history_record(record, cx));
+                body = body.child(self.render_history_record(record, cx));
             }
         }
 
-        drawer
+        drawer.child(body)
     }
     pub(crate) fn render_history_record(
         &self,
