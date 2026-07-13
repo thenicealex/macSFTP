@@ -1,4 +1,4 @@
-use gpui::{Pixels, px};
+use gpui::{Context, IntoElement, Pixels, Render, Styled, Window, div, px};
 
 /// Default open height (matches former `max_h(240)`).
 pub(crate) const DEFAULT_DRAWER_HEIGHT: Pixels = px(240.0);
@@ -14,6 +14,26 @@ pub(crate) const RESIZE_HANDLE_HEIGHT: Pixels = px(5.0);
 /// Approximate chrome outside the content area when measuring max height.
 /// tab_bar (~36) + status_bar (theme ~22–28) — keep conservative so max is not too tall.
 pub(crate) const APPROX_CHROME_HEIGHT: Pixels = px(64.0);
+
+/// GPUI drag value for the transfer drawer resize handle.
+#[derive(Clone, Debug)]
+pub(crate) struct TransferDrawerResize {
+    pub start_height: Pixels,
+    pub start_y: Pixels,
+}
+
+/// Empty drag preview (no visual ghost required for resize; minimal transparent view).
+pub(crate) struct ResizeDragGhost;
+
+impl Render for ResizeDragGhost {
+    fn render(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div().w(px(1.0)).h(px(1.0))
+    }
+}
 
 /// Clamp a requested drawer height into [min, max(content)].
 ///

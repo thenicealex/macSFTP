@@ -416,6 +416,46 @@ mod tests {
     }
 
     #[gpui::test]
+    fn transfer_drawer_default_height(cx: &mut TestAppContext) {
+        let (workspace, _cx, _channels) = init_workspace(cx);
+        workspace.read_with(&_cx, |workspace, _| {
+            assert_eq!(
+                workspace.drawer_height,
+                crate::workspace::drawer_height::DEFAULT_DRAWER_HEIGHT
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn transfer_drawer_height_survives_toggle(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        workspace.update(&mut cx, |workspace, _cx| {
+            workspace.set_drawer_height(gpui::px(180.0), gpui::px(900.0));
+        });
+        cx.dispatch_action(ShowTransferDrawer);
+        cx.dispatch_action(ShowTransferDrawer);
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(workspace.drawer_open);
+            assert_eq!(workspace.drawer_height, gpui::px(180.0));
+        });
+    }
+
+    #[gpui::test]
+    fn transfer_drawer_reset_height(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        workspace.update(&mut cx, |workspace, _cx| {
+            workspace.set_drawer_height(gpui::px(360.0), gpui::px(900.0));
+            workspace.reset_drawer_height(gpui::px(900.0));
+        });
+        workspace.read_with(&cx, |workspace, _| {
+            assert_eq!(
+                workspace.drawer_height,
+                crate::workspace::drawer_height::DEFAULT_DRAWER_HEIGHT
+            );
+        });
+    }
+
+    #[gpui::test]
     fn settings_action_switches_surface_and_persists_appearance(cx: &mut TestAppContext) {
         let (workspace, mut cx, _channels) = init_workspace(cx);
 

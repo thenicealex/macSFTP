@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use gpui::{
-    App, ClipboardItem, Context, FocusHandle, Focusable, IntoElement, ParentElement, Render, SharedString, Styled, Subscription, Task,
-    UniformListScrollHandle, Window, div, prelude::*,
+    App, ClipboardItem, Context, FocusHandle, Focusable, IntoElement, ParentElement, Pixels, Render,
+    SharedString, Styled, Subscription, Task, UniformListScrollHandle, Window, div, prelude::*,
 };
 use macsftp_core::{
     AppCommand, AppState,
@@ -93,6 +93,7 @@ pub struct Workspace {
     surface: WorkspaceSurface,
     about_open: bool,
     drawer_open: bool,
+    drawer_height: Pixels,
     completed_section_expanded: bool,
     failed_section_expanded: bool,
     local_scroll: UniformListScrollHandle,
@@ -201,6 +202,7 @@ impl Workspace {
             surface: WorkspaceSurface::Files,
             about_open: false,
             drawer_open: true,
+            drawer_height: drawer_height::DEFAULT_DRAWER_HEIGHT,
             completed_section_expanded: false,
             failed_section_expanded: false,
             local_scroll: UniformListScrollHandle::new(),
@@ -267,6 +269,19 @@ impl Workspace {
             self.active_tab().map(|tab| tab.title.as_str()),
         );
         window.set_window_title(&title);
+    }
+
+    pub(crate) fn set_drawer_height(&mut self, height: Pixels, viewport_height: Pixels) {
+        let content = drawer_height::content_area_height_from_viewport(viewport_height);
+        self.drawer_height = drawer_height::clamp_drawer_height(height, content);
+    }
+
+    pub(crate) fn reset_drawer_height(&mut self, viewport_height: Pixels) {
+        self.set_drawer_height(drawer_height::DEFAULT_DRAWER_HEIGHT, viewport_height);
+    }
+
+    pub(crate) fn reclamp_drawer_height(&mut self, viewport_height: Pixels) {
+        self.set_drawer_height(self.drawer_height, viewport_height);
     }
 
     /// Rebuild disconnected tabs from `session.json`. Does not send ConnectTab.
