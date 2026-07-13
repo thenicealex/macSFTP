@@ -107,6 +107,7 @@ impl Workspace {
                 {
                     self.about_open = false;
                     self.surface = WorkspaceSurface::Settings;
+                    self.settings_section = crate::workspace::profiles::SettingsSection::General;
                     self.workspace_focus.focus(window);
                     cx.notify();
                 }

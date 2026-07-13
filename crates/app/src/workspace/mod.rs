@@ -30,6 +30,7 @@ use crate::app_actions::{
 use crate::resources::ActiveResources;
 use crate::workspace::file_ops::{ContextMenuState, DeleteConfirmState, InlineEditState};
 use crate::workspace::nav::{HistoryOp, TabNavState};
+use crate::workspace::profiles::SettingsSection;
 
 /// Status bar copy when the command channel is full (non-blocking drop).
 pub(crate) const STATUS_BUSY_TRY_AGAIN: &str = "Busy — try again in a moment.";
@@ -91,6 +92,12 @@ pub struct Workspace {
     modal_focus: FocusHandle,
     focused_side: PaneSide,
     surface: WorkspaceSurface,
+    /// Active sidebar section when `surface == Settings`.
+    settings_section: SettingsSection,
+    /// Free-text filter for the Settings → Profiles list (Task 4 wires the input).
+    profile_filter: String,
+    /// Selected profile in Settings → Profiles (None when the list is empty).
+    selected_profile_id: Option<ProfileId>,
     about_open: bool,
     drawer_open: bool,
     completed_section_expanded: bool,
@@ -199,6 +206,9 @@ impl Workspace {
             modal_focus: cx.focus_handle(),
             focused_side: PaneSide::Local,
             surface: WorkspaceSurface::Files,
+            settings_section: SettingsSection::General,
+            profile_filter: String::new(),
+            selected_profile_id: None,
             about_open: false,
             drawer_open: true,
             completed_section_expanded: false,
@@ -1001,6 +1011,7 @@ impl Render for Workspace {
                 {
                     workspace.about_open = false;
                     workspace.surface = WorkspaceSurface::Settings;
+                    workspace.settings_section = SettingsSection::General;
                     workspace.workspace_focus.focus(window);
                     cx.notify();
                 }
@@ -1056,6 +1067,7 @@ mod helpers;
 mod modals;
 mod nav;
 mod panes;
+mod profiles;
 mod render;
 #[cfg(test)]
 mod tests;

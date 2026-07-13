@@ -64,6 +64,7 @@ mod tests {
         AppPaths, PaneSide, RestoredTabTarget, Workspace, WorkspaceSurface,
         STATUS_BUSY_TRY_AGAIN, STATUS_CONNECTION_SERVICE_UNAVAILABLE,
     };
+    use crate::workspace::profiles::{SettingsSection, profile_matches_filter};
     use crate::app_actions::{
         self, ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, FilterPane, GoToPath,
         NavigateBack, NewTab, OpenSettings, PageDown, SelectAllEntries, SelectNextEntry,
@@ -422,6 +423,11 @@ mod tests {
         cx.dispatch_action(OpenSettings);
         workspace.read_with(&cx, |workspace, _| {
             assert_eq!(workspace.surface, WorkspaceSurface::Settings);
+            assert_eq!(
+                workspace.settings_section,
+                SettingsSection::General,
+                "OpenSettings resets to General"
+            );
         });
 
         workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -439,6 +445,61 @@ mod tests {
         workspace.read_with(&cx, |workspace, _| {
             assert_eq!(workspace.surface, WorkspaceSurface::Files);
         });
+    }
+
+    #[gpui::test]
+    fn settings_profiles_section_lists_saved_profiles(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        workspace.update_in(&mut cx, |ws, _window, cx| {
+            let profile = macsftp_core::ConnectionProfile::new(
+                ProfileId(1),
+                "Work Server",
+                "example.com",
+                "alex",
+                AuthMethod::Password {
+                    secret_ref: macsftp_core::SecretRef::keychain_ref(ProfileId(1), "password"),
+                },
+            );
+            match cx.resources_mut().profiles.save_profile(profile) {
+                Ok(_) => {}
+                Err(error) => panic!("save profile for settings list test: {error}"),
+            }
+            ws.surface = WorkspaceSurface::Settings;
+            ws.set_settings_section(SettingsSection::Profiles, cx);
+            assert_eq!(ws.settings_section, SettingsSection::Profiles);
+            let n = cx.resources().profiles.profiles().len();
+            assert!(n >= 1, "expected at least one saved profile");
+            assert!(
+                ws.selected_profile_id.is_some(),
+                "selected defaults to first when entering Profiles with a non-empty list"
+            );
+            assert_eq!(
+                ws.selected_profile_id,
+                Some(ProfileId(1)),
+                "first saved profile is selected"
+            );
+        });
+    }
+
+    #[test]
+    fn profile_matches_filter_name_host_user() {
+        let profile = macsftp_core::ConnectionProfile::new(
+            ProfileId(1),
+            "Work Server",
+            "example.com",
+            "alex",
+            AuthMethod::Password {
+                secret_ref: macsftp_core::SecretRef::new("test-ref"),
+            },
+        );
+        assert!(profile_matches_filter(&profile, ""));
+        assert!(profile_matches_filter(&profile, "   "));
+        assert!(profile_matches_filter(&profile, "work"));
+        assert!(profile_matches_filter(&profile, "WORK"));
+        assert!(profile_matches_filter(&profile, "example"));
+        assert!(profile_matches_filter(&profile, "alex"));
+        assert!(!profile_matches_filter(&profile, "nomatch"));
     }
 
     #[gpui::test]

@@ -17,6 +17,7 @@ use crate::palette_commands::labeled_shortcut;
 use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::helpers::*;
 use crate::workspace::nav::{HistoryOp, breadcrumb_display_indices, breadcrumb_segments};
+use crate::workspace::profiles::{SettingsSection, profile_list_label};
 use crate::workspace::{PaneSide, WorkspaceSurface};
 use macsftp_storage::AppearancePreference;
 
@@ -1578,6 +1579,7 @@ impl crate::workspace::Workspace {
     }
     pub(crate) fn render_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme().clone();
+        let selected_section = self.settings_section;
         let selected_appearance = cx.resources().config.config().appearance;
         let appearance_button = |id: &'static str,
                                  label: &'static str,
@@ -1613,6 +1615,137 @@ impl crate::workspace::Workspace {
                     workspace.set_appearance(appearance, window, cx);
                 }))
                 .child(label)
+        };
+
+        let sidebar_item = |id: &'static str,
+                            label: &'static str,
+                            section: SettingsSection,
+                            cx: &mut Context<Self>| {
+            let selected = selected_section == section;
+            div()
+                .id(id)
+                .px_2()
+                .py_2()
+                .rounded_sm()
+                .bg(if selected {
+                    theme.colors.element_selected
+                } else {
+                    theme.colors.surface
+                })
+                .text_size(px(12.0))
+                .text_color(if selected {
+                    theme.colors.text
+                } else {
+                    theme.colors.text_muted
+                })
+                .hover(|style| style.bg(theme.colors.element_hover))
+                .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                    workspace.set_settings_section(section, cx);
+                }))
+                .child(label)
+        };
+
+        let body = match self.settings_section {
+            SettingsSection::General => div()
+                .flex_1()
+                .min_w_0()
+                .p_6()
+                .child(
+                    div()
+                        .max_w(px(560.0))
+                        .flex()
+                        .flex_col()
+                        .gap_5()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_size(px(16.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child("Appearance"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .text_color(theme.colors.text_muted)
+                                        .child(
+                                            "Choose how macSFTP follows the macOS appearance.",
+                                        ),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(appearance_button(
+                                    "appearance-system",
+                                    "System",
+                                    AppearancePreference::System,
+                                    cx,
+                                ))
+                                .child(appearance_button(
+                                    "appearance-light",
+                                    "Light",
+                                    AppearancePreference::Light,
+                                    cx,
+                                ))
+                                .child(appearance_button(
+                                    "appearance-dark",
+                                    "Dark",
+                                    AppearancePreference::Dark,
+                                    cx,
+                                )),
+                        )
+                        .children(self.config_error.clone().map(|error| {
+                            div()
+                                .p_3()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(theme.colors.error)
+                                .text_size(px(12.0))
+                                .text_color(theme.colors.error)
+                                .child(error)
+                        }))
+                        .child(div().h(px(1.0)).bg(theme.colors.border))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .text_size(px(14.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child("Diagnostics"),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .gap_2()
+                                        .child(
+                                            text_button("open-log-folder", "Open Log Folder")
+                                                .on_click(cx.listener(
+                                                    |workspace, _event, _window, cx| {
+                                                        workspace.open_log_folder(cx);
+                                                    },
+                                                )),
+                                        )
+                                        .child(
+                                            text_button("copy-version", "Copy Version Info")
+                                                .on_click(cx.listener(
+                                                    |workspace, _event, _window, cx| {
+                                                        workspace.copy_version_info(cx);
+                                                    },
+                                                )),
+                                        ),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+            SettingsSection::Profiles => self.render_settings_profiles(cx),
         };
 
         div()
@@ -1657,113 +1790,121 @@ impl crate::workspace::Workspace {
                             .w(px(180.0))
                             .flex_none()
                             .p_3()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
                             .bg(theme.colors.surface)
                             .border_r_1()
                             .border_color(theme.colors.border)
-                            .child(
-                                div()
-                                    .px_2()
-                                    .py_2()
-                                    .rounded_sm()
-                                    .bg(theme.colors.element_selected)
-                                    .text_size(px(12.0))
-                                    .text_color(theme.colors.text)
-                                    .child("General"),
-                            ),
+                            .child(sidebar_item(
+                                "settings-section-general",
+                                "General",
+                                SettingsSection::General,
+                                cx,
+                            ))
+                            .child(sidebar_item(
+                                "settings-section-profiles",
+                                "Profiles",
+                                SettingsSection::Profiles,
+                                cx,
+                            )),
+                    )
+                    .child(body),
+            )
+            .into_any_element()
+    }
+
+    /// Settings → Profiles: list on the left, read-only summary on the right.
+    pub(crate) fn render_settings_profiles(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = cx.theme().clone();
+        let profiles = cx.resources().profiles.profiles().to_vec();
+        let filtered = self.filtered_profiles(&profiles);
+        let selected_id = self.selected_profile_id;
+        let selected = selected_id.and_then(|id| profiles.iter().find(|p| p.id == id).cloned());
+
+        let list_rows = filtered.into_iter().map(|profile| {
+            let profile_id = profile.id;
+            let selected = selected_id == Some(profile_id);
+            let label = profile_list_label(profile);
+            div()
+                .id(("settings-profile-row", profile_id.0))
+                .px_2()
+                .py_2()
+                .rounded_sm()
+                .bg(if selected {
+                    theme.colors.element_selected
+                } else {
+                    theme.colors.background
+                })
+                .text_size(px(12.0))
+                .text_color(theme.colors.text)
+                .hover(|style| style.bg(theme.colors.element_hover))
+                .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                    workspace.select_profile_in_settings(profile_id, cx);
+                }))
+                .child(label)
+        });
+
+        let detail = match selected {
+            Some(profile) => div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .text_size(px(16.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(profile.name.clone()),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme.colors.text_muted)
+                        .child(format!(
+                            "{}@{}:{}",
+                            profile.username, profile.host, profile.port
+                        )),
+                )
+                .into_any_element(),
+            None => div()
+                .text_size(px(13.0))
+                .text_color(theme.colors.text_muted)
+                .child("Select a profile")
+                .into_any_element(),
+        };
+
+        div()
+            .flex()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .child(
+                div()
+                    .w(px(220.0))
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .p_3()
+                    .border_r_1()
+                    .border_color(theme.colors.border)
+                    .child(
+                        text_button("settings-new-profile", "New Profile").on_click(cx.listener(
+                            |_workspace, _event, _window, _cx| {
+                                // Task 2: open editor for a new profile.
+                            },
+                        )),
                     )
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .p_6()
-                            .child(
-                                div()
-                                    .max_w(px(560.0))
-                                    .flex()
-                                    .flex_col()
-                                    .gap_5()
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap_1()
-                                            .child(
-                                                div()
-                                                    .text_size(px(16.0))
-                                                    .font_weight(FontWeight::MEDIUM)
-                                                    .child("Appearance"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(px(12.0))
-                                                    .text_color(theme.colors.text_muted)
-                                                    .child("Choose how macSFTP follows the macOS appearance."),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .gap_2()
-                                            .child(appearance_button(
-                                                "appearance-system",
-                                                "System",
-                                                AppearancePreference::System,
-                                                cx,
-                                            ))
-                                            .child(appearance_button(
-                                                "appearance-light",
-                                                "Light",
-                                                AppearancePreference::Light,
-                                                cx,
-                                            ))
-                                            .child(appearance_button(
-                                                "appearance-dark",
-                                                "Dark",
-                                                AppearancePreference::Dark,
-                                                cx,
-                                            )),
-                                    )
-                                    .children(self.config_error.clone().map(|error| {
-                                        div()
-                                            .p_3()
-                                            .rounded_sm()
-                                            .border_1()
-                                            .border_color(theme.colors.error)
-                                            .text_size(px(12.0))
-                                            .text_color(theme.colors.error)
-                                            .child(error)
-                                    }))
-                                    .child(div().h(px(1.0)).bg(theme.colors.border))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap_3()
-                                            .child(
-                                                div()
-                                                    .text_size(px(14.0))
-                                                    .font_weight(FontWeight::MEDIUM)
-                                                    .child("Diagnostics"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex()
-                                                    .gap_2()
-                                                    .child(text_button("open-log-folder", "Open Log Folder").on_click(
-                                                        cx.listener(|workspace, _event, _window, cx| {
-                                                            workspace.open_log_folder(cx);
-                                                        }),
-                                                    ))
-                                                    .child(text_button("copy-version", "Copy Version Info").on_click(
-                                                        cx.listener(|workspace, _event, _window, cx| {
-                                                            workspace.copy_version_info(cx);
-                                                        }),
-                                                    )),
-                                            ),
-                                    ),
-                            ),
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .min_h_0()
+                            .children(list_rows),
                     ),
             )
+            .child(div().flex_1().min_w_0().p_6().child(detail))
             .into_any_element()
     }
     pub(crate) fn render_about(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
