@@ -39,7 +39,7 @@ use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::connect_form::*;
 use crate::workspace::helpers::*;
 use crate::workspace::nav::HistoryOp;
-use crate::workspace::profiles::profile_matches_filter;
+use crate::workspace::profiles::{SettingsSection, profile_matches_filter};
 use crate::workspace::*;
 
 impl crate::workspace::Workspace {
@@ -630,6 +630,21 @@ impl crate::workspace::Workspace {
                                 .text_color(theme.colors.text_muted)
                                 .child(if profile_picker_open { "▴" } else { "▾" }),
                         ),
+                )
+                .child(
+                    text_button("connect-manage-profiles", "Manage…").on_click(cx.listener(
+                        |workspace, _event, window, cx| {
+                            // OpenProfiles is gated on connect_form being closed;
+                            // dismiss Connect first so Settings Profiles can open.
+                            workspace.close_connect_form(window, cx);
+                            workspace.about_open = false;
+                            workspace.surface = WorkspaceSurface::Settings;
+                            workspace
+                                .set_settings_section(SettingsSection::Profiles, cx);
+                            workspace.workspace_focus.focus(window);
+                            cx.notify();
+                        },
+                    )),
                 ),
         );
 
@@ -824,53 +839,75 @@ impl crate::workspace::Workspace {
                 )),
         };
 
-        // Save the current connection as a profile. The secret is mapped
-        // to a SecretRef stub and never written to disk (plan §5).
-        card = card.child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .w(px(96.0))
-                        .flex_none()
-                        .text_size(px(11.0))
-                        .text_color(theme.colors.text_muted)
-                        .child("Save as"),
-                )
-                .child(
-                    div()
-                        .id("profile-name-row")
-                        .flex_1()
-                        .min_w_0()
-                        .on_click(cx.listener(
-                            move |workspace, _event: &ClickEvent, _window, cx| {
-                                if let Some(form) = &mut workspace.connect_form {
-                                    form.focused_field = ConnectField::ProfileName;
-                                    cx.notify();
-                                }
+        // Save as is collapsed by default so the form stays short for one-off
+        // connects. Expanding reveals the optional name field + Save profile.
+        // Secrets are mapped to a SecretRef stub and never written to disk
+        // (plan §5).
+        if form.save_as_expanded {
+            card = card.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(96.0))
+                            .flex_none()
+                            .text_size(px(11.0))
+                            .text_color(theme.colors.text_muted)
+                            .child("Save as"),
+                    )
+                    .child(
+                        div()
+                            .id("profile-name-row")
+                            .flex_1()
+                            .min_w_0()
+                            .on_click(cx.listener(
+                                move |workspace, _event: &ClickEvent, _window, cx| {
+                                    if let Some(form) = &mut workspace.connect_form {
+                                        form.focused_field = ConnectField::ProfileName;
+                                        cx.notify();
+                                    }
+                                },
+                            ))
+                            .child(text_field(
+                                "profile-name-input",
+                                TextFieldModel {
+                                    state: &form.profile_name,
+                                    placeholder: "profile name (optional)",
+                                    focused: form.focused_field == ConnectField::ProfileName,
+                                    masked: false,
+                                },
+                                cx,
+                            )),
+                    )
+                    .child(
+                        text_button("save-profile", "Save profile").on_click(cx.listener(
+                            |workspace, _event, _window, cx| {
+                                workspace.save_current_profile(cx);
                             },
-                        ))
-                        .child(text_field(
-                            "profile-name-input",
-                            TextFieldModel {
-                                state: &form.profile_name,
-                                placeholder: "profile name (optional)",
-                                focused: form.focused_field == ConnectField::ProfileName,
-                                masked: false,
-                            },
-                            cx,
                         )),
-                )
-                .child(
-                    text_button("save-profile", "Save profile").on_click(cx.listener(
-                        |workspace, _event, _window, cx| {
-                            workspace.save_current_profile(cx);
-                        },
-                    )),
-                ),
-        );
+                    ),
+            );
+        } else {
+            card = card.child(
+                div()
+                    .id("save-as-profile-expand")
+                    .flex()
+                    .items_center()
+                    .cursor_pointer()
+                    .text_size(px(12.0))
+                    .text_color(theme.colors.text_muted)
+                    .on_click(cx.listener(|workspace, _event, _window, cx| {
+                        if let Some(form) = &mut workspace.connect_form {
+                            form.save_as_expanded = true;
+                            form.focused_field = ConnectField::ProfileName;
+                            cx.notify();
+                        }
+                    }))
+                    .child("Save as profile…"),
+            );
+        }
 
         card = card.child(
             div()

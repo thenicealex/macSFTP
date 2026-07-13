@@ -46,7 +46,7 @@ pub(crate) struct ConnectForm {
     pub(crate) profile_picker_open: bool,
     /// Filter text for the inline profile picker list.
     pub(crate) profile_picker_filter: InputState,
-    #[allow(dead_code)]
+    /// Whether the "Save as profile" name + Save row is expanded.
     pub(crate) save_as_expanded: bool,
 }
 
@@ -466,6 +466,7 @@ impl crate::workspace::Workspace {
                 if let Some(form) = self.connect_form.as_mut() {
                     form.source_profile_id = Some(saved.id);
                     form.profile_name = InputState::new();
+                    form.save_as_expanded = false;
                     form.error = None;
                 }
                 self.status_message = Some(format!("Saved profile '{}'.", name).into());
