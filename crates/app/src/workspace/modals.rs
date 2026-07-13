@@ -299,9 +299,15 @@ impl crate::workspace::Workspace {
             PaneSide::Local => {
                 let expanded = expand_home(&raw);
                 let path = LocalPath::new(expanded);
-                if !Path::new(path.as_str()).exists() {
-                    self.go_to_path_error = Some("Path not found".into());
-                    self.status_message = Some("Path not found".into());
+                let fs_path = Path::new(path.as_str());
+                if !fs_path.is_dir() {
+                    let message = if fs_path.exists() {
+                        "Not a directory"
+                    } else {
+                        "Path not found"
+                    };
+                    self.go_to_path_error = Some(message.into());
+                    self.status_message = Some(message.into());
                     cx.notify();
                     return;
                 }

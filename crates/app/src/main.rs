@@ -24,8 +24,8 @@ use tracing_subscriber::{EnvFilter, fmt};
 use crate::app_actions::{
     CloseTab, CopyVersionInfo, DownloadSelection, FocusLocalPane, FocusRemotePane, HideApplication,
     HideOtherApplications, MinimizeWindow, NewTab, NewWindow, OpenLogFolder, OpenSettings, Quit,
-    ReconnectTab, RefreshPane, ShowAbout, ShowAllApplications, ShowTransferDrawer, UploadSelection,
-    ZoomWindow,
+    ReconnectTab, RefreshPane, ShowAbout, ShowAllApplications, ShowTransferDrawer,
+    ToggleHiddenFiles, UploadSelection, ZoomWindow,
 };
 use crate::assets::Assets;
 use crate::resources::{AppResources, SharedTransfers};
@@ -195,6 +195,8 @@ fn main() {
                     MenuItem::action("Focus Local Pane", FocusLocalPane),
                     MenuItem::action("Focus Remote Pane", FocusRemotePane),
                     MenuItem::action("Toggle Transfers", ShowTransferDrawer),
+                    MenuItem::separator(),
+                    MenuItem::action("Show Hidden Files", ToggleHiddenFiles),
                     MenuItem::separator(),
                     MenuItem::action("Refresh", RefreshPane),
                     MenuItem::action("Reconnect", ReconnectTab),

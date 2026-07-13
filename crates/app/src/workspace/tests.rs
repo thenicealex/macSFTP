@@ -1197,6 +1197,62 @@ mod tests {
             );
         });
 
+        // A file path is rejected (must be a directory).
+        let file_path = fixture.join("note.txt");
+        std::fs::write(&file_path, b"x").expect("write file");
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.open_go_to_path(window, cx);
+            workspace
+                .go_to_path_input
+                .set_value(file_path.to_string_lossy().as_ref());
+            workspace.submit_go_to_path(window, cx);
+            assert!(
+                workspace.go_to_path_open,
+                "modal stays open when target is a file"
+            );
+            assert_eq!(
+                workspace.go_to_path_error.as_ref().map(|s| s.as_ref()),
+                Some("Not a directory")
+            );
+            assert_eq!(
+                workspace
+                    .active_tab()
+                    .and_then(|tab| tab.local.path.as_ref().map(LocalPath::as_str)),
+                Some(child.as_str()),
+                "file path must not navigate"
+            );
+        });
+
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[gpui::test]
+    fn navigate_clears_type_to_filter_query(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        let (fixture, parent) = temp_local_fixture("nav-clears-filter");
+        let child_dir = fixture.join("sub");
+        std::fs::create_dir(&child_dir).expect("child");
+        std::fs::write(fixture.join("alpha.txt"), b"a").expect("alpha");
+        std::fs::write(fixture.join("beta.txt"), b"b").expect("beta");
+        let child = LocalPath::new(child_dir.to_string_lossy().into_owned());
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.set_local_path(parent, window, cx);
+            workspace.focused_side = PaneSide::Local;
+            workspace.local_filter.query = "alpha".into();
+            workspace.local_filter.explicit_focus = true;
+            assert_eq!(workspace.entry_count(PaneSide::Local, cx), 1);
+            workspace.navigate_pane_local(child, HistoryOp::Push, window, cx);
+            assert!(
+                workspace.local_filter.query.is_empty(),
+                "navigate must clear filter query"
+            );
+            assert!(
+                !workspace.local_filter.explicit_focus,
+                "navigate must clear filter focus"
+            );
+        });
+
         let _ = std::fs::remove_dir_all(&fixture);
     }
 

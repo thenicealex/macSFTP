@@ -294,12 +294,14 @@ impl crate::workspace::Workspace {
         macsftp_core::sort_entries(&mut tab.remote.entries, &sort);
         cx.notify();
     }
+    /// Request a remote listing. Returns `false` if the command could not be
+    /// enqueued (caller must not advance navigation history in that case).
     pub(crate) fn request_remote_directory(
         &mut self,
         tab_id: TabId,
         path: RemotePath,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if !self.send_command(
             AppCommand::ReadRemoteDir {
                 tab_id,
@@ -307,7 +309,7 @@ impl crate::workspace::Workspace {
             },
             cx,
         ) {
-            return;
+            return false;
         }
         if let Some(tab) = self.state.tabs.find_tab_mut(tab_id) {
             // Keep the last listing visible while the actor reads the new
@@ -319,6 +321,7 @@ impl crate::workspace::Workspace {
             tab.selection.selected_paths.clear();
         }
         cx.notify();
+        true
     }
     pub(crate) fn go_to_parent_directory(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let side = self.focused_side;
@@ -552,39 +555,59 @@ impl crate::workspace::Workspace {
             .active_tab()
             .and_then(|tab| tab.remote.path.clone());
 
+        // Peek history targets for Back/Forward without mutating stacks until
+        // the ReadRemoteDir command is successfully enqueued (review fix).
         let target = match op {
+            HistoryOp::Push | HistoryOp::Replace => path,
+            HistoryOp::Back => {
+                let Some(nav) = self.tab_nav.get(&tab_id) else {
+                    return;
+                };
+                let Some(target) = nav.remote.back.last() else {
+                    return;
+                };
+                RemotePath::new(target.clone())
+            }
+            HistoryOp::Forward => {
+                let Some(nav) = self.tab_nav.get(&tab_id) else {
+                    return;
+                };
+                let Some(target) = nav.remote.forward.last() else {
+                    return;
+                };
+                RemotePath::new(target.clone())
+            }
+        };
+
+        if !self.request_remote_directory(tab_id, target.clone(), cx) {
+            return;
+        }
+
+        match op {
             HistoryOp::Push => {
                 let nav = self.tab_nav.entry(tab_id).or_default();
                 nav.remote.push_navigating_from(
                     current.as_ref().map(|path| path.as_str()),
-                    path.as_str(),
+                    target.as_str(),
                 );
-                path
             }
-            HistoryOp::Replace => path,
+            HistoryOp::Replace => {}
             HistoryOp::Back => {
                 let Some(current_path) = current.as_ref() else {
                     return;
                 };
                 let nav = self.tab_nav.entry(tab_id).or_default();
-                let Some(target) = nav.remote.go_back(current_path.as_str()) else {
-                    return;
-                };
-                RemotePath::new(target)
+                let _ = nav.remote.go_back(current_path.as_str());
             }
             HistoryOp::Forward => {
                 let Some(current_path) = current.as_ref() else {
                     return;
                 };
                 let nav = self.tab_nav.entry(tab_id).or_default();
-                let Some(target) = nav.remote.go_forward(current_path.as_str()) else {
-                    return;
-                };
-                RemotePath::new(target)
+                let _ = nav.remote.go_forward(current_path.as_str());
             }
-        };
+        }
 
-        self.request_remote_directory(tab_id, target, cx);
         self.clear_filter(PaneSide::Remote);
     }
 

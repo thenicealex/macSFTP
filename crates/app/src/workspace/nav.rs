@@ -9,8 +9,8 @@
 pub enum HistoryOp {
     /// Record the previous path on the back stack and clear forward.
     Push,
-    /// Change path without touching history (e.g. initial load, go-to replace).
-    #[allow(dead_code)] // wired for breadcrumbs / Go to Path (later tasks)
+    /// Change path without touching history (refresh-adjacent or rare replace).
+    #[allow(dead_code)] // available for callers; Push covers normal navigation
     Replace,
     /// Pop back → go there; push current onto forward.
     Back,
