@@ -961,6 +961,13 @@ pub enum AuthMethod {
 - log 和 error 里只能出现 `SecretRef`，不能出现 secret value；
 - passphrase 默认可记住到 Keychain，但 profile 里必须保存 `remember_passphrase`，用户可关闭。
 
+**2026-07-14 边界收口：** `ProfileStore` 是 profile 文件与 Keychain 生命周期的
+唯一协调者，`app` 不持有或调用 `KeychainStore`。Connect 与 Settings 分别通过
+`save_connection_settings` / `save_request` 进入同一事务：先备份并写入新 secret，
+`profiles.json` 原子提交成功后才替换内存并清理旧认证方式的 orphan；磁盘提交失败
+时恢复原 Keychain 值。删除同样先提交 profile 文件，再 best-effort 清理无引用
+secret，并把清理失败作为 warning 返回调用方。
+
 ### keyboard-interactive 扩展点
 
 第一版不做完整 keyboard-interactive UI，但认证流程要保留 challenge/response 扩展点：

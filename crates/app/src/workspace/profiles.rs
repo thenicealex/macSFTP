@@ -1,13 +1,14 @@
 use gpui::{App, Context, KeyDownEvent, SharedString, Window};
 use macsftp_core::{
-    AuthMethod, AuthMethodKind, ConnectionProfile, LocalPath, ProfileId, RemotePath, SecretRef,
+    AuthMethod, AuthMethodKind, ConnectionProfile, LocalPath, ProfileId, RemotePath,
 };
+use macsftp_storage::{ProfileAuthUpdate, ProfileMutationError, ProfileSaveRequest};
 use macsftp_ui::{InputKeyResult, InputState};
 use tracing::warn;
 
 use crate::resources::ActiveResources;
 use crate::workspace::WorkspaceSurface;
-use crate::workspace::helpers::{expand_home, secret_refs_for_profile};
+use crate::workspace::helpers::expand_home;
 
 /// Settings sidebar section (General appearance vs Profiles management).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -172,17 +173,13 @@ pub(crate) fn profile_list_label(profile: &ConnectionProfile) -> String {
     )
 }
 
-fn profile_secret_present(profile: &ConnectionProfile, cx: &App) -> bool {
-    match &profile.auth {
-        AuthMethod::Password { secret_ref } => {
-            matches!(cx.resources().keychain.load(secret_ref), Ok(Some(_)))
+fn profile_secret_present(profile_id: ProfileId, cx: &App) -> bool {
+    match cx.resources().profiles.has_saved_secret(profile_id) {
+        Ok(present) => present,
+        Err(error) => {
+            warn!(?profile_id, %error, "could not inspect saved profile credential");
+            false
         }
-        AuthMethod::PrivateKey { passphrase_ref, .. } => match passphrase_ref {
-            Some(secret_ref) => {
-                matches!(cx.resources().keychain.load(secret_ref), Ok(Some(_)))
-            }
-            None => false,
-        },
     }
 }
 
@@ -206,7 +203,7 @@ impl crate::workspace::Workspace {
                     .resources()
                     .profiles
                     .find_profile(id)
-                    .map(|profile| profile_secret_present(profile, cx))
+                    .map(|profile| profile_secret_present(profile.id, cx))
                     .unwrap_or(false);
                 if let Some(profile) = cx.resources().profiles.find_profile(id).cloned() {
                     self.profile_editor =
@@ -235,21 +232,47 @@ impl crate::workspace::Workspace {
         let Some(profile) = cx.resources().profiles.find_profile(id).cloned() else {
             return;
         };
-        let secret_present = profile_secret_present(&profile, cx);
+        let secret_present = profile_secret_present(profile.id, cx);
         self.profile_filter_focused = false;
         self.selected_profile_id = Some(id);
         self.profile_editor = Some(ProfileEditorState::from_profile(&profile, secret_present));
         cx.notify();
     }
 
-    /// Validate and persist the profile editor. Keychain is written before
-    /// JSON; empty password on edit keeps the existing secret_ref.
+    /// Validate the profile editor and submit one storage transaction. An
+    /// empty password on edit asks storage to keep the existing credential.
     pub(crate) fn save_profile_editor(&mut self, cx: &mut Context<Self>) {
-        let Some(editor) = self.profile_editor.as_ref() else {
-            return;
+        let (
+            host,
+            port_text,
+            username,
+            is_new,
+            editor_profile_id,
+            entered_name,
+            default_remote_path_text,
+            auth_method,
+            password,
+            key_path_raw,
+            passphrase,
+        ) = {
+            let Some(editor) = self.profile_editor.as_ref() else {
+                return;
+            };
+            (
+                editor.host.value().trim().to_string(),
+                editor.port.value().trim().to_string(),
+                editor.username.value().trim().to_string(),
+                editor.is_new,
+                editor.profile_id,
+                editor.name.value().trim().to_string(),
+                editor.default_remote_path.value().trim().to_string(),
+                editor.auth_method,
+                editor.password.value().to_string(),
+                editor.key_path.value().trim().to_string(),
+                editor.passphrase.value().to_string(),
+            )
         };
 
-        let host = editor.host.value().trim().to_string();
         if host.is_empty() {
             if let Some(editor) = self.profile_editor.as_mut() {
                 editor.error = Some("Host is required.".into());
@@ -257,7 +280,6 @@ impl crate::workspace::Workspace {
             cx.notify();
             return;
         }
-        let port_text = editor.port.value().trim();
         let port: u16 = if port_text.is_empty() {
             22
         } else {
@@ -272,7 +294,6 @@ impl crate::workspace::Workspace {
                 }
             }
         };
-        let username = editor.username.value().trim().to_string();
         if username.is_empty() {
             if let Some(editor) = self.profile_editor.as_mut() {
                 editor.error = Some("Username is required.".into());
@@ -281,74 +302,32 @@ impl crate::workspace::Workspace {
             return;
         }
 
-        let is_new = editor.is_new;
-        let profile_id = match (is_new, editor.profile_id) {
+        let profile_id = match (is_new, editor_profile_id) {
             (false, Some(id)) if cx.resources().profiles.find_profile(id).is_some() => id,
-            _ => self.next_profile_id(cx),
-        };
-
-        let previous = if is_new {
-            None
-        } else {
-            cx.resources().profiles.find_profile(profile_id).cloned()
+            _ => {
+                let Some(profile_id) = self.next_profile_id(cx) else {
+                    cx.notify();
+                    return;
+                };
+                profile_id
+            }
         };
 
         let name = {
-            let entered = editor.name.value().trim().to_string();
-            if entered.is_empty() {
+            if entered_name.is_empty() {
                 format!("{username}@{host}")
             } else {
-                entered
+                entered_name
             }
         };
 
-        let default_remote_path = {
-            let path = editor.default_remote_path.value().trim();
-            if path.is_empty() {
-                None
-            } else {
-                Some(RemotePath::new(path))
-            }
-        };
-
-        let auth_method = editor.auth_method;
-        let password = editor.password.value().to_string();
-        let key_path_raw = editor.key_path.value().trim().to_string();
-        let passphrase = editor.passphrase.value().to_string();
+        let default_remote_path = (!default_remote_path_text.is_empty())
+            .then(|| RemotePath::new(default_remote_path_text));
 
         let auth = match auth_method {
-            AuthMethodKind::Password => {
-                if password.is_empty() {
-                    if is_new {
-                        if let Some(editor) = self.profile_editor.as_mut() {
-                            editor.error = Some("Password is required.".into());
-                        }
-                        cx.notify();
-                        return;
-                    }
-                    match previous.as_ref().map(|p| &p.auth) {
-                        Some(AuthMethod::Password { secret_ref }) => AuthMethod::Password {
-                            secret_ref: secret_ref.clone(),
-                        },
-                        _ => {
-                            if let Some(editor) = self.profile_editor.as_mut() {
-                                editor.error = Some("Password is required.".into());
-                            }
-                            cx.notify();
-                            return;
-                        }
-                    }
-                } else {
-                    let secret_ref = SecretRef::keychain_ref(profile_id, "password");
-                    if let Err(error) = cx.resources().keychain.store(&secret_ref, &password) {
-                        self.status_message =
-                            Some(format!("Could not save credentials to Keychain: {error}").into());
-                        cx.notify();
-                        return;
-                    }
-                    AuthMethod::Password { secret_ref }
-                }
-            }
+            AuthMethodKind::Password => ProfileAuthUpdate::Password {
+                password: (!password.is_empty()).then_some(password),
+            },
             AuthMethodKind::PrivateKey => {
                 let key_path = expand_home(&key_path_raw);
                 if key_path.is_empty() {
@@ -358,82 +337,50 @@ impl crate::workspace::Workspace {
                     cx.notify();
                     return;
                 }
-                let passphrase_ref = if passphrase.is_empty() {
-                    if is_new {
-                        None
-                    } else {
-                        match previous.as_ref().map(|p| &p.auth) {
-                            Some(AuthMethod::PrivateKey { passphrase_ref, .. }) => {
-                                passphrase_ref.clone()
-                            }
-                            _ => None,
-                        }
-                    }
-                } else {
-                    let secret_ref = SecretRef::keychain_ref(profile_id, "passphrase");
-                    if let Err(error) = cx.resources().keychain.store(&secret_ref, &passphrase) {
-                        self.status_message =
-                            Some(format!("Could not save credentials to Keychain: {error}").into());
-                        cx.notify();
-                        return;
-                    }
-                    Some(secret_ref)
-                };
-                AuthMethod::PrivateKey {
+                ProfileAuthUpdate::PrivateKey {
                     key_path: LocalPath::new(key_path),
-                    passphrase_ref: passphrase_ref.clone(),
-                    remember_passphrase: passphrase_ref.is_some(),
+                    passphrase: (!passphrase.is_empty()).then_some(passphrase),
                 }
             }
         };
 
-        let new_secret_refs = secret_refs_for_profile(&auth);
-
-        // Drop Keychain entries from a previous auth method that the new
-        // profile no longer references.
-        if let Some(previous) = &previous {
-            for orphan in secret_refs_for_profile(&previous.auth) {
-                if !new_secret_refs.iter().any(|current| current == &orphan)
-                    && let Err(error) = cx.resources().keychain.delete(&orphan)
-                {
+        let request = ProfileSaveRequest {
+            profile_id,
+            name: name.clone(),
+            host,
+            port,
+            username,
+            auth,
+            default_remote_path,
+        };
+        match cx.resources_mut().profiles.save_request(request) {
+            Ok(outcome) => {
+                for error in outcome.cleanup_warnings {
                     warn!(
-                        "could not remove orphaned Keychain secret for profile {profile_id:?}: {error}"
+                        ?profile_id,
+                        %error,
+                        "could not remove obsolete Keychain secret after profile update"
                     );
                 }
-            }
-        }
-
-        let mut profile = ConnectionProfile::new(profile_id, name.clone(), host, username, auth);
-        profile.port = port;
-        profile.default_remote_path = default_remote_path;
-        if let Some(previous) = &previous {
-            profile.group_id = previous.group_id;
-            profile.last_local_path = previous.last_local_path.clone();
-        }
-
-        match cx.resources_mut().profiles.save_profile(profile) {
-            Ok(saved) => {
-                self.selected_profile_id = Some(saved.id);
-                self.profile_editor = Some(ProfileEditorState::from_profile(&saved, true));
+                let secret_present = profile_secret_present(outcome.profile.id, cx);
+                self.selected_profile_id = Some(outcome.profile.id);
+                self.profile_editor = Some(ProfileEditorState::from_profile(
+                    &outcome.profile,
+                    secret_present,
+                ));
                 self.status_message = Some(format!("Saved profile '{}'.", name).into());
             }
             Err(error) => {
-                // New profile never landed on disk — drop secrets we just wrote.
-                if previous.is_none() {
-                    for secret_ref in &new_secret_refs {
-                        if let Err(cleanup_error) = cx.resources().keychain.delete(secret_ref) {
-                            warn!(
-                                ?profile_id,
-                                %cleanup_error,
-                                "could not roll back Keychain secret after profile save failed"
-                            );
-                        }
+                let message = match error {
+                    ProfileMutationError::CredentialRequired(AuthMethodKind::Password) => {
+                        "Password is required.".to_string()
                     }
-                }
+                    other => format!("Could not save profile: {other}"),
+                };
                 if let Some(editor) = self.profile_editor.as_mut() {
-                    editor.error = Some(format!("Could not save profile: {error}").into());
+                    editor.error = Some(message.clone().into());
                 }
-                self.status_message = Some(format!("Could not save profile: {error}").into());
+                self.status_message = Some(message.into());
             }
         }
         cx.notify();

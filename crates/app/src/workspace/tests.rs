@@ -22,10 +22,7 @@ use macsftp_core::{
 };
 use macsftp_platform::{AppPaths, read_local_directory};
 use macsftp_sftp::{EventReceiver, RuntimeClient};
-use macsftp_storage::{
-    AppearancePreference, ConfigStore, KeychainError, KeychainStore, ProfileStore,
-    ResidualTempStore,
-};
+use macsftp_storage::{AppearancePreference, ConfigStore, ProfileStore, ResidualTempStore};
 use macsftp_ui::{
     ActiveTheme, DragPreview, FileRowModel, IconName, InputKeyResult, InputState, TextFieldModel,
     Theme, TransferRow, connection_status, copy_name, empty_state, file_row, file_table_header,
@@ -92,10 +89,8 @@ mod tests {
             // Shared globals must exist before `Workspace::new` (which reads
             // them). A fresh `AppResources` per test → fresh tab-id counter
             // starting at 1, keeping each test isolated.
-            cx.set_global(crate::resources::AppResources::load(
-                app_paths,
-                config,
-                macsftp_storage::KeychainStore::new_memory(),
+            cx.set_global(crate::resources::AppResources::load_for_test(
+                app_paths, config,
             ));
             cx.set_global(crate::resources::SharedTransfers::default());
         });
@@ -617,19 +612,15 @@ mod tests {
                 Some("/var/www")
             );
 
-            let AuthMethod::Password { secret_ref } = &profile.auth else {
-                panic!("expected password auth");
-            };
             let loaded = cx
                 .resources()
-                .keychain
-                .load(secret_ref)
-                .expect("keychain load must succeed");
-            assert_eq!(
-                loaded.as_deref(),
-                Some("s3cret"),
-                "password must be stored in Keychain"
-            );
+                .profiles
+                .load_connection_settings(profile.id)
+                .expect("saved profile credential must load");
+            let AuthCredential::Password { password } = &loaded.auth else {
+                panic!("expected password auth");
+            };
+            assert_eq!(password, "s3cret", "password must be stored in Keychain");
 
             let editor = ws
                 .profile_editor
@@ -648,23 +639,21 @@ mod tests {
 
         workspace.update_in(&mut cx, |ws, _window, cx| {
             let profile_id = ProfileId(1);
-            let secret_ref = macsftp_core::SecretRef::keychain_ref(profile_id, "password");
-            match cx.resources().keychain.store(&secret_ref, "original-pass") {
-                Ok(()) => {}
-                Err(error) => panic!("seed keychain: {error}"),
-            }
-            let profile = macsftp_core::ConnectionProfile::new(
-                profile_id,
-                "Work",
-                "old.example.com",
-                "alex",
-                AuthMethod::Password {
-                    secret_ref: secret_ref.clone(),
+            let settings = ConnectionSettings {
+                host: "old.example.com".into(),
+                port: 22,
+                username: "alex".into(),
+                auth: AuthCredential::Password {
+                    password: "original-pass".into(),
                 },
-            );
-            match cx.resources_mut().profiles.save_profile(profile) {
+            };
+            match cx.resources_mut().profiles.save_connection_settings(
+                profile_id,
+                "Work".into(),
+                &settings,
+            ) {
                 Ok(_) => {}
-                Err(error) => panic!("seed profile: {error}"),
+                Err(error) => panic!("seed profile and credential: {error}"),
             }
 
             ws.surface = WorkspaceSurface::Settings;
@@ -690,20 +679,16 @@ mod tests {
                 .find_profile(profile_id)
                 .expect("profile still present");
             assert_eq!(profile.host, "new.example.com");
-            let AuthMethod::Password {
-                secret_ref: saved_ref,
-            } = &profile.auth
-            else {
-                panic!("expected password auth retained");
-            };
             let loaded = cx
                 .resources()
-                .keychain
-                .load(saved_ref)
-                .expect("keychain load must succeed");
+                .profiles
+                .load_connection_settings(profile_id)
+                .expect("saved profile credential must load");
+            let AuthCredential::Password { password } = &loaded.auth else {
+                panic!("expected password auth retained");
+            };
             assert_eq!(
-                loaded.as_deref(),
-                Some("original-pass"),
+                password, "original-pass",
                 "blank password on edit must keep existing Keychain secret"
             );
         });
@@ -746,24 +731,22 @@ mod tests {
         let (workspace, mut cx, _channels) = init_workspace(cx);
 
         let profile_id = ProfileId(1);
-        let secret_ref = macsftp_core::SecretRef::keychain_ref(profile_id, "password");
         workspace.update_in(&mut cx, |ws, window, cx| {
-            match cx.resources().keychain.store(&secret_ref, "hunter2") {
-                Ok(()) => {}
-                Err(error) => panic!("seed keychain: {error}"),
-            }
-            let profile = macsftp_core::ConnectionProfile::new(
-                profile_id,
-                "Work Server",
-                "example.com",
-                "alex",
-                AuthMethod::Password {
-                    secret_ref: secret_ref.clone(),
+            let settings = ConnectionSettings {
+                host: "example.com".into(),
+                port: 22,
+                username: "alex".into(),
+                auth: AuthCredential::Password {
+                    password: "hunter2".into(),
                 },
-            );
-            match cx.resources_mut().profiles.save_profile(profile) {
+            };
+            match cx.resources_mut().profiles.save_connection_settings(
+                profile_id,
+                "Work Server".into(),
+                &settings,
+            ) {
                 Ok(_) => {}
-                Err(error) => panic!("seed profile: {error}"),
+                Err(error) => panic!("seed profile and credential: {error}"),
             }
 
             ws.surface = WorkspaceSurface::Settings;
@@ -777,13 +760,16 @@ mod tests {
                 cx.resources().profiles.find_profile(profile_id).is_some(),
                 "request_delete must not remove the profile yet"
             );
+            let loaded = cx
+                .resources()
+                .profiles
+                .load_connection_settings(profile_id)
+                .expect("profile credential must load");
+            let AuthCredential::Password { password } = &loaded.auth else {
+                panic!("expected password auth");
+            };
             assert_eq!(
-                cx.resources()
-                    .keychain
-                    .load(&secret_ref)
-                    .expect("keychain load")
-                    .as_deref(),
-                Some("hunter2"),
+                password, "hunter2",
                 "request_delete must not remove Keychain secrets yet"
             );
 
@@ -802,15 +788,6 @@ mod tests {
             assert!(
                 cx.resources().profiles.profiles().is_empty(),
                 "confirm must delete the profile from the store"
-            );
-            assert_eq!(
-                cx.resources()
-                    .keychain
-                    .load(&secret_ref)
-                    .expect("keychain load after delete")
-                    .as_deref(),
-                None,
-                "confirm must clear Keychain secret"
             );
             assert!(
                 ws.selected_profile_id.is_none(),
@@ -1645,20 +1622,15 @@ mod tests {
             assert_eq!(profiles.len(), 1, "profile saved");
             let saved = &profiles[0];
             let saved_id = saved.id;
-            let secret_ref = match &saved.auth {
-                AuthMethod::Password { secret_ref } => secret_ref.clone(),
-                other => panic!("expected password auth, got {other:?}"),
-            };
             cx.resources()
-                .keychain
-                .delete(&secret_ref)
+                .profiles
+                .delete_profile_credentials(saved_id)
                 .expect("delete keychain secret for regression");
             assert!(
                 cx.resources()
-                    .keychain
-                    .load(&secret_ref)
-                    .expect("load after delete")
-                    .is_none(),
+                    .profiles
+                    .load_connection_settings(saved_id)
+                    .is_err(),
                 "secret must be gone before open recent"
             );
             cx.resources_mut()
@@ -2863,12 +2835,21 @@ mod tests {
                 Ok(_) => {}
                 Err(error) => panic!("seed home: {error}"),
             }
-            match cx.resources().keychain.store(
-                &macsftp_core::SecretRef::keychain_ref(ProfileId(1), "password"),
-                "secret",
+            let settings = ConnectionSettings {
+                host: "work.example.com".into(),
+                port: 22,
+                username: "alex".into(),
+                auth: AuthCredential::Password {
+                    password: "secret".into(),
+                },
+            };
+            match cx.resources_mut().profiles.save_connection_settings(
+                ProfileId(1),
+                "Work".into(),
+                &settings,
             ) {
-                Ok(()) => {}
-                Err(error) => panic!("seed keychain: {error}"),
+                Ok(_) => {}
+                Err(error) => panic!("seed work credential: {error}"),
             }
 
             workspace.open_connect_form(window, cx);
@@ -3083,18 +3064,16 @@ mod tests {
 
         // The secret was written to the Keychain, not just the profile
         // file (plan §11). The profile on disk holds only the SecretRef.
-        let secret_ref = macsftp_core::SecretRef::keychain_ref(saved_id, "password");
         let stored = workspace.read_with(&cx, |_workspace, cx| {
             cx.resources()
-                .keychain
-                .load(&secret_ref)
+                .profiles
+                .load_connection_settings(saved_id)
                 .expect("load secret")
         });
-        assert_eq!(
-            stored,
-            Some("hunter2".to_string()),
-            "secret stored in Keychain"
-        );
+        let AuthCredential::Password { password } = &stored.auth else {
+            panic!("expected password auth");
+        };
+        assert_eq!(password, "hunter2", "secret stored in Keychain");
 
         // "Use" prefills the form (including the restored secret) and
         // remembers the source profile id.

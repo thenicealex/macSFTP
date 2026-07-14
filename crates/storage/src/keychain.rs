@@ -38,7 +38,7 @@ impl std::error::Error for KeychainError {}
 
 /// Pluggable credential backend. The app uses `OsKeychain`; tests inject
 /// `MemoryKeychain` so they never touch the user's login Keychain.
-pub trait KeychainBackend: Send + Sync {
+trait KeychainBackend: Send + Sync {
     fn store(&self, secret_ref: &SecretRef, secret: &str) -> Result<(), KeychainError>;
     fn load(&self, secret_ref: &SecretRef) -> Result<Option<String>, KeychainError>;
     fn delete(&self, secret_ref: &SecretRef) -> Result<(), KeychainError>;
@@ -125,34 +125,34 @@ impl KeychainBackend for MemoryKeychain {
 
 /// Owned handle to the credential store. Construct with `new_os()` in the
 /// app and `new_memory()` in tests.
-pub struct KeychainStore {
+pub(crate) struct KeychainStore {
     backend: Box<dyn KeychainBackend>,
 }
 
 impl KeychainStore {
     /// Production backend backed by the macOS login Keychain.
-    pub fn new_os() -> Self {
+    pub(crate) fn new_os() -> Self {
         Self {
             backend: Box::new(OsKeychain::new()),
         }
     }
 
     /// In-memory backend for tests; never touches the OS Keychain.
-    pub fn new_memory() -> Self {
+    pub(crate) fn new_memory() -> Self {
         Self {
             backend: Box::new(MemoryKeychain::new()),
         }
     }
 
-    pub fn store(&self, secret_ref: &SecretRef, secret: &str) -> Result<(), KeychainError> {
+    pub(crate) fn store(&self, secret_ref: &SecretRef, secret: &str) -> Result<(), KeychainError> {
         self.backend.store(secret_ref, secret)
     }
 
-    pub fn load(&self, secret_ref: &SecretRef) -> Result<Option<String>, KeychainError> {
+    pub(crate) fn load(&self, secret_ref: &SecretRef) -> Result<Option<String>, KeychainError> {
         self.backend.load(secret_ref)
     }
 
-    pub fn delete(&self, secret_ref: &SecretRef) -> Result<(), KeychainError> {
+    pub(crate) fn delete(&self, secret_ref: &SecretRef) -> Result<(), KeychainError> {
         self.backend.delete(secret_ref)
     }
 }

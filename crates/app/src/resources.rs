@@ -13,9 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use gpui::{App, Global};
 use macsftp_core::{LocalPath, TabId, TransferStore};
 use macsftp_platform::AppPaths;
-use macsftp_storage::{
-    ConfigStore, KeychainStore, ProfileStore, RecentsStore, ResidualTempStore, SessionStore,
-};
+use macsftp_storage::{ConfigStore, ProfileStore, RecentsStore, ResidualTempStore, SessionStore};
 use tracing::warn;
 
 /// The disk-backed stores plus the app paths and the shared tab-id
@@ -25,7 +23,6 @@ use tracing::warn;
 pub struct AppResources {
     pub app_paths: AppPaths,
     pub config: ConfigStore,
-    pub keychain: KeychainStore,
     pub profiles: ProfileStore,
     pub residual_temps: ResidualTempStore,
     /// Last-window tab layout (host/user/paths). No secrets.
@@ -43,11 +40,24 @@ impl Global for AppResources {}
 
 impl AppResources {
     /// Load (or default-initialize) every store from `app_paths`. `config`
-    /// and `keychain` are passed in because `main()` needs `config` earlier
-    /// (to pick the initial theme) and tests inject a different `keychain`
-    /// backend (`new_memory()` vs `new_os()`).
-    pub fn load(app_paths: AppPaths, config: ConfigStore, keychain: KeychainStore) -> Self {
+    /// is passed in because `main()` needs it earlier to pick the initial
+    /// theme. ProfileStore owns the production Keychain boundary.
+    pub fn load(app_paths: AppPaths, config: ConfigStore) -> Self {
         let profiles = ProfileStore::open_or_empty(app_paths.profiles_file.clone());
+        Self::load_with_profiles(app_paths, config, profiles)
+    }
+
+    #[cfg(test)]
+    pub fn load_for_test(app_paths: AppPaths, config: ConfigStore) -> Self {
+        let profiles = ProfileStore::open_or_empty_memory(app_paths.profiles_file.clone());
+        Self::load_with_profiles(app_paths, config, profiles)
+    }
+
+    fn load_with_profiles(
+        app_paths: AppPaths,
+        config: ConfigStore,
+        profiles: ProfileStore,
+    ) -> Self {
         remove_legacy_transfer_history(&app_paths.legacy_transfer_history_file);
         let residual_temps = reconcile_local_residual_temps(ResidualTempStore::open_or_empty(
             app_paths.residual_temp_file.clone(),
@@ -57,7 +67,6 @@ impl AppResources {
         Self {
             app_paths,
             config,
-            keychain,
             profiles,
             residual_temps,
             session,

@@ -137,7 +137,7 @@ macSFTP 已从「可连接的文件浏览器原型」演进为 **可当主力使
 | --- | --- |
 | **交互式 §15 手测签字** | 720×480、10k 目录、多 transfer、多 tab 真实跑一遍并更新 audit |
 | **Verify gate 常绿** | 保持 `fmt` + `clippy -D warnings` + test 在 CI 必过 |
-| Keychain / 双保存路径 | Settings `save_profile_editor` 与 Connect `save_current_profile` 抽取共享逻辑，防漂移 |
+| Keychain / 双保存路径 | **已收口：** Connect 与 Settings 均通过 storage `ProfileStore` 事务保存；app 不直接访问 Keychain |
 | 集成测试 | 真实 sshd 路径在 CI 可跑时默认开；无 Docker skip 信息已有则保持清晰 |
 | 陈旧事件 / multi-window session | 多窗口写 `session.json` last-writer 已知限制；可选 tabs-most 或仅主窗口写 |
 
@@ -168,7 +168,7 @@ macSFTP 已从「可连接的文件浏览器原型」演进为 **可当主力使
 1. ~~**P0 — 工程守门**~~ **已完成（2026-07-14）：** `scripts/check.sh` 全绿（fmt / test / clippy `-D warnings`）。  
 2. ~~**P1 — Connect/Profile 小 polish**~~ **已完成（2026-07-14）：** picker 行标签、Enter 选首条、Settings 草稿丢弃、删除后焦点、filter 清空。  
 3. **P1 — 手测签字：** 按 phase6 audit 手测清单跑一轮，把 accepted risk 收敛为 pass 或具体 bug 单。  
-4. **P2 — 共享 profile 保存路径**，降低 Keychain 逻辑分叉。  
+4. ~~**P2 — 共享 profile 保存路径**~~ **已完成（2026-07-14）：** storage 统一事务、失败回滚、orphan 清理 warning。
 5. **P2 — 按用户真实痛点** 开下一专项（例如传输体验、批量操作、书签），**不要**再平行开大而全的「阶段 7 杂烩」。
 
 ---
@@ -208,3 +208,4 @@ macSFTP 已从「可连接的文件浏览器原型」演进为 **可当主力使
 | 2026-07-14 | P0：`scripts/check.sh` 全绿；core 重复 `#[test]`、sftp clippy、app lint 清理 |
 | 2026-07-14 | P1：Connect/Profile polish（行标签、Enter、草稿、焦点、filter） |
 | 2026-07-14 | P0：移除无产品入口的 Transfer History catalog/retry 路径；drawer 仅保留进程内分组 |
+| 2026-07-14 | 安全边界：ProfileStore 统一 profiles.json + Keychain 事务，app 移除 Keychain 直连 |

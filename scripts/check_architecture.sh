@@ -39,3 +39,13 @@ if [[ -n "$broad_import_allows" ]]; then
     echo "$broad_import_allows" >&2
     exit 1
 fi
+
+direct_keychain_access="$(
+    find crates/app/src -type f -name '*.rs' ! -name 'tests.rs' \
+        -exec grep -EH 'KeychainStore|\.keychain' {} + || true
+)"
+if [[ -n "$direct_keychain_access" ]]; then
+    echo "app must use the storage profile boundary instead of Keychain directly:" >&2
+    echo "$direct_keychain_access" >&2
+    exit 1
+fi

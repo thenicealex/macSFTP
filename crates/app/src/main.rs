@@ -13,7 +13,7 @@ use gpui::{
 use macsftp_core::RuntimeBridgeConfig;
 use macsftp_platform::AppPaths;
 use macsftp_sftp::{HostTrustConfig, RuntimeController, SessionBackend};
-use macsftp_storage::{AppearancePreference, ConfigStore, KeychainStore};
+use macsftp_storage::{AppearancePreference, ConfigStore};
 use macsftp_ui::Theme;
 use std::path::Path;
 use tracing::{error, warn};
@@ -147,11 +147,7 @@ fn main() {
 
         // Shared, process-wide app state: one instance per process, read
         // and written by every window (Cmd+N). Set before any window opens.
-        cx.set_global(AppResources::load(
-            app_paths,
-            config_store,
-            KeychainStore::new_os(),
-        ));
+        cx.set_global(AppResources::load(app_paths, config_store));
         cx.set_global(SharedTransfers::default());
 
         // Cmd+N (and File > New Window) opens another independent window.
