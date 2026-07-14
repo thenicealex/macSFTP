@@ -16,7 +16,7 @@
 - 主布局齐全：tab bar + 左右 pane + transfer drawer + status bar（drawer 可拖拽调高）。
 - 文件列表**已虚拟化**（`uniform_list`），支持 10k entries。
 - 拖拽：local↔remote 上传/下载（`DragPreview` + drop handlers）。
-- 传输：分组（active/queued/completed/failed）、cancel/retry、planning 流式、history 持久化 + 重试；**真实速度/ETA**。
+- 传输：进程内分组（active/queued/completed/failed）、cancel/retry、planning 流式；**真实速度/ETA**。退出后不恢复传输目录。
 - 连接：connect form（**紧凑 profile picker**）、host-key modal、冲突 modal（含 apply-to-all）、Keychain + **Settings Profiles CRUD**、recents。
 - 文件操作：删除/重命名/新建文件夹、右键菜单、行内编辑。
 - 导航：type-to-filter、back/forward、面包屑、Go to Path、隐藏文件、列排序。

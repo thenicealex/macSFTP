@@ -269,7 +269,7 @@ height = drawer_height (clamped)
 3. 高度始终夹在 min 与 max 之间；窗口变矮时自动合法化。
 4. 开关 drawer 不丢会话内高度。
 5. Header + 汇总在列表滚动时保持可见。
-6. 不改变传输业务语义（cancel/retry/conflict/history）。
+6. 不改变传输业务语义（cancel/retry/conflict；无跨启动 History）。
 7. 相关单元测试通过；交付说明含视觉验证方式（截图或步骤）。
 
 ---

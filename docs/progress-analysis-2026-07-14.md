@@ -92,7 +92,7 @@ macSFTP 已从「可连接的文件浏览器原型」演进为 **可当主力使
 
 - Drawer 高度可拖拽调整、双击复位。  
 - Sticky header、会话内高度状态。  
-- 相关稳定性修复（resize 起止、session 结束清 history 等）。
+- 相关稳定性修复（resize 起止、session 结束清理拖拽状态等）。
 
 文档：`docs/plans/2026-07-14-transfer-drawer-ux-{design,impl}.md`。
 
