@@ -152,9 +152,6 @@ pub struct Workspace {
     tab_nav: HashMap<TabId, TabNavState>,
     /// Connection meta restored from `session.json` (form prefill / path).
     restored_targets: HashMap<TabId, RestoredTabTarget>,
-    /// Guards against double-flushing history if the quit hook fires
-    /// more than once.
-    transfer_history_flushed: bool,
     /// Guards against double-flushing session layout on quit.
     session_flushed: bool,
     _appearance_subscription: Subscription,
@@ -252,14 +249,12 @@ impl Workspace {
             tab_settings: HashMap::new(),
             tab_nav: HashMap::new(),
             restored_targets: HashMap::new(),
-            transfer_history_flushed: false,
             session_flushed: false,
             _appearance_subscription: appearance_subscription,
             _event_drain: event_drain,
         };
-        // Persist transfer history and session layout when the app quits.
+        // Persist session layout when the app quits.
         cx.on_app_quit(|workspace, cx| {
-            workspace.flush_transfer_history(cx);
             workspace.flush_session(cx);
             async {}
         })

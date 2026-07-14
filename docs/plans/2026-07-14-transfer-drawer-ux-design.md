@@ -10,14 +10,14 @@
 
 ## 决策摘要（已确认）
 
-1. **范围：** 可拖拽调高 + 现有布局打磨；**不**重做信息架构（仍为 Active / Queued / Completed / Failed / History）。
+1. **范围：** 可拖拽调高 + 现有布局打磨；**不**重做信息架构（仍为 Active / Queued / Completed / Failed）。
 2. **记忆：** 高度与开合仅**本窗口会话内**（`Workspace` 字段）；不写 `AppConfig`。
 3. **拖拽：** 顶部手柄连续调高；夹在 min–max 之间；**拖到很矮不自动关闭**。
 4. **双击：** 手柄双击恢复默认高度。
 5. **关闭：** 仍用 ⌘J / status bar（`ShowTransferDrawer`）；本轮 header **不**加关闭按钮。
 6. **架构：** 方案 1 — 状态与逻辑留在 `Workspace`；不抽通用 `VerticalResizeHandle`（YAGNI）。
 7. **打磨 P0：** sticky header、列表独立滚动、手柄可见/hover/cursor、空态略清晰、合理 min/max。
-8. **本轮不做：** collapse 按钮、History 可折叠、行虚拟化、clear completed、进度动画。
+8. **本轮不做：** collapse 按钮、行虚拟化、clear completed、进度动画。
 
 ---
 
@@ -41,7 +41,7 @@
 - 拖到最小吸附关闭 / 半展开中间态。
 - 多档预设（25% / 50% / 最大化）。
 - 通用 splitter 组件或左右 pane 分栏 resize。
-- 重做 transfer row 信息架构或 History 产品逻辑。
+- 重做 transfer row 信息架构；跨启动 History 不属于产品能力。
 - 列表虚拟化（本轮列表量仍可控；P2）。
 
 ---
@@ -53,7 +53,7 @@
 | 开合 | `Workspace.drawer_open: bool`，默认 `true`；`ShowTransferDrawer` 与 status bar 点击 toggle |
 | 高度 | `render_transfer_drawer` 固定 `max_h(px(240.0))`，**不可调** |
 | 滚动 | **整块 drawer**（含 header）`overflow_y_scroll`，header 会滚走 |
-| 分组 | Active / Queued 常开；Completed / Failed 可折叠；History 常开列表 |
+| 分组 | Active / Queued 常开；Completed / Failed 可折叠 |
 | 汇总 | Header 文案：`N active · N queued · N done · N failed` + 聚合速度/ETA |
 | 自动打开 | 发起上传/下载/重试等路径会 `drawer_open = true` |
 | 持久化 | 高度与 open **均无** `AppConfig` 字段 |
@@ -123,14 +123,13 @@ Drawer 内部改为固定高度 flex 列（**不再**整块 `max_h` + 整块滚�
 ├─────────────────────────────────────────┤
 │ scroll body                             │  flex_1 min_h_0 overflow_y_scroll
 │   Active / Queued / Completed / Failed  │
-│   History                               │
 │   empty: "No transfers"                 │
 └─────────────────────────────────────────┘
 height = drawer_height (clamped)
 ```
 
 - Drawer 根：`h(drawer_height)` + `flex_none` + `min_h_0`；**去掉**根级 `overflow_y_scroll`。
-- 分组、row 渲染、history、cancel/retry **复用**现有 `render_transfer_job` / `render_history_record` / section toggle。
+- 分组、row 渲染、cancel/retry **复用**现有 `render_transfer_job` / section toggle。
 - Status bar 仍在 drawer 下方，不参与 drawer 高度。
 
 ---
@@ -186,8 +185,7 @@ height = drawer_height (clamped)
 ### P1（本轮明确不做，可后续）
 
 - Header 显式 collapse / chevron 关闭按钮。
-- History 可折叠（与 Completed/Failed 一致）。
-- Clear completed / 清空 history 入口。
+- Clear completed 入口。
 
 ### P2（不做）
 

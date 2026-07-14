@@ -4,9 +4,8 @@ use serde::{Deserialize, Serialize};
 use super::StorageError;
 
 /// On-disk envelope for residual temporary-transfer files (plan M5/M6
-/// residual). Mirrors `TransferHistoryFile`: a versioned wrapper around
-/// the record list so the file format can evolve without breaking older
-/// writes.
+/// residual). The versioned wrapper lets the record format evolve without
+/// breaking older writes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResidualTempFile {
     pub version: u32,

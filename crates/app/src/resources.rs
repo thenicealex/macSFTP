@@ -11,11 +11,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui::{App, Global};
-use macsftp_core::{TabId, TransferStore};
+use macsftp_core::{LocalPath, TabId, TransferStore};
 use macsftp_platform::AppPaths;
 use macsftp_storage::{
     ConfigStore, KeychainStore, ProfileStore, RecentsStore, ResidualTempStore, SessionStore,
-    TransferHistoryStore,
 };
 use tracing::warn;
 
@@ -28,7 +27,6 @@ pub struct AppResources {
     pub config: ConfigStore,
     pub keychain: KeychainStore,
     pub profiles: ProfileStore,
-    pub transfer_history: TransferHistoryStore,
     pub residual_temps: ResidualTempStore,
     /// Last-window tab layout (host/user/paths). No secrets.
     pub session: SessionStore,
@@ -50,9 +48,7 @@ impl AppResources {
     /// backend (`new_memory()` vs `new_os()`).
     pub fn load(app_paths: AppPaths, config: ConfigStore, keychain: KeychainStore) -> Self {
         let profiles = ProfileStore::open_or_empty(app_paths.profiles_file.clone());
-        // Session-scoped: never restore a cross-launch catalog; purge residual file.
-        let transfer_history =
-            TransferHistoryStore::open_session(app_paths.transfer_history_file.clone());
+        remove_legacy_transfer_history(&app_paths.legacy_transfer_history_file);
         let residual_temps = reconcile_local_residual_temps(ResidualTempStore::open_or_empty(
             app_paths.residual_temp_file.clone(),
         ));
@@ -63,7 +59,6 @@ impl AppResources {
             config,
             keychain,
             profiles,
-            transfer_history,
             residual_temps,
             session,
             recents,
@@ -74,6 +69,16 @@ impl AppResources {
     /// Allocate the next process-unique tab id.
     pub fn next_tab_id(&self) -> TabId {
         TabId(self.next_tab_id.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
+fn remove_legacy_transfer_history(path: &LocalPath) {
+    match std::fs::remove_file(path.as_str()) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            warn!(path = %path.as_str(), error = %error, "could not remove legacy transfer history");
+        }
     }
 }
 

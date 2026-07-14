@@ -17,22 +17,20 @@ use macsftp_core::{
     ConflictRequestId, ConnectCommand, ConnectionProfile, ConnectionSettings, ConnectionState,
     DisconnectReason, EntryPath, ErrorCode, FileKind, HostKeyDecisionCommand, HostKeyPrompt,
     LocalPath, ModalRequest, ModalRequestId, ProfileId, RemotePath, SecretRef, TabId, TabState,
-    Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferHistoryId,
-    TransferHistoryRecord, TransferHistoryStatus, TransferJob, TransferState, TrustRequestId,
-    UserFacingError, sort_entries,
+    Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferJob,
+    TransferState, TrustRequestId, UserFacingError, sort_entries,
 };
 use macsftp_platform::{AppPaths, read_local_directory};
 use macsftp_sftp::{EventReceiver, RuntimeClient};
 use macsftp_storage::{
     AppearancePreference, ConfigStore, KeychainError, KeychainStore, ProfileStore,
-    ResidualTempStore, TransferHistoryStore,
+    ResidualTempStore,
 };
 use macsftp_ui::{
     ActiveTheme, DragPreview, FileRowModel, IconName, InputKeyResult, InputState, TextFieldModel,
     Theme, TransferRow, connection_status, copy_name, empty_state, file_row, file_table_header,
     format_size, format_timestamp, icon, icon_button, section_header_static, tab, text_button,
-    text_field, text_tooltip, transfer_history_detail, transfer_history_title, transfer_row,
-    transfer_title,
+    text_field, text_tooltip, transfer_row, transfer_title,
 };
 
 use tracing::{debug, warn};
@@ -52,9 +50,8 @@ mod tests {
         ProfileId, RemoteDirSnapshot, RemoteEntry, RemoteEventScope, RemoteOperationFailure,
         RemotePath, RemoteScoped, RuntimeBridgeConfig, SessionId, SortDirection, TabConnected,
         TabDisconnected, TabId, Timestamp, TransferConflictPrompt, TransferDirection,
-        TransferEndpoint, TransferHistoryRecord, TransferHistoryStatus, TransferId, TransferJob,
-        TransferPlanId, TransferPlanProgress, TransferPlanSnapshot, TransferPlanState,
-        TransferState, TrustRequestId, UserFacingError,
+        TransferEndpoint, TransferId, TransferJob, TransferPlanId, TransferPlanProgress,
+        TransferPlanSnapshot, TransferPlanState, TransferState, TrustRequestId, UserFacingError,
     };
     use macsftp_sftp::{BridgeChannels, EventReceiver, RuntimeClient};
     use macsftp_storage::{AppearancePreference, SessionFile, SessionStore, SessionTabSnapshot};
@@ -3201,177 +3198,6 @@ mod tests {
         assert!(matches!(command, AppCommand::CloseTab { tab_id: TabId(1) }));
         workspace.read_with(&cx, |workspace, _| {
             assert!(workspace.state.tabs.tabs.is_empty());
-        });
-    }
-
-    #[gpui::test]
-    fn flush_clears_transfer_history_on_session_end(cx: &mut TestAppContext) {
-        let (workspace, mut cx, channels) = init_workspace(cx);
-        let _ = channels.command_rx.try_recv();
-
-        // Seed a history record as older builds would leave on disk.
-        workspace.update_in(&mut cx, |_workspace, _window, cx| {
-            let now = macsftp_core::Timestamp::unix_epoch();
-            let id = cx.resources_mut().transfer_history.allocate_id();
-            cx.resources_mut()
-                .transfer_history
-                .append(vec![TransferHistoryRecord {
-                    id,
-                    profile_id: None,
-                    direction: TransferDirection::Upload,
-                    sources: vec![TransferEndpoint::Local(LocalPath::new("/tmp/report.pdf"))],
-                    destination: TransferEndpoint::Remote(RemotePath::new("/srv/report.pdf")),
-                    metadata_policy: MetadataPolicy::default(),
-                    conflict_policy: ConflictPolicy::Ask,
-                    status: TransferHistoryStatus::Completed,
-                    started_at: now,
-                    last_updated: now,
-                }]);
-            assert_eq!(cx.resources().transfer_history.records().len(), 1);
-        });
-
-        // Quit path: session-scoped policy clears history instead of appending plans.
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            workspace.flush_transfer_history(cx);
-        });
-
-        workspace.read_with(&cx, |_workspace, cx| {
-            assert!(
-                cx.resources().transfer_history.records().is_empty(),
-                "history must be empty after session flush"
-            );
-        });
-
-        let reopened = macsftp_storage::TransferHistoryStore::open_or_empty(
-            workspace.read_with(&cx, |_workspace, cx| {
-                cx.resources().transfer_history.path().clone()
-            }),
-        );
-        assert!(
-            reopened.records().is_empty(),
-            "cleared history must persist empty on disk"
-        );
-
-        // Guard still prevents a second pass from reintroducing records.
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            workspace.flush_transfer_history(cx);
-        });
-        workspace.read_with(&cx, |_workspace, cx| {
-            assert!(cx.resources().transfer_history.records().is_empty());
-        });
-    }
-
-    #[gpui::test]
-    fn retry_history_transfer_rebuilds_command_for_connected_tab(cx: &mut TestAppContext) {
-        let (workspace, mut cx, channels) = init_workspace(cx);
-        let _ = channels.command_rx.try_recv();
-
-        // Establish a connected active tab by mutating connection state
-        // directly (the host-key handshake is exercised by other tests).
-        workspace.update_in(&mut cx, |workspace, _window, _cx| {
-            let active_tab_id = workspace
-                .state
-                .tabs
-                .active_tab_id
-                .expect("active tab exists");
-            let tab = workspace
-                .state
-                .tabs
-                .find_tab_mut(active_tab_id)
-                .expect("active tab exists");
-            tab.profile_id = Some(ProfileId(5));
-            tab.connection = ConnectionState::Connected {
-                session_id: SessionId(2),
-                session_epoch: 3,
-                connected_at: Timestamp::unix_epoch(),
-            };
-        });
-
-        // Seed a retryable (unfinished) history record.
-        let record_id = macsftp_core::TransferHistoryId(11);
-        workspace.update_in(&mut cx, |_workspace, _window, cx| {
-            cx.resources_mut()
-                .transfer_history
-                .append(vec![TransferHistoryRecord {
-                    id: record_id,
-                    profile_id: None,
-                    direction: TransferDirection::Download,
-                    sources: vec![TransferEndpoint::Remote(RemotePath::new("/srv/a.txt"))],
-                    destination: TransferEndpoint::Local(LocalPath::new("/tmp/a.txt")),
-                    metadata_policy: MetadataPolicy::default(),
-                    conflict_policy: ConflictPolicy::Ask,
-                    status: TransferHistoryStatus::Unfinished,
-                    started_at: Timestamp::unix_epoch(),
-                    last_updated: Timestamp::unix_epoch(),
-                }]);
-        });
-
-        let removed = workspace.update_in(&mut cx, |workspace, _window, cx| {
-            workspace.retry_history_transfer(record_id, cx)
-        });
-        assert!(removed, "retry should enqueue a transfer");
-
-        let command = channels
-            .command_rx
-            .try_recv()
-            .expect("a StartTransfer command must be enqueued");
-        match command {
-            AppCommand::StartTransfer(cmd) => {
-                assert_eq!(cmd.direction, TransferDirection::Download);
-                assert_eq!(
-                    cmd.sources,
-                    vec![TransferEndpoint::Remote(RemotePath::new("/srv/a.txt"))]
-                );
-                assert_eq!(
-                    cmd.destination,
-                    TransferEndpoint::Local(LocalPath::new("/tmp/a.txt"))
-                );
-                // Rebuilt against the live connected tab.
-                assert_eq!(cmd.tab_id, TabId(1));
-                assert_eq!(cmd.session_epoch, 3);
-                assert_eq!(cmd.profile_id, ProfileId(5));
-            }
-            other => panic!("expected StartTransfer, got {other:?}"),
-        }
-
-        // The record is removed from history once retried.
-        workspace.read_with(&cx, |_workspace, cx| {
-            assert!(cx.resources().transfer_history.find(record_id).is_none());
-        });
-    }
-
-    #[gpui::test]
-    fn retry_history_transfer_requires_connected_tab(cx: &mut TestAppContext) {
-        let (workspace, mut cx, channels) = init_workspace(cx);
-        let _ = channels.command_rx.try_recv();
-
-        let record_id = macsftp_core::TransferHistoryId(12);
-        workspace.update_in(&mut cx, |_workspace, _window, cx| {
-            cx.resources_mut()
-                .transfer_history
-                .append(vec![TransferHistoryRecord {
-                    id: record_id,
-                    profile_id: None,
-                    direction: TransferDirection::Download,
-                    sources: vec![TransferEndpoint::Remote(RemotePath::new("/srv/a.txt"))],
-                    destination: TransferEndpoint::Local(LocalPath::new("/tmp/a.txt")),
-                    metadata_policy: MetadataPolicy::default(),
-                    conflict_policy: ConflictPolicy::Ask,
-                    status: TransferHistoryStatus::Unfinished,
-                    started_at: Timestamp::unix_epoch(),
-                    last_updated: Timestamp::unix_epoch(),
-                }]);
-        });
-
-        // No connected tab → retry is refused and nothing is enqueued.
-        let enqueued = workspace.update_in(&mut cx, |workspace, _window, cx| {
-            workspace.retry_history_transfer(record_id, cx)
-        });
-        assert!(!enqueued);
-        assert!(channels.command_rx.try_recv().is_err());
-        // Record remains so the user can retry later.
-        workspace.read_with(&cx, |_workspace, cx| {
-            assert!(cx.resources().transfer_history.find(record_id).is_some());
         });
     }
 

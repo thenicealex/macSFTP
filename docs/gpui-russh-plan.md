@@ -19,7 +19,7 @@
 - session 模型：浏览 session 跟随 tab；传输 session 由全局 TransferManager 独立管理。
 - 冲突处理：弹出 UI，让用户选择覆盖、跳过、重命名。
 - 元数据：保留权限、mtime、symlink。
-- 关闭 app 策略：MVP 取消运行中的传输，并在下次启动展示未完成 history。
+- 关闭 app 策略：运行中的传输随进程结束；不跨启动恢复传输目录或任务。
 - 不做：目录同步、远程编辑、App Store、签名公证、S3/WebDAV/FTP。
 
 ### 主要取舍
@@ -1334,7 +1334,7 @@ remote readlink
 
 > **2026-07-13 更新 —— 多窗口已交付（post-MVP）。** 上述三点担忧均已解决：
 > - **event routing**：`RuntimeController` 内新增一个 fan-out 任务，把内部 flume 事件流转发到 `tokio::sync::broadcast`，每个窗口 `.subscribe()` 一份完整事件流；跨窗口的 tab 事件由既有的 `TabStore::accepts_remote_event`（按 `tab_id` 过滤）天然分流，无需新增过滤逻辑。
-> - **AppModel**：`TransferStore` 与五个磁盘存储（config/profiles/keychain/transfer_history/residual_temps）+ `AppPaths` + tab-id 计数器提升为进程级 GPUI global（`SharedTransfers` / `AppResources`），所有窗口共享同一实例；tab 集合、模态、焦点仍为每窗口私有。
+> - **AppModel**：`TransferStore` 与六个持久化资源（config/profiles/keychain/residual_temps/session/recents）+ `AppPaths` + tab-id 计数器提升为进程级 GPUI global（`SharedTransfers` / `AppResources`），所有窗口共享同一实例；tab 集合、模态、焦点仍为每窗口私有。
 > - **modal ownership**：host-key 模态携带 `tab_id`，只在拥有该 tab 的窗口弹出，保持每窗口私有。
 > - `TabId` 由每实例 `max+1` 改为共享 `Arc<AtomicU64>`，跨窗口绝不冲突（runtime 的 session 注册表按 `TabId` 索引）。
 > - 关闭全部窗口后 app 常驻（原生 macOS 行为），Cmd+N / Dock 图标可重新开窗口。
@@ -1607,11 +1607,9 @@ Profile 结构预留：
 
 - Drawer 只展示进程内 `TransferStore` 的 Active / Queued / Completed / Failed。
 - **没有**跨启动 History 分区；退出后不恢复未完成/已完成清单。
-- `TransferHistoryStore` 仅会话内存袋：启动 `open_session` 清空并删除残留
-  `transfer_history.json`；退出 `clear_and_persist` 写空文件。
-- `TransferHistoryRecord` + `retry_history_transfer` 保留给测试与命令重建
-  （`to_start_command` 用当前 tab 的 `session_epoch`/`profile_id`），**不**再
-  从 plan snapshot 写入磁盘、**不**做 7 天/100 条 prune 目录策略。
+- 不保留 `TransferHistoryStore`、history record、retry command rebuild 或仅供测试的目录模型。
+- 启动时 best-effort 删除旧版本遗留的 `transfer_history.json`；该路径只用于迁移清理，
+  不会读取或恢复其中的任务。
 
 ## 19. 测试计划
 

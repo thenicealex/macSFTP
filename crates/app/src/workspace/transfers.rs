@@ -14,22 +14,20 @@ use macsftp_core::{
     ConflictRequestId, ConnectCommand, ConnectionProfile, ConnectionSettings, ConnectionState,
     DisconnectReason, EntryPath, ErrorCode, FileKind, HostKeyDecisionCommand, HostKeyPrompt,
     LocalPath, ModalRequest, ModalRequestId, ProfileId, RemotePath, SecretRef, TabId, TabState,
-    Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferHistoryId,
-    TransferHistoryRecord, TransferHistoryStatus, TransferJob, TransferState, TrustRequestId,
-    UserFacingError, sort_entries,
+    Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferJob,
+    TransferState, TrustRequestId, UserFacingError, sort_entries,
 };
 use macsftp_platform::{AppPaths, read_local_directory};
 use macsftp_sftp::{EventReceiver, RuntimeClient};
 use macsftp_storage::{
     AppearancePreference, ConfigStore, KeychainError, KeychainStore, ProfileStore,
-    ResidualTempStore, TransferHistoryStore,
+    ResidualTempStore,
 };
 use macsftp_ui::{
     ActiveTheme, DragPreview, FileRowModel, IconName, InputKeyResult, InputState, TextFieldModel,
     Theme, TransferRow, connection_status, copy_name, empty_state, file_row, file_table_header,
     format_size, format_timestamp, icon, icon_button, section_header_static, tab, text_button,
-    text_field, text_tooltip, transfer_history_detail, transfer_history_title, transfer_row,
-    transfer_title,
+    text_field, text_tooltip, transfer_row, transfer_title,
 };
 
 use tracing::{debug, warn};
@@ -274,17 +272,6 @@ impl crate::workspace::Workspace {
             };
         }
     }
-    pub(crate) fn flush_transfer_history(&mut self, cx: &mut Context<Self>) {
-        if self.transfer_history_flushed {
-            return;
-        }
-        // Session end: empty memory + residual file. Live jobs already die
-        // with TransferStore; there is no cross-session history catalog.
-        if let Err(error) = cx.resources_mut().transfer_history.clear_and_persist() {
-            warn!(error = %error, "could not clear transfer history on quit");
-        }
-        self.transfer_history_flushed = true;
-    }
     pub(crate) fn clean_remote_residual_temps(&mut self, tab_id: TabId, cx: &mut Context<Self>) {
         let connection_key = {
             let Some(tab) = self.state.tabs.find_tab(tab_id) else {
@@ -314,36 +301,5 @@ impl crate::workspace::Workspace {
                 cx,
             );
         }
-    }
-    pub(crate) fn retry_history_transfer(
-        &mut self,
-        record_id: TransferHistoryId,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let Some(record) = cx.resources().transfer_history.find(record_id).cloned() else {
-            return false;
-        };
-        let Some(tab) = self.active_tab() else {
-            self.status_message = Some("Open a connection to retry a transfer".into());
-            cx.notify();
-            return false;
-        };
-        let Some((session_epoch, profile_id)) = connected_transfer_session(tab) else {
-            self.status_message = Some("Connect before retrying a transfer".into());
-            cx.notify();
-            return false;
-        };
-        let command = record.to_start_command(tab.id, session_epoch, profile_id);
-        let enqueued = self.send_command(AppCommand::StartTransfer(command), cx);
-        if enqueued {
-            cx.resources_mut().transfer_history.remove(record_id);
-            if let Err(error) = cx.resources_mut().transfer_history.save() {
-                warn!(error = %error, "could not update transfer history after retry");
-            }
-            self.drawer_open = true;
-            self.status_message = Some("Retrying transfer…".into());
-            cx.notify();
-        }
-        enqueued
     }
 }

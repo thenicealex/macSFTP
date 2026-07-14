@@ -14,22 +14,20 @@ use macsftp_core::{
     ConflictRequestId, ConnectCommand, ConnectionProfile, ConnectionSettings, ConnectionState,
     DisconnectReason, EntryPath, ErrorCode, FileKind, HostKeyDecisionCommand, HostKeyPrompt,
     LocalPath, ModalRequest, ModalRequestId, ProfileId, RemotePath, SecretRef, TabId, TabState,
-    Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferHistoryId,
-    TransferHistoryRecord, TransferHistoryStatus, TransferJob, TransferState, TrustRequestId,
-    UserFacingError, sort_entries,
+    Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferJob,
+    TransferState, TrustRequestId, UserFacingError, sort_entries,
 };
 use macsftp_platform::{AppPaths, read_local_directory};
 use macsftp_sftp::{EventReceiver, RuntimeClient};
 use macsftp_storage::{
     AppearancePreference, ConfigStore, KeychainError, KeychainStore, ProfileStore,
-    ResidualTempStore, TransferHistoryStore,
+    ResidualTempStore,
 };
 use macsftp_ui::{
     ActiveTheme, DragPreview, FileRowModel, IconName, InputKeyResult, InputState, TextFieldModel,
     Theme, TransferRow, connection_status, copy_name, empty_state, file_row, file_table_header,
     format_size, format_timestamp, icon, icon_button, section_header_static, tab, text_button,
-    text_field, text_tooltip, transfer_history_detail, transfer_history_title, transfer_row,
-    transfer_title,
+    text_field, text_tooltip, transfer_row, transfer_title,
 };
 
 use tracing::{debug, warn};

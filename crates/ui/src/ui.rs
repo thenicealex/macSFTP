@@ -21,8 +21,7 @@ pub use tab::{Tab, tab};
 pub use theme::{ActiveTheme, Appearance, Theme, ThemeColors, ThemeFonts, ThemeSizes};
 pub use transfer_row::{TransferRow, transfer_row};
 pub use workspace_widgets::{
-    DragPreview, connection_status, copy_name, section_header_static, transfer_history_detail,
-    transfer_history_title, transfer_title,
+    DragPreview, connection_status, copy_name, section_header_static, transfer_title,
 };
 
 pub fn crate_name() -> &'static str {

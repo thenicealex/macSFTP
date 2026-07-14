@@ -9,11 +9,6 @@ pub use keychain::{KeychainError, KeychainStore};
 pub mod config;
 pub use config::{AppConfig, AppearancePreference, ConfigError, ConfigStore};
 
-/// Session-scoped transfer-history bag + residual file wipe (not a
-/// cross-launch catalog).
-pub mod transfer_history;
-pub use transfer_history::TransferHistoryStore;
-
 pub mod residual_temp;
 pub use residual_temp::ResidualTempStore;
 

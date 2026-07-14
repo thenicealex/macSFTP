@@ -1,7 +1,9 @@
 # macSFTP — 项目进展分析（2026-07-14）
 
-**Date:** 2026-07-14 GMT+8  
-**基准：** `docs/ux-improvement-plan.md`、`docs/ui-ux-guidelines.md`、`docs/plans/*`、当前 `master` 提交历史与 `cargo test -p macsftp-app --bin macsftp`（**133** 通过）。  
+**Date:** 2026-07-14 GMT+8
+
+**基准：** `docs/ux-improvement-plan.md`、`docs/ui-ux-guidelines.md`、`docs/plans/*`、当前 `master` 提交历史与 `cargo test -p macsftp-app --bin macsftp`（**132** 通过）。
+
 **范围：** 产品能力、UX 阶段交付、近期专项、已知缺口与改进建议。
 
 > 早期快照：`docs/progress-analysis-2026-07-12.md`、`docs/progress-analysis-2026-07-13.md`、`docs/progress-analysis-2026-07-13-multiwindow.md`。以**本文**为 UX 收口后的最新总览。
@@ -21,7 +23,7 @@ macSFTP 已从「可连接的文件浏览器原型」演进为 **可当主力使
 | --- | --- | --- |
 | 模型 / 状态机 | `macsftp-core` | Tab/Session、命令与事件、传输计划、错误模型 |
 | 网络 / SFTP | `macsftp-sftp` | russh + actor、Connection Pool、传输与 FS 操作 |
-| 存储 | `macsftp-storage` | profiles、config、Keychain、session、recents、transfer history |
+| 存储 | `macsftp-storage` | profiles、config、Keychain、session、recents、residual temp records |
 | 平台 | `macsftp-platform` | AppPaths、本地 FS |
 | UI 组件 | `macsftp-ui` | Theme、列表、按钮、tooltip、transfer row |
 | 应用 | `macsftp-app` | GPUI 窗口、Workspace 模块化、桥接 Runtime |
@@ -106,7 +108,7 @@ macSFTP 已从「可连接的文件浏览器原型」演进为 **可当主力使
 
 | 项 | 现状 |
 | --- | --- |
-| `macsftp-app` 二进制测试 | **133 passed**（2026-07-14 实测） |
+| `macsftp-app` 二进制测试 | **132 passed**（2026-07-14 实测；移除 3 个无产品入口的 History-only 测试后） |
 | 覆盖面 | core/sftp/storage/app 分层均有；gpui 集成测在 app；`real_session` 集成测 21 |
 | Phase 6 性能 | **10k visible indices 单元 smoke**；完整 10k GUI + 4 transfer 手测 **未系统签字** |
 | **Verify gate** | **`bash scripts/check.sh` 全绿**（fmt + workspace test + clippy `-D warnings`，2026-07-14 P0 修通） |
@@ -145,7 +147,7 @@ macSFTP 已从「可连接的文件浏览器原型」演进为 **可当主力使
 | --- | --- |
 | Profile 分组 / 排序 / 导入 OpenSSH config | design 明确非 MVP |
 | Settings 一键 Connect | 曾否决；若产品要「库即连接」可重开 |
-| 传输队列恢复 | session 恢复不含 in-flight transfer 全状态（history 可重试） |
+| 传输队列恢复 | 不恢复；运行中任务随进程结束，重启后由用户重新发起 |
 | 同步 / compare / 双向 diff | 非当前架构主路径 |
 | 微动效系统 | Phase 6 明确几乎不动效；仅在有证据再上 |
 | i18n | 业务层已 error code 友好；完整多语言未做 |
@@ -205,3 +207,4 @@ macSFTP 已从「可连接的文件浏览器原型」演进为 **可当主力使
 | 2026-07-14 | 初版：六阶段完成态 + Profile/Connect/Drawer 专项 + 改进 backlog |
 | 2026-07-14 | P0：`scripts/check.sh` 全绿；core 重复 `#[test]`、sftp clippy、app lint 清理 |
 | 2026-07-14 | P1：Connect/Profile polish（行标签、Enter、草稿、焦点、filter） |
+| 2026-07-14 | P0：移除无产品入口的 Transfer History catalog/retry 路径；drawer 仅保留进程内分组 |

@@ -1680,81 +1680,6 @@ impl TransferWarning {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-pub struct TransferHistoryId(pub u64);
-
-impl std::fmt::Display for TransferHistoryId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-/// Outcome tag for a session-scoped transfer history record.
-///
-/// Product policy: history is **not** a cross-launch catalog. Live
-/// Active/Completed/Failed jobs live in `TransferStore` for the process
-/// lifetime. These records exist for mid-session helpers/tests (e.g. retry
-/// command rebuild) and are wiped on quit/launch residual purge.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum TransferHistoryStatus {
-    Unfinished,
-    Completed,
-    Failed { message: String, retryable: bool },
-    Cancelled,
-}
-
-/// Session-scoped transfer snapshot used to rebuild a
-/// `StartTransferCommand` for the *current* connected tab on retry
-/// (does not restore a closed tab's session actor).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TransferHistoryRecord {
-    pub id: TransferHistoryId,
-    pub profile_id: Option<ProfileId>,
-    pub direction: TransferDirection,
-    pub sources: Vec<TransferEndpoint>,
-    pub destination: TransferEndpoint,
-    pub metadata_policy: MetadataPolicy,
-    pub conflict_policy: ConflictPolicy,
-    pub status: TransferHistoryStatus,
-    pub started_at: Timestamp,
-    pub last_updated: Timestamp,
-}
-
-impl TransferHistoryRecord {
-    /// Rebuild a transfer command for retry against the live session
-    /// identified by `tab_id` / `session_epoch` / `profile_id`.
-    pub fn to_start_command(
-        &self,
-        tab_id: TabId,
-        session_epoch: u64,
-        profile_id: ProfileId,
-    ) -> StartTransferCommand {
-        StartTransferCommand {
-            tab_id,
-            session_epoch,
-            profile_id,
-            direction: self.direction,
-            sources: self.sources.clone(),
-            destination: self.destination.clone(),
-            metadata_policy: self.metadata_policy.clone(),
-            conflict_policy: self.conflict_policy.clone(),
-        }
-    }
-
-    /// Whether this record can be retried (re-enqueued as a fresh
-    /// transfer on a connected tab).
-    pub fn is_retryable(&self) -> bool {
-        matches!(
-            self.status,
-            TransferHistoryStatus::Unfinished
-                | TransferHistoryStatus::Failed {
-                    retryable: true,
-                    ..
-                }
-        )
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModalRequest {
     HostKey(HostKeyPrompt),
@@ -1861,12 +1786,12 @@ impl fmt::Display for ErrorCode {
 mod tests {
     use super::AppEvent;
     use super::{
-        AppState, AuthFingerprint, AuthMethod, AuthMethodKind, ConflictPolicy, ConflictRequest,
-        ConflictRequestId, ConnectionProfile, ConnectionState, DisconnectReason, HostKeyPrompt,
-        LocalPath, MetadataPolicy, ModalRequest, ModalRequestId, ProfileId, RemoteEventScope,
-        RemotePath, RemoteScoped, RuntimeBridgeConfig, SecretRef, SessionId, TabId, TabState,
-        Timestamp, TransferDirection, TransferEndpoint, TransferHistoryId, TransferHistoryRecord,
-        TransferHistoryStatus, TransferId, TransferPlanId, TrustRequest, TrustRequestId,
+        AppState, AuthFingerprint, AuthMethod, AuthMethodKind, ConflictRequest, ConflictRequestId,
+        ConnectionProfile, ConnectionState, DisconnectReason, HostKeyPrompt, LocalPath,
+        MetadataPolicy, ModalRequest, ModalRequestId, ProfileId, RemoteEventScope, RemotePath,
+        RemoteScoped, RuntimeBridgeConfig, SecretRef, SessionId, TabId, TabState, Timestamp,
+        TransferDirection, TransferEndpoint, TransferId, TransferPlanId, TrustRequest,
+        TrustRequestId,
     };
 
     #[test]
@@ -2696,29 +2621,6 @@ mod tests {
                 remember_passphrase: false,
             }
         );
-    }
-
-    #[test]
-    fn transfer_history_record_round_trips_through_json() {
-        let record = TransferHistoryRecord {
-            id: TransferHistoryId(42),
-            profile_id: Some(ProfileId(3)),
-            direction: TransferDirection::Upload,
-            sources: vec![TransferEndpoint::Local(LocalPath::new("/tmp/a.txt"))],
-            destination: TransferEndpoint::Remote(RemotePath::new("/srv/a.txt")),
-            metadata_policy: MetadataPolicy::default(),
-            conflict_policy: ConflictPolicy::Ask,
-            status: TransferHistoryStatus::Failed {
-                message: "boom".into(),
-                retryable: true,
-            },
-            started_at: Timestamp::from_secs_since_epoch(1_700_000_000),
-            last_updated: Timestamp::from_secs_since_epoch(1_700_000_123),
-        };
-        let json = serde_json::to_string(&record).expect("serialize");
-        let restored: TransferHistoryRecord = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(record, restored);
-        assert!(restored.is_retryable());
     }
 
     #[test]

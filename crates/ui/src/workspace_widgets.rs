@@ -1,7 +1,5 @@
 use gpui::{Context, Hsla, IntoElement, Render, SharedString, Window, div, prelude::*, px};
-use macsftp_core::{
-    ConnectionState, TransferEndpoint, TransferHistoryRecord, TransferHistoryStatus, TransferJob,
-};
+use macsftp_core::{ConnectionState, TransferEndpoint, TransferJob};
 
 use crate::{ActiveTheme, Theme};
 
@@ -61,34 +59,6 @@ pub fn copy_name(destination: &TransferEndpoint) -> String {
     match name.rsplit_once('.') {
         Some((stem, extension)) if !stem.is_empty() => format!("{stem} (copy).{extension}"),
         _ => format!("{name} (copy)"),
-    }
-}
-
-/// Builds a human-readable title for a transfer history record.
-pub fn transfer_history_title(record: &TransferHistoryRecord) -> String {
-    let endpoint_text = |endpoint: &TransferEndpoint| match endpoint {
-        TransferEndpoint::Local(path) => path.as_str().to_string(),
-        TransferEndpoint::Remote(path) => path.as_str().to_string(),
-    };
-    let source = record
-        .sources
-        .first()
-        .map(endpoint_text)
-        .unwrap_or_default();
-    let destination = endpoint_text(&record.destination);
-    let name = source.rsplit('/').next().unwrap_or(&source).to_string();
-    format!("{name} · {source} → {destination}")
-}
-
-/// Returns a short detail string describing a history record's status.
-pub fn transfer_history_detail(record: &TransferHistoryRecord) -> String {
-    match &record.status {
-        TransferHistoryStatus::Failed { message, .. } => message.clone(),
-        TransferHistoryStatus::Unfinished => {
-            "Was running when the app closed — retry to resume".to_string()
-        }
-        TransferHistoryStatus::Cancelled => "Cancelled".to_string(),
-        TransferHistoryStatus::Completed => "Completed".to_string(),
     }
 }
 

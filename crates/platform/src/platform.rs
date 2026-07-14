@@ -15,7 +15,9 @@ pub struct AppPaths {
     pub config_file: LocalPath,
     pub profiles_file: LocalPath,
     pub known_hosts_file: LocalPath,
-    pub transfer_history_file: LocalPath,
+    /// Legacy file produced before transfer history became process-only.
+    /// Startup removes it instead of loading a cross-launch catalog.
+    pub legacy_transfer_history_file: LocalPath,
     pub residual_temp_file: LocalPath,
     pub session_file: LocalPath,
     pub recents_file: LocalPath,
@@ -32,7 +34,7 @@ impl AppPaths {
             config_file: LocalPath::new(format!("{app_support_dir}/config.json")),
             profiles_file: LocalPath::new(format!("{app_support_dir}/profiles.json")),
             known_hosts_file: LocalPath::new(format!("{app_support_dir}/known_hosts")),
-            transfer_history_file: LocalPath::new(format!(
+            legacy_transfer_history_file: LocalPath::new(format!(
                 "{app_support_dir}/transfer_history.json"
             )),
             residual_temp_file: LocalPath::new(format!("{app_support_dir}/residual_temp.json")),
@@ -43,13 +45,12 @@ impl AppPaths {
     }
 
     /// Create the app support and log directories so writes (known_hosts,
-    /// profiles, transfer history, logs) succeed on first launch.
+    /// profiles, residual temp records, logs) succeed on first launch.
     pub fn ensure_directories(&self) -> std::io::Result<()> {
         for file in [
             &self.config_file,
             &self.profiles_file,
             &self.known_hosts_file,
-            &self.transfer_history_file,
             &self.residual_temp_file,
             &self.session_file,
             &self.recents_file,
