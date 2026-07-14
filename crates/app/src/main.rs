@@ -117,8 +117,8 @@ fn main() {
         };
         let initial_theme = match config_store.config().appearance {
             AppearancePreference::System => Theme::for_appearance(cx.window_appearance()),
-            AppearancePreference::Light => Theme::light(),
-            AppearancePreference::Dark => Theme::dark(),
+            AppearancePreference::Light => Theme::one_light(),
+            AppearancePreference::Dark => Theme::one_dark(),
         };
         cx.set_global(initial_theme);
         let user_known_hosts = std::path::PathBuf::from(format!("{home_dir}/.ssh/known_hosts"));

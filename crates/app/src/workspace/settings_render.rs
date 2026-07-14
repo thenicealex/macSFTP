@@ -101,7 +101,9 @@ impl crate::workspace::Workspace {
                                     div()
                                         .text_size(px(12.0))
                                         .text_color(theme.colors.text_muted)
-                                        .child("Choose how macSFTP follows the macOS appearance."),
+                                        .child(
+                                            "System follows macOS; fixed modes use One Light or One Dark.",
+                                        ),
                                 ),
                         )
                         .child(
@@ -116,13 +118,13 @@ impl crate::workspace::Workspace {
                                 ))
                                 .child(appearance_button(
                                     "appearance-light",
-                                    "Light",
+                                    "One Light",
                                     AppearancePreference::Light,
                                     cx,
                                 ))
                                 .child(appearance_button(
                                     "appearance-dark",
-                                    "Dark",
+                                    "One Dark",
                                     AppearancePreference::Dark,
                                     cx,
                                 )),

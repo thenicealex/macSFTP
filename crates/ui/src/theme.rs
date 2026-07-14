@@ -63,62 +63,72 @@ pub struct ThemeSizes {
 }
 
 impl Theme {
-    pub fn dark() -> Self {
+    /// One Dark is the default palette for every dark appearance mode.
+    pub fn one_dark() -> Self {
         Self {
             appearance: Appearance::Dark,
             colors: ThemeColors {
-                background: rgb(0x1f2127).into(),
-                surface: rgb(0x191b1f).into(),
-                elevated_surface: rgb(0x25272d).into(),
-                border: rgb(0x2e3138).into(),
-                border_focused: rgb(0x5c7fb8).into(),
-                text: rgb(0xc8ccd4).into(),
-                text_muted: rgb(0x8b909b).into(),
-                text_disabled: rgb(0x5c6067).into(),
+                background: rgb(0x282c34).into(),
+                surface: rgb(0x21252b).into(),
+                elevated_surface: rgb(0x2c313a).into(),
+                border: rgb(0x3e4451).into(),
+                border_focused: rgb(0x61afef).into(),
+                text: rgb(0xabb2bf).into(),
+                text_muted: rgb(0x828997).into(),
+                text_disabled: rgb(0x5c6370).into(),
                 element_hover: hsla(0.0, 0.0, 1.0, 0.04),
                 element_active: hsla(0.0, 0.0, 1.0, 0.08),
                 element_selected: hsla(214.0 / 360.0, 0.6, 0.6, 0.16),
-                accent: rgb(0x74ade8).into(),
-                error: rgb(0xd07277).into(),
-                warning: rgb(0xdec184).into(),
-                success: rgb(0xa1c181).into(),
-                info: rgb(0x6eb4bf).into(),
+                accent: rgb(0x61afef).into(),
+                error: rgb(0xe06c75).into(),
+                warning: rgb(0xe5c07b).into(),
+                success: rgb(0x98c379).into(),
+                info: rgb(0x56b6c2).into(),
             },
             fonts: default_fonts(),
             sizes: default_sizes(),
         }
     }
 
-    pub fn light() -> Self {
+    /// One Light is the default palette for every light appearance mode.
+    pub fn one_light() -> Self {
         Self {
             appearance: Appearance::Light,
             colors: ThemeColors {
                 background: rgb(0xfafafa).into(),
-                surface: rgb(0xefeff1).into(),
+                surface: rgb(0xf0f0f0).into(),
                 elevated_surface: rgb(0xffffff).into(),
-                border: rgb(0xd9dade).into(),
-                border_focused: rgb(0x3b79c7).into(),
-                text: rgb(0x33373e).into(),
-                text_muted: rgb(0x71757d).into(),
-                text_disabled: rgb(0xa5a8ae).into(),
+                border: rgb(0xd3d4d5).into(),
+                border_focused: rgb(0x4078f2).into(),
+                text: rgb(0x383a42).into(),
+                text_muted: rgb(0x696c77).into(),
+                text_disabled: rgb(0xa0a1a7).into(),
                 element_hover: hsla(0.0, 0.0, 0.0, 0.04),
                 element_active: hsla(0.0, 0.0, 0.0, 0.08),
                 element_selected: hsla(214.0 / 360.0, 0.55, 0.5, 0.14),
-                accent: rgb(0x3b79c7).into(),
-                error: rgb(0xb3423f).into(),
-                warning: rgb(0x9a7b27).into(),
-                success: rgb(0x5e8a46).into(),
-                info: rgb(0x3a7e8a).into(),
+                accent: rgb(0x4078f2).into(),
+                error: rgb(0xe45649).into(),
+                warning: rgb(0xc18401).into(),
+                success: rgb(0x50a14f).into(),
+                info: rgb(0x0184bc).into(),
             },
             fonts: default_fonts(),
             sizes: default_sizes(),
         }
     }
 
+    pub fn dark() -> Self {
+        Self::one_dark()
+    }
+
+    pub fn light() -> Self {
+        Self::one_light()
+    }
+
     pub fn for_appearance(appearance: WindowAppearance) -> Self {
         match appearance {
-            WindowAppearance::Dark | WindowAppearance::VibrantDark => Self::dark(),
-            WindowAppearance::Light | WindowAppearance::VibrantLight => Self::light(),
+            WindowAppearance::Dark | WindowAppearance::VibrantDark => Self::one_dark(),
+            WindowAppearance::Light | WindowAppearance::VibrantLight => Self::one_light(),
         }
     }
 }
@@ -155,17 +165,51 @@ impl ActiveTheme for App {
 
 #[cfg(test)]
 mod tests {
+    use gpui::{WindowAppearance, rgb};
+
     use super::{Appearance, Theme};
 
     #[test]
     fn dark_and_light_token_sets_are_both_defined_and_distinct() {
-        let dark = Theme::dark();
-        let light = Theme::light();
+        let dark = Theme::one_dark();
+        let light = Theme::one_light();
 
         assert_eq!(dark.appearance, Appearance::Dark);
         assert_eq!(light.appearance, Appearance::Light);
         assert_ne!(dark.colors.background, light.colors.background);
         assert_ne!(dark.colors.text, light.colors.text);
+    }
+
+    #[test]
+    fn dark_appearance_defaults_to_one_dark_tokens() {
+        let theme = Theme::dark();
+
+        assert_eq!(theme.colors.background, rgb(0x282c34).into());
+        assert_eq!(theme.colors.text, rgb(0xabb2bf).into());
+        assert_eq!(theme.colors.accent, rgb(0x61afef).into());
+        assert_eq!(theme.colors.error, rgb(0xe06c75).into());
+    }
+
+    #[test]
+    fn light_appearance_defaults_to_one_light_tokens() {
+        let theme = Theme::light();
+
+        assert_eq!(theme.colors.background, rgb(0xfafafa).into());
+        assert_eq!(theme.colors.text, rgb(0x383a42).into());
+        assert_eq!(theme.colors.accent, rgb(0x4078f2).into());
+        assert_eq!(theme.colors.error, rgb(0xe45649).into());
+    }
+
+    #[test]
+    fn system_appearance_selects_the_matching_one_theme() {
+        let dark = Theme::for_appearance(WindowAppearance::Dark);
+        let light = Theme::for_appearance(WindowAppearance::Light);
+
+        assert_eq!(dark.colors.background, Theme::one_dark().colors.background);
+        assert_eq!(
+            light.colors.background,
+            Theme::one_light().colors.background
+        );
     }
 
     #[test]

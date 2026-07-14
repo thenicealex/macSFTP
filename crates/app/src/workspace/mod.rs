@@ -706,8 +706,8 @@ impl Workspace {
 
         let theme = match appearance {
             AppearancePreference::System => Theme::for_appearance(window.appearance()),
-            AppearancePreference::Light => Theme::light(),
-            AppearancePreference::Dark => Theme::dark(),
+            AppearancePreference::Light => Theme::one_light(),
+            AppearancePreference::Dark => Theme::one_dark(),
         };
         cx.set_global(theme);
         cx.notify();

@@ -13,7 +13,7 @@
 | # | 验证标准 | 核查方式 | 结果 | 状态 |
 | --- | --- | --- | --- | --- |
 | V1 | 单一 `Theme` 全局 + 语义色令牌，组件不写死颜色 | `theme.rs` 定义 `Theme`（`Global`）；`grep -rn "rgb(\|hsla(" crates/ui/src crates/app/src` 仅命中 `theme.rs` 令牌源 | UI 全部经 `theme.colors.*` 取色，无组件级字面量 | PASS |
-| V2 | Light / Dark / System 三态齐备且互异 | `Theme::dark()/light()/for_appearance()`；单测 `dark_and_light_token_sets_are_both_defined_and_distinct` | 三态存在、背景/文字互不相同 | PASS |
+| V2 | One Light / One Dark / System 三态齐备且互异 | `Theme::one_dark()/one_light()/for_appearance()`；主题 token 回归测试 | 三态存在、背景/文字互不相同 | PASS |
 | V3 | 固定布局尺寸（ThemeSizes）落地，hover/loading 不抖动 | `theme.sizes` 7 处应用：tab_bar/path_bar/table_header/file_row/transfer_row/status_bar/settings-tab | 尺寸令牌统一驱动，无散落像素值 | PASS |
 | V4 | Zed 风：中性面 + 细边框 + 单一强调色 | 组件用 `.border_1()`；surface 三级（background/surface/elevated_surface）；唯一 `accent` 令牌 | 中性层级 + 1px 边框 + 单 accent | PASS |
 | V5 | 状态语义色（success/error/warning/info）用于状态而非裸色 | transfer 状态、history、connection 状态全部映射到 `theme.colors.*` 语义色 | 状态用色一致、语义化 | PASS |
