@@ -25,7 +25,7 @@
 | M7-02 | 打包 | `plutil -lint Info.plist` 通过 | `plutil -lint build/macSFTP.app/Contents/Info.plist` | 输出 `OK` | Automated（本会话实跑） | `build/macSFTP.app/Contents/Info.plist: OK` | PASS |
 | M7-03 | 打包 | 不签名也可从本地构建产物运行 | 在 macOS 直接打开 `build/macSFTP.app` | 应用启动并显示主窗口 | Interactive | 代码路径无签名依赖（`main.rs` 直接 `open_window`）；未做人工启动 | NEEDS-INTERACTIVE |
 | M7-04 | 打包 | Info.plist 结构正确、必填键齐全 | 检查 plist 键 | 含 `CFBundleName/Executable/Identifier/IconFile/ShortVersion/Version/LSMinimumSystemVersion/NSHighResolutionCapable` | Code-inspection | 全部存在（见 `Info.plist`） | PASS |
-| M7-05 | 图标 | `AppIcon.icns` 完整尺寸集（16/32/128/256/512 + @2x） | 检查 `build_app.sh` 生成逻辑与产物 | 全尺寸集存在；icns 体积合理 | Code-inspection + Automated（产物 1.1MB） | 脚本生成 16–1024px 全集；已构建 icns ≈1.1MB | PASS（建议人工确认图标渲染） |
+| M7-05 | 图标 | `AppIcon.icns` 完整尺寸集（16/32/128/256/512 + @2x） | 检查 SVG/PNG 母版、`build_app.sh` 生成逻辑与多尺寸产物 | 全尺寸集存在；16px 仍可辨认；留白不贴边 | Code-inspection + Automated + Visual | 1024px SVG/PNG 源；脚本生成 16–1024px 全集；16/32/64/128px 已目检 | PASS |
 | M7-06 | 菜单 | macOS 基础菜单（macSFTP/File/View/Window/Help）+ About/Settings 入口 | 检查 `main.rs::set_menus` | 5 个菜单，含 About、Settings… | Code-inspection | `set_menus`（main.rs:134）含 macSFTP/File/View/Window/Help，About+Settings 已挂 | PASS（建议人工确认原生菜单栏） |
 | M7-07 | About | About 窗口含图标/名称/版本 + Copy Version Info | 触发 `ShowAbout` | 显示 macSFTP 标识、版本、复制按钮 | Code-inspection + Automated（单测） | `render_about`（workspace.rs:3675）含 mark/名称/`Version {CARGO_PKG_VERSION}`/Copy 按钮；单测 `about_action_opens_and_escape_closes_overlay` 通过 | PASS（建议人工目检） |
 | M7-08 | 日志 | tracing 日志初始化 | 启动后检查日志文件 | 日志落盘 + stderr 镜像 | Code-inspection | `init_logging`（main.rs:50）非阻塞文件 appender + stderr，`RUST_LOG` 控级别 | PASS |

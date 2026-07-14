@@ -21,7 +21,7 @@
 | V7 | 字体令牌：UI 与等宽分离 | `ui_family`=`.SystemUIFont`、`mono_family`=`Menlo`；单测 `ui_and_mono_font_families_are_separate_tokens` | 双字体令牌独立 | PASS |
 | V8 | accent 克制使用（主按钮/选中/焦点环） | accent 仅用于主按钮（About Close、设置激活项）、`border_focused` 焦点环 | 不过度使用 | PASS |
 | V9 | modal/popover 用 elevated_surface + border | connect/host-key/conflict modal、About 卡片均 `elevated_surface`+`border` | 浮层层级一致 | PASS |
-| V10 | 图标体系：AppIcon 全尺寸集 + 应用内 IconName 令牌 | `build_app.sh` 生成 16–1024px 全集（icns≈1.1MB）；应用内用 `IconName` 枚举（transfer drawer 等） | 图标令牌化、尺寸齐全 | PASS（渲染见 M7-05 目检） |
+| V10 | 图标体系：AppIcon 全尺寸集 + 应用内 IconName 令牌 | 可编辑 `AppIcon.svg` + 同步 1024px PNG；`build_app.sh` 生成 16–1024px 全集；应用内使用 `IconName` | 白色圆角底板、宽安全区、简化双端点/双向传输符号；小尺寸可辨认 | PASS（16/32/64/128px 见 M7-05 目检） |
 | V11 | 文本/背景对比度达标（可读性） | 抽样：暗色 text `#c8ccd4`/bg `#1f2127` 高对比；亮色 text `#33373e`/bg `#fafafa` 高对比；muted 文字刻意降对比做层级 | 代码层无违规；最终可读性需实机目检 | PASS（代码层）/ NEEDS-INTERACTIVE |
 | V12 | 颜色无散落魔法数（全部集中在 theme.rs） | `grep "rgb(\|hsla("` 在 `crates/{ui,app}/src` 仅 `theme.rs` 命中 | 单一颜色来源 | PASS |
 

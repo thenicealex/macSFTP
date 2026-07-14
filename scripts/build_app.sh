@@ -5,6 +5,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build_dir="$repo_root/build"
 bundle_dir="$build_dir/macSFTP.app"
 iconset_dir="$build_dir/AppIcon.iconset"
+# AppIcon.png is the committed raster generated from the editable AppIcon.svg.
+# Keep both assets in sync when changing the icon geometry.
 icon_source="$repo_root/packaging/macos/AppIcon.png"
 plist_template="$repo_root/packaging/macos/Info.plist.in"
 

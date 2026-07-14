@@ -58,13 +58,15 @@ mod tests {
 
     #[test]
     fn m7_appicon_source_asset_present() {
-        let icon = packaging_path("AppIcon.png");
-        let meta = std::fs::metadata(&icon)
-            .expect("packaging/macos/AppIcon.png (icon source) must be committed to the repo");
-        assert!(
-            meta.is_file() && meta.len() > 0,
-            "AppIcon.png source must be a non-empty committed file"
-        );
+        for filename in ["AppIcon.svg", "AppIcon.png"] {
+            let icon = packaging_path(filename);
+            let meta = std::fs::metadata(&icon)
+                .unwrap_or_else(|_| panic!("packaging/macos/{filename} must be committed"));
+            assert!(
+                meta.is_file() && meta.len() > 0,
+                "{filename} must be a non-empty committed file"
+            );
+        }
     }
 
     #[test]
