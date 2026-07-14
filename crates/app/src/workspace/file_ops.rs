@@ -1,23 +1,19 @@
 //! Phase 1: create / rename / delete for local + remote panes.
 
-#![allow(unused_imports)]
 use std::path::Path;
 
 use gpui::{
-    App, ClickEvent, ClipboardItem, Context, FocusHandle, Focusable, FontWeight, IntoElement,
-    KeyDownEvent, ParentElement, Render, SharedString, Styled, Window, div, prelude::*, px,
+    Context, FontWeight, IntoElement, KeyDownEvent, ParentElement, SharedString, Styled, Window,
+    div, prelude::*, px,
 };
 use macsftp_core::{
     AppCommand, ConnectionState, EntryPath, FileKind, FsCommand, FsEntryRef, FsOp, FsPath, FsScope,
-    LocalPath, RemotePath, TabId, UserFacingError,
+    TabId, UserFacingError,
 };
 use macsftp_platform::{create_directory, delete_entry, local_fs_error, rename_entry};
-use macsftp_ui::{
-    ActiveTheme, InputKeyResult, InputState, TextFieldModel, text_button, text_field,
-};
+use macsftp_ui::{ActiveTheme, InputKeyResult, InputState, text_button};
 use tracing::warn;
 
-use crate::app_actions::*;
 use crate::resources::ActiveResources;
 use crate::workspace::*;
 
@@ -346,7 +342,7 @@ impl crate::workspace::Workspace {
         &mut self,
         tab_id: TabId,
         op: FsOp,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let result = match &op {
@@ -414,7 +410,6 @@ impl crate::workspace::Workspace {
             }
             Err(failure) => self.report_local_fs_failure(tab_id, failure, cx),
         }
-        let _ = window;
     }
 
     fn report_local_fs_failure(

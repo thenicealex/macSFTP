@@ -1,41 +1,13 @@
-#![allow(unused_imports)]
-use std::collections::HashMap;
-use std::path::Path;
-use std::time::SystemTime;
-
-use gpui::{
-    App, ClickEvent, ClipboardItem, Context, FocusHandle, Focusable, FontWeight, Hsla, IntoElement,
-    KeyDownEvent, ParentElement, Render, ScrollStrategy, SharedString, Styled, Subscription, Task,
-    UniformListScrollHandle, Window, div, prelude::*, px, uniform_list,
-};
+use gpui::{Context, UniformListScrollHandle, Window};
 use macsftp_core::{
-    AppCommand, AppEvent, AppState, AuthCredential, AuthMethod, AuthMethodKind,
-    CommandDispatchError, ConflictDecision, ConflictDecisionCommand, ConflictRequest,
-    ConflictRequestId, ConnectCommand, ConnectionProfile, ConnectionSettings, ConnectionState,
-    DisconnectReason, EntryPath, ErrorCode, FileKind, HostKeyDecisionCommand, HostKeyPrompt,
-    LocalPath, ModalRequest, ModalRequestId, ProfileId, RemotePath, SecretRef, TabId, TabState,
-    Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferJob,
-    TransferState, TrustRequestId, UserFacingError, sort_entries,
+    AppEvent, ConflictRequest, ErrorCode, ModalRequest, TransferState, UserFacingError,
+    sort_entries,
 };
-use macsftp_platform::{AppPaths, read_local_directory};
-use macsftp_sftp::{EventReceiver, RuntimeClient};
-use macsftp_storage::{
-    AppearancePreference, ConfigStore, KeychainError, KeychainStore, ProfileStore,
-    ResidualTempStore,
-};
-use macsftp_ui::{
-    ActiveTheme, DragPreview, FileRowModel, IconName, InputKeyResult, InputState, TextFieldModel,
-    Theme, TransferRow, connection_status, copy_name, empty_state, file_row, file_table_header,
-    format_size, format_timestamp, icon, icon_button, section_header_static, tab, text_button,
-    text_field, text_tooltip, transfer_row, transfer_title,
-};
+use macsftp_ui::copy_name;
 
 use tracing::{debug, warn};
 
-use crate::app_actions::*;
 use crate::resources::{ActiveResources, ActiveTransfers};
-use crate::workspace::connect_form::*;
-use crate::workspace::helpers::*;
 use crate::workspace::*;
 
 impl crate::workspace::Workspace {

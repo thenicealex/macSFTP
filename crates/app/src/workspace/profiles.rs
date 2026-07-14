@@ -421,7 +421,13 @@ impl crate::workspace::Workspace {
                 // New profile never landed on disk — drop secrets we just wrote.
                 if previous.is_none() {
                     for secret_ref in &new_secret_refs {
-                        let _ = cx.resources().keychain.delete(secret_ref);
+                        if let Err(cleanup_error) = cx.resources().keychain.delete(secret_ref) {
+                            warn!(
+                                ?profile_id,
+                                %cleanup_error,
+                                "could not roll back Keychain secret after profile save failed"
+                            );
+                        }
                     }
                 }
                 if let Some(editor) = self.profile_editor.as_mut() {

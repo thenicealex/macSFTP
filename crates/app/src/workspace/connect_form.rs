@@ -456,8 +456,12 @@ impl crate::workspace::Workspace {
                 let still_used = secret_refs_for_settings(profile_id, &settings.auth)
                     .iter()
                     .any(|current| current == &orphan);
-                if !still_used {
-                    let _ = cx.resources().keychain.delete(&orphan);
+                if !still_used && let Err(error) = cx.resources().keychain.delete(&orphan) {
+                    warn!(
+                        ?profile_id,
+                        %error,
+                        "could not remove obsolete Keychain secret after profile update"
+                    );
                 }
             }
         }
@@ -479,7 +483,13 @@ impl crate::workspace::Workspace {
                 // Best-effort cleanup so we don't leave an orphan
                 // credential behind.
                 for secret_ref in secret_refs_for_settings(profile_id, &settings.auth) {
-                    let _ = cx.resources().keychain.delete(&secret_ref);
+                    if let Err(cleanup_error) = cx.resources().keychain.delete(&secret_ref) {
+                        warn!(
+                            ?profile_id,
+                            %cleanup_error,
+                            "could not roll back Keychain secret after profile save failed"
+                        );
+                    }
                 }
                 self.status_message = Some(format!("Could not save profile: {error}").into());
             }
