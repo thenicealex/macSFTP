@@ -11,11 +11,14 @@ use macsftp_core::{
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
+pub(crate) const PLAN_PROGRESS_BATCH_SIZE: usize = 128;
+
 /// Plan a local upload from a blocking worker thread.
 ///
 /// Local directory traversal must not run on Tokio's async workers. Each
-/// discovered child is emitted immediately, so the UI can update before a
-/// large tree has been fully scanned.
+/// The first discovered child is emitted immediately so the UI updates
+/// promptly; later children are emitted in bounded batches so large trees do
+/// not consume one structural event per filesystem entry.
 pub fn plan_local_upload(
     command: StartTransferCommand,
     plan_id: TransferPlanId,
@@ -34,6 +37,7 @@ pub fn plan_local_upload(
         total_bytes: Some(0),
         created_at: root_job.created_at,
         child_jobs: Vec::new(),
+        pending_progress: Vec::with_capacity(PLAN_PROGRESS_BATCH_SIZE),
     };
 
     if planner.command.direction == TransferDirection::Download {
@@ -132,6 +136,7 @@ struct LocalUploadPlanner {
     total_bytes: Option<u64>,
     created_at: Timestamp,
     child_jobs: Vec<TransferJob>,
+    pending_progress: Vec<TransferJob>,
 }
 
 impl LocalUploadPlanner {
@@ -175,7 +180,7 @@ impl LocalUploadPlanner {
             warnings: Vec::new(),
             created_at: self.created_at,
         };
-        self.emit_progress(child_job)
+        self.queue_progress(child_job)
     }
 
     fn plan_source(
@@ -260,14 +265,27 @@ impl LocalUploadPlanner {
             warnings: Vec::new(),
             created_at: self.created_at,
         };
-        self.emit_progress(child_job)
+        self.queue_progress(child_job)
     }
 
-    fn emit_progress(&mut self, child_job: TransferJob) -> Result<(), UserFacingError> {
+    fn queue_progress(&mut self, child_job: TransferJob) -> Result<(), UserFacingError> {
+        self.child_jobs.push(child_job.clone());
+        self.pending_progress.push(child_job);
+        if self.planned_count == 1 || self.pending_progress.len() >= PLAN_PROGRESS_BATCH_SIZE {
+            self.flush_progress()?;
+        }
+        Ok(())
+    }
+
+    fn flush_progress(&mut self) -> Result<(), UserFacingError> {
+        if self.pending_progress.is_empty() {
+            return Ok(());
+        }
+        let child_jobs = std::mem::take(&mut self.pending_progress);
         self.event_tx
             .send(AppEvent::TransferPlanProgress(TransferPlanProgress {
                 plan_id: self.plan_id,
-                child_job: child_job.clone(),
+                child_jobs,
                 planned_count: self.planned_count,
                 total_bytes: self.total_bytes,
             }))
@@ -277,14 +295,16 @@ impl LocalUploadPlanner {
                     "Transfer planning stopped",
                     "The application stopped receiving planning updates.",
                 )
-            })?;
-        self.child_jobs.push(child_job);
-        Ok(())
+            })
     }
 
-    fn finish(&self) -> bool {
+    fn finish(&mut self) -> bool {
         if self.cancel.is_cancelled() {
             self.cancelled();
+            return false;
+        }
+        if let Err(error) = self.flush_progress() {
+            self.finish_error(error);
             return false;
         }
         self.event_tx
@@ -386,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_planning_emits_each_child_before_completion() {
+    fn directory_planning_streams_all_children_before_completion() {
         let fixture_root =
             std::env::temp_dir().join(format!("macsftp-transfer-plan-{}", std::process::id()));
         std::fs::create_dir_all(fixture_root.join("nested")).expect("create fixture directory");
@@ -421,7 +441,8 @@ mod tests {
             match event {
                 AppEvent::TransferPlanProgress(progress) => {
                     final_count = Some(progress.planned_count);
-                    planned_paths.push(progress.child_job.destination);
+                    planned_paths
+                        .extend(progress.child_jobs.into_iter().map(|job| job.destination));
                 }
                 AppEvent::TransferPlanCompleted { plan_id } => {
                     assert_eq!(plan_id, TransferPlanId(1));
@@ -446,6 +467,54 @@ mod tests {
                 "/uploads/nested/beta.txt"
             )))
         );
+
+        std::fs::remove_dir_all(&fixture_root).expect("remove fixture directory");
+    }
+
+    #[test]
+    fn large_directory_planning_emits_first_child_then_bounded_batches() {
+        let fixture_root = std::env::temp_dir().join(format!(
+            "macsftp-transfer-plan-batches-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&fixture_root).expect("create fixture directory");
+        for index in 0..300 {
+            std::fs::write(fixture_root.join(format!("file-{index:03}.txt")), b"x")
+                .expect("write fixture file");
+        }
+
+        let command = command(
+            LocalPath::new(fixture_root.display().to_string()),
+            "/uploads",
+        );
+        let (_, root_job) = new_plan(
+            &command,
+            TransferPlanId(3),
+            TransferId(3),
+            macsftp_core::Timestamp::from_secs_since_epoch(1),
+        );
+        let (event_tx, event_rx) = flume::bounded(8);
+        let planned = plan_local_upload(
+            command,
+            TransferPlanId(3),
+            root_job,
+            std::sync::Arc::new(AtomicU64::new(4)),
+            event_tx,
+            CancellationToken::new(),
+        )
+        .expect("planning should complete");
+
+        let mut batch_sizes = Vec::new();
+        let mut final_count = None;
+        while let Ok(event) = event_rx.try_recv() {
+            if let AppEvent::TransferPlanProgress(progress) = event {
+                batch_sizes.push(progress.child_jobs.len());
+                final_count = Some(progress.planned_count);
+            }
+        }
+        assert_eq!(planned.len(), 300);
+        assert_eq!(batch_sizes, vec![1, 128, 128, 43]);
+        assert_eq!(final_count, Some(300));
 
         std::fs::remove_dir_all(&fixture_root).expect("remove fixture directory");
     }

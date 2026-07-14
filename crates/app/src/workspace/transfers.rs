@@ -1,7 +1,6 @@
 use gpui::Context;
 use macsftp_core::{
-    AppCommand, EntryPath, ErrorCode, FileKind, LocalPath, RemotePath, TabId, TransferEndpoint,
-    TransferState, UserFacingError,
+    AppCommand, EntryPath, FileKind, LocalPath, RemotePath, TabId, TransferEndpoint,
 };
 
 use crate::resources::{ActiveResources, ActiveTransfers};
@@ -142,18 +141,7 @@ impl crate::workspace::Workspace {
         transfer_id: macsftp_core::TransferId,
         cx: &mut Context<Self>,
     ) {
-        if let Some(job) = cx
-            .transfers_mut()
-            .jobs
-            .iter_mut()
-            .find(|job| job.id == transfer_id)
-            && matches!(
-                job.state,
-                TransferState::Queued | TransferState::Running { .. }
-            )
-        {
-            job.state = TransferState::Cancelling;
-        }
+        cx.mark_transfer_cancelling(transfer_id);
         self.send_command(AppCommand::CancelTransfer { transfer_id }, cx);
         cx.notify();
     }
@@ -163,83 +151,6 @@ impl crate::workspace::Workspace {
         cx: &mut Context<Self>,
     ) {
         self.send_command(AppCommand::RetryTransfer { transfer_id }, cx);
-    }
-    pub(crate) fn finalize_plan(
-        &mut self,
-        _job_id: macsftp_core::TransferId,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(plan_id) = cx
-            .transfers()
-            .plans
-            .iter()
-            .find_map(|plan| plan.child_jobs.contains(&_job_id).then_some(plan.id))
-        else {
-            return;
-        };
-        let Some(plan) = cx.transfers().plans.iter().find(|plan| plan.id == plan_id) else {
-            return;
-        };
-        if matches!(
-            plan.state,
-            macsftp_core::TransferPlanState::Completed
-                | macsftp_core::TransferPlanState::Cancelled
-                | macsftp_core::TransferPlanState::Failed { .. }
-        ) {
-            return;
-        }
-        let child_jobs = plan.child_jobs.clone();
-        let root_job_id = plan.root_job_id;
-        let mut any_failed = false;
-        for child_id in &child_jobs {
-            let Some(job) = cx.transfers().jobs.iter().find(|job| job.id == *child_id) else {
-                return;
-            };
-            match job.state {
-                TransferState::Completed | TransferState::Skipped => {}
-                TransferState::Failed { .. } => any_failed = true,
-                _ => return,
-            }
-        }
-
-        let plan_state = if any_failed {
-            macsftp_core::TransferPlanState::Failed {
-                error: UserFacingError::new(
-                    ErrorCode::Unknown,
-                    "Transfer finished with failures",
-                    "Some files could not be transferred.",
-                ),
-            }
-        } else {
-            macsftp_core::TransferPlanState::Completed
-        };
-        if let Some(plan) = cx
-            .transfers_mut()
-            .plans
-            .iter_mut()
-            .find(|plan| plan.id == plan_id)
-        {
-            plan.state = plan_state;
-        }
-        if let Some(root_job) = cx
-            .transfers_mut()
-            .jobs
-            .iter_mut()
-            .find(|job| job.id == root_job_id)
-        {
-            root_job.state = if any_failed {
-                TransferState::Failed {
-                    retryable: true,
-                    error: UserFacingError::new(
-                        ErrorCode::Unknown,
-                        "Transfer finished with failures",
-                        "Some files could not be transferred.",
-                    ),
-                }
-            } else {
-                TransferState::Completed
-            };
-        }
     }
     pub(crate) fn clean_remote_residual_temps(&mut self, tab_id: TabId, cx: &mut Context<Self>) {
         let connection_key = {

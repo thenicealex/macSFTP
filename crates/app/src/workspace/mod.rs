@@ -3,14 +3,13 @@ use std::path::Path;
 
 use gpui::{
     App, ClipboardItem, Context, FocusHandle, Focusable, IntoElement, ParentElement, Pixels,
-    Render, SharedString, Styled, Subscription, Task, UniformListScrollHandle, Window, div,
-    prelude::*,
+    Render, SharedString, Styled, Subscription, UniformListScrollHandle, Window, div, prelude::*,
 };
 use macsftp_core::{
     AppCommand, AppState, CommandDispatchError, ConnectCommand, ConnectionSettings,
     ConnectionState, EntryPath, LocalPath, ProfileId, RemotePath, TabId, TabState,
 };
-use macsftp_sftp::{EventReceiver, RuntimeClient};
+use macsftp_sftp::RuntimeClient;
 use macsftp_storage::{AppearancePreference, RecentEntryInput, SessionFile, SessionTabSnapshot};
 use macsftp_ui::{ActiveTheme, InputState, Theme, empty_state, text_button};
 use tracing::warn;
@@ -155,14 +154,11 @@ pub struct Workspace {
     /// Guards against double-flushing session layout on quit.
     session_flushed: bool,
     _appearance_subscription: Subscription,
-    /// Keeps the event drain task alive for the workspace's lifetime.
-    _event_drain: Task<()>,
 }
 
 impl Workspace {
     pub fn new(
         runtime_client: RuntimeClient,
-        mut event_receiver: EventReceiver,
         restore_session: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -185,20 +181,6 @@ impl Workspace {
                     cx.notify();
                 }
             });
-
-        // ADR-002: the drain task runs on the GPUI executor and only
-        // awaits `recv()`; every event is applied inside an entity
-        // update, followed by `cx.notify()` in the handler.
-        let event_drain = cx.spawn_in(window, async move |workspace, cx| {
-            while let Some(event) = event_receiver.recv().await {
-                let applied = workspace.update_in(cx, |workspace, window, cx| {
-                    workspace.handle_app_event(event, window, cx);
-                });
-                if applied.is_err() {
-                    break; // workspace released — app is shutting down
-                }
-            }
-        });
 
         let mut workspace = Self {
             state,
@@ -251,7 +233,6 @@ impl Workspace {
             restored_targets: HashMap::new(),
             session_flushed: false,
             _appearance_subscription: appearance_subscription,
-            _event_drain: event_drain,
         };
         // Persist session layout when the app quits.
         cx.on_app_quit(|workspace, cx| {

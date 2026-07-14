@@ -729,6 +729,359 @@ impl TransferStore {
             .iter()
             .find(|conflict| conflict.id == request_id)
     }
+
+    /// Apply one runtime transfer event at the process-wide state boundary.
+    ///
+    /// The reducer is deliberately idempotent: replaying an event must not
+    /// duplicate plans, jobs, warnings, or conflicts. Window views observe
+    /// this store but never replay runtime transfer events themselves.
+    pub fn apply_event(&mut self, event: &AppEvent, now: Timestamp) -> bool {
+        match event {
+            AppEvent::TransferPlanStarted(snapshot) => {
+                self.insert_plan(snapshot.plan.clone()) | self.insert_job(snapshot.root_job.clone())
+            }
+            AppEvent::TransferPlanProgress(progress) => {
+                let mut changed = false;
+                if let Some(plan) = self
+                    .plans
+                    .iter_mut()
+                    .find(|plan| plan.id == progress.plan_id)
+                {
+                    if progress.planned_count > plan.planned_count {
+                        plan.planned_count = progress.planned_count;
+                        plan.total_bytes = progress.total_bytes;
+                        changed = true;
+                    }
+                    for child_job in &progress.child_jobs {
+                        if !plan.child_jobs.contains(&child_job.id) {
+                            plan.child_jobs.push(child_job.id);
+                            changed = true;
+                        }
+                    }
+                }
+                for child_job in &progress.child_jobs {
+                    changed |= self.insert_job(child_job.clone());
+                }
+                changed
+            }
+            AppEvent::TransferPlanCompleted { plan_id } => {
+                let Some(plan) = self.plans.iter_mut().find(|plan| plan.id == *plan_id) else {
+                    return false;
+                };
+                if matches!(
+                    plan.state,
+                    TransferPlanState::Completed
+                        | TransferPlanState::Cancelled
+                        | TransferPlanState::Failed { .. }
+                ) {
+                    return false;
+                }
+                let root_job_id = plan.root_job_id;
+                let empty = plan.child_jobs.is_empty();
+                let plan_state = if empty {
+                    TransferPlanState::Completed
+                } else {
+                    TransferPlanState::Queued
+                };
+                let root_state = if empty {
+                    TransferState::Completed
+                } else {
+                    TransferState::Queued
+                };
+                let mut changed = false;
+                if plan.state != plan_state {
+                    plan.state = plan_state;
+                    changed = true;
+                }
+                if let Some(root_job) = self.jobs.iter_mut().find(|job| job.id == root_job_id)
+                    && root_job.state != root_state
+                {
+                    root_job.state = root_state;
+                    changed = true;
+                }
+                changed
+            }
+            AppEvent::TransferPlanCancelled { plan_id } => self.set_plan_terminal_state(
+                *plan_id,
+                TransferPlanState::Cancelled,
+                TransferState::Skipped,
+            ),
+            AppEvent::TransferPlanFailed { plan_id, error } => self.set_plan_terminal_state(
+                *plan_id,
+                TransferPlanState::Failed {
+                    error: error.clone(),
+                },
+                TransferState::Failed {
+                    retryable: error.retryable,
+                    error: error.clone(),
+                },
+            ),
+            AppEvent::TransferQueued(snapshot) | AppEvent::TransferRunning(snapshot) => {
+                self.upsert_job(snapshot.job.clone())
+            }
+            AppEvent::TransferPlanning { transfer_id } => {
+                self.set_job_state(*transfer_id, TransferState::Planning)
+            }
+            AppEvent::TransferConflict(prompt) => {
+                let waiting = self.set_job_state(
+                    prompt.transfer_id,
+                    TransferState::WaitingForConflictDecision {
+                        plan_id: prompt.plan_id,
+                        request_id: prompt.request_id,
+                    },
+                );
+                let conflict = ConflictRequest::new(
+                    prompt.request_id,
+                    prompt.plan_id,
+                    prompt.transfer_id,
+                    prompt.source.clone(),
+                    prompt.destination.clone(),
+                    now,
+                )
+                .with_source_details(prompt.source_size, prompt.source_modified_at);
+                waiting | self.upsert_conflict(conflict)
+            }
+            AppEvent::TransferProgress(progress) => {
+                let Some(job) = self
+                    .jobs
+                    .iter_mut()
+                    .find(|job| job.id == progress.transfer_id)
+                else {
+                    return false;
+                };
+                if matches!(
+                    job.state,
+                    TransferState::Cancelling
+                        | TransferState::Completed
+                        | TransferState::Skipped
+                        | TransferState::Failed { .. }
+                ) {
+                    return false;
+                }
+                let started_at = match job.state {
+                    TransferState::Running { started_at, .. } => started_at,
+                    _ => now,
+                };
+                let state = TransferState::Running {
+                    bytes_done: progress.bytes_done,
+                    bytes_total: progress.bytes_total,
+                    started_at,
+                };
+                if job.state == state {
+                    false
+                } else {
+                    job.state = state;
+                    true
+                }
+            }
+            AppEvent::TransferWarning(warning) => {
+                let Some(job) = self
+                    .jobs
+                    .iter_mut()
+                    .find(|job| job.id == warning.transfer_id)
+                else {
+                    return false;
+                };
+                if job.warnings.contains(warning) {
+                    false
+                } else {
+                    job.warnings.push(warning.clone());
+                    true
+                }
+            }
+            AppEvent::TransferCompleted { transfer_id } => {
+                self.set_transfer_terminal(*transfer_id, TransferState::Completed)
+            }
+            AppEvent::TransferSkipped { transfer_id } => {
+                self.set_transfer_terminal(*transfer_id, TransferState::Skipped)
+            }
+            AppEvent::TransferFailed(failure) => self.set_transfer_terminal(
+                failure.transfer_id,
+                TransferState::Failed {
+                    retryable: failure.error.retryable,
+                    error: failure.error.clone(),
+                },
+            ),
+            _ => false,
+        }
+    }
+
+    pub fn mark_cancelling(&mut self, transfer_id: TransferId) -> bool {
+        let Some(job) = self.jobs.iter_mut().find(|job| job.id == transfer_id) else {
+            return false;
+        };
+        if matches!(
+            job.state,
+            TransferState::Queued | TransferState::Running { .. }
+        ) {
+            job.state = TransferState::Cancelling;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn remove_conflict(&mut self, request_id: ConflictRequestId) -> bool {
+        let previous_len = self.pending_conflicts.len();
+        self.pending_conflicts
+            .retain(|conflict| conflict.id != request_id);
+        self.pending_conflicts.len() != previous_len
+    }
+
+    fn insert_plan(&mut self, plan: TransferPlan) -> bool {
+        if self.plans.iter().any(|existing| existing.id == plan.id) {
+            false
+        } else {
+            self.plans.push(plan);
+            true
+        }
+    }
+
+    fn insert_job(&mut self, job: TransferJob) -> bool {
+        if self.jobs.iter().any(|existing| existing.id == job.id) {
+            false
+        } else {
+            self.jobs.push(job);
+            true
+        }
+    }
+
+    fn upsert_job(&mut self, job: TransferJob) -> bool {
+        if let Some(existing) = self.jobs.iter_mut().find(|existing| existing.id == job.id) {
+            if *existing == job {
+                false
+            } else {
+                *existing = job;
+                true
+            }
+        } else {
+            self.jobs.push(job);
+            true
+        }
+    }
+
+    fn upsert_conflict(&mut self, conflict: ConflictRequest) -> bool {
+        if let Some(existing) = self
+            .pending_conflicts
+            .iter_mut()
+            .find(|existing| existing.id == conflict.id)
+        {
+            if *existing == conflict {
+                false
+            } else {
+                *existing = conflict;
+                true
+            }
+        } else {
+            self.pending_conflicts.push(conflict);
+            true
+        }
+    }
+
+    fn set_job_state(&mut self, transfer_id: TransferId, state: TransferState) -> bool {
+        let Some(job) = self.jobs.iter_mut().find(|job| job.id == transfer_id) else {
+            return false;
+        };
+        if job.state == state {
+            false
+        } else {
+            job.state = state;
+            true
+        }
+    }
+
+    fn set_plan_terminal_state(
+        &mut self,
+        plan_id: TransferPlanId,
+        plan_state: TransferPlanState,
+        root_state: TransferState,
+    ) -> bool {
+        let Some(plan) = self.plans.iter_mut().find(|plan| plan.id == plan_id) else {
+            return false;
+        };
+        let root_job_id = plan.root_job_id;
+        let mut changed = false;
+        if plan.state != plan_state {
+            plan.state = plan_state;
+            changed = true;
+        }
+        if let Some(root_job) = self.jobs.iter_mut().find(|job| job.id == root_job_id)
+            && root_job.state != root_state
+        {
+            root_job.state = root_state;
+            changed = true;
+        }
+        changed
+    }
+
+    fn set_transfer_terminal(&mut self, transfer_id: TransferId, state: TransferState) -> bool {
+        let changed = self.set_job_state(transfer_id, state);
+        let conflict_ids: Vec<_> = self
+            .pending_conflicts
+            .iter()
+            .filter_map(|conflict| (conflict.transfer_id == transfer_id).then_some(conflict.id))
+            .collect();
+        let mut conflicts_changed = false;
+        for request_id in conflict_ids {
+            conflicts_changed |= self.remove_conflict(request_id);
+        }
+        changed | conflicts_changed | self.finalize_plan_for_job(transfer_id)
+    }
+
+    fn finalize_plan_for_job(&mut self, transfer_id: TransferId) -> bool {
+        let Some(plan_index) = self
+            .plans
+            .iter()
+            .position(|plan| plan.child_jobs.contains(&transfer_id))
+        else {
+            return false;
+        };
+        if matches!(
+            self.plans[plan_index].state,
+            TransferPlanState::Completed
+                | TransferPlanState::Cancelled
+                | TransferPlanState::Failed { .. }
+        ) {
+            return false;
+        }
+        let child_jobs = self.plans[plan_index].child_jobs.clone();
+        let mut any_failed = false;
+        for child_id in &child_jobs {
+            let Some(job) = self.jobs.iter().find(|job| job.id == *child_id) else {
+                return false;
+            };
+            match job.state {
+                TransferState::Completed | TransferState::Skipped => {}
+                TransferState::Failed { .. } => any_failed = true,
+                _ => return false,
+            }
+        }
+
+        let root_job_id = self.plans[plan_index].root_job_id;
+        let (plan_state, root_state) = if any_failed {
+            let error = UserFacingError::new(
+                ErrorCode::Unknown,
+                "Transfer finished with failures",
+                "Some files could not be transferred.",
+            );
+            (
+                TransferPlanState::Failed {
+                    error: error.clone(),
+                },
+                TransferState::Failed {
+                    retryable: true,
+                    error,
+                },
+            )
+        } else {
+            (TransferPlanState::Completed, TransferState::Completed)
+        };
+        self.plans[plan_index].state = plan_state;
+        if let Some(root_job) = self.jobs.iter_mut().find(|job| job.id == root_job_id) {
+            root_job.state = root_state;
+        }
+        true
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1500,7 +1853,11 @@ pub struct TransferPlanSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransferPlanProgress {
     pub plan_id: TransferPlanId,
-    pub child_job: TransferJob,
+    /// Newly discovered jobs since the previous planning update. The first
+    /// child is emitted immediately; large trees are then delivered in
+    /// bounded batches to preserve streaming feedback without one event per
+    /// filesystem entry.
+    pub child_jobs: Vec<TransferJob>,
     pub planned_count: usize,
     pub total_bytes: Option<u64>,
 }
@@ -2178,6 +2535,134 @@ mod tests {
             state.should_accept_event(&transfer_completed),
             "transfer completed must be accepted after tab close"
         );
+    }
+
+    #[test]
+    fn transfer_store_replay_does_not_duplicate_plans_jobs_or_conflicts() {
+        let now = Timestamp::from_secs_since_epoch(10);
+        let plan_id = TransferPlanId(1);
+        let root_job = super::TransferJob {
+            id: TransferId(1),
+            direction: TransferDirection::Upload,
+            source: TransferEndpoint::Local(LocalPath::new("/tmp/source")),
+            destination: TransferEndpoint::Remote(RemotePath::new("/srv/source")),
+            state: super::TransferState::Planning,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        let plan = super::TransferPlan {
+            id: plan_id,
+            root_job_id: root_job.id,
+            source_root: root_job.source.clone(),
+            destination_root: root_job.destination.clone(),
+            state: super::TransferPlanState::Planning,
+            planned_count: 0,
+            total_bytes: Some(0),
+            child_jobs: Vec::new(),
+            conflict_policy: super::ConflictPolicy::default(),
+        };
+        let started = AppEvent::TransferPlanStarted(super::TransferPlanSnapshot { plan, root_job });
+        let child_job = super::TransferJob {
+            id: TransferId(2),
+            direction: TransferDirection::Upload,
+            source: TransferEndpoint::Local(LocalPath::new("/tmp/source/a.txt")),
+            destination: TransferEndpoint::Remote(RemotePath::new("/srv/source/a.txt")),
+            state: super::TransferState::Queued,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        let progress = AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+            plan_id,
+            child_jobs: vec![child_job.clone()],
+            planned_count: 1,
+            total_bytes: Some(4),
+        });
+        let conflict = AppEvent::TransferConflict(super::TransferConflictPrompt {
+            request_id: ConflictRequestId(7),
+            plan_id,
+            transfer_id: child_job.id,
+            source: child_job.source.clone(),
+            destination: child_job.destination.clone(),
+            source_size: Some(4),
+            source_modified_at: Some(now),
+        });
+
+        let mut store = super::TransferStore::default();
+        for event in [
+            &started, &progress, &conflict, &started, &progress, &conflict,
+        ] {
+            store.apply_event(event, now);
+        }
+
+        assert_eq!(store.plans.len(), 1);
+        assert_eq!(store.jobs.len(), 2);
+        assert_eq!(store.plans[0].child_jobs, vec![TransferId(2)]);
+        assert_eq!(store.pending_conflicts.len(), 1);
+        assert!(matches!(
+            store.jobs[1].state,
+            super::TransferState::WaitingForConflictDecision { .. }
+        ));
+    }
+
+    #[test]
+    fn transfer_store_terminal_events_finalize_root_plan_idempotently() {
+        let now = Timestamp::from_secs_since_epoch(10);
+        let plan_id = TransferPlanId(1);
+        let root_job = super::TransferJob {
+            id: TransferId(1),
+            direction: TransferDirection::Download,
+            source: TransferEndpoint::Remote(RemotePath::new("/srv/a.txt")),
+            destination: TransferEndpoint::Local(LocalPath::new("/tmp/a.txt")),
+            state: super::TransferState::Planning,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        let plan = super::TransferPlan {
+            id: plan_id,
+            root_job_id: root_job.id,
+            source_root: root_job.source.clone(),
+            destination_root: root_job.destination.clone(),
+            state: super::TransferPlanState::Planning,
+            planned_count: 0,
+            total_bytes: Some(0),
+            child_jobs: Vec::new(),
+            conflict_policy: super::ConflictPolicy::default(),
+        };
+        let child_job = super::TransferJob {
+            id: TransferId(2),
+            state: super::TransferState::Queued,
+            ..root_job.clone()
+        };
+        let mut store = super::TransferStore::default();
+        store.apply_event(
+            &AppEvent::TransferPlanStarted(super::TransferPlanSnapshot { plan, root_job }),
+            now,
+        );
+        store.apply_event(
+            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+                plan_id,
+                child_jobs: vec![child_job],
+                planned_count: 1,
+                total_bytes: Some(4),
+            }),
+            now,
+        );
+        store.apply_event(&AppEvent::TransferPlanCompleted { plan_id }, now);
+        let completed = AppEvent::TransferCompleted {
+            transfer_id: TransferId(2),
+        };
+        assert!(store.apply_event(&completed, now));
+        assert!(!store.apply_event(&completed, now));
+
+        assert_eq!(store.plans[0].state, super::TransferPlanState::Completed);
+        assert_eq!(store.jobs[0].state, super::TransferState::Completed);
+        assert_eq!(store.jobs[1].state, super::TransferState::Completed);
     }
 
     #[test]

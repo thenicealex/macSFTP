@@ -1,5 +1,6 @@
 mod app_actions;
 mod assets;
+mod event_coordinator;
 mod m7_regression;
 mod palette_commands;
 mod rate_sampler;
@@ -29,6 +30,7 @@ use crate::app_actions::{
     ToggleHiddenFiles, UploadSelection, ZoomWindow,
 };
 use crate::assets::Assets;
+use crate::event_coordinator::{AppEventCoordinator, present_orphaned_transfer_conflicts};
 use crate::resources::{AppResources, SharedTransfers};
 use crate::workspace::Workspace;
 
@@ -127,10 +129,13 @@ fn main() {
             user_known_hosts.exists().then_some(user_known_hosts),
         );
 
-        let controller = RuntimeController::start(
+        let mut controller = RuntimeController::start(
             RuntimeBridgeConfig::default(),
             SessionBackend::Real(trust_config),
         );
+        let event_receiver = controller
+            .take_event_receiver()
+            .expect("runtime event receiver must be available at startup");
         cx.set_global(RuntimeHandle {
             controller: Some(controller),
             _log_guard: log_guard,
@@ -149,6 +154,10 @@ fn main() {
         // and written by every window (Cmd+N). Set before any window opens.
         cx.set_global(AppResources::load(app_paths, config_store));
         cx.set_global(SharedTransfers::default());
+        let event_coordinator = AppEventCoordinator::start(event_receiver, cx);
+        cx.set_global(event_coordinator);
+        cx.on_window_closed(present_orphaned_transfer_conflicts)
+            .detach();
 
         // Cmd+N (and File > New Window) opens another independent window.
         // Registered at the App level so it fires regardless of which
@@ -226,17 +235,18 @@ fn main() {
 /// the `NewWindow` action (Cmd+N / File > New Window), and the Dock-icon
 /// reopen hook so all three construct a window identically.
 ///
-/// Each window mints its own `RuntimeClient` and broadcast `EventReceiver`
-/// from the one process-wide [`RuntimeController`], and shares the
-/// `AppResources`/`SharedTransfers` globals with every other window.
+/// Each window mints its own `RuntimeClient` from the one process-wide
+/// [`RuntimeController`] and shares `AppResources`/`SharedTransfers` with
+/// every other window. Runtime events are consumed once by
+/// [`AppEventCoordinator`].
 fn open_workspace_window(cx: &mut App) -> gpui::Result<()> {
-    let (runtime_client, event_receiver) = {
+    let runtime_client = {
         let handle = cx.global::<RuntimeHandle>();
         let controller = handle
             .controller
             .as_ref()
             .expect("runtime controller must be running while opening a window");
-        (controller.client(), controller.event_receiver())
+        controller.client()
     };
 
     // First window restores the previous session layout; Cmd+N windows start empty.
@@ -266,10 +276,9 @@ fn open_workspace_window(cx: &mut App) -> gpui::Result<()> {
             }),
             ..Default::default()
         },
-        |window, cx| {
-            cx.new(|cx| Workspace::new(runtime_client, event_receiver, restore_session, window, cx))
-        },
+        |window, cx| cx.new(|cx| Workspace::new(runtime_client, restore_session, window, cx)),
     )?;
+    present_orphaned_transfer_conflicts(cx);
     cx.activate(true);
     Ok(())
 }

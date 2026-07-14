@@ -150,7 +150,9 @@ async fn wait_for_runtime_transfer_completion(events: &mut EventReceiver) -> Tra
     loop {
         match next_runtime_event(events, "runtime transfer event").await {
             AppEvent::TransferPlanStarted(_) | AppEvent::TransferPlanCompleted { .. } => {}
-            AppEvent::TransferPlanProgress(progress) => transfer_id = Some(progress.child_job.id),
+            AppEvent::TransferPlanProgress(progress) => {
+                transfer_id = progress.child_jobs.first().map(|job| job.id);
+            }
             AppEvent::TransferRunning(snapshot) => {
                 assert_eq!(Some(snapshot.job.id), transfer_id);
             }
@@ -832,12 +834,14 @@ async fn runtime_plans_and_executes_single_file_upload_and_download() {
         format!("[127.0.0.1]:{} {}\n", server.port, server.host_public_key),
     )
     .expect("prefill known_hosts");
-    let controller = RuntimeController::start(
+    let mut controller = RuntimeController::start(
         RuntimeBridgeConfig::default(),
         SessionBackend::Real(HostTrustConfig::new(known_hosts_path, None)),
     );
     let client = controller.client();
-    let mut events = controller.event_receiver();
+    let mut events = controller
+        .take_event_receiver()
+        .expect("event receiver should be available once");
 
     client
         .try_send(AppCommand::ConnectTab(ConnectCommand {
@@ -936,12 +940,14 @@ async fn runtime_executes_directory_upload_with_a_bounded_session_queue() {
         format!("[127.0.0.1]:{} {}\n", server.port, server.host_public_key),
     )
     .expect("prefill known_hosts");
-    let controller = RuntimeController::start(
+    let mut controller = RuntimeController::start(
         RuntimeBridgeConfig::default(),
         SessionBackend::Real(HostTrustConfig::new(known_hosts_path, None)),
     );
     let client = controller.client();
-    let mut events = controller.event_receiver();
+    let mut events = controller
+        .take_event_receiver()
+        .expect("event receiver should be available once");
 
     client
         .try_send(AppCommand::ConnectTab(ConnectCommand {
@@ -984,7 +990,9 @@ async fn runtime_executes_directory_upload_with_a_bounded_session_queue() {
     while completed_jobs < 3 {
         match next_runtime_event(&mut events, "directory upload event").await {
             AppEvent::TransferPlanStarted(_) | AppEvent::TransferPlanCompleted { .. } => {}
-            AppEvent::TransferPlanProgress(_) => planned_jobs += 1,
+            AppEvent::TransferPlanProgress(progress) => {
+                planned_jobs += progress.child_jobs.len();
+            }
             AppEvent::TransferRunning(_) | AppEvent::TransferProgress(_) => {}
             AppEvent::TransferCompleted { .. } => completed_jobs += 1,
             AppEvent::TransferFailed(failure) => {
@@ -1032,12 +1040,14 @@ async fn runtime_streams_and_executes_directory_download() {
         format!("[127.0.0.1]:{} {}\n", server.port, server.host_public_key),
     )
     .expect("prefill known_hosts");
-    let controller = RuntimeController::start(
+    let mut controller = RuntimeController::start(
         RuntimeBridgeConfig::default(),
         SessionBackend::Real(HostTrustConfig::new(known_hosts_path, None)),
     );
     let client = controller.client();
-    let mut events = controller.event_receiver();
+    let mut events = controller
+        .take_event_receiver()
+        .expect("event receiver should be available once");
 
     client
         .try_send(AppCommand::ConnectTab(ConnectCommand {
@@ -1080,7 +1090,9 @@ async fn runtime_streams_and_executes_directory_download() {
     while completed_jobs < 4 {
         match next_runtime_event(&mut events, "directory download event").await {
             AppEvent::TransferPlanStarted(_) | AppEvent::TransferPlanCompleted { .. } => {}
-            AppEvent::TransferPlanProgress(_) => planned_jobs += 1,
+            AppEvent::TransferPlanProgress(progress) => {
+                planned_jobs += progress.child_jobs.len();
+            }
             AppEvent::TransferRunning(_) | AppEvent::TransferProgress(_) => {}
             AppEvent::TransferCompleted { .. } => completed_jobs += 1,
             AppEvent::TransferFailed(failure) => {
@@ -1165,12 +1177,14 @@ async fn runtime_routes_read_dir_to_real_actor() {
         format!("[127.0.0.1]:{} {}\n", server.port, server.host_public_key),
     )
     .expect("prefill known_hosts");
-    let controller = RuntimeController::start(
+    let mut controller = RuntimeController::start(
         RuntimeBridgeConfig::default(),
         SessionBackend::Real(HostTrustConfig::new(known_hosts_path, None)),
     );
     let client = controller.client();
-    let mut events = controller.event_receiver();
+    let mut events = controller
+        .take_event_receiver()
+        .expect("event receiver should be available once");
 
     client
         .try_send(AppCommand::ConnectTab(ConnectCommand {
@@ -1237,12 +1251,14 @@ async fn tabs_browse_independently_after_another_tab_disconnects() {
         format!("[127.0.0.1]:{} {}\n", server.port, server.host_public_key),
     )
     .expect("prefill known_hosts");
-    let controller = RuntimeController::start(
+    let mut controller = RuntimeController::start(
         RuntimeBridgeConfig::default(),
         SessionBackend::Real(HostTrustConfig::new(known_hosts_path, None)),
     );
     let client = controller.client();
-    let mut events = controller.event_receiver();
+    let mut events = controller
+        .take_event_receiver()
+        .expect("event receiver should be available once");
 
     for (tab_id, session_id) in [(TAB, SESSION), (SECOND_TAB, SECOND_SESSION)] {
         client

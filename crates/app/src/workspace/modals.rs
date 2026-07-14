@@ -23,6 +23,34 @@ use crate::workspace::profiles::{SettingsSection, profile_list_label};
 use crate::workspace::*;
 
 impl crate::workspace::Workspace {
+    pub(crate) fn has_transfer_conflict_modal(&self, request_id: ConflictRequestId) -> bool {
+        self.state
+            .modals
+            .active
+            .iter()
+            .any(|modal| modal.request_id() == Some(ModalRequestId::Conflict(request_id)))
+    }
+
+    pub(crate) fn present_transfer_conflict(
+        &mut self,
+        prompt: TransferConflictPrompt,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.has_transfer_conflict_modal(prompt.request_id) {
+            return;
+        }
+        let default_rename = copy_name(&prompt.destination);
+        self.state
+            .modals
+            .active
+            .push(ModalRequest::TransferConflict(prompt));
+        self.conflict_rename.set_value(default_rename);
+        self.conflict_rename_error = None;
+        window.focus(&self.modal_focus);
+        cx.notify();
+    }
+
     pub(crate) fn active_host_key_prompt(&self) -> Option<&HostKeyPrompt> {
         let active_tab_id = self.state.tabs.active_tab_id?;
         self.state
@@ -61,9 +89,7 @@ impl crate::workspace::Workspace {
             .modals
             .active
             .retain(|modal| modal.request_id() != Some(ModalRequestId::Conflict(request_id)));
-        cx.transfers_mut()
-            .pending_conflicts
-            .retain(|conflict| conflict.id != request_id);
+        cx.remove_transfer_conflict(request_id);
         self.conflict_rename_error = None;
         if let Some(default_name) = self
             .active_transfer_conflict_prompt()

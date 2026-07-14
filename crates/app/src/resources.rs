@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui::{App, Global};
-use macsftp_core::{LocalPath, TabId, TransferStore};
+use macsftp_core::{AppEvent, LocalPath, TabId, Timestamp, TransferId, TransferStore};
 use macsftp_platform::AppPaths;
 use macsftp_storage::{ConfigStore, ProfileStore, RecentsStore, ResidualTempStore, SessionStore};
 use tracing::warn;
@@ -111,15 +111,15 @@ impl ActiveResources for App {
 /// The app-wide, shared transfer list (jobs/plans/pending conflicts),
 /// visible identically in every window's transfer drawer. Kept separate
 /// from [`AppResources`] because it is in-memory only (no disk path),
-/// created fresh via `Default`, and mutated continuously by every window's
-/// event-drain task.
+/// created fresh via `Default`, and mutated once at the process event
+/// boundary. Windows only read it and issue named user-action mutations.
 ///
 /// `rates` is a view-side sliding-window sampler map (phase 2) keyed by
 /// transfer id; progress events update it, and the drawer/detail read it.
 #[derive(Default)]
 pub struct SharedTransfers {
-    pub store: TransferStore,
-    pub rates: crate::rate_sampler::TransferRateBook,
+    store: TransferStore,
+    rates: crate::rate_sampler::TransferRateBook,
 }
 
 impl Global for SharedTransfers {}
@@ -128,23 +128,83 @@ impl Global for SharedTransfers {}
 /// `&App`/`&mut App` is reachable.
 pub trait ActiveTransfers {
     fn transfers(&self) -> &TransferStore;
-    fn transfers_mut(&mut self) -> &mut TransferStore;
     fn rates(&self) -> &crate::rate_sampler::TransferRateBook;
-    fn rates_mut(&mut self) -> &mut crate::rate_sampler::TransferRateBook;
+    fn apply_transfer_event(&mut self, event: &AppEvent, now: Timestamp) -> bool;
+    fn mark_transfer_cancelling(&mut self, transfer_id: TransferId) -> bool;
+    fn remove_transfer_conflict(&mut self, request_id: macsftp_core::ConflictRequestId) -> bool;
+    #[cfg(test)]
+    fn observe_transfer_rate(
+        &mut self,
+        transfer_id: TransferId,
+        bytes_done: u64,
+        now: std::time::Instant,
+    );
 }
 
 impl ActiveTransfers for App {
     fn transfers(&self) -> &TransferStore {
         &self.global::<SharedTransfers>().store
     }
-    fn transfers_mut(&mut self) -> &mut TransferStore {
-        &mut self.global_mut::<SharedTransfers>().store
-    }
     fn rates(&self) -> &crate::rate_sampler::TransferRateBook {
         &self.global::<SharedTransfers>().rates
     }
-    fn rates_mut(&mut self) -> &mut crate::rate_sampler::TransferRateBook {
-        &mut self.global_mut::<SharedTransfers>().rates
+
+    fn apply_transfer_event(&mut self, event: &AppEvent, now: Timestamp) -> bool {
+        let transfers = self.global_mut::<SharedTransfers>();
+        match event {
+            AppEvent::TransferRunning(snapshot) => {
+                if let macsftp_core::TransferState::Running { bytes_done, .. } = snapshot.job.state
+                {
+                    transfers
+                        .rates
+                        .observe(snapshot.job.id, bytes_done, std::time::Instant::now());
+                }
+            }
+            AppEvent::TransferProgress(progress) => transfers.rates.observe(
+                progress.transfer_id,
+                progress.bytes_done,
+                std::time::Instant::now(),
+            ),
+            AppEvent::TransferCompleted { transfer_id }
+            | AppEvent::TransferSkipped { transfer_id } => transfers.rates.clear(*transfer_id),
+            AppEvent::TransferFailed(failure) => transfers.rates.clear(failure.transfer_id),
+            _ => {}
+        }
+        transfers.store.apply_event(event, now)
+    }
+
+    fn mark_transfer_cancelling(&mut self, transfer_id: TransferId) -> bool {
+        let changed = self
+            .global_mut::<SharedTransfers>()
+            .store
+            .mark_cancelling(transfer_id);
+        if changed {
+            self.refresh_windows();
+        }
+        changed
+    }
+
+    fn remove_transfer_conflict(&mut self, request_id: macsftp_core::ConflictRequestId) -> bool {
+        let changed = self
+            .global_mut::<SharedTransfers>()
+            .store
+            .remove_conflict(request_id);
+        if changed {
+            self.refresh_windows();
+        }
+        changed
+    }
+
+    #[cfg(test)]
+    fn observe_transfer_rate(
+        &mut self,
+        transfer_id: TransferId,
+        bytes_done: u64,
+        now: std::time::Instant,
+    ) {
+        self.global_mut::<SharedTransfers>()
+            .rates
+            .observe(transfer_id, bytes_done, now);
     }
 }
 

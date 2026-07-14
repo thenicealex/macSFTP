@@ -294,8 +294,8 @@ GPUI main thread
 - channel 容量初始值：commands 256，events 1024；
 - GPUI 侧发送 command 必须使用 `flume::Sender::try_send`，禁止在主线程调用阻塞 `send`；
 - Tokio 侧发送 event 使用 `send_async`，让背压传导到 actor，但 progress event 必须先节流或合并；
-- event drain task 由 `AppModel` 生命周期持有，在 GPUI executor 上运行；
-- event drain task 收到 event 后进入 GPUI update closure，更新 Entity state，再 `cx.notify()`；
+- 唯一的 event drain task 由进程级 `AppEventCoordinator` 生命周期持有，在 GPUI executor 上运行；`RuntimeController::take_event_receiver()` 只能交出一次 receiver，禁止每窗口各自消费或订阅 runtime event；
+- event drain task 收到 event 后进入 GPUI update closure：transfer 与 residual-temp 事件只更新一次进程级状态，tab/window 事件再分发到各 `Workspace` 并由 core stale-event guard 过滤；
 - event drain task 只允许 await `flume::Receiver::recv_async()`，不能 await 网络、文件 IO 或其他可能阻塞 UI 的操作；
 - Tokio task 只发送 `AppEvent`，不能持有任何 GPUI handle。
 
@@ -308,18 +308,19 @@ GPUI action
  -> RuntimeController task on Tokio
  -> RemoteSessionActor / TransferManager
  -> bounded event channel
- -> GPUI event drain task
- -> AppModel update
- -> cx.notify()
+ -> process-wide AppEventCoordinator
+ -> TransferStore / persistence update exactly once
+ -> window-scoped Workspace update
+ -> cx.notify() / refresh windows
 ```
 
 背压策略：
 
 - command channel 满时，用户动作类 command 返回错误并在 UI 显示轻量 warning；
 - 低优先级 command，如重复 refresh、重复 progress poll，可以被合并或丢弃；
-- event channel 满时，progress event 可以合并，状态转换 event 不能丢；
+- event channel 满时由 bounded `flume` 背压生产者，不能覆盖或跳过未读事件；状态转换和终态事件绝不能丢；
 - `TransferProgress` 必须节流，例如每个 transfer 最多 10 Hz 进入 UI。
-- `TransferProgress` 节流必须在 TransferManager 发 event 前完成；event drain 侧的合并只作为兜底。
+- `TransferProgress` 节流必须在 TransferManager 发 event 前完成；目录 planning 的首个 child 立即发出，后续 child 在生产端按 128 个一批发送，完成事件前冲刷尾批。
 
 shutdown 策略：
 
@@ -451,6 +452,13 @@ pub enum AppEvent {
     TransferCompleted { transfer_id: TransferId },
     TransferSkipped { transfer_id: TransferId },
     TransferFailed(TransferFailure),
+}
+
+pub struct TransferPlanProgress {
+    pub plan_id: TransferPlanId,
+    pub child_jobs: Vec<TransferJob>,
+    pub planned_count: usize,
+    pub total_bytes: Option<u64>,
 }
 ```
 
@@ -1360,10 +1368,10 @@ remote readlink
 
 第一版只做单窗口。多窗口会改变 `AppModel`、event routing 和 modal ownership，不进入 MVP。
 
-> **2026-07-13 更新 —— 多窗口已交付（post-MVP）。** 上述三点担忧均已解决：
-> - **event routing**：`RuntimeController` 内新增一个 fan-out 任务，把内部 flume 事件流转发到 `tokio::sync::broadcast`，每个窗口 `.subscribe()` 一份完整事件流；跨窗口的 tab 事件由既有的 `TabStore::accepts_remote_event`（按 `tab_id` 过滤）天然分流，无需新增过滤逻辑。
+> **2026-07-15 更新 —— 多窗口事件边界已收敛。** 上述三点担忧均已解决：
+> - **event routing**：`RuntimeController` 只暴露一个 bounded flume receiver，由进程级 `AppEventCoordinator` 唯一消费。transfer 与 residual-temp 事件只归并/持久化一次；tab/window 事件再投递给全部 workspace，并由既有的 `TabStore::accepts_remote_event` 按 `tab_id + session_id + session_epoch` 过滤。禁止 broadcast lag 覆盖未读结构事件。
 > - **AppModel**：`TransferStore` 与六个持久化资源（config/profiles/keychain/residual_temps/session/recents）+ `AppPaths` + tab-id 计数器提升为进程级 GPUI global（`SharedTransfers` / `AppResources`），所有窗口共享同一实例；tab 集合、模态、焦点仍为每窗口私有。
-> - **modal ownership**：host-key 模态携带 `tab_id`，只在拥有该 tab 的窗口弹出，保持每窗口私有。
+> - **modal ownership**：host-key 模态携带 `tab_id`，只在拥有该 tab 的窗口弹出；transfer conflict 由协调器只分配给一个活动窗口，窗口关闭后把仍 pending 的 prompt 重新分配给另一个窗口。
 > - `TabId` 由每实例 `max+1` 改为共享 `Arc<AtomicU64>`，跨窗口绝不冲突（runtime 的 session 注册表按 `TabId` 索引）。
 > - 关闭全部窗口后 app 常驻（原生 macOS 行为），Cmd+N / Dock 图标可重新开窗口。
 
@@ -1895,7 +1903,8 @@ Keychain-backed profile 仍留待后续里程碑。
 - 大文件传输不阻塞目录浏览。
 
 状态：已交付。跨连接 residual temp 持久化与清理缺口已闭合（见 §1893 起），M5 ≈ 100%。`StartTransfer` 先建立 `TransferPlan`，本地
-目录扫描在 blocking worker 中逐项回传 `TransferPlanProgress`，drawer 在
+目录扫描在 blocking worker 中流式回传 `TransferPlanProgress`：首个 child 立即回传，
+后续 child 按 128 个一批并在完成前冲刷尾批；drawer 在
 planning 期间显示发现数量与总字节。每个真实 session 用固定 4 槽队列执行
 child job，目录浏览保持在独立 SFTP channel；规划、队列和运行态均可取消，失败
 job 可重试。目标已存在时 job 进入 conflict state，modal 支持 overwrite、skip、
@@ -1917,10 +1926,11 @@ temp 做无连接对账清理，tab 重连同 host 时发送 `AppCommand::Remove
 Upload/Download 工具栏按钮（按连接+选择态启用）与跨面板拖拽传输（本地条目拖至远端面板=上传，
 远端条目拖至本地面板=下载），消除此前仅菜单/快捷键导致的可发现性问题。修复一个 UI 状态 bug：当
 `TransferPlanCompleted` 时 root job 被错误地设为 `Queued` 且子任务完成后没有事件再次更新它，导致
-已完成的传输仍显示在 Queued 区；现子任务全部到达终态（Completed/Skipped/Failed）后 UI 会主动把
-root job 与 plan 同步 finalize，空 plan 在规划完成时直接 finalize。上传和下载
+已完成的传输仍显示在 Queued 区；现子任务全部到达终态（Completed/Skipped/Failed）后 core reducer 会把
+root job 与 plan 同步 finalize，空 plan 在规划完成时直接 finalize。该状态转换现集中在 core 的幂等
+`TransferStore::apply_event` reducer，重复事件不会复制 plan/job/conflict。上传和下载
 symlink 均复制 link 本身，不解引用，并由真实 sshd 集成测试覆盖。目录下载会在已连接 tab actor 中另开 SFTP channel
-执行远端递归 listing，逐项发出 `TransferPlanProgress` 后才入队；这样远端扫描不占用
+执行远端递归 listing，并按同一首条即时 + 128 条批量规则发出 `TransferPlanProgress` 后才入队；这样远端扫描不占用
 浏览 channel，取消仍复用 root planning 的 cancellation token。目录 child job 会创建
 本地空目录与嵌套父目录，保留目录 metadata，文件与 symlink 继续走既有执行路径。
 
@@ -2093,7 +2103,7 @@ M7 ≈ 100%；MVP ≈ 100%。
 12. `ConnectionProfile.revision` 是 `AuthFingerprint.profile_revision` 的来源，由 storage 层自动递增。
 13. 用户取消 planning 会丢弃 child jobs；planning 错误中断会保留已发现 child jobs 并提示是否部分继续。
 14. borrow fallback 失效时先回退 dedicated，dedicated 也不可行才 failed。
-15. `TransferProgress` 节流在 TransferManager 发 event 前完成，event drain 合并只做兜底。
+15. `TransferProgress` 节流在 TransferManager 发 event 前完成；planning child 在生产端批量化，event drain 不通过丢事件来降载。
 16. dedicated transfer session 使用引用计数，最后一个 active transfer 释放后关闭。
 17. 三轮架构评审后不再继续做文档层架构评审；进入 M0，通过实现期 spike 验证剩余风险。
 18. MVP UI 默认语言英文优先。
@@ -2101,6 +2111,7 @@ M7 ≈ 100%；MVP ≈ 100%。
 20. session_id/session_epoch 由 UI/core 侧在发起连接时分配并放入 `ConnectCommand`；runtime 与 actor 只是回显，不自行分配（M2 实现期决策，保证 stale event guard 端到端一致）。
 21. Keychain-backed profile 落地前的过渡：连接表单收集 `ConnectionSettings`（zeroize 容器、Debug 全量 redact）并直接随 `ConnectCommand` 传给 runtime；secret 仅驻内存（per-tab 缓存供重连），不持久化。Keychain + profiles.json 接入后，command 恢复为按 `profile_id` 解析。
 22. M4a `ReadRemoteDir` 路由：dispatch loop 为每个 `SessionBackend::Real` session 建立请求信箱（`flume` bounded channel），`RemoteSessionActor` 连接成功后用 `select!` 循环同时监听 cancel / connection_lost / 请求信箱，复用已持有的 `SftpSession` 执行 `read_dir`；结果经 `RemoteDirLoaded(RemoteScoped<RemoteDirSnapshot>)` 回传，走既有 session/epoch 陈旧事件守卫。App 侧在 `TabConnected` 后自动发起根目录请求；导航/上级/刷新一律改为发命令，不再本地拼接路径或复用 mock 数据。若同一 session 内有后续导航请求，只有匹配当前目标路径的 listing 可以替换列表。
+23. 多窗口事件所有权：runtime event receiver 只有一个进程级所有者。transfer reducer、rate sampler 和 residual-temp persistence 只执行一次；workspace 只处理窗口/tab 状态。transfer conflict 只能属于一个 live window，owner 关闭后重新分配。
 
 ## 23. 剩余待确认问题
 

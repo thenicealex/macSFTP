@@ -24,6 +24,8 @@ use tokio_util::sync::CancellationToken;
 
 use tracing::warn;
 
+use crate::transfer_planner::PLAN_PROGRESS_BATCH_SIZE;
+
 /// Host trust file locations and prompt policy (plan §10).
 #[derive(Debug, Clone)]
 pub struct HostTrustConfig {
@@ -888,6 +890,7 @@ async fn plan_remote_download(
         planned_count: 0,
         total_bytes: Some(0),
         child_jobs: Vec::new(),
+        pending_progress: Vec::with_capacity(PLAN_PROGRESS_BATCH_SIZE),
     };
 
     match planner.plan(&sftp).await {
@@ -910,6 +913,7 @@ struct RemoteDownloadPlanner {
     planned_count: usize,
     total_bytes: Option<u64>,
     child_jobs: Vec<TransferJob>,
+    pending_progress: Vec<TransferJob>,
 }
 
 impl RemoteDownloadPlanner {
@@ -1032,11 +1036,24 @@ impl RemoteDownloadPlanner {
             warnings: Vec::new(),
             created_at: self.created_at,
         };
+        self.child_jobs.push(child_job.clone());
+        self.pending_progress.push(child_job);
+        if self.planned_count == 1 || self.pending_progress.len() >= PLAN_PROGRESS_BATCH_SIZE {
+            self.flush_progress().await?;
+        }
+        Ok(())
+    }
+
+    async fn flush_progress(&mut self) -> Result<(), UserFacingError> {
+        if self.pending_progress.is_empty() {
+            return Ok(());
+        }
+        let child_jobs = std::mem::take(&mut self.pending_progress);
         tokio::select! {
             _ = self.cancel.cancelled() => return Err(cancelled_transfer_error()),
             result = self.event_tx.send_async(AppEvent::TransferPlanProgress(TransferPlanProgress {
                 plan_id: self.plan_id,
-                child_job: child_job.clone(),
+                child_jobs,
                 planned_count: self.planned_count,
                 total_bytes: self.total_bytes,
             })) => result.map_err(|_| UserFacingError::new(
@@ -1045,13 +1062,16 @@ impl RemoteDownloadPlanner {
                 "The application stopped receiving planning updates.",
             ))?,
         }
-        self.child_jobs.push(child_job);
         Ok(())
     }
 
-    async fn finish(&self) -> bool {
+    async fn finish(&mut self) -> bool {
         if self.cancel.is_cancelled() {
             self.cancelled().await;
+            return false;
+        }
+        if let Err(error) = self.flush_progress().await {
+            self.finish_error(error).await;
             return false;
         }
         self.event_tx

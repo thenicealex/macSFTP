@@ -87,64 +87,40 @@ impl RuntimeClient {
 /// The drain task runs on the GPUI executor and must only await
 /// `recv()` — never network, file IO, or other blocking work.
 ///
-/// Backed by a `tokio::sync::broadcast` receiver so every open window can
-/// hold its own independent subscription and see the full event stream
-/// (a flume clone would be a competing consumer, splitting events between
-/// windows instead of fanning out to all of them).
+/// This is the sole consumer of the runtime's bounded event channel. The app
+/// owns it at the process boundary and fans window-scoped events out only
+/// after process-wide state has been reduced exactly once.
 pub struct EventReceiver {
-    event_rx: tokio::sync::broadcast::Receiver<AppEvent>,
+    event_rx: flume::Receiver<AppEvent>,
 }
 
 impl EventReceiver {
-    pub fn new(event_rx: tokio::sync::broadcast::Receiver<AppEvent>) -> Self {
+    pub fn new(event_rx: flume::Receiver<AppEvent>) -> Self {
         Self { event_rx }
     }
 
     /// Async receive. Safe to await on the GPUI executor.
     ///
     /// Returns `None` when all senders have been dropped (i.e. the runtime
-    /// has shut down). A lagged subscriber (this window's drain task fell
-    /// behind and the channel overwrote unread events) is logged and
-    /// skipped, not treated as fatal.
+    /// has shut down). The bounded channel never overwrites unread events;
+    /// a slow consumer applies backpressure to runtime producers instead.
     pub async fn recv(&mut self) -> Option<AppEvent> {
-        use tokio::sync::broadcast::error::RecvError;
-        loop {
-            match self.event_rx.recv().await {
-                Ok(event) => return Some(event),
-                Err(RecvError::Lagged(skipped)) => {
-                    warn!(skipped, "event receiver lagged; some events were dropped");
-                    continue;
-                }
-                Err(RecvError::Closed) => return None,
-            }
-        }
+        self.event_rx.recv_async().await.ok()
     }
 
-    /// Non-blocking try-receive, for coalescing fallback in the drain loop.
+    /// Non-blocking receive for tests and diagnostics.
     pub fn try_recv(&mut self) -> Option<AppEvent> {
-        use tokio::sync::broadcast::error::TryRecvError;
-        loop {
-            match self.event_rx.try_recv() {
-                Ok(event) => return Some(event),
-                Err(TryRecvError::Lagged(skipped)) => {
-                    warn!(skipped, "event receiver lagged; some events were dropped");
-                    continue;
-                }
-                Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => return None,
-            }
-        }
+        self.event_rx.try_recv().ok()
     }
 }
 
-/// Build a standalone event-broadcast pair without a full
+/// Build a standalone bounded event pair without a full
 /// [`RuntimeController`] (its Tokio runtime, dispatch loop, trust
 /// registry, ...). Exists so callers outside this crate — e.g. the
 /// `macsftp-app` `Workspace` test harness — never need to name
-/// `tokio::sync::broadcast` directly.
-pub fn test_event_channel(
-    capacity: usize,
-) -> (tokio::sync::broadcast::Sender<AppEvent>, EventReceiver) {
-    let (tx, rx) = tokio::sync::broadcast::channel(capacity);
+/// `flume` directly.
+pub fn test_event_channel(capacity: usize) -> (flume::Sender<AppEvent>, EventReceiver) {
+    let (tx, rx) = flume::bounded(capacity);
     (tx, EventReceiver::new(rx))
 }
 
@@ -160,14 +136,7 @@ pub struct RuntimeController {
     runtime: Option<Runtime>,
     channels: BridgeChannels,
     command_loop_handle: Option<JoinHandle<()>>,
-    /// Re-publishes every event from the internal flume channel onto
-    /// `broadcast_tx`, so each window's `EventReceiver` sees the full
-    /// stream. Aborted on shutdown alongside the command loop.
-    event_fanout_handle: Option<JoinHandle<()>>,
-    /// Fan-out source for per-window [`EventReceiver`]s. Held so
-    /// `event_receiver()` can hand out fresh `.subscribe()`d receivers at
-    /// any time (including after zero windows briefly existed).
-    broadcast_tx: tokio::sync::broadcast::Sender<AppEvent>,
+    event_receiver: Option<EventReceiver>,
     trust_registry: Arc<TrustRegistry>,
     config: RuntimeBridgeConfig,
     shutdown_initiated: bool,
@@ -189,6 +158,7 @@ impl RuntimeController {
         );
 
         let channels = BridgeChannels::new(&config);
+        let event_receiver = Some(EventReceiver::new(channels.event_rx.clone()));
         let trust_registry = Arc::new(TrustRegistry::new());
 
         let command_rx = channels.command_rx.clone();
@@ -203,26 +173,11 @@ impl RuntimeController {
             loop_config,
         ));
 
-        // Fan-out stage: the internal flume channel stays a single-consumer
-        // pipe drained here, and each event is re-published to a
-        // `broadcast` sender that every window subscribes to independently.
-        let (broadcast_tx, _) = tokio::sync::broadcast::channel(config.event_channel_capacity);
-        let fanout_event_rx = channels.event_rx.clone();
-        let fanout_tx = broadcast_tx.clone();
-        let event_fanout_handle = runtime.spawn(async move {
-            while let Ok(event) = fanout_event_rx.recv_async().await {
-                // `Err` only means "no subscribers right now" (all windows
-                // closed) — fine to drop; a future window resubscribes.
-                let _ = fanout_tx.send(event);
-            }
-        });
-
         Self {
             runtime: Some(runtime),
             channels,
             command_loop_handle: Some(command_loop_handle),
-            event_fanout_handle: Some(event_fanout_handle),
-            broadcast_tx,
+            event_receiver,
             trust_registry,
             config,
             shutdown_initiated: false,
@@ -234,11 +189,12 @@ impl RuntimeController {
         RuntimeClient::new(self.channels.command_tx.clone())
     }
 
-    /// Return a fresh GPUI-facing event receiver. Each call yields an
-    /// independent broadcast subscription, so multiple windows each drain
-    /// the complete event stream.
-    pub fn event_receiver(&self) -> EventReceiver {
-        EventReceiver::new(self.broadcast_tx.subscribe())
+    /// Take the process-wide GPUI-facing event receiver.
+    ///
+    /// The receiver has one authoritative owner so process-wide events are
+    /// reduced exactly once. Subsequent calls return `None`.
+    pub fn take_event_receiver(&mut self) -> Option<EventReceiver> {
+        self.event_receiver.take()
     }
 
     /// Explicit shutdown. Sends `Shutdown`, waits for the command loop to
@@ -261,10 +217,6 @@ impl RuntimeController {
             // Abort ensures we don't hang if the loop is stuck on a send.
             handle.abort();
         }
-        if let Some(handle) = self.event_fanout_handle.take() {
-            handle.abort();
-        }
-
         // Reject all pending trust requests so no actor hangs waiting.
         self.trust_registry.reject_all();
 
@@ -296,9 +248,6 @@ impl Drop for RuntimeController {
     fn drop(&mut self) {
         if !self.shutdown_initiated {
             if let Some(handle) = self.command_loop_handle.take() {
-                handle.abort();
-            }
-            if let Some(handle) = self.event_fanout_handle.take() {
                 handle.abort();
             }
             self.trust_registry.reject_all();
@@ -1022,9 +971,11 @@ mod tests {
     #[test]
     fn event_receiver_gets_events_via_recv_async() {
         let config = RuntimeBridgeConfig::default();
-        let controller =
+        let mut controller =
             RuntimeController::start(config, SessionBackend::Mock(MockSessionConfig::default()));
-        let mut event_rx = controller.event_receiver();
+        let mut event_rx = controller
+            .take_event_receiver()
+            .expect("event receiver should be available once");
         let event_tx = controller.event_sender().clone();
 
         // Run the async send/receive on the controller's own runtime.
@@ -1171,6 +1122,54 @@ mod tests {
     }
 
     #[test]
+    fn runtime_event_receiver_has_one_authoritative_owner() {
+        let mut controller = RuntimeController::start(
+            RuntimeBridgeConfig::default(),
+            SessionBackend::Mock(MockSessionConfig::default()),
+        );
+
+        assert!(controller.take_event_receiver().is_some());
+        assert!(controller.take_event_receiver().is_none());
+
+        controller.shutdown();
+    }
+
+    #[test]
+    fn bounded_event_receiver_applies_backpressure_without_losing_events() {
+        let (event_tx, mut receiver) = test_event_channel(2);
+        let helper = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("helper runtime");
+
+        helper.block_on(async move {
+            let sender = tokio::spawn(async move {
+                for id in 0u64..6 {
+                    event_tx
+                        .send_async(AppEvent::TransferCompleted {
+                            transfer_id: TransferId(id),
+                        })
+                        .await
+                        .expect("receiver should remain connected");
+                }
+            });
+
+            tokio::task::yield_now().await;
+            for expected_id in 0u64..6 {
+                assert_eq!(
+                    receiver.recv().await,
+                    Some(AppEvent::TransferCompleted {
+                        transfer_id: TransferId(expected_id),
+                    })
+                );
+            }
+            sender.await.expect("sender task should finish");
+        });
+
+        helper.shutdown_timeout(Duration::from_secs(1));
+    }
+
+    #[test]
     fn command_dispatch_loop_exits_on_shutdown_command() {
         let config = RuntimeBridgeConfig {
             shutdown_timeout: Duration::from_millis(500),
@@ -1227,9 +1226,11 @@ mod tests {
             event_channel_capacity: 8,
             ..RuntimeBridgeConfig::default()
         };
-        let controller =
+        let mut controller =
             RuntimeController::start(config, SessionBackend::Mock(MockSessionConfig::default()));
-        let mut event_rx = controller.event_receiver();
+        let mut event_rx = controller
+            .take_event_receiver()
+            .expect("event receiver should be available once");
         let event_tx = controller.event_sender().clone();
 
         controller.runtime().block_on(async move {
@@ -1264,12 +1265,14 @@ mod tests {
             std::env::temp_dir().join(format!("macsftp-runtime-plan-{}", std::process::id()));
         std::fs::write(&fixture_path, b"plan me").expect("write planning fixture");
 
-        let controller = RuntimeController::start(
+        let mut controller = RuntimeController::start(
             RuntimeBridgeConfig::default(),
             SessionBackend::Mock(MockSessionConfig::default()),
         );
         let client = controller.client();
-        let mut events = controller.event_receiver();
+        let mut events = controller
+            .take_event_receiver()
+            .expect("event receiver should be available once");
 
         controller.runtime().block_on(async {
             client
@@ -1353,12 +1356,14 @@ mod tests {
 
     #[test]
     fn full_round_trip_connect_accept_host_key_tab_connected() {
-        let controller = RuntimeController::start(
+        let mut controller = RuntimeController::start(
             RuntimeBridgeConfig::default(),
             SessionBackend::Mock(MockSessionConfig::default()),
         );
         let client = controller.client();
-        let mut event_rx = controller.event_receiver();
+        let mut event_rx = controller
+            .take_event_receiver()
+            .expect("event receiver should be available once");
 
         controller.runtime().block_on(async {
             // 1. Send ConnectTab.
@@ -1411,12 +1416,14 @@ mod tests {
 
     #[test]
     fn full_round_trip_connect_reject_host_key_tab_disconnected() {
-        let controller = RuntimeController::start(
+        let mut controller = RuntimeController::start(
             RuntimeBridgeConfig::default(),
             SessionBackend::Mock(MockSessionConfig::default()),
         );
         let client = controller.client();
-        let mut event_rx = controller.event_receiver();
+        let mut event_rx = controller
+            .take_event_receiver()
+            .expect("event receiver should be available once");
 
         controller.runtime().block_on(async {
             client
@@ -1459,12 +1466,14 @@ mod tests {
 
     #[test]
     fn reconnect_rejects_old_host_key_request() {
-        let controller = RuntimeController::start(
+        let mut controller = RuntimeController::start(
             RuntimeBridgeConfig::default(),
             SessionBackend::Mock(MockSessionConfig::default()),
         );
         let client = controller.client();
-        let mut event_rx = controller.event_receiver();
+        let mut event_rx = controller
+            .take_event_receiver()
+            .expect("event receiver should be available once");
 
         controller.runtime().block_on(async {
             // First connection.
@@ -1537,12 +1546,14 @@ mod tests {
 
     #[test]
     fn close_tab_cancels_actor_and_rejects_pending_trust() {
-        let controller = RuntimeController::start(
+        let mut controller = RuntimeController::start(
             RuntimeBridgeConfig::default(),
             SessionBackend::Mock(MockSessionConfig::default()),
         );
         let client = controller.client();
-        let mut event_rx = controller.event_receiver();
+        let mut event_rx = controller
+            .take_event_receiver()
+            .expect("event receiver should be available once");
 
         controller.runtime().block_on(async {
             // Connect — actor starts and awaits host key decision.
@@ -1600,12 +1611,14 @@ mod tests {
 
     #[test]
     fn shutdown_rejects_all_pending_trust_requests() {
-        let controller = RuntimeController::start(
+        let mut controller = RuntimeController::start(
             RuntimeBridgeConfig::default(),
             SessionBackend::Mock(MockSessionConfig::default()),
         );
         let client = controller.client();
-        let mut event_rx = controller.event_receiver();
+        let mut event_rx = controller
+            .take_event_receiver()
+            .expect("event receiver should be available once");
 
         controller.runtime().block_on(async {
             // Start a connection but don't resolve the host key prompt.
@@ -1641,12 +1654,14 @@ mod tests {
 
     #[test]
     fn multiple_tabs_connect_independently() {
-        let controller = RuntimeController::start(
+        let mut controller = RuntimeController::start(
             RuntimeBridgeConfig::default(),
             SessionBackend::Mock(MockSessionConfig::default()),
         );
         let client = controller.client();
-        let mut event_rx = controller.event_receiver();
+        let mut event_rx = controller
+            .take_event_receiver()
+            .expect("event receiver should be available once");
 
         controller.runtime().block_on(async {
             // Connect tab 1.

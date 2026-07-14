@@ -96,10 +96,8 @@ mod tests {
         });
         let channels = BridgeChannels::new(&RuntimeBridgeConfig::default());
         let client = RuntimeClient::new(channels.command_tx.clone());
-        let (_event_tx, receiver) =
-            macsftp_sftp::test_event_channel(RuntimeBridgeConfig::default().event_channel_capacity);
-        let window = cx
-            .add_window(|window, cx| Workspace::new(client, receiver, restore_session, window, cx));
+        let window =
+            cx.add_window(|window, cx| Workspace::new(client, restore_session, window, cx));
         let workspace = window
             .root(cx)
             .expect("workspace root view should be available");
@@ -3295,7 +3293,7 @@ mod tests {
             workspace.handle_app_event(
                 AppEvent::TransferPlanProgress(TransferPlanProgress {
                     plan_id,
-                    child_job,
+                    child_jobs: vec![child_job],
                     planned_count: 1,
                     total_bytes: Some(100),
                 }),
@@ -4108,9 +4106,8 @@ mod tests {
         let t0 = Instant::now();
 
         workspace.update(&mut cx, |_workspace, cx| {
-            cx.rates_mut().observe(transfer_id, 0, t0);
-            cx.rates_mut()
-                .observe(transfer_id, 1_000_000, t0 + Duration::from_secs(1));
+            cx.observe_transfer_rate(transfer_id, 0, t0);
+            cx.observe_transfer_rate(transfer_id, 1_000_000, t0 + Duration::from_secs(1));
             let snap = cx.rates().snapshot(
                 transfer_id,
                 1_000_000,
