@@ -3,7 +3,7 @@ use macsftp_core::{
     AuthCredential, AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionSettings, ProfileId,
 };
 use macsftp_storage::ProfileMutationError;
-use macsftp_ui::{InputKeyResult, InputState};
+use macsftp_ui::{InputKeyResult, InputState, SecretInputState};
 use tracing::warn;
 
 use crate::resources::ActiveResources;
@@ -30,9 +30,9 @@ pub(crate) struct ConnectForm {
     pub(crate) port: InputState,
     pub(crate) username: InputState,
     pub(crate) auth_method: AuthMethodKind,
-    pub(crate) password: InputState,
+    pub(crate) password: SecretInputState,
     pub(crate) key_path: InputState,
-    pub(crate) passphrase: InputState,
+    pub(crate) passphrase: SecretInputState,
     pub(crate) focused_field: ConnectField,
     pub(crate) error: Option<SharedString>,
     /// Profile this form was prefilled from, if any. Carried into the
@@ -56,9 +56,9 @@ impl ConnectForm {
             port: InputState::with_value("22"),
             username: InputState::new(),
             auth_method: AuthMethodKind::Password,
-            password: InputState::new(),
+            password: SecretInputState::new(),
             key_path: InputState::new(),
-            passphrase: InputState::new(),
+            passphrase: SecretInputState::new(),
             focused_field: ConnectField::Host,
             error: None,
             source_profile_id: None,
@@ -138,9 +138,9 @@ impl ConnectForm {
             ConnectField::Host => &mut self.host,
             ConnectField::Port => &mut self.port,
             ConnectField::Username => &mut self.username,
-            ConnectField::Password => &mut self.password,
+            ConnectField::Password => self.password.as_input_state_mut(),
             ConnectField::KeyPath => &mut self.key_path,
-            ConnectField::Passphrase => &mut self.passphrase,
+            ConnectField::Passphrase => self.passphrase.as_input_state_mut(),
             ConnectField::ProfileName => &mut self.profile_name,
         }
     }
@@ -236,8 +236,8 @@ impl ConnectForm {
     /// can tweak without retyping connection metadata.
     pub(crate) fn switch_to_manual_entry(&mut self) {
         self.source_profile_id = None;
-        self.password = InputState::new();
-        self.passphrase = InputState::new();
+        self.password.clear();
+        self.passphrase.clear();
         self.profile_picker_open = false;
         self.profile_picker_filter = InputState::new();
     }

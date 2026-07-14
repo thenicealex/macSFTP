@@ -180,14 +180,17 @@ impl client::Handler for ClientHandler {
     }
 }
 
-pub fn connection_error(host: &str, port: u16, error: &dyn std::fmt::Display) -> UserFacingError {
+pub fn connection_error(host: &str, port: u16, _error: &dyn std::fmt::Display) -> UserFacingError {
     let mut user_error = UserFacingError::new(
         ErrorCode::ChannelClosed,
         "Connection failed",
         format!("Could not connect to {host}:{port}."),
     )
     .with_retryable(true);
-    user_error.detail = Some(error.to_string());
+    // Third-party technical text is deliberately not copied into UI state
+    // because it is not a trustworthy redaction boundary.
+    user_error.detail =
+        Some("Check the server address, network connection, and SSH configuration.".to_string());
     user_error
 }
 
@@ -225,11 +228,16 @@ async fn authenticate(
             // the authentication step failed.
             let key = match load_secret_key(key_path, passphrase.as_deref()) {
                 Ok(key) => key,
-                Err(error) => {
+                Err(_) => {
+                    let key_file = private_key_file_name(key_path);
+                    warn!(
+                        key_file,
+                        "private key could not be read or decrypted; technical detail redacted"
+                    );
                     let reason = UserFacingError::new(
                         ErrorCode::AuthFailed,
                         "Could not load private key",
-                        error.to_string(),
+                        "The selected private key could not be read or decrypted.",
                     );
                     let _ = event_tx
                         .send_async(AppEvent::AuthFailed(RemoteScoped::new(
@@ -333,8 +341,7 @@ pub async fn establish_physical_connection(
             warn!(
                 host = settings.host.as_str(),
                 port = settings.port,
-                error = %error,
-                "ssh tcp/handshake failed"
+                "ssh tcp/handshake failed; technical detail redacted"
             );
             let recorded = rejection
                 .lock()
@@ -373,7 +380,43 @@ pub fn log_connect_failure(host: &str, failure: &ConnectFailure) {
             warn!(host, title = %auth_failure.reason.title, "connection failed: authentication failed");
         }
         ConnectFailure::Connection(error) => {
-            warn!(host, title = %error.title, detail = ?error.detail, "connection failed: protocol or network error");
+            warn!(host, title = %error.title, "connection failed: protocol or network error");
         }
+    }
+}
+
+fn private_key_file_name(path: &str) -> &str {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("[unknown]")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{connection_error, private_key_file_name};
+
+    #[test]
+    fn connection_error_does_not_copy_untrusted_technical_detail() {
+        let sensitive = "password=do-not-log /Users/alex/.ssh/private-key";
+
+        let error = connection_error("example.com", 22, &sensitive);
+        let rendered = format!(
+            "{} {} {}",
+            error.title,
+            error.message,
+            error.detail.as_deref().unwrap_or_default()
+        );
+
+        assert!(!rendered.contains("do-not-log"));
+        assert!(!rendered.contains("/Users/alex/.ssh"));
+    }
+
+    #[test]
+    fn private_key_log_label_omits_parent_directories() {
+        assert_eq!(
+            private_key_file_name("/Users/alex/.ssh/id_ed25519"),
+            "id_ed25519"
+        );
     }
 }

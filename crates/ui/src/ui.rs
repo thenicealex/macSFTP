@@ -16,7 +16,7 @@ pub use file_list::{
     format_size, format_timestamp,
 };
 pub use icon::{ICON_SIZE, IconName, icon};
-pub use input::{InputKeyResult, InputState, TextFieldModel, text_field};
+pub use input::{InputKeyResult, InputState, SecretInputState, TextFieldModel, text_field};
 pub use tab::{Tab, tab};
 pub use theme::{ActiveTheme, Appearance, Theme, ThemeColors, ThemeFonts, ThemeSizes};
 pub use transfer_row::{TransferRow, transfer_row};

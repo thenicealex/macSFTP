@@ -968,6 +968,11 @@ pub enum AuthMethod {
 时恢复原 Keychain 值。删除同样先提交 profile 文件，再 best-effort 清理无引用
 secret，并把清理失败作为 warning 返回调用方。
 
+**2026-07-14 内存与诊断收口：** password/passphrase 表单使用不可克隆的
+`SecretInputState`；替换、删除、清空和 drop 都会清零旧字符串缓冲区。输入组件的
+`Debug` 始终脱敏。第三方 SSH/IO 错误原文不直接进入 `UserFacingError` 或认证日志；
+私钥诊断最多记录文件名，不记录完整路径。
+
 ### keyboard-interactive 扩展点
 
 第一版不做完整 keyboard-interactive UI，但认证流程要保留 challenge/response 扩展点：
@@ -1445,7 +1450,7 @@ MVP UI 默认语言英文优先，但业务层不能硬编码最终展示文案�
 - 第一版界面文案以英文为主；
 - `core` 输出 error code 和参数；
 - `app/ui` 负责把 error code 映射成展示文案；
-- 日志使用技术信息，UI 使用用户可理解信息；
+- 日志使用经过分类和脱敏的诊断信息，UI 使用用户可理解信息；
 - 后续国际化只替换 UI 文案映射，不改 SFTP adapter。
 
 ## 16. GPUI 实现约束
@@ -1546,7 +1551,7 @@ UI 展示：
 原则：
 
 - 不向 UI 泄露密码、私钥路径中的敏感片段、passphrase；
-- 技术错误可以进入 log；
+- 第三方技术错误原文不能直接进入 log；应先分类并移除 secret、私钥完整路径等敏感上下文；
 - 用户错误要有下一步动作。
 
 ### Logging
@@ -1563,7 +1568,7 @@ UI 展示：
 - 私钥路径默认只记录文件名或 hash，不记录完整路径；
 - host 可以记录，username 默认可记录，password/passphrase 永不记录；
 - transfer progress 不逐 chunk 记录，只记录 state transition 和节流后的 summary；
-- russh/russh-sftp error 保留 debug detail；
+- russh/russh-sftp error 仅保留经过审核的分类信息，不直接记录第三方 `Display` / `Debug` 原文；
 - UI error 只展示 `UserFacingError`。
 
 日志分级：

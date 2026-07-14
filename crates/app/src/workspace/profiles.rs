@@ -3,7 +3,7 @@ use macsftp_core::{
     AuthMethod, AuthMethodKind, ConnectionProfile, LocalPath, ProfileId, RemotePath,
 };
 use macsftp_storage::{ProfileAuthUpdate, ProfileMutationError, ProfileSaveRequest};
-use macsftp_ui::{InputKeyResult, InputState};
+use macsftp_ui::{InputKeyResult, InputState, SecretInputState};
 use tracing::warn;
 
 use crate::resources::ActiveResources;
@@ -41,9 +41,9 @@ pub(crate) struct ProfileEditorState {
     pub port: InputState,
     pub username: InputState,
     pub auth_method: AuthMethodKind,
-    pub password: InputState,
+    pub password: SecretInputState,
     pub key_path: InputState,
-    pub passphrase: InputState,
+    pub passphrase: SecretInputState,
     pub default_remote_path: InputState,
     pub error: Option<SharedString>,
     pub secret_present_hint: bool,
@@ -60,9 +60,9 @@ impl ProfileEditorState {
             port: InputState::with_value("22"),
             username: InputState::new(),
             auth_method: AuthMethodKind::Password,
-            password: InputState::new(),
+            password: SecretInputState::new(),
             key_path: InputState::new(),
-            passphrase: InputState::new(),
+            passphrase: SecretInputState::new(),
             default_remote_path: InputState::new(),
             error: None,
             secret_present_hint: false,
@@ -123,9 +123,9 @@ impl ProfileEditorState {
             ProfileEditorField::Host => &mut self.host,
             ProfileEditorField::Port => &mut self.port,
             ProfileEditorField::Username => &mut self.username,
-            ProfileEditorField::Password => &mut self.password,
+            ProfileEditorField::Password => self.password.as_input_state_mut(),
             ProfileEditorField::KeyPath => &mut self.key_path,
-            ProfileEditorField::Passphrase => &mut self.passphrase,
+            ProfileEditorField::Passphrase => self.passphrase.as_input_state_mut(),
             ProfileEditorField::DefaultRemotePath => &mut self.default_remote_path,
         }
     }

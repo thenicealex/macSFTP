@@ -138,6 +138,7 @@ macSFTP 已从「可连接的文件浏览器原型」演进为 **可当主力使
 | **交互式 §15 手测签字** | 720×480、10k 目录、多 transfer、多 tab 真实跑一遍并更新 audit |
 | **Verify gate 常绿** | 保持 `fmt` + `clippy -D warnings` + test 在 CI 必过 |
 | Keychain / 双保存路径 | **已收口：** Connect 与 Settings 均通过 storage `ProfileStore` 事务保存；app 不直接访问 Keychain |
+| Secret 内存 / 诊断脱敏 | **已收口：** UI secret state 不可克隆并清零旧缓冲；第三方连接错误与私钥完整路径不进入 UI/log |
 | 集成测试 | 真实 sshd 路径在 CI 可跑时默认开；无 Docker skip 信息已有则保持清晰 |
 | 陈旧事件 / multi-window session | 多窗口写 `session.json` last-writer 已知限制；可选 tabs-most 或仅主窗口写 |
 
@@ -209,3 +210,4 @@ macSFTP 已从「可连接的文件浏览器原型」演进为 **可当主力使
 | 2026-07-14 | P1：Connect/Profile polish（行标签、Enter、草稿、焦点、filter） |
 | 2026-07-14 | P0：移除无产品入口的 Transfer History catalog/retry 路径；drawer 仅保留进程内分组 |
 | 2026-07-14 | 安全边界：ProfileStore 统一 profiles.json + Keychain 事务，app 移除 Keychain 直连 |
+| 2026-07-14 | 安全边界：UI secret 输入清零且不可克隆；SSH 连接与私钥诊断按分类脱敏 |

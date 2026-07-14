@@ -3,6 +3,7 @@ use gpui::{
     App, ElementId, InteractiveElement, IntoElement, Keystroke, ParentElement, SharedString,
     Styled, div, px,
 };
+use zeroize::Zeroize;
 
 use crate::theme::ActiveTheme;
 
@@ -13,11 +14,77 @@ use crate::theme::ActiveTheme;
 /// MVP scope (M3): character input via `key_char`, backspace/delete,
 /// arrow/home/end movement, insert-at-cursor paste. No selection, no
 /// IME composition — those come with a real input component later.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Default, Clone, PartialEq, Eq)]
 pub struct InputState {
     value: String,
     /// Byte offset into `value`, always on a char boundary.
     cursor: usize,
+}
+
+impl std::fmt::Debug for InputState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InputState")
+            .field("value", &"[REDACTED]")
+            .field("cursor", &self.cursor)
+            .finish()
+    }
+}
+
+impl Drop for InputState {
+    fn drop(&mut self) {
+        self.value.zeroize();
+        self.cursor = 0;
+    }
+}
+
+/// Non-cloneable marker for password/passphrase fields. It reuses the same
+/// editing behavior as [`InputState`] while preventing accidental secret
+/// duplication in form snapshots.
+#[derive(Default, PartialEq, Eq)]
+pub struct SecretInputState(InputState);
+
+impl SecretInputState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_value(value: impl Into<String>) -> Self {
+        Self(InputState::with_value(value))
+    }
+
+    pub fn value(&self) -> &str {
+        self.0.value()
+    }
+
+    pub fn set_value(&mut self, value: impl Into<String>) {
+        self.0.set_value(value);
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    pub fn chars_before_cursor(&self) -> usize {
+        self.0.chars_before_cursor()
+    }
+
+    pub fn as_input_state(&self) -> &InputState {
+        &self.0
+    }
+
+    pub fn as_input_state_mut(&mut self) -> &mut InputState {
+        &mut self.0
+    }
+}
+
+impl std::fmt::Debug for SecretInputState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SecretInputState")
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// What `handle_keystroke` did with the key.
@@ -45,12 +112,14 @@ impl InputState {
     }
 
     pub fn set_value(&mut self, value: impl Into<String>) {
-        self.value = value.into();
+        let value = value.into();
+        self.value.zeroize();
+        self.value = value;
         self.cursor = self.value.len();
     }
 
     pub fn clear(&mut self) {
-        self.value.clear();
+        self.value.zeroize();
         self.cursor = 0;
     }
 
@@ -62,9 +131,10 @@ impl InputState {
 
     pub fn insert(&mut self, text: &str) {
         // Single-line field: strip newlines from pasted text.
-        let sanitized: String = text.chars().filter(|ch| !ch.is_control()).collect();
-        self.value.insert_str(self.cursor, &sanitized);
+        let mut sanitized: String = text.chars().filter(|ch| !ch.is_control()).collect();
+        self.replace_range(self.cursor..self.cursor, &sanitized);
         self.cursor += sanitized.len();
+        sanitized.zeroize();
     }
 
     /// Apply one keystroke. Modifier chords (except shift) are ignored
@@ -78,14 +148,14 @@ impl InputState {
         match keystroke.key.as_str() {
             "backspace" => {
                 if let Some(previous) = self.previous_boundary() {
-                    self.value.replace_range(previous..self.cursor, "");
+                    self.replace_range(previous..self.cursor, "");
                     self.cursor = previous;
                 }
                 InputKeyResult::Handled
             }
             "delete" => {
                 if let Some(next) = self.next_boundary() {
-                    self.value.replace_range(self.cursor..next, "");
+                    self.replace_range(self.cursor..next, "");
                 }
                 InputKeyResult::Handled
             }
@@ -131,6 +201,16 @@ impl InputState {
             .chars()
             .next()
             .map(|ch| self.cursor + ch.len_utf8())
+    }
+
+    fn replace_range(&mut self, range: std::ops::Range<usize>, replacement: &str) {
+        let mut next =
+            String::with_capacity(self.value.len() - (range.end - range.start) + replacement.len());
+        next.push_str(&self.value[..range.start]);
+        next.push_str(replacement);
+        next.push_str(&self.value[range.end..]);
+        self.value.zeroize();
+        self.value = next;
     }
 }
 
@@ -231,7 +311,7 @@ impl TextFieldModel<'_> {
 mod tests {
     use gpui::Keystroke;
 
-    use super::{InputKeyResult, InputState};
+    use super::{InputKeyResult, InputState, SecretInputState};
 
     fn key(name: &str) -> Keystroke {
         Keystroke::parse(name).expect("test keystroke must parse")
@@ -259,6 +339,25 @@ mod tests {
         input.handle_keystroke(&key("left"));
         input.handle_keystroke(&typed('X'));
         assert_eq!(input.value(), "hoXst");
+    }
+
+    #[test]
+    fn debug_output_redacts_input_values() {
+        let input = InputState::with_value("do-not-log-this");
+        let secret = SecretInputState::with_value("do-not-log-this-either");
+
+        assert!(!format!("{input:?}").contains("do-not-log-this"));
+        assert!(!format!("{secret:?}").contains("do-not-log-this-either"));
+    }
+
+    #[test]
+    fn clearing_secret_input_removes_the_visible_value() {
+        let mut secret = SecretInputState::with_value("temporary-secret");
+
+        secret.clear();
+
+        assert!(secret.value().is_empty());
+        assert_eq!(secret.chars_before_cursor(), 0);
     }
 
     #[test]

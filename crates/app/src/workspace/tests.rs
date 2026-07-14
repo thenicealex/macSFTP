@@ -593,7 +593,7 @@ mod tests {
             editor.host = InputState::with_value("sftp.example.com");
             editor.port = InputState::with_value("22");
             editor.username = InputState::with_value("deploy");
-            editor.password = InputState::with_value("s3cret");
+            editor.password.set_value("s3cret");
             editor.default_remote_path = InputState::with_value("/var/www");
 
             ws.save_profile_editor(cx);
@@ -2678,7 +2678,7 @@ mod tests {
             let form = workspace.connect_form.as_mut().expect("form is open");
             form.host.set_value("other.example.com");
             form.username.set_value("other");
-            form.password = macsftp_ui::InputState::new();
+            form.password.clear();
             form.profile_picker_open = true;
             form.profile_picker_filter.set_value("work");
             workspace.select_connect_profile(saved_id, cx);

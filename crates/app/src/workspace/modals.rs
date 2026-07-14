@@ -783,7 +783,7 @@ impl crate::workspace::Workspace {
             AuthMethodKind::Password => card.child(field_row(
                 "Password",
                 ConnectField::Password,
-                &form.password,
+                form.password.as_input_state(),
                 "",
                 true,
                 cx,
@@ -800,7 +800,7 @@ impl crate::workspace::Workspace {
                 .child(field_row(
                     "Passphrase",
                     ConnectField::Passphrase,
-                    &form.passphrase,
+                    form.passphrase.as_input_state(),
                     "",
                     true,
                     cx,

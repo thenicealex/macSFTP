@@ -13,6 +13,7 @@ path = "src/ui.rs"
 [dependencies]
 gpui = "=0.2.2"
 macsftp-core = { path = "../core" }
+zeroize = "1"
 
 [lints]
 workspace = true

@@ -2129,7 +2129,7 @@ impl crate::workspace::Workspace {
             AuthMethodKind::Password => form.child(field_row(
                 "Password",
                 ProfileEditorField::Password,
-                &editor.password,
+                editor.password.as_input_state(),
                 if editor.secret_present_hint {
                     "leave blank to keep"
                 } else {
@@ -2152,7 +2152,7 @@ impl crate::workspace::Workspace {
                 .child(field_row(
                     "Passphrase",
                     ProfileEditorField::Passphrase,
-                    &editor.passphrase,
+                    editor.passphrase.as_input_state(),
                     if editor.secret_present_hint {
                         "leave blank to keep"
                     } else {
