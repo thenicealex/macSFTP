@@ -437,6 +437,7 @@ async fn command_dispatch_loop(
                             RemoteEventScope::new(cmd.tab_id, cmd.session_id, cmd.session_epoch);
                         let mut receiver = connection_manager.get_or_connect(
                             &cmd.settings,
+                            &cmd.pool_identity,
                             &scope,
                             trust_request_id,
                             store.clone(),
@@ -926,9 +927,10 @@ impl ProgressThrottle {
 mod tests {
     use super::*;
     use macsftp_core::{
-        AuthCredential, ConflictPolicy, ConnectCommand, ConnectionSettings, HostKeyDecisionCommand,
-        LocalPath, MetadataPolicy, ProfileId, RemotePath, SessionId, StartTransferCommand, TabId,
-        TransferDirection, TransferEndpoint, TransferId, TransferPlanState, TransferState,
+        AuthCredential, ConflictPolicy, ConnectCommand, ConnectionPoolIdentity, ConnectionSettings,
+        HostKeyDecisionCommand, LocalPath, MetadataPolicy, ProfileId, RemotePath, SessionId,
+        StartTransferCommand, TabId, TransferDirection, TransferEndpoint, TransferId,
+        TransferPlanState, TransferState,
     };
 
     /// Placeholder settings — the mock backend never dials them.
@@ -1373,6 +1375,7 @@ mod tests {
                     session_id: SessionId(1),
                     session_epoch: 1,
                     profile_id: ProfileId(1),
+                    pool_identity: ConnectionPoolIdentity::Ephemeral(SessionId(1)),
                     settings: test_settings(),
                 }))
                 .expect("connect command should send");
@@ -1432,6 +1435,7 @@ mod tests {
                     session_id: SessionId(1),
                     session_epoch: 1,
                     profile_id: ProfileId(1),
+                    pool_identity: ConnectionPoolIdentity::Ephemeral(SessionId(1)),
                     settings: test_settings(),
                 }))
                 .expect("connect command should send");
@@ -1483,6 +1487,7 @@ mod tests {
                     session_id: SessionId(1),
                     session_epoch: 1,
                     profile_id: ProfileId(1),
+                    pool_identity: ConnectionPoolIdentity::Ephemeral(SessionId(1)),
                     settings: test_settings(),
                 }))
                 .expect("first connect");
@@ -1503,6 +1508,7 @@ mod tests {
                     session_id: SessionId(2),
                     session_epoch: 2,
                     profile_id: ProfileId(1),
+                    pool_identity: ConnectionPoolIdentity::Ephemeral(SessionId(2)),
                     settings: test_settings(),
                 }))
                 .expect("reconnect");
@@ -1563,6 +1569,7 @@ mod tests {
                     session_id: SessionId(1),
                     session_epoch: 1,
                     profile_id: ProfileId(1),
+                    pool_identity: ConnectionPoolIdentity::Ephemeral(SessionId(1)),
                     settings: test_settings(),
                 }))
                 .expect("connect");
@@ -1628,6 +1635,7 @@ mod tests {
                     session_id: SessionId(1),
                     session_epoch: 1,
                     profile_id: ProfileId(1),
+                    pool_identity: ConnectionPoolIdentity::Ephemeral(SessionId(1)),
                     settings: test_settings(),
                 }))
                 .expect("connect");
@@ -1671,6 +1679,7 @@ mod tests {
                     session_id: SessionId(1),
                     session_epoch: 1,
                     profile_id: ProfileId(1),
+                    pool_identity: ConnectionPoolIdentity::Ephemeral(SessionId(1)),
                     settings: test_settings(),
                 }))
                 .expect("connect tab 1");
@@ -1682,6 +1691,7 @@ mod tests {
                     session_id: SessionId(2),
                     session_epoch: 1,
                     profile_id: ProfileId(2),
+                    pool_identity: ConnectionPoolIdentity::Ephemeral(SessionId(2)),
                     settings: test_settings(),
                 }))
                 .expect("connect tab 2");

@@ -13,7 +13,7 @@ use gpui::{
     WindowBounds, WindowHandle, WindowOptions, px, size,
 };
 use macsftp_core::RuntimeBridgeConfig;
-use macsftp_platform::AppPaths;
+use macsftp_platform::{AppPaths, prune_log_files, write_crash_marker};
 use macsftp_sftp::{HostTrustConfig, RuntimeController, SessionBackend};
 use macsftp_storage::{AppearancePreference, ConfigStore, SessionStore, SessionWindowSnapshot};
 use macsftp_ui::Theme;
@@ -66,7 +66,10 @@ fn init_logging(log_path: &str) -> WorkerGuard {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "macsftp.log".to_string());
-    let appender = tracing_appender::rolling::never(directory, file_name.as_str());
+    if let Err(error) = prune_log_files(directory, file_name.as_str(), 7, 50 * 1024 * 1024) {
+        eprintln!("macSFTP could not prune old diagnostic logs: {error}");
+    }
+    let appender = tracing_appender::rolling::daily(directory, file_name.as_str());
     let (non_blocking_writer, guard) = tracing_appender::non_blocking(appender);
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -90,6 +93,29 @@ fn init_logging(log_path: &str) -> WorkerGuard {
     guard
 }
 
+fn install_panic_hook(crash_marker_path: &str) {
+    let crash_marker_path = crash_marker_path.to_string();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let location = panic_info.location();
+        let source_file_name = location.and_then(|location| {
+            Path::new(location.file())
+                .file_name()
+                .and_then(|name| name.to_str())
+        });
+        let source_line = location.map(std::panic::Location::line);
+        if let Err(error) = write_crash_marker(
+            Path::new(&crash_marker_path),
+            env!("CARGO_PKG_VERSION"),
+            source_file_name,
+            source_line,
+        ) {
+            eprintln!("macSFTP encountered an error and could not write a crash marker: {error}");
+        } else {
+            eprintln!("macSFTP encountered an internal error; a crash marker was written");
+        }
+    }));
+}
+
 fn main() {
     let app = Application::new().with_assets(Assets);
     // Native macOS behavior: the app stays alive with no windows open;
@@ -108,12 +134,11 @@ fn main() {
         // present, write only to the app-owned file.
         let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         let app_paths = AppPaths::from_home_dir(&home_dir);
-        // Start logging early so directory-creation and every later
-        // diagnostic land in the log file, not just stderr.
-        let log_guard = init_logging(app_paths.log_file.as_str());
         if let Err(error) = app_paths.ensure_directories() {
-            warn!(error = %error, "could not create app directories");
+            eprintln!("macSFTP could not create its application directories: {error}");
         }
+        install_panic_hook(app_paths.crash_marker_file.as_str());
+        let log_guard = init_logging(app_paths.log_file.as_str());
         let config_store = match ConfigStore::open(app_paths.config_file.clone()) {
             Ok(store) => store,
             Err(error) => {

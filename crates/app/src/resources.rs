@@ -56,11 +56,22 @@ impl AppResources {
         config: ConfigStore,
         profiles: ProfileStore,
     ) -> Self {
+        if profiles.initial_error().is_some() {
+            warn!("profiles.json could not be loaded; profile writes are blocked until recovery");
+        }
         remove_legacy_transfer_history(&app_paths.legacy_transfer_history_file);
         let residual_temps = reconcile_local_residual_temps(ResidualTempStore::open_or_empty(
             app_paths.residual_temp_file.clone(),
         ));
         let recents = RecentsStore::open_or_empty(app_paths.recents_file.clone());
+        if residual_temps.initial_error().is_some() {
+            warn!(
+                "residual_temp.json could not be loaded; residual writes are blocked until recovery"
+            );
+        }
+        if recents.initial_error().is_some() {
+            warn!("recents.json could not be loaded; recent writes are blocked until recovery");
+        }
         Self {
             app_paths,
             config,

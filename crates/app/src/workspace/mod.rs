@@ -6,8 +6,9 @@ use gpui::{
     Render, SharedString, Styled, Subscription, UniformListScrollHandle, Window, div, prelude::*,
 };
 use macsftp_core::{
-    AppCommand, AppState, CommandDispatchError, ConnectCommand, ConnectionSettings,
-    ConnectionState, EntryPath, LocalPath, ProfileId, RemotePath, TabId, TabState, WindowSessionId,
+    AppCommand, AppState, CommandDispatchError, ConnectCommand, ConnectionPoolIdentity,
+    ConnectionSettings, ConnectionState, EntryPath, LocalPath, ProfileId, RemotePath, TabId,
+    TabState, WindowSessionId,
 };
 use macsftp_sftp::RuntimeClient;
 use macsftp_storage::{
@@ -612,6 +613,10 @@ impl Workspace {
         let is_reconnect = matches!(tab.connection, ConnectionState::Connected { .. });
 
         let session_id = self.state.allocate_session_id();
+        let pool_identity = profile_id
+            .and_then(|profile_id| cx.resources().profiles.auth_fingerprint(profile_id))
+            .map(ConnectionPoolIdentity::Saved)
+            .unwrap_or(ConnectionPoolIdentity::Ephemeral(session_id));
         let sent = self.send_command(
             AppCommand::ConnectTab(ConnectCommand {
                 tab_id,
@@ -622,6 +627,7 @@ impl Workspace {
                 // profile id links the tab to a saved entry when one
                 // was used, so transfers and reconnects stay associated.
                 profile_id: profile_id.unwrap_or(ProfileId(0)),
+                pool_identity,
                 settings: settings.clone(),
             }),
             cx,

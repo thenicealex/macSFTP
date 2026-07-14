@@ -2,6 +2,7 @@ use macsftp_core::ResidualTempRecord;
 use serde::{Deserialize, Serialize};
 
 use super::StorageError;
+use crate::write_private_file_atomically;
 
 /// On-disk envelope for residual temporary-transfer files (plan M5/M6
 /// residual). The versioned wrapper lets the record format evolve without
@@ -50,17 +51,12 @@ impl ResidualTempFile {
         let json = serde_json::to_string_pretty(self).map_err(|error| StorageError::Parse {
             message: error.to_string(),
         })?;
-        let path_str = path.as_str();
-        let temp_path = format!("{path_str}.tmp");
-        std::fs::write(&temp_path, &json).map_err(|error| StorageError::Io {
-            path: temp_path.clone(),
-            message: error.to_string(),
-        })?;
-        std::fs::rename(&temp_path, path_str).map_err(|error| StorageError::Io {
-            path: path_str.to_string(),
-            message: error.to_string(),
-        })?;
-        Ok(())
+        write_private_file_atomically(std::path::Path::new(path.as_str()), json.as_bytes()).map_err(
+            |error| StorageError::Io {
+                path: path.as_str().to_string(),
+                message: error.to_string(),
+            },
+        )
     }
 }
 
@@ -78,6 +74,7 @@ impl Default for ResidualTempFile {
 pub struct ResidualTempStore {
     path: macsftp_core::LocalPath,
     records: Vec<ResidualTempRecord>,
+    initial_error: Option<StorageError>,
 }
 
 impl ResidualTempStore {
@@ -87,18 +84,20 @@ impl ResidualTempStore {
         Ok(Self {
             path,
             records: file.records,
+            initial_error: None,
         })
     }
 
     /// Like `open`, but never fails: a missing or unreadable file yields
-    /// an empty store that still remembers `path`, so the next save
-    /// recovers.
+    /// an empty store. An unreadable file blocks writes so recovery data is
+    /// not overwritten.
     pub fn open_or_empty(path: macsftp_core::LocalPath) -> Self {
         match Self::open(path.clone()) {
             Ok(store) => store,
-            Err(_) => Self {
+            Err(error) => Self {
                 path,
                 records: Vec::new(),
+                initial_error: Some(error),
             },
         }
     }
@@ -109,6 +108,10 @@ impl ResidualTempStore {
 
     pub fn records(&self) -> &[ResidualTempRecord] {
         &self.records
+    }
+
+    pub fn initial_error(&self) -> Option<&StorageError> {
+        self.initial_error.as_ref()
     }
 
     /// All local residual records (cleaned at launch without a connection).
@@ -153,6 +156,11 @@ impl ResidualTempStore {
 
     /// Flush the in-memory records to disk atomically.
     pub fn save(&self) -> Result<(), StorageError> {
+        if self.initial_error.is_some() {
+            return Err(StorageError::RecoveryRequired {
+                path: self.path.as_str().to_string(),
+            });
+        }
         ResidualTempFile {
             version: ResidualTempFile::CURRENT_VERSION,
             records: self.records.clone(),
@@ -214,6 +222,24 @@ mod tests {
     fn missing_file_loads_empty() {
         let store = ResidualTempStore::open_or_empty(temp_path());
         assert!(store.records().is_empty());
+    }
+
+    #[test]
+    fn corrupt_file_blocks_writes_and_is_preserved() {
+        let path = temp_path();
+        std::fs::write(path.as_str(), "{not json").expect("write corrupt residual fixture");
+        let store = ResidualTempStore::open_or_empty(path.clone());
+
+        assert!(store.records().is_empty());
+        assert!(store.initial_error().is_some());
+        assert!(matches!(
+            store.save(),
+            Err(crate::StorageError::RecoveryRequired { .. })
+        ));
+        assert_eq!(
+            std::fs::read_to_string(path.as_str()).expect("read preserved residual fixture"),
+            "{not json"
+        );
     }
 
     #[test]

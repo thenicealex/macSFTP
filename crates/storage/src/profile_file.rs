@@ -1,6 +1,8 @@
 use macsftp_core::{ConnectionProfile, LocalPath, ProfileId};
 use serde::{Deserialize, Serialize};
 
+use crate::write_private_file_atomically;
+
 /// Versioned, non-secret representation persisted as `profiles.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfilesFile {
@@ -77,17 +79,12 @@ impl ProfilesFile {
         let json = serde_json::to_string_pretty(self).map_err(|error| StorageError::Parse {
             message: error.to_string(),
         })?;
-        let path_str = path.as_str();
-        let temp_path = format!("{path_str}.tmp");
-        std::fs::write(&temp_path, &json).map_err(|error| StorageError::Io {
-            path: temp_path.clone(),
-            message: error.to_string(),
-        })?;
-        std::fs::rename(&temp_path, path_str).map_err(|error| StorageError::Io {
-            path: path_str.to_string(),
-            message: error.to_string(),
-        })?;
-        Ok(())
+        write_private_file_atomically(std::path::Path::new(path.as_str()), json.as_bytes()).map_err(
+            |error| StorageError::Io {
+                path: path.as_str().to_string(),
+                message: error.to_string(),
+            },
+        )
     }
 }
 
@@ -100,6 +97,7 @@ impl Default for ProfilesFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StorageError {
     RevisionOverflow { profile_id: ProfileId },
+    RecoveryRequired { path: String },
     Io { path: String, message: String },
     Parse { message: String },
 }
@@ -110,6 +108,10 @@ impl std::fmt::Display for StorageError {
             StorageError::RevisionOverflow { profile_id } => {
                 write!(formatter, "profile {profile_id:?} revision overflowed")
             }
+            StorageError::RecoveryRequired { path } => write!(
+                formatter,
+                "refusing to overwrite unreadable application data at {path}"
+            ),
             StorageError::Io { path, message } => {
                 write!(formatter, "could not access {path}: {message}")
             }

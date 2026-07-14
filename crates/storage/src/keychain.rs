@@ -192,14 +192,19 @@ mod tests {
         );
     }
 
-    // Touches the real macOS login Keychain and may prompt for access, so
-    // it is opt-in. Run with: cargo test -- --ignored
+    // Touches the active macOS Keychain and may prompt for access, so it is
+    // opt-in. The release gate runs it against an isolated temporary Keychain.
     #[test]
-    #[ignore = "touches the macOS login Keychain; run manually with cargo test -- --ignored"]
+    #[ignore = "touches macOS Keychain; run through scripts/test_keychain.sh"]
     fn os_backend_stores_loads_and_deletes() {
         let store = KeychainStore::new_os();
-        let secret_ref = SecretRef::new("keychain:macsftp:test:password");
-        let _ = store.delete(&secret_ref);
+        let secret_ref = SecretRef::new(format!(
+            "keychain:macsftp:test:{}:password",
+            std::process::id()
+        ));
+        if let Err(error) = store.delete(&secret_ref) {
+            panic!("clean stale Keychain fixture: {error}");
+        }
 
         store.store(&secret_ref, "secret-value").expect("store");
         assert_eq!(

@@ -758,10 +758,17 @@ pub struct AuthFingerprint {
 规则：
 
 - password auth 使用 `SecretRef + profile_revision`；
-- private key auth 使用 canonicalized key path 的 hash、passphrase `SecretRef`、`profile_revision`；
+- private key auth 使用已展开并持久化的 key path 的 SHA-256、passphrase `SecretRef`、`profile_revision`；
+- 未保存的手工连接使用 UI/core 分配的 `SessionId` 作为临时连接池身份，只允许同一
+  session 内复用，禁止不同连接尝试共享；
 - 用户修改 profile 的 password、key path、passphrase 或 auth method 时，`profile_revision` 递增；
 - `AuthFingerprint` 不包含 secret value，也不对 secret value 做 hash；
+- `AuthCredential` / `ConnectionSettings` 不实现 `Hash`，防止后续重新引入 secret-derived key；
 - TransferManager 只在 `TransferSessionKey` 完全一致时复用 session。
+
+持久化写入统一使用同目录临时文件、`0600`、file `fsync`、atomic rename 和 parent
+directory `fsync`。如果 config/profiles/session/recents/residual 文件损坏或版本不支持，应用可用
+空内存状态继续启动，但该 store 禁止写回，避免在用户恢复原文件前静默覆盖。
 
 默认使用 `Dedicated`。如果服务端拒绝额外 SSH 连接，且用户确认接受限制，则 fallback 到 `BorrowBrowsingSession`。
 
@@ -907,7 +914,7 @@ MVP 目标是 OpenSSH-compatible 子集，而不是完整 OpenSSH grammar。
 - 无法解析的行按行忽略；
 - 写 `WARN` log，包含文件路径和行号，不包含整行原文；
 - 单行解析失败不能导致整个 known_hosts 文件失效；
-- 如果目标 host 只存在于 unsupported entry，例如 hashed host，则该 host 在 MVP 中视为 `NotFound`，触发正常信任弹窗。
+- OpenSSH `|1|` hashed host entry 使用 HMAC-SHA1 按 host pattern 匹配；不能通过解码恢复 hostname。
 
 写入支持：
 
@@ -917,11 +924,9 @@ MVP 目标是 OpenSSH-compatible 子集，而不是完整 OpenSSH grammar。
 
 MVP 不承诺：
 
-- hashed host entry；
 - wildcard / negated pattern；
 - 一行多个 host pattern；
-- `@cert-authority`；
-- `@revoked`；
+- `@cert-authority` CA 验证；
 - OpenSSH certificate host keys；
 - FIDO/U2F `sk-*` host key 完整兼容。
 

@@ -3700,11 +3700,13 @@ name = "macsftp-sftp"
 version = "0.1.0"
 dependencies = [
  "flume",
+ "hmac 0.13.0",
  "macsftp-core",
  "macsftp-storage",
  "macsftp-test-support",
  "russh",
  "russh-sftp",
+ "sha1",
  "ssh-key",
  "tokio",
  "tokio-util",
@@ -3719,6 +3721,7 @@ dependencies = [
  "security-framework",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "zeroize",
 ]
 

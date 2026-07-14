@@ -1,6 +1,8 @@
 use macsftp_core::LocalPath;
 use serde::{Deserialize, Serialize};
 
+use crate::write_private_file_atomically;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AppearancePreference {
@@ -38,6 +40,7 @@ impl Default for AppConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
+    RecoveryRequired { path: String },
     Io { path: String, message: String },
     Parse { message: String },
     UnsupportedVersion { found: u32, supported: u32 },
@@ -46,6 +49,10 @@ pub enum ConfigError {
 impl std::fmt::Display for ConfigError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::RecoveryRequired { path } => write!(
+                formatter,
+                "refusing to overwrite unreadable application data at {path}"
+            ),
             Self::Io { path, message } => write!(formatter, "could not access {path}: {message}"),
             Self::Parse { message } => write!(formatter, "could not parse config: {message}"),
             Self::UnsupportedVersion { found, supported } => write!(
@@ -96,7 +103,7 @@ impl ConfigStore {
     }
 
     /// Fallback used after a read error. It keeps the original path but does
-    /// not touch the unreadable file until the user explicitly changes a setting.
+    /// not touch the unreadable file until a recovery action is implemented.
     pub fn with_defaults(path: LocalPath) -> Self {
         Self {
             path,
@@ -122,47 +129,56 @@ impl ConfigStore {
     }
 
     pub fn set_appearance(&mut self, appearance: AppearancePreference) -> Result<(), ConfigError> {
+        let previous = self.config.appearance;
         self.config.appearance = appearance;
         let result = self.save();
         if result.is_ok() {
             self.initial_error = None;
+        } else {
+            self.config.appearance = previous;
         }
         result
     }
 
     pub fn set_confirm_delete(&mut self, confirm_delete: bool) -> Result<(), ConfigError> {
+        let previous = self.config.confirm_delete;
         self.config.confirm_delete = confirm_delete;
         let result = self.save();
         if result.is_ok() {
             self.initial_error = None;
+        } else {
+            self.config.confirm_delete = previous;
         }
         result
     }
 
     pub fn set_show_hidden_files(&mut self, show_hidden_files: bool) -> Result<(), ConfigError> {
+        let previous = self.config.show_hidden_files;
         self.config.show_hidden_files = show_hidden_files;
         let result = self.save();
         if result.is_ok() {
             self.initial_error = None;
+        } else {
+            self.config.show_hidden_files = previous;
         }
         result
     }
 
     fn save(&self) -> Result<(), ConfigError> {
+        if self.initial_error.is_some() {
+            return Err(ConfigError::RecoveryRequired {
+                path: self.path.as_str().to_string(),
+            });
+        }
         let json =
             serde_json::to_string_pretty(&self.config).map_err(|error| ConfigError::Parse {
                 message: error.to_string(),
             })?;
-        let path = self.path.as_str();
-        let temp_path = format!("{path}.tmp");
-        std::fs::write(&temp_path, json).map_err(|error| ConfigError::Io {
-            path: temp_path.clone(),
-            message: error.to_string(),
-        })?;
-        std::fs::rename(&temp_path, path).map_err(|error| ConfigError::Io {
-            path: path.to_string(),
-            message: error.to_string(),
-        })
+        write_private_file_atomically(std::path::Path::new(self.path.as_str()), json.as_bytes())
+            .map_err(|error| ConfigError::Io {
+                path: self.path.as_str().to_string(),
+                message: error.to_string(),
+            })
     }
 }
 
@@ -290,5 +306,27 @@ mod tests {
 
         cleanup(&malformed_path);
         cleanup(&future_path);
+    }
+
+    #[test]
+    fn fallback_after_parse_error_blocks_writes_and_preserves_config() {
+        let path = temp_config_path("corrupt-write-block");
+        cleanup(&path);
+        std::fs::write(path.as_str(), "{not json").expect("write corrupt config fixture");
+        let error = ConfigStore::open(path.clone())
+            .err()
+            .expect("corrupt config must fail");
+        let mut store = ConfigStore::with_defaults_after_error(path.clone(), error);
+
+        assert!(matches!(
+            store.set_show_hidden_files(true),
+            Err(ConfigError::RecoveryRequired { .. })
+        ));
+        assert!(!store.config().show_hidden_files);
+        assert_eq!(
+            std::fs::read_to_string(path.as_str()).expect("read preserved corrupt config"),
+            "{not json"
+        );
+        cleanup(&path);
     }
 }

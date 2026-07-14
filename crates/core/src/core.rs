@@ -449,7 +449,7 @@ pub enum AuthMethodKind {
 /// persisted to the macOS Keychain (keyed by the profile's `SecretRef`)
 /// so it can be restored later; `Debug` is manually implemented to redact
 /// auth.
-#[derive(Clone, PartialEq, Eq, Hash, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct ConnectionSettings {
     pub host: String,
     pub port: u16,
@@ -462,25 +462,21 @@ pub struct ConnectionKey {
     pub host: String,
     pub port: u16,
     pub username: String,
-    pub auth_hash: u64,
+    pub identity: ConnectionPoolIdentity,
 }
 
-impl ConnectionSettings {
-    pub fn connection_key(&self) -> ConnectionKey {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        self.auth.hash(&mut hasher);
-        ConnectionKey {
-            host: self.host.clone(),
-            port: self.port,
-            username: self.username.clone(),
-            auth_hash: hasher.finish(),
+impl ConnectionKey {
+    pub fn new(settings: &ConnectionSettings, identity: ConnectionPoolIdentity) -> Self {
+        Self {
+            host: settings.host.clone(),
+            port: settings.port,
+            username: settings.username.clone(),
+            identity,
         }
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
 pub enum AuthCredential {
     Password {
         password: String,
@@ -533,6 +529,16 @@ impl AuthFingerprint {
             profile_revision,
         }
     }
+}
+
+/// Non-secret identity used to decide whether an established SSH connection
+/// can be reused. Saved profiles use only persisted credential references and
+/// their revision; one-off connections are scoped to the UI-allocated session
+/// and never share a physical connection across attempts.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ConnectionPoolIdentity {
+    Saved(AuthFingerprint),
+    Ephemeral(SessionId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1547,8 +1553,9 @@ pub struct ConnectCommand {
     pub session_id: SessionId,
     pub session_epoch: u64,
     pub profile_id: ProfileId,
-    /// Connection target and credentials for this attempt (interim —
-    /// Keychain-backed profile resolution replaces this later).
+    pub pool_identity: ConnectionPoolIdentity,
+    /// Connection target and credentials for this attempt. Persisted copies
+    /// are resolved through the Keychain before the command is created.
     pub settings: ConnectionSettings,
 }
 
@@ -2146,8 +2153,9 @@ impl fmt::Display for ErrorCode {
 mod tests {
     use super::AppEvent;
     use super::{
-        AppState, AuthFingerprint, AuthMethod, AuthMethodKind, ConflictRequest, ConflictRequestId,
-        ConnectionProfile, ConnectionState, DisconnectReason, HostKeyPrompt, LocalPath,
+        AppState, AuthCredential, AuthFingerprint, AuthMethod, AuthMethodKind, ConflictRequest,
+        ConflictRequestId, ConnectionKey, ConnectionPoolIdentity, ConnectionProfile,
+        ConnectionSettings, ConnectionState, DisconnectReason, HostKeyPrompt, LocalPath,
         MetadataPolicy, ModalRequest, ModalRequestId, ProfileId, RemoteEventScope, RemotePath,
         RemoteScoped, RuntimeBridgeConfig, SecretRef, SessionId, TabId, TabState, Timestamp,
         TransferDirection, TransferEndpoint, TransferId, TransferPlanId, TrustRequest,
@@ -2243,6 +2251,24 @@ mod tests {
         assert_eq!(fingerprint.method, AuthMethodKind::Password);
         assert_eq!(fingerprint.profile_revision, 3);
         assert_eq!(fingerprint.secret_ref, Some(SecretRef::new("secret-ref")));
+    }
+
+    #[test]
+    fn connection_key_uses_explicit_non_secret_identity() {
+        let settings = ConnectionSettings {
+            host: "example.com".into(),
+            port: 22,
+            username: "alex".into(),
+            auth: AuthCredential::Password {
+                password: "never-hashed".into(),
+            },
+        };
+
+        let first = ConnectionKey::new(&settings, ConnectionPoolIdentity::Ephemeral(SessionId(1)));
+        let second = ConnectionKey::new(&settings, ConnectionPoolIdentity::Ephemeral(SessionId(2)));
+
+        assert_ne!(first, second);
+        assert!(!format!("{first:?}").contains("never-hashed"));
     }
 
     #[test]

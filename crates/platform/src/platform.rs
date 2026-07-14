@@ -1,3 +1,7 @@
+mod diagnostics;
+
+pub use diagnostics::{prune_log_files, write_crash_marker};
+
 use macsftp_core::{FileKind, LocalEntry, LocalPath, Timestamp};
 
 use std::os::unix::fs::PermissionsExt;
@@ -22,6 +26,7 @@ pub struct AppPaths {
     pub session_file: LocalPath,
     pub recents_file: LocalPath,
     pub log_file: LocalPath,
+    pub crash_marker_file: LocalPath,
 }
 
 impl AppPaths {
@@ -41,6 +46,7 @@ impl AppPaths {
             session_file: LocalPath::new(format!("{app_support_dir}/session.json")),
             recents_file: LocalPath::new(format!("{app_support_dir}/recents.json")),
             log_file: LocalPath::new(format!("{log_dir}/macsftp.log")),
+            crash_marker_file: LocalPath::new(format!("{log_dir}/last-crash.txt")),
         }
     }
 
@@ -55,9 +61,11 @@ impl AppPaths {
             &self.session_file,
             &self.recents_file,
             &self.log_file,
+            &self.crash_marker_file,
         ] {
             if let Some(parent) = std::path::Path::new(file.as_str()).parent() {
                 std::fs::create_dir_all(parent)?;
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
             }
         }
         Ok(())
@@ -266,6 +274,10 @@ mod tests {
         assert_eq!(
             paths.log_file.as_str(),
             "/Users/alex/Library/Logs/macSFTP/macsftp.log"
+        );
+        assert_eq!(
+            paths.crash_marker_file.as_str(),
+            "/Users/alex/Library/Logs/macSFTP/last-crash.txt"
         );
         assert_eq!(
             paths.session_file.as_str(),

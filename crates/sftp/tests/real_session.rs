@@ -9,10 +9,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use macsftp_core::{
-    AppCommand, AppEvent, AuthCredential, ConflictDecision, ConnectCommand, ConnectionSettings,
-    DisconnectReason, ErrorCode, FileKind, ProfileId, RemoteEventScope, RemotePath,
-    RuntimeBridgeConfig, SessionId, TabId, Timestamp, TransferDirection, TransferEndpoint,
-    TransferId, TransferJob, TransferState, TrustDecision, TrustRequestId,
+    AppCommand, AppEvent, AuthCredential, ConflictDecision, ConnectCommand, ConnectionPoolIdentity,
+    ConnectionSettings, DisconnectReason, ErrorCode, FileKind, ProfileId, RemoteEventScope,
+    RemotePath, RuntimeBridgeConfig, SessionId, TabId, Timestamp, TransferDirection,
+    TransferEndpoint, TransferId, TransferJob, TransferState, TrustDecision, TrustRequestId,
 };
 use macsftp_sftp::pool::ConnectionManager;
 use macsftp_sftp::{
@@ -78,6 +78,7 @@ fn spawn_actor(
     let scope = RemoteEventScope::new(TAB, SESSION, EPOCH);
     let connect_rx = cm.connect_session(
         &settings,
+        &ConnectionPoolIdentity::Ephemeral(SESSION),
         &scope,
         TRUST_REQUEST,
         known_hosts,
@@ -849,6 +850,7 @@ async fn runtime_plans_and_executes_single_file_upload_and_download() {
             session_id: SESSION,
             session_epoch: EPOCH,
             profile_id: ProfileId(1),
+            pool_identity: ConnectionPoolIdentity::Ephemeral(SESSION),
             settings: ConnectionSettings {
                 host: "127.0.0.1".to_string(),
                 port: server.port,
@@ -955,6 +957,7 @@ async fn runtime_executes_directory_upload_with_a_bounded_session_queue() {
             session_id: SESSION,
             session_epoch: EPOCH,
             profile_id: ProfileId(1),
+            pool_identity: ConnectionPoolIdentity::Ephemeral(SESSION),
             settings: ConnectionSettings {
                 host: "127.0.0.1".to_string(),
                 port: server.port,
@@ -1055,6 +1058,7 @@ async fn runtime_streams_and_executes_directory_download() {
             session_id: SESSION,
             session_epoch: EPOCH,
             profile_id: ProfileId(1),
+            pool_identity: ConnectionPoolIdentity::Ephemeral(SESSION),
             settings: ConnectionSettings {
                 host: "127.0.0.1".to_string(),
                 port: server.port,
@@ -1192,6 +1196,7 @@ async fn runtime_routes_read_dir_to_real_actor() {
             session_id: SESSION,
             session_epoch: EPOCH,
             profile_id: ProfileId(1),
+            pool_identity: ConnectionPoolIdentity::Ephemeral(SESSION),
             settings: ConnectionSettings {
                 host: "127.0.0.1".to_string(),
                 port: server.port,
@@ -1267,6 +1272,7 @@ async fn tabs_browse_independently_after_another_tab_disconnects() {
                 session_id,
                 session_epoch: EPOCH,
                 profile_id: ProfileId(tab_id.0),
+                pool_identity: ConnectionPoolIdentity::Ephemeral(session_id),
                 settings: ConnectionSettings {
                     host: "127.0.0.1".to_string(),
                     port: server.port,

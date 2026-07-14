@@ -1,0 +1,13 @@
+Port 2222
+ListenAddress 0.0.0.0
+PidFile /run/sshd_macsftp.pid
+PasswordAuthentication yes
+KbdInteractiveAuthentication no
+PubkeyAuthentication no
+UsePAM no
+PermitRootLogin no
+PermitEmptyPasswords no
+StrictModes yes
+AllowUsers macsftp
+Subsystem sftp internal-sftp
+LogLevel ERROR

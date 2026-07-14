@@ -1,7 +1,8 @@
 use macsftp_core::{
-    AuthCredential, AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionSettings, LocalPath,
-    ProfileId, RemotePath, SecretRef,
+    AuthCredential, AuthFingerprint, AuthMethod, AuthMethodKind, ConnectionProfile,
+    ConnectionSettings, LocalPath, ProfileId, RemotePath, SecretRef,
 };
+use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::keychain::{KeychainError, KeychainStore};
@@ -13,6 +14,7 @@ pub struct ProfileStore {
     path: LocalPath,
     profiles: ProfilesFile,
     keychain: KeychainStore,
+    initial_error: Option<StorageError>,
 }
 
 /// Credential update requested by a profile editor. `None` means "keep the
@@ -150,20 +152,22 @@ impl ProfileStore {
             path,
             profiles,
             keychain: KeychainStore::new_os(),
+            initial_error: None,
         })
     }
 
     /// Like `open`, but never fails: a missing or unreadable
-    /// `profiles.json` (corrupt, permission denied) yields an empty store
-    /// that still remembers `path`, so the next save recovers. The app
-    /// keeps running instead of dying on a bad profile file.
+    /// `profiles.json` yields an empty in-memory store. An unreadable file
+    /// blocks writes so launch remains possible without destroying recovery
+    /// data.
     pub fn open_or_empty(path: LocalPath) -> Self {
         match Self::open(path.clone()) {
             Ok(store) => store,
-            Err(_) => Self {
+            Err(error) => Self {
                 path,
                 profiles: ProfilesFile::new(),
                 keychain: KeychainStore::new_os(),
+                initial_error: Some(error),
             },
         }
     }
@@ -172,11 +176,19 @@ impl ProfileStore {
     /// public because `macsftp-app` integration tests compile as a separate
     /// crate and need an isolated storage boundary.
     pub fn open_or_empty_memory(path: LocalPath) -> Self {
-        let profiles = ProfilesFile::load(&path).unwrap_or_else(|_| ProfilesFile::new());
-        Self {
-            path,
-            profiles,
-            keychain: KeychainStore::new_memory(),
+        match ProfilesFile::load(&path) {
+            Ok(profiles) => Self {
+                path,
+                profiles,
+                keychain: KeychainStore::new_memory(),
+                initial_error: None,
+            },
+            Err(error) => Self {
+                path,
+                profiles: ProfilesFile::new(),
+                keychain: KeychainStore::new_memory(),
+                initial_error: Some(error),
+            },
         }
     }
 
@@ -188,8 +200,46 @@ impl ProfileStore {
         &self.profiles.profiles
     }
 
+    pub fn initial_error(&self) -> Option<&StorageError> {
+        self.initial_error.as_ref()
+    }
+
+    fn ensure_writable(&self) -> Result<(), StorageError> {
+        if self.initial_error.is_some() {
+            return Err(StorageError::RecoveryRequired {
+                path: self.path.as_str().to_string(),
+            });
+        }
+        Ok(())
+    }
+
     pub fn find_profile(&self, profile_id: ProfileId) -> Option<&ConnectionProfile> {
         self.profiles.find_profile(profile_id)
+    }
+
+    /// Build the non-secret identity used by the SFTP connection pool. This
+    /// intentionally reads only profile metadata; Keychain values never take
+    /// part in connection reuse decisions.
+    pub fn auth_fingerprint(&self, profile_id: ProfileId) -> Option<AuthFingerprint> {
+        let profile = self.find_profile(profile_id)?;
+        match &profile.auth {
+            AuthMethod::Password { secret_ref } => Some(AuthFingerprint::password(
+                secret_ref.clone(),
+                profile.revision,
+            )),
+            AuthMethod::PrivateKey {
+                key_path,
+                passphrase_ref,
+                ..
+            } => {
+                let path_hash = format!("{:x}", Sha256::digest(key_path.as_str().as_bytes()));
+                Some(AuthFingerprint::private_key(
+                    path_hash,
+                    passphrase_ref.clone(),
+                    profile.revision,
+                ))
+            }
+        }
     }
 
     pub fn next_profile_id(&self) -> Result<ProfileId, ProfileMutationError> {
@@ -209,6 +259,7 @@ impl ProfileStore {
         &mut self,
         profile: ConnectionProfile,
     ) -> Result<ConnectionProfile, StorageError> {
+        self.ensure_writable()?;
         let mut next_profiles = self.profiles.clone();
         let saved = next_profiles.save_profile(profile)?;
         next_profiles.save(&self.path)?;
@@ -219,6 +270,7 @@ impl ProfileStore {
     /// Remove a profile by id and flush. Removing a non-existent id is a
     /// no-op that still succeeds (idempotent).
     pub fn delete_profile(&mut self, profile_id: ProfileId) -> Result<(), StorageError> {
+        self.ensure_writable()?;
         let mut next_profiles = self.profiles.clone();
         let before = next_profiles.profiles.len();
         next_profiles
@@ -274,6 +326,7 @@ impl ProfileStore {
         &mut self,
         request: ProfileSaveRequest,
     ) -> Result<ProfileSaveOutcome, ProfileMutationError> {
+        self.ensure_writable()?;
         let previous = self.find_profile(request.profile_id).cloned();
         let resolved = Self::resolve_auth(&request, previous.as_ref())?;
 
@@ -502,8 +555,8 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use macsftp_core::{
-        AuthCredential, AuthMethod, ConnectionProfile, ConnectionSettings, LocalPath, ProfileId,
-        SecretRef,
+        AuthCredential, AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionSettings,
+        LocalPath, ProfileId, SecretRef,
     };
 
     use crate::{ProfilesFile, StorageError, core_crate_name, crate_name};
@@ -603,6 +656,81 @@ mod tests {
     }
 
     #[test]
+    fn auth_fingerprint_changes_with_profile_revision_without_secret_values() {
+        let path = temp_profiles_path("auth-fingerprint-revision");
+        cleanup(&path);
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
+        let first = store
+            .save_profile(password_profile(1, "Production"))
+            .expect("save first profile revision");
+        let first_fingerprint = store
+            .auth_fingerprint(first.id)
+            .expect("saved profile has a fingerprint");
+
+        let second = store
+            .save_profile(first)
+            .expect("save second profile revision");
+        let second_fingerprint = store
+            .auth_fingerprint(second.id)
+            .expect("updated profile has a fingerprint");
+
+        assert_eq!(first_fingerprint.method, AuthMethodKind::Password);
+        assert_ne!(first_fingerprint, second_fingerprint);
+        assert_eq!(second_fingerprint.profile_revision, 2);
+        let debug = format!("{second_fingerprint:?}");
+        assert!(!debug.contains("password-value"));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn private_key_fingerprint_distinguishes_paths_without_retaining_them() {
+        let path = temp_profiles_path("auth-fingerprint-key-path");
+        cleanup(&path);
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
+        let first_path = "/Users/alex/.ssh/first_ed25519";
+        let second_path = "/Users/alex/.ssh/second_ed25519";
+        let first = store
+            .save_profile(ConnectionProfile::new(
+                ProfileId(1),
+                "First",
+                "example.com",
+                "alex",
+                AuthMethod::PrivateKey {
+                    key_path: LocalPath::new(first_path),
+                    passphrase_ref: None,
+                    remember_passphrase: false,
+                },
+            ))
+            .expect("save first key profile");
+        let second = store
+            .save_profile(ConnectionProfile::new(
+                ProfileId(2),
+                "Second",
+                "example.com",
+                "alex",
+                AuthMethod::PrivateKey {
+                    key_path: LocalPath::new(second_path),
+                    passphrase_ref: None,
+                    remember_passphrase: false,
+                },
+            ))
+            .expect("save second key profile");
+
+        let first_fingerprint = store
+            .auth_fingerprint(first.id)
+            .expect("first key profile has a fingerprint");
+        let second_fingerprint = store
+            .auth_fingerprint(second.id)
+            .expect("second key profile has a fingerprint");
+
+        assert_ne!(first_fingerprint, second_fingerprint);
+        let debug = format!("{first_fingerprint:?}");
+        assert!(!debug.contains(first_path));
+        assert!(!debug.contains(second_path));
+        cleanup(&path);
+    }
+
+    #[test]
     fn save_existing_profile_reports_revision_overflow() {
         let mut profiles = ProfilesFile {
             version: ProfilesFile::CURRENT_VERSION,
@@ -695,6 +823,25 @@ mod tests {
         let retained = store.find_profile(ProfileId(1)).expect("profile retained");
         assert_eq!(retained.name, "Before");
         assert_eq!(retained.revision, 1);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn corrupt_profile_file_blocks_writes_and_is_preserved() {
+        let path = temp_profiles_path("corrupt-write-block");
+        cleanup(&path);
+        std::fs::write(path.as_str(), "{not json").expect("write corrupt profile fixture");
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
+
+        assert!(store.initial_error().is_some());
+        assert!(matches!(
+            store.save_profile(password_profile(1, "Replacement")),
+            Err(StorageError::RecoveryRequired { .. })
+        ));
+        assert_eq!(
+            std::fs::read_to_string(path.as_str()).expect("read preserved profile fixture"),
+            "{not json"
+        );
         cleanup(&path);
     }
 

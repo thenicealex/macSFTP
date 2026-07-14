@@ -2,6 +2,7 @@ use macsftp_core::LocalPath;
 use serde::{Deserialize, Serialize};
 
 use super::StorageError;
+use crate::write_private_file_atomically;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecentEntry {
@@ -65,17 +66,12 @@ impl RecentsFile {
         let json = serde_json::to_string_pretty(self).map_err(|error| StorageError::Parse {
             message: error.to_string(),
         })?;
-        let path_str = path.as_str();
-        let temp_path = format!("{path_str}.tmp");
-        std::fs::write(&temp_path, &json).map_err(|error| StorageError::Io {
-            path: temp_path.clone(),
-            message: error.to_string(),
-        })?;
-        std::fs::rename(&temp_path, path_str).map_err(|error| StorageError::Io {
-            path: path_str.to_string(),
-            message: error.to_string(),
-        })?;
-        Ok(())
+        write_private_file_atomically(std::path::Path::new(path.as_str()), json.as_bytes()).map_err(
+            |error| StorageError::Io {
+                path: path.as_str().to_string(),
+                message: error.to_string(),
+            },
+        )
     }
 }
 
@@ -95,6 +91,7 @@ pub struct RecentsStore {
     path: LocalPath,
     file: RecentsFile,
     next_id: u64,
+    initial_error: Option<StorageError>,
 }
 
 impl RecentsStore {
@@ -113,16 +110,18 @@ impl RecentsStore {
             path,
             file,
             next_id,
+            initial_error: None,
         })
     }
 
     pub fn open_or_empty(path: LocalPath) -> Self {
         match Self::open(path.clone()) {
             Ok(store) => store,
-            Err(_) => Self {
+            Err(error) => Self {
                 path,
                 file: RecentsFile::empty(),
                 next_id: 1,
+                initial_error: Some(error),
             },
         }
     }
@@ -135,8 +134,22 @@ impl RecentsStore {
         &self.file.entries
     }
 
+    pub fn initial_error(&self) -> Option<&StorageError> {
+        self.initial_error.as_ref()
+    }
+
+    fn ensure_writable(&self) -> Result<(), StorageError> {
+        if self.initial_error.is_some() {
+            return Err(StorageError::RecoveryRequired {
+                path: self.path.as_str().to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// Upsert by `(host, port, username, profile_id)`; move to front; cap 20; save.
     pub fn upsert(&mut self, entry: RecentEntryInput) -> Result<(), StorageError> {
+        self.ensure_writable()?;
         let dedupe_matches = |existing: &RecentEntry| {
             existing.host == entry.host
                 && existing.port == entry.port
@@ -176,6 +189,7 @@ impl RecentsStore {
     }
 
     pub fn save(&self) -> Result<(), StorageError> {
+        self.ensure_writable()?;
         self.file.save(&self.path)
     }
 }
@@ -279,8 +293,17 @@ mod tests {
     fn corrupt_recents_open_or_empty() {
         let path = temp_path("corrupt");
         std::fs::write(path.as_str(), "{not json").expect("write corrupt");
-        let store = RecentsStore::open_or_empty(path);
+        let mut store = RecentsStore::open_or_empty(path.clone());
         assert!(store.entries().is_empty());
+        assert!(store.initial_error().is_some());
+        assert!(matches!(
+            store.upsert(sample_input("new.example", 1)),
+            Err(StorageError::RecoveryRequired { .. })
+        ));
+        assert_eq!(
+            std::fs::read_to_string(path.as_str()).expect("read preserved corrupt recents"),
+            "{not json"
+        );
     }
 
     #[test]

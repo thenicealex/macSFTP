@@ -2,6 +2,7 @@ use macsftp_core::{LocalPath, WindowSessionId};
 use serde::{Deserialize, Serialize};
 
 use super::StorageError;
+use crate::write_private_file_atomically;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionTabSnapshot {
@@ -110,37 +111,38 @@ impl SessionFile {
         let json = serde_json::to_string_pretty(self).map_err(|error| StorageError::Parse {
             message: error.to_string(),
         })?;
-        let path_str = path.as_str();
-        let temp_path = format!("{path_str}.tmp");
-        std::fs::write(&temp_path, &json).map_err(|error| StorageError::Io {
-            path: temp_path.clone(),
-            message: error.to_string(),
-        })?;
-        std::fs::rename(&temp_path, path_str).map_err(|error| StorageError::Io {
-            path: path_str.to_string(),
-            message: error.to_string(),
-        })?;
-        Ok(())
+        write_private_file_atomically(std::path::Path::new(path.as_str()), json.as_bytes()).map_err(
+            |error| StorageError::Io {
+                path: path.as_str().to_string(),
+                message: error.to_string(),
+            },
+        )
     }
 }
 
 pub struct SessionStore {
     path: LocalPath,
     file: SessionFile,
+    initial_error: Option<StorageError>,
 }
 
 impl SessionStore {
     pub fn open(path: LocalPath) -> Result<Self, StorageError> {
         let file = SessionFile::load(&path)?;
-        Ok(Self { path, file })
+        Ok(Self {
+            path,
+            file,
+            initial_error: None,
+        })
     }
 
     pub fn open_or_empty(path: LocalPath) -> Self {
         match Self::open(path.clone()) {
             Ok(store) => store,
-            Err(_) => Self {
+            Err(error) => Self {
                 path,
                 file: SessionFile::empty(),
+                initial_error: Some(error),
             },
         }
     }
@@ -153,11 +155,20 @@ impl SessionStore {
         &self.file
     }
 
+    pub fn initial_error(&self) -> Option<&StorageError> {
+        self.initial_error.as_ref()
+    }
+
     pub fn replace(&mut self, file: SessionFile) {
         self.file = file;
     }
 
     pub fn save(&self) -> Result<(), StorageError> {
+        if self.initial_error.is_some() {
+            return Err(StorageError::RecoveryRequired {
+                path: self.path.as_str().to_string(),
+            });
+        }
         self.file.save(&self.path)
     }
 }
@@ -243,8 +254,17 @@ mod tests {
     fn corrupt_json_open_or_empty_yields_empty() {
         let path = temp_path("corrupt");
         std::fs::write(path.as_str(), "{not json").expect("write corrupt");
-        let store = SessionStore::open_or_empty(path);
+        let store = SessionStore::open_or_empty(path.clone());
         assert!(store.file().windows.is_empty());
+        assert!(store.initial_error().is_some());
+        assert!(matches!(
+            store.save(),
+            Err(StorageError::RecoveryRequired { .. })
+        ));
+        assert_eq!(
+            std::fs::read_to_string(path.as_str()).expect("read preserved corrupt session"),
+            "{not json"
+        );
     }
 
     #[test]
@@ -257,6 +277,7 @@ mod tests {
         .expect("write");
         let store = SessionStore::open_or_empty(path);
         assert!(store.file().windows.is_empty());
+        assert!(store.initial_error().is_some());
     }
 
     #[test]
@@ -292,17 +313,24 @@ mod tests {
 
     #[test]
     fn failed_save_preserves_previous_session_file() {
-        let path = temp_path("preserve-on-failure");
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = format!("{}.dir", temp_path("preserve-on-failure").as_str());
+        std::fs::create_dir_all(&directory).expect("create protected session directory");
+        let path = LocalPath::new(format!("{directory}/session.json"));
         let mut original = SessionFile::empty();
         original.active_window_index = 3;
         original.save(&path).expect("save original session");
-        std::fs::create_dir(format!("{}.tmp", path.as_str()))
-            .expect("block the temporary file path with a directory");
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o500))
+            .expect("make session directory read-only");
 
         let replacement = SessionFile::empty();
         assert!(replacement.save(&path).is_err());
 
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .expect("restore session directory permissions");
         let reloaded = SessionFile::load(&path).expect("original session should remain readable");
         assert_eq!(reloaded.active_window_index, 3);
+        std::fs::remove_dir_all(directory).expect("remove protected session directory");
     }
 }

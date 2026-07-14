@@ -18,6 +18,9 @@ impl Global for SessionCoordinator {}
 
 impl SessionCoordinator {
     pub fn new(store: SessionStore) -> Self {
+        if store.initial_error().is_some() {
+            warn!("session.json could not be loaded; session writes are blocked until recovery");
+        }
         let restore_pending = store.file().clone();
         let next_window_id = restore_pending
             .windows

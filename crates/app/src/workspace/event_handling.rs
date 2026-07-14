@@ -34,10 +34,10 @@ impl crate::workspace::Workspace {
         }
 
         if !self.state.should_accept_event(&event) {
-            // `AppEvent` carries no secrets by invariant (only host/port,
-            // key fingerprints, paths, and user-facing errors), so logging
-            // it at debug is safe per AGENTS.md §5.
-            debug!(?event, "dropped stale event");
+            // Events may carry host-key fingerprints, paths, and remote error
+            // details. Keep stale-event diagnostics structural rather than
+            // formatting the payload.
+            debug!("dropped stale event");
             return;
         }
 

@@ -104,7 +104,6 @@ impl client::Handler for ClientHandler {
                     host = self.host.as_str(),
                     port = self.port,
                     algorithm = key_algorithm(server_key).as_str(),
-                    fingerprint = fingerprint_sha256(server_key).as_str(),
                     "unknown host key; prompting user to trust"
                 );
                 let (responder, decision_rx) = oneshot::channel();

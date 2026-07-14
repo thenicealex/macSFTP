@@ -38,3 +38,6 @@ patched version or commit is available.
 - Unknown-host decisions are scoped to the active request and session epoch.
 - Secrets and full private-key paths must not appear in logs, errors, UI detail,
   configuration files, fixtures, screenshots, or snapshots.
+- Host-key fingerprints are shown only in the trust and mismatch UI. They must
+  not be written to diagnostics or logs, and event payloads must never be
+  formatted wholesale by tracing calls.

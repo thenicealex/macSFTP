@@ -14,11 +14,11 @@ use gpui::{
 use macsftp_core::{
     AppCommand, AppEvent, AppState, AuthCredential, AuthMethod, AuthMethodKind,
     CommandDispatchError, ConflictDecision, ConflictDecisionCommand, ConflictRequest,
-    ConflictRequestId, ConnectCommand, ConnectionProfile, ConnectionSettings, ConnectionState,
-    DisconnectReason, EntryPath, ErrorCode, FileKind, HostKeyDecisionCommand, HostKeyPrompt,
-    LocalPath, ModalRequest, ModalRequestId, ProfileId, RemotePath, SecretRef, TabId, TabState,
-    Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferJob,
-    TransferState, TrustRequestId, UserFacingError, sort_entries,
+    ConflictRequestId, ConnectCommand, ConnectionPoolIdentity, ConnectionProfile,
+    ConnectionSettings, ConnectionState, DisconnectReason, EntryPath, ErrorCode, FileKind,
+    HostKeyDecisionCommand, HostKeyPrompt, LocalPath, ModalRequest, ModalRequestId, ProfileId,
+    RemotePath, SecretRef, TabId, TabState, Timestamp, TransferConflictPrompt, TransferDirection,
+    TransferEndpoint, TransferJob, TransferState, TrustRequestId, UserFacingError, sort_entries,
 };
 use macsftp_platform::{AppPaths, read_local_directory};
 use macsftp_sftp::{EventReceiver, RuntimeClient};
@@ -42,14 +42,14 @@ mod tests {
     use gpui::{Entity, TestAppContext, VisualTestContext};
     use macsftp_core::{
         AppCommand, AppEvent, AuthCredential, AuthMethod, AuthMethodKind, ConflictDecision,
-        ConflictPolicy, ConflictRequestId, ConnectionSettings, ConnectionState, DisconnectReason,
-        EntryPath, ErrorCode, FileKind, FileSortField, HostKeyPrompt, LocalPath, MetadataPolicy,
-        ProfileId, RemoteDirSnapshot, RemoteEntry, RemoteEventScope, RemoteOperationFailure,
-        RemotePath, RemoteScoped, RuntimeBridgeConfig, SessionId, SortDirection, TabConnected,
-        TabDisconnected, TabId, Timestamp, TransferConflictPrompt, TransferDirection,
-        TransferEndpoint, TransferId, TransferJob, TransferPlanId, TransferPlanProgress,
-        TransferPlanSnapshot, TransferPlanState, TransferState, TrustRequestId, UserFacingError,
-        WindowSessionId,
+        ConflictPolicy, ConflictRequestId, ConnectionPoolIdentity, ConnectionSettings,
+        ConnectionState, DisconnectReason, EntryPath, ErrorCode, FileKind, FileSortField,
+        HostKeyPrompt, LocalPath, MetadataPolicy, ProfileId, RemoteDirSnapshot, RemoteEntry,
+        RemoteEventScope, RemoteOperationFailure, RemotePath, RemoteScoped, RuntimeBridgeConfig,
+        SessionId, SortDirection, TabConnected, TabDisconnected, TabId, Timestamp,
+        TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferId, TransferJob,
+        TransferPlanId, TransferPlanProgress, TransferPlanSnapshot, TransferPlanState,
+        TransferState, TrustRequestId, UserFacingError, WindowSessionId,
     };
     use macsftp_sftp::{BridgeChannels, EventReceiver, RuntimeClient};
     use macsftp_storage::{
@@ -972,6 +972,10 @@ mod tests {
                 assert_eq!(connect.tab_id, TabId(1));
                 assert_eq!(connect.session_id, SessionId(1));
                 assert_eq!(connect.session_epoch, 1);
+                assert_eq!(
+                    connect.pool_identity,
+                    ConnectionPoolIdentity::Ephemeral(SessionId(1))
+                );
             }
             other => panic!("expected ConnectTab, got {other:?}"),
         }

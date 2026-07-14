@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use macsftp_core::{
-    AppEvent, ConnectionKey, ConnectionSettings, ErrorCode, RemoteEventScope, TrustRequestId,
-    UserFacingError,
+    AppEvent, ConnectionKey, ConnectionPoolIdentity, ConnectionSettings, ErrorCode,
+    RemoteEventScope, TrustRequestId, UserFacingError,
 };
 use russh::client;
 use russh_sftp::client::SftpSession;
@@ -46,6 +46,7 @@ impl ConnectionManager {
     pub fn get_or_connect(
         self: &Arc<Self>,
         settings: &ConnectionSettings,
+        pool_identity: &ConnectionPoolIdentity,
         scope: &RemoteEventScope,
         trust_request_id: TrustRequestId,
         known_hosts: Arc<Mutex<KnownHostsStore>>,
@@ -54,7 +55,7 @@ impl ConnectionManager {
         event_tx: flume::Sender<AppEvent>,
         connection_lost: CancellationToken,
     ) -> broadcast::Receiver<Result<Arc<SharedConnection>, ConnectFailure>> {
-        let key = settings.connection_key();
+        let key = ConnectionKey::new(settings, pool_identity.clone());
         let mut pool = self
             .pool
             .lock()
@@ -156,6 +157,7 @@ impl ConnectionManager {
     pub fn connect_session(
         self: &Arc<Self>,
         settings: &ConnectionSettings,
+        pool_identity: &ConnectionPoolIdentity,
         scope: &RemoteEventScope,
         trust_request_id: TrustRequestId,
         known_hosts: Arc<Mutex<KnownHostsStore>>,
@@ -166,6 +168,7 @@ impl ConnectionManager {
     ) -> flume::Receiver<Result<(Arc<SharedConnection>, SftpSession), ConnectFailure>> {
         let cm = self.clone();
         let settings = settings.clone();
+        let pool_identity = pool_identity.clone();
         let scope = scope.clone();
         let known_hosts = known_hosts.clone();
         let trust_config = trust_config.clone();
@@ -177,6 +180,7 @@ impl ConnectionManager {
 
         let mut connect_rx = cm.get_or_connect(
             &settings,
+            &pool_identity,
             &scope,
             trust_request_id,
             known_hosts,

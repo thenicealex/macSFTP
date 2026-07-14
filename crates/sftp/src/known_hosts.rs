@@ -1,8 +1,10 @@
 use std::path::Path;
 
+use hmac::{Hmac, KeyInit, Mac};
+use sha1::Sha1;
 use ssh_key::HashAlg;
 use ssh_key::PublicKey;
-use ssh_key::known_hosts::{Entry, HostPatterns, KnownHosts};
+use ssh_key::known_hosts::{Entry, HostPatterns, KnownHosts, Marker};
 use tracing::warn;
 
 /// Result of checking a server's host key against known_hosts.
@@ -24,8 +26,9 @@ pub enum HostKeyCheckResult {
 /// MVP subset (per `docs/gpui-russh-plan.md` §10):
 /// - Supports plaintext host and `[host]:port` patterns.
 /// - Supports common key types: ed25519, ecdsa, rsa.
-/// - Skips hashed entries, wildcards, and `@cert-authority`/`@revoked`
-///   markers — logs a WARN per skipped line, does not fail the file.
+/// - Supports plaintext and OpenSSH `|1|` hashed hostnames.
+/// - Skips wildcards and `@cert-authority`; a matching `@revoked` entry
+///   blocks the connection through the mismatch path.
 pub struct KnownHostsStore {
     app_entries: Vec<Entry>,
     user_entries: Vec<Entry>,
@@ -66,6 +69,12 @@ impl KnownHostsStore {
         for entries in [&self.app_entries, &self.user_entries] {
             for entry in entries {
                 if entry_matches_host(entry, &pattern) {
+                    if entry.marker() == Some(&Marker::Revoked) {
+                        return HostKeyCheckResult::Mismatch;
+                    }
+                    if entry.marker() == Some(&Marker::CertAuthority) {
+                        continue;
+                    }
                     // Compare key material only: stored entries may carry
                     // a comment, wire keys never do, and `PublicKey`'s
                     // `PartialEq` would treat that as a different key.
@@ -106,7 +115,8 @@ impl KnownHostsStore {
         }
         content.push_str(&line);
         content.push('\n');
-        std::fs::write(app_path, content).map_err(KnownHostsError::Io)?;
+        macsftp_storage::write_private_file_atomically(app_path, content.as_bytes())
+            .map_err(KnownHostsError::Io)?;
 
         self.app_entries.push(entry);
         Ok(())
@@ -157,13 +167,16 @@ pub fn key_algorithm(key: &PublicKey) -> String {
 
 /// Check if a known_hosts entry matches a host pattern.
 ///
-/// MVP: only supports `HostPatterns::Patterns` (plaintext hostnames).
-/// Hashed entries are skipped (return false) — they trigger a normal
-/// `NotFound` trust prompt.
 fn entry_matches_host(entry: &Entry, pattern: &str) -> bool {
     match entry.host_patterns() {
         HostPatterns::Patterns(patterns) => patterns.iter().any(|p| p == pattern),
-        HostPatterns::HashedName { .. } => false,
+        HostPatterns::HashedName { salt, hash } => {
+            let Ok(mut mac) = <Hmac<Sha1> as KeyInit>::new_from_slice(salt) else {
+                return false;
+            };
+            mac.update(pattern.as_bytes());
+            mac.verify_slice(hash).is_ok()
+        }
     }
 }
 
@@ -233,6 +246,17 @@ mod tests {
         path
     }
 
+    fn hashed_pattern(pattern: &str) -> HostPatterns {
+        let salt = b"macsftp-hashed-host-test".to_vec();
+        let mut mac = <Hmac<Sha1> as KeyInit>::new_from_slice(&salt)
+            .expect("HMAC accepts an arbitrary OpenSSH known_hosts salt");
+        mac.update(pattern.as_bytes());
+        let bytes = mac.finalize().into_bytes();
+        let mut hash = [0u8; 20];
+        hash.copy_from_slice(&bytes);
+        HostPatterns::HashedName { salt, hash }
+    }
+
     #[test]
     fn host_pattern_uses_bare_hostname_for_port_22() {
         assert_eq!(host_pattern("example.com", 22), "example.com");
@@ -241,6 +265,42 @@ mod tests {
     #[test]
     fn host_pattern_uses_brackets_for_non_default_port() {
         assert_eq!(host_pattern("example.com", 2222), "[example.com]:2222");
+    }
+
+    #[test]
+    fn hashed_host_entry_matches_only_the_original_host_pattern() {
+        let key = test_key(77);
+        let pattern = hashed_pattern("[hashed.example.com]:2222").to_string();
+        let key_line = key.to_string();
+        let path = write_temp_known_hosts("hashed", &format!("{pattern} {key_line}\n"));
+        let store = KnownHostsStore::load(&path, None);
+
+        assert_eq!(
+            store.check("hashed.example.com", 2222, &key),
+            HostKeyCheckResult::Match
+        );
+        assert_eq!(
+            store.check("other.example.com", 2222, &key),
+            HostKeyCheckResult::NotFound
+        );
+        std::fs::remove_file(path).expect("remove hashed known_hosts fixture");
+    }
+
+    #[test]
+    fn revoked_matching_host_is_always_blocked() {
+        let key = test_key(78);
+        let key_line = key.to_string();
+        let path = write_temp_known_hosts(
+            "revoked",
+            &format!("@revoked revoked.example.com {key_line}\n"),
+        );
+        let store = KnownHostsStore::load(&path, None);
+
+        assert_eq!(
+            store.check("revoked.example.com", 22, &key),
+            HostKeyCheckResult::Mismatch
+        );
+        std::fs::remove_file(path).expect("remove revoked known_hosts fixture");
     }
 
     #[test]

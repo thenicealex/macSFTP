@@ -2,6 +2,9 @@
 pub mod config;
 pub use config::{AppConfig, AppearancePreference, ConfigError, ConfigStore};
 
+mod atomic_file;
+pub use atomic_file::write_private_file_atomically;
+
 /// macOS Keychain backend for credential persistence (plan §11/§18).
 mod keychain;
 pub use keychain::KeychainError;
