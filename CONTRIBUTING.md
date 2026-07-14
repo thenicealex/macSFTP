@@ -24,8 +24,15 @@ bash scripts/check.sh
 ```
 
 For SFTP changes, also confirm that real-session tests ran rather than being
-skipped. For visible UI changes, test a narrow/short window, light and dark
-themes, keyboard focus, and include a screenshot or a precise visual QA note.
+skipped. CI enforces this with `MACSFTP_REQUIRE_SSHD=1`. When changing
+`Cargo.toml`, `Cargo.lock`, or vendored code, install `cargo-deny` and run:
+
+```bash
+cargo deny --locked check advisories bans licenses sources
+```
+
+For visible UI changes, test a narrow/short window, light and dark themes,
+keyboard focus, and include a screenshot or a precise visual QA note.
 
 Commit subjects use an imperative Conventional Commit form, for example:
 

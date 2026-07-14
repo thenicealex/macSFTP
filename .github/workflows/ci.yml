@@ -2,28 +2,68 @@ name: CI
 
 on:
   push:
-    branches: [ "master", "main" ]
+    branches: ["master", "main"]
   pull_request:
-    branches: [ "master", "main" ]
+    branches: ["master", "main"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: Test on macOS
-    runs-on: macos-latest
-    
+  quality:
+    name: Quality and integration tests
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      MACSFTP_REQUIRE_SSHD: "1"
+
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Set up Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: rustfmt, clippy
-        
-    - name: Cache dependencies
-      uses: Swatinem/rust-cache@v2
-        
-    - name: Run checks
-      run: ./scripts/check.sh
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        # Keep this version aligned with rust-toolchain.toml.
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: 1.96.1
+          components: rustfmt, clippy
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+
+      - name: Run quality gate
+        run: bash scripts/check.sh
+
+      - name: Build app bundle
+        run: bash scripts/build_app.sh
+
+      - name: Validate app bundle
+        run: |
+          test -x build/macSFTP.app/Contents/MacOS/macsftp
+          plutil -lint build/macSFTP.app/Contents/Info.plist
+
+  dependencies:
+    name: Dependency policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Audit dependencies
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          rust-version: 1.96.1
+          arguments: --all-features --locked

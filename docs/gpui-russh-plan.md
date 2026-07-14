@@ -973,6 +973,12 @@ secret，并把清理失败作为 warning 返回调用方。
 `Debug` 始终脱敏。第三方 SSH/IO 错误原文不直接进入 `UserFacingError` 或认证日志；
 私钥诊断最多记录文件名，不记录完整路径。
 
+**2026-07-14 RSA 临时策略：** `russh` 的 RSA feature 暂时关闭，RSA 客户端私钥
+会在认证前被明确拒绝；建议使用 Ed25519 或 ECDSA。原因是当前传递的 RustCrypto
+`rsa` 仍受 RUSTSEC-2023-0071 timing advisory 影响。该限制也意味着只提供 RSA host
+key 的旧服务器暂不兼容；待上游提供 constant-time 私钥实现后再复评，不以忽略
+advisory 代替缓解。
+
 ### keyboard-interactive 扩展点
 
 第一版不做完整 keyboard-interactive UI，但认证流程要保留 challenge/response 扩展点：

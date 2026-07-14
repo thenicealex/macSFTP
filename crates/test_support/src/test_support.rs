@@ -17,9 +17,9 @@ pub fn crate_name() -> &'static str {
 /// passwords), so password tests can only assert the rejection path;
 /// the full password matrix needs the Docker fixture in CI (plan §19).
 ///
-/// `spawn()` returns `None` (with an explanatory message on stderr)
-/// when sshd or ssh-keygen is unavailable — integration tests must
-/// treat that as a skip, not a failure.
+/// `spawn()` returns `None` (with an explanatory message on stderr) when sshd
+/// or ssh-keygen is unavailable. When `MACSFTP_REQUIRE_SSHD=1`, used by CI,
+/// fixture unavailability is a hard failure instead of a silent skip.
 pub struct SshTestServer {
     child: Child,
     pub port: u16,
@@ -43,23 +43,18 @@ impl SshTestServer {
     pub fn spawn() -> Option<Self> {
         let sshd = PathBuf::from("/usr/sbin/sshd");
         if !sshd.exists() {
-            eprintln!("SFTP integration tests skipped: /usr/sbin/sshd not available");
-            return None;
+            return Self::unavailable("/usr/sbin/sshd not available");
         }
         let username = match std::env::var("USER") {
             Ok(user) if !user.is_empty() => user,
-            _ => {
-                eprintln!("SFTP integration tests skipped: USER not set");
-                return None;
-            }
+            _ => return Self::unavailable("USER not set"),
         };
 
         let fixture_id = FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let fixture_dir =
             std::env::temp_dir().join(format!("macsftp-sshd-{}-{fixture_id}", std::process::id()));
         if let Err(error) = std::fs::create_dir_all(&fixture_dir) {
-            eprintln!("SFTP integration tests skipped: cannot create fixture dir: {error}");
-            return None;
+            return Self::unavailable(format!("cannot create fixture dir: {error}"));
         }
 
         let host_key_path = fixture_dir.join("host_ed25519");
@@ -69,37 +64,26 @@ impl SshTestServer {
             || !generate_key(&client_key_path, "")
             || !generate_key(&encrypted_key_path, Self::ENCRYPTED_KEY_PASSPHRASE)
         {
-            eprintln!("SFTP integration tests skipped: ssh-keygen failed");
-            return None;
+            return Self::unavailable("ssh-keygen failed");
         }
 
         let client_public = match std::fs::read_to_string(client_key_path.with_extension("pub")) {
             Ok(content) => content,
-            Err(error) => {
-                eprintln!("SFTP integration tests skipped: cannot read client key: {error}");
-                return None;
-            }
+            Err(error) => return Self::unavailable(format!("cannot read client key: {error}")),
         };
         let host_public_key = match std::fs::read_to_string(host_key_path.with_extension("pub")) {
             Ok(content) => content.trim().to_string(),
-            Err(error) => {
-                eprintln!("SFTP integration tests skipped: cannot read host key: {error}");
-                return None;
-            }
+            Err(error) => return Self::unavailable(format!("cannot read host key: {error}")),
         };
 
         let authorized_keys_path = fixture_dir.join("authorized_keys");
         if let Err(error) = std::fs::write(&authorized_keys_path, client_public) {
-            eprintln!("SFTP integration tests skipped: cannot write authorized_keys: {error}");
-            return None;
+            return Self::unavailable(format!("cannot write authorized_keys: {error}"));
         }
 
         let port = match free_loopback_port() {
             Some(port) => port,
-            None => {
-                eprintln!("SFTP integration tests skipped: no free loopback port");
-                return None;
-            }
+            None => return Self::unavailable("no free loopback port"),
         };
 
         let sshd_config_path = fixture_dir.join("sshd_config");
@@ -121,8 +105,7 @@ impl SshTestServer {
             authorized_keys = authorized_keys_path.display(),
         );
         if let Err(error) = std::fs::write(&sshd_config_path, sshd_config) {
-            eprintln!("SFTP integration tests skipped: cannot write sshd_config: {error}");
-            return None;
+            return Self::unavailable(format!("cannot write sshd_config: {error}"));
         }
 
         let child = match Command::new(&sshd)
@@ -137,10 +120,7 @@ impl SshTestServer {
             .spawn()
         {
             Ok(child) => child,
-            Err(error) => {
-                eprintln!("SFTP integration tests skipped: cannot start sshd: {error}");
-                return None;
-            }
+            Err(error) => return Self::unavailable(format!("cannot start sshd: {error}")),
         };
 
         let mut server = Self {
@@ -156,11 +136,20 @@ impl SshTestServer {
         if !server.wait_until_ready(Duration::from_secs(5)) {
             let log =
                 std::fs::read_to_string(server.fixture_dir.join("sshd.log")).unwrap_or_default();
-            eprintln!("SFTP integration tests skipped: sshd did not become ready.\n{log}");
-            return None; // Drop kills the child and cleans up.
+            // `server` drops while returning, killing the child and cleaning up.
+            return Self::unavailable(format!("sshd did not become ready.\n{log}"));
         }
 
         Some(server)
+    }
+
+    fn unavailable(reason: impl std::fmt::Display) -> Option<Self> {
+        let message = format!("SFTP integration fixture unavailable: {reason}");
+        if integration_tests_required(std::env::var_os("MACSFTP_REQUIRE_SSHD").as_deref()) {
+            panic!("{message}; CI requires the real sshd integration suite");
+        }
+        eprintln!("SFTP integration tests skipped: {reason}");
+        None
     }
 
     fn wait_until_ready(&mut self, timeout: Duration) -> bool {
@@ -176,6 +165,13 @@ impl SshTestServer {
         }
         false
     }
+}
+
+fn integration_tests_required(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|value| {
+        let value = value.to_string_lossy();
+        value == "1" || value.eq_ignore_ascii_case("true")
+    })
 }
 
 impl Drop for SshTestServer {
@@ -220,10 +216,20 @@ fn free_loopback_port() -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
-    use super::crate_name;
+    use std::ffi::OsStr;
+
+    use super::{crate_name, integration_tests_required};
 
     #[test]
     fn exposes_crate_name() {
         assert_eq!(crate_name(), "macsftp-test-support");
+    }
+
+    #[test]
+    fn integration_requirement_accepts_only_explicit_truthy_values() {
+        assert!(integration_tests_required(Some(OsStr::new("1"))));
+        assert!(integration_tests_required(Some(OsStr::new("TRUE"))));
+        assert!(!integration_tests_required(Some(OsStr::new("0"))));
+        assert!(!integration_tests_required(None));
     }
 }

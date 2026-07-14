@@ -10,7 +10,7 @@ other than SFTP are outside the current scope.
 ## Current capabilities
 
 - Multiple windows and connection tabs
-- Password and private-key authentication backed by macOS Keychain
+- Password and Ed25519/ECDSA private-key authentication backed by macOS Keychain
 - OpenSSH-compatible host-key verification
 - Local and remote browsing, navigation, filtering, sorting, and file operations
 - Upload/download plans with progress, conflict handling, cancellation, and retry
@@ -32,6 +32,11 @@ bash scripts/build_app.sh
 ```
 
 The last command creates the unsigned bundle at `build/macSFTP.app`.
+
+RSA private-key authentication and RSA-only server host keys are temporarily
+disabled because the current upstream RSA implementation is affected by
+RUSTSEC-2023-0071. Use Ed25519 or ECDSA keys; the restriction will be reviewed
+when the upstream stack provides a constant-time implementation.
 
 ## Architecture
 

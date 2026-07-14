@@ -1,0 +1,54 @@
+[graph]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]
+all-features = true
+
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "GPUI transitive dependency; no maintained paste replacement is selectable from macSFTP" },
+    { id = "RUSTSEC-2025-0052", reason = "GPUI HTTP transitive dependency; remove when GPUI no longer depends on async-std" },
+    { id = "RUSTSEC-2025-0134", reason = "GPUI HTTP transitive dependency; remove when GPUI migrates to rustls-pki-types PEM APIs" },
+    { id = "RUSTSEC-2026-0173", reason = "GPUI stacksafe transitive dependency; no direct macSFTP use" },
+    { id = "RUSTSEC-2026-0192", reason = "GPUI SVG/font transitive dependency; no direct replacement is selectable from macSFTP" },
+    { id = "RUSTSEC-2026-0206", reason = "GPUI SVG/font transitive dependency; remove when GPUI adopts harfrust" },
+]
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.8
+exceptions = [
+    # GPUI build dependency; MPL terms apply to this unmodified crate only.
+    { allow = ["MPL-2.0"], crate = "cbindgen@0.28.0" },
+    # GPUI font-stack dependency; MPL terms apply to this unmodified crate only.
+    { allow = ["MPL-2.0"], crate = "option-ext@0.2.0" },
+]
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace crates are private and linked by path; published dependencies must
+# still provide an explicit version requirement.
+allow-wildcard-paths = true
+highlight = "simplest-path"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

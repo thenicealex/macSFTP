@@ -7,6 +7,7 @@ use macsftp_core::{
 };
 use russh::client;
 use russh::keys::{PrivateKeyWithHashAlg, load_secret_key};
+use ssh_key::Algorithm;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -194,6 +195,17 @@ pub fn connection_error(host: &str, port: u16, _error: &dyn std::fmt::Display) -
     user_error
 }
 
+fn validate_private_key_algorithm(algorithm: Algorithm) -> Result<(), UserFacingError> {
+    if matches!(algorithm, Algorithm::Rsa { .. }) {
+        return Err(UserFacingError::new(
+            ErrorCode::AuthFailed,
+            "RSA private keys are disabled",
+            "Use an Ed25519 or ECDSA private key. RSA signing is disabled until its dependency provides a constant-time implementation.",
+        ));
+    }
+    Ok(())
+}
+
 async fn authenticate(
     handle: &mut client::Handle<ClientHandler>,
     settings: &ConnectionSettings,
@@ -250,6 +262,22 @@ async fn authenticate(
                     return Err(ConnectFailure::AuthFailed(AuthFailure { reason }));
                 }
             };
+            if let Err(reason) = validate_private_key_algorithm(key.algorithm()) {
+                let key_file = private_key_file_name(key_path);
+                warn!(
+                    key_file,
+                    "RSA private key authentication blocked by security policy"
+                );
+                let _ = event_tx
+                    .send_async(AppEvent::AuthFailed(RemoteScoped::new(
+                        scope.clone(),
+                        AuthFailure {
+                            reason: reason.clone(),
+                        },
+                    )))
+                    .await;
+                return Err(ConnectFailure::AuthFailed(AuthFailure { reason }));
+            }
             let best_hash = handle
                 .best_supported_rsa_hash()
                 .await
@@ -394,7 +422,9 @@ fn private_key_file_name(path: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{connection_error, private_key_file_name};
+    use ssh_key::Algorithm;
+
+    use super::{connection_error, private_key_file_name, validate_private_key_algorithm};
 
     #[test]
     fn connection_error_does_not_copy_untrusted_technical_detail() {
@@ -418,5 +448,15 @@ mod tests {
             private_key_file_name("/Users/alex/.ssh/id_ed25519"),
             "id_ed25519"
         );
+    }
+
+    #[test]
+    fn rsa_private_key_authentication_is_blocked() {
+        let Err(error) = validate_private_key_algorithm(Algorithm::Rsa { hash: None }) else {
+            panic!("RSA private keys must remain blocked while RUSTSEC-2023-0071 applies");
+        };
+
+        assert_eq!(error.code, macsftp_core::ErrorCode::AuthFailed);
+        assert!(validate_private_key_algorithm(Algorithm::Ed25519).is_ok());
     }
 }
