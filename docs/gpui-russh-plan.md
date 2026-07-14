@@ -108,6 +108,11 @@ GPUI 应用入口和窗口层。
 - 不直接访问 Keychain；
 - 不包含 transfer planning 业务逻辑。
 
+workspace 的渲染实现按产品 surface 分文件：`render.rs` 保留 tab、pane 和 About
+等主工作区骨架，`settings_render.rs` 只负责设置与 profile 编辑，
+`transfer_render.rs` 只负责传输 drawer、job row 和状态栏。三者仍是同一个
+`WorkspaceView` 的实现，不引入额外 view state 或跨层抽象。
+
 ### `crates/ui`
 
 GPUI reusable components 和主题。
@@ -182,6 +187,11 @@ GPUI reusable components 和主题。
 - migration。
 
 敏感信息不写入普通配置文件。
+
+profile 持久化内部按职责拆分：`profile_file.rs` 只处理 `profiles.json` 的解析与
+原子写入，`profiles.rs` 负责 `ProfileStore`、Keychain 协调和事务语义；
+`storage.rs` 只组装模块并重导出现有公共 API。调用方不能绕过 `ProfileStore`
+分别修改 profile 文件和 secret。
 
 ### `crates/platform`
 

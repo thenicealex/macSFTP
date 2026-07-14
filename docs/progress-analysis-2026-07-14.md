@@ -159,7 +159,8 @@ macSFTP 已从「可连接的文件浏览器原型」演进为 **可当主力使
 
 | 项 | 说明 |
 | --- | --- |
-| `workspace/render.rs` 体量 | 仍大；可按 surface（settings/connect/drawer）继续拆文件 |
+| workspace 渲染职责 | 已按主工作区、Settings/Profile、Transfer Drawer/状态栏拆成三个实现文件；不新增状态或抽象 |
+| profile 持久化职责 | 已拆为 JSON 文件 I/O、ProfileStore/Keychain 事务、公共 API 组装三层；调用方 API 不变 |
 | 视觉回归 | UI 改动依赖人工；可选截图基线或脚本化 smoke |
 | 文档导航 | 增加本文件为「现状入口」；ux-improvement-plan 标注阶段完成 |
 
@@ -213,3 +214,4 @@ macSFTP 已从「可连接的文件浏览器原型」演进为 **可当主力使
 | 2026-07-14 | 安全边界：ProfileStore 统一 profiles.json + Keychain 事务，app 移除 Keychain 直连 |
 | 2026-07-14 | 安全边界：UI secret 输入清零且不可克隆；SSH 连接与私钥诊断按分类脱敏 |
 | 2026-07-14 | 供应链：cargo-deny + Dependabot；因 RUSTSEC-2023-0071 暂时关闭 russh RSA feature |
+| 2026-07-14 | 可维护性：拆分 profile 文件 I/O 与 secret 事务，并按产品 surface 拆分 workspace 渲染 |

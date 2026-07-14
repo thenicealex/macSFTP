@@ -1126,8 +1126,10 @@ mod nav;
 mod panes;
 mod profiles;
 mod render;
+mod settings_render;
 #[cfg(test)]
 mod tests;
+mod transfer_render;
 mod transfers;
 mod visible_entries;
 
