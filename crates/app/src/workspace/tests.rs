@@ -49,9 +49,12 @@ mod tests {
         TabDisconnected, TabId, Timestamp, TransferConflictPrompt, TransferDirection,
         TransferEndpoint, TransferId, TransferJob, TransferPlanId, TransferPlanProgress,
         TransferPlanSnapshot, TransferPlanState, TransferState, TrustRequestId, UserFacingError,
+        WindowSessionId,
     };
     use macsftp_sftp::{BridgeChannels, EventReceiver, RuntimeClient};
-    use macsftp_storage::{AppearancePreference, SessionFile, SessionStore, SessionTabSnapshot};
+    use macsftp_storage::{
+        AppearancePreference, SessionFile, SessionStore, SessionTabSnapshot, SessionWindowSnapshot,
+    };
     use macsftp_ui::{Appearance, Theme};
 
     use super::{
@@ -65,6 +68,7 @@ mod tests {
         ToggleHiddenFiles,
     };
     use crate::resources::{ActiveResources, ActiveTransfers};
+    use crate::session_coordinator::SessionCoordinator;
     use crate::workspace::nav::HistoryOp;
     use crate::workspace::profiles::{SettingsSection, profile_matches_filter};
     use macsftp_ui::InputState;
@@ -83,6 +87,16 @@ mod tests {
         restore_session: bool,
     ) -> (Entity<Workspace>, VisualTestContext, BridgeChannels) {
         let config = macsftp_storage::ConfigStore::with_defaults(app_paths.config_file.clone());
+        let mut session_coordinator =
+            SessionCoordinator::new(SessionStore::open_or_empty(app_paths.session_file.clone()));
+        let restore_snapshot = restore_session
+            .then(|| session_coordinator.take_restore_session())
+            .and_then(|session| session.windows.into_iter().next());
+        let window_session_id = restore_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.id)
+            .unwrap_or_else(|| session_coordinator.allocate_window_id());
+        session_coordinator.register_window(window_session_id);
         cx.update(|cx| {
             cx.set_global(Theme::dark());
             app_actions::init(cx);
@@ -92,12 +106,14 @@ mod tests {
             cx.set_global(crate::resources::AppResources::load_for_test(
                 app_paths, config,
             ));
+            cx.set_global(session_coordinator);
             cx.set_global(crate::resources::SharedTransfers::default());
         });
         let channels = BridgeChannels::new(&RuntimeBridgeConfig::default());
         let client = RuntimeClient::new(channels.command_tx.clone());
-        let window =
-            cx.add_window(|window, cx| Workspace::new(client, restore_session, window, cx));
+        let window = cx.add_window(|window, cx| {
+            Workspace::new(client, window_session_id, restore_snapshot, window, cx)
+        });
         let workspace = window
             .root(cx)
             .expect("workspace root view should be available");
@@ -3952,27 +3968,31 @@ mod tests {
         let mut store = SessionStore::open_or_empty(app_paths.session_file.clone());
         store.replace(SessionFile {
             version: SessionFile::CURRENT_VERSION,
-            active_tab_index: 1,
-            tabs: vec![
-                SessionTabSnapshot {
-                    title: "alpha.example".into(),
-                    profile_id: Some(3),
-                    host: "alpha.example".into(),
-                    port: 22,
-                    username: "alice".into(),
-                    local_path: None,
-                    remote_path: Some("/home/alice/proj".into()),
-                },
-                SessionTabSnapshot {
-                    title: "beta.example".into(),
-                    profile_id: None,
-                    host: "beta.example".into(),
-                    port: 2222,
-                    username: "bob".into(),
-                    local_path: None,
-                    remote_path: Some("/var/www".into()),
-                },
-            ],
+            active_window_index: 0,
+            windows: vec![SessionWindowSnapshot {
+                id: WindowSessionId(9),
+                active_tab_index: 1,
+                tabs: vec![
+                    SessionTabSnapshot {
+                        title: "alpha.example".into(),
+                        profile_id: Some(3),
+                        host: "alpha.example".into(),
+                        port: 22,
+                        username: "alice".into(),
+                        local_path: None,
+                        remote_path: Some("/home/alice/proj".into()),
+                    },
+                    SessionTabSnapshot {
+                        title: "beta.example".into(),
+                        profile_id: None,
+                        host: "beta.example".into(),
+                        port: 2222,
+                        username: "bob".into(),
+                        local_path: None,
+                        remote_path: Some("/var/www".into()),
+                    },
+                ],
+            }],
         });
         store
             .save()
@@ -4051,19 +4071,15 @@ mod tests {
     }
 
     #[gpui::test]
-    fn flush_session_writes_session_json(cx: &mut TestAppContext) {
+    fn session_snapshot_never_persists_credentials(cx: &mut TestAppContext) {
         let app_paths = temp_app_paths();
         let session_path = app_paths.session_file.clone();
         let (workspace, mut cx, _channels) = init_workspace_with_paths(cx, app_paths, false);
 
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            {
-                let tab = workspace.active_tab_mut().expect("default tab");
-                tab.title = "saved-host".into();
-                tab.remote.path = Some(RemotePath::new("/srv/data"));
-            }
+        workspace.update_in(&mut cx, |workspace, _window, _cx| {
+            let tab_id = workspace.active_tab().expect("default tab").id;
             workspace.tab_settings.insert(
-                TabId(1),
+                tab_id,
                 ConnectionSettings {
                     host: "saved-host".into(),
                     port: 2222,
@@ -4073,22 +4089,16 @@ mod tests {
                     },
                 },
             );
-            workspace.flush_session(cx);
-            // Second flush is a no-op guard.
-            workspace.flush_session(cx);
+            SessionFile {
+                version: SessionFile::CURRENT_VERSION,
+                active_window_index: 0,
+                windows: vec![workspace.build_session_snapshot()],
+            }
+            .save(&session_path)
+            .expect("session snapshot should save");
         });
 
-        let reloaded = SessionStore::open(session_path).expect("session.json should exist");
-        assert_eq!(reloaded.file().tabs.len(), 1);
-        assert_eq!(reloaded.file().tabs[0].title, "saved-host");
-        assert_eq!(reloaded.file().tabs[0].host, "saved-host");
-        assert_eq!(reloaded.file().tabs[0].port, 2222);
-        assert_eq!(reloaded.file().tabs[0].username, "deploy");
-        assert_eq!(
-            reloaded.file().tabs[0].remote_path.as_deref(),
-            Some("/srv/data")
-        );
-        let raw = std::fs::read_to_string(reloaded.path().as_str()).expect("read session.json");
+        let raw = std::fs::read_to_string(session_path.as_str()).expect("read session.json");
         assert!(
             !raw.contains("not-persisted"),
             "password must never appear in session.json: {raw}"

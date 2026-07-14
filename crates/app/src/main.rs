@@ -5,16 +5,17 @@ mod m7_regression;
 mod palette_commands;
 mod rate_sampler;
 mod resources;
+mod session_coordinator;
 mod workspace;
 
 use gpui::{
     App, AppContext, Application, Bounds, Global, Menu, MenuItem, SystemMenuType, TitlebarOptions,
-    WindowBounds, WindowOptions, px, size,
+    WindowBounds, WindowHandle, WindowOptions, px, size,
 };
 use macsftp_core::RuntimeBridgeConfig;
 use macsftp_platform::AppPaths;
 use macsftp_sftp::{HostTrustConfig, RuntimeController, SessionBackend};
-use macsftp_storage::{AppearancePreference, ConfigStore};
+use macsftp_storage::{AppearancePreference, ConfigStore, SessionStore, SessionWindowSnapshot};
 use macsftp_ui::Theme;
 use std::path::Path;
 use tracing::{error, warn};
@@ -32,6 +33,9 @@ use crate::app_actions::{
 use crate::assets::Assets;
 use crate::event_coordinator::{AppEventCoordinator, present_orphaned_transfer_conflicts};
 use crate::resources::{AppResources, SharedTransfers};
+use crate::session_coordinator::{
+    SessionCoordinator, checkpoint_after_window_closed, checkpoint_before_quit,
+};
 use crate::workspace::Workspace;
 
 /// Owns the Tokio runtime controller for the app's lifetime so it can
@@ -93,7 +97,7 @@ fn main() {
     // when zero windows are open. Registered on the builder (not `App`);
     // the callback runs later, once the globals it reads are set.
     app.on_reopen(|cx: &mut App| {
-        if let Err(error) = open_workspace_window(cx) {
+        if let Err(error) = open_workspace_window(cx, None) {
             error!(error = ?error, "failed to reopen window");
         }
     });
@@ -141,6 +145,7 @@ fn main() {
             _log_guard: log_guard,
         });
         cx.on_app_quit(|cx| {
+            checkpoint_before_quit(cx);
             if cx.has_global::<RuntimeHandle>()
                 && let Some(controller) = cx.remove_global::<RuntimeHandle>().controller
             {
@@ -152,18 +157,24 @@ fn main() {
 
         // Shared, process-wide app state: one instance per process, read
         // and written by every window (Cmd+N). Set before any window opens.
+        cx.set_global(SessionCoordinator::new(SessionStore::open_or_empty(
+            app_paths.session_file.clone(),
+        )));
         cx.set_global(AppResources::load(app_paths, config_store));
         cx.set_global(SharedTransfers::default());
         let event_coordinator = AppEventCoordinator::start(event_receiver, cx);
         cx.set_global(event_coordinator);
-        cx.on_window_closed(present_orphaned_transfer_conflicts)
-            .detach();
+        cx.on_window_closed(|cx| {
+            checkpoint_after_window_closed(cx);
+            present_orphaned_transfer_conflicts(cx);
+        })
+        .detach();
 
         // Cmd+N (and File > New Window) opens another independent window.
         // Registered at the App level so it fires regardless of which
         // window — if any — is focused.
         cx.on_action(|_: &NewWindow, cx: &mut App| {
-            if let Err(error) = open_workspace_window(cx) {
+            if let Err(error) = open_workspace_window(cx, None) {
                 error!(error = ?error, "failed to open new window");
             }
         });
@@ -224,7 +235,7 @@ fn main() {
             },
         ]);
 
-        if let Err(error) = open_workspace_window(cx) {
+        if let Err(error) = restore_workspace_windows(cx) {
             error!(error = ?error, "failed to open macSFTP window");
             cx.quit();
         }
@@ -239,7 +250,10 @@ fn main() {
 /// [`RuntimeController`] and shares `AppResources`/`SharedTransfers` with
 /// every other window. Runtime events are consumed once by
 /// [`AppEventCoordinator`].
-fn open_workspace_window(cx: &mut App) -> gpui::Result<()> {
+fn open_workspace_window(
+    cx: &mut App,
+    restore_session: Option<SessionWindowSnapshot>,
+) -> gpui::Result<WindowHandle<Workspace>> {
     let runtime_client = {
         let handle = cx.global::<RuntimeHandle>();
         let controller = handle
@@ -249,14 +263,17 @@ fn open_workspace_window(cx: &mut App) -> gpui::Result<()> {
         controller.client()
     };
 
-    // First window restores the previous session layout; Cmd+N windows start empty.
-    let restore_session = cx.windows().is_empty();
+    let is_first_window = cx.windows().is_empty();
+    let window_session_id = restore_session
+        .as_ref()
+        .map(|snapshot| snapshot.id)
+        .unwrap_or_else(|| cx.global_mut::<SessionCoordinator>().allocate_window_id());
 
     // The first window (including one reopened after the last closed) opens
     // centered at the default size. Additional windows pass `None` so gpui
     // cascades them off the active window instead of stacking exactly on
     // top of it.
-    let window_bounds = if restore_session {
+    let window_bounds = if is_first_window {
         Some(WindowBounds::Windowed(Bounds::centered(
             None,
             size(px(1200.0), px(800.0)),
@@ -266,7 +283,7 @@ fn open_workspace_window(cx: &mut App) -> gpui::Result<()> {
         None
     };
 
-    cx.open_window(
+    let window = cx.open_window(
         WindowOptions {
             window_bounds,
             window_min_size: Some(size(px(720.0), px(480.0))),
@@ -276,9 +293,45 @@ fn open_workspace_window(cx: &mut App) -> gpui::Result<()> {
             }),
             ..Default::default()
         },
-        |window, cx| cx.new(|cx| Workspace::new(runtime_client, restore_session, window, cx)),
+        |window, cx| {
+            cx.new(|cx| {
+                Workspace::new(
+                    runtime_client,
+                    window_session_id,
+                    restore_session,
+                    window,
+                    cx,
+                )
+            })
+        },
     )?;
+    cx.global_mut::<SessionCoordinator>()
+        .register_window(window_session_id);
     present_orphaned_transfer_conflicts(cx);
+    cx.activate(true);
+    Ok(window)
+}
+
+fn restore_workspace_windows(cx: &mut App) -> gpui::Result<()> {
+    let session = cx.global_mut::<SessionCoordinator>().take_restore_session();
+    if session.windows.is_empty() {
+        open_workspace_window(cx, None)?;
+        return Ok(());
+    }
+
+    let active_window_index = session
+        .active_window_index
+        .min(session.windows.len().saturating_sub(1));
+    let mut active_window = None;
+    for (index, snapshot) in session.windows.into_iter().enumerate() {
+        let window = open_workspace_window(cx, Some(snapshot))?;
+        if index == active_window_index {
+            active_window = Some(window);
+        }
+    }
+    if let Some(window) = active_window {
+        window.update(cx, |_workspace, window, _cx| window.activate_window())?;
+    }
     cx.activate(true);
     Ok(())
 }

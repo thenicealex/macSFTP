@@ -7,10 +7,12 @@ use gpui::{
 };
 use macsftp_core::{
     AppCommand, AppState, CommandDispatchError, ConnectCommand, ConnectionSettings,
-    ConnectionState, EntryPath, LocalPath, ProfileId, RemotePath, TabId, TabState,
+    ConnectionState, EntryPath, LocalPath, ProfileId, RemotePath, TabId, TabState, WindowSessionId,
 };
 use macsftp_sftp::RuntimeClient;
-use macsftp_storage::{AppearancePreference, RecentEntryInput, SessionFile, SessionTabSnapshot};
+use macsftp_storage::{
+    AppearancePreference, RecentEntryInput, SessionTabSnapshot, SessionWindowSnapshot,
+};
 use macsftp_ui::{ActiveTheme, InputState, Theme, empty_state, text_button};
 use tracing::warn;
 
@@ -80,6 +82,7 @@ pub(crate) struct RestoredTabTarget {
 }
 
 pub struct Workspace {
+    window_session_id: WindowSessionId,
     state: AppState,
     runtime_client: RuntimeClient,
     workspace_focus: FocusHandle,
@@ -151,15 +154,14 @@ pub struct Workspace {
     tab_nav: HashMap<TabId, TabNavState>,
     /// Connection meta restored from `session.json` (form prefill / path).
     restored_targets: HashMap<TabId, RestoredTabTarget>,
-    /// Guards against double-flushing session layout on quit.
-    session_flushed: bool,
     _appearance_subscription: Subscription,
 }
 
 impl Workspace {
     pub fn new(
         runtime_client: RuntimeClient,
-        restore_session: bool,
+        window_session_id: WindowSessionId,
+        restore_session: Option<SessionWindowSnapshot>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -183,6 +185,7 @@ impl Workspace {
             });
 
         let mut workspace = Self {
+            window_session_id,
             state,
             runtime_client,
             workspace_focus: cx.focus_handle(),
@@ -231,18 +234,11 @@ impl Workspace {
             tab_settings: HashMap::new(),
             tab_nav: HashMap::new(),
             restored_targets: HashMap::new(),
-            session_flushed: false,
             _appearance_subscription: appearance_subscription,
         };
-        // Persist session layout when the app quits.
-        cx.on_app_quit(|workspace, cx| {
-            workspace.flush_session(cx);
-            async {}
-        })
-        .detach();
-        // Restore previous tabs only on the first window. Never auto-connect.
-        if restore_session {
-            workspace.restore_session_tabs(window, cx);
+        // Restored tabs remain disconnected until the user explicitly connects.
+        if let Some(snapshot) = restore_session.as_ref() {
+            workspace.restore_session_tabs(snapshot, window, cx);
         }
         if workspace.state.tabs.tabs.is_empty() {
             workspace.open_new_tab(window, cx);
@@ -278,14 +274,18 @@ impl Workspace {
         self.set_drawer_height(self.drawer_height, viewport_height);
     }
 
-    /// Rebuild disconnected tabs from `session.json`. Does not send ConnectTab.
-    fn restore_session_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let file = cx.resources().session.file().clone();
-        if file.tabs.is_empty() {
+    /// Rebuild disconnected tabs from one window snapshot. Does not send ConnectTab.
+    fn restore_session_tabs(
+        &mut self,
+        snapshot: &SessionWindowSnapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if snapshot.tabs.is_empty() {
             return;
         }
         let mut restored_ids = Vec::new();
-        for snap in &file.tabs {
+        for snap in &snapshot.tabs {
             let tab_id = cx.resources().next_tab_id();
             let title = if snap.title.is_empty() {
                 snap.host.clone()
@@ -326,7 +326,7 @@ impl Workspace {
             restored_ids.push(tab_id);
             self.touch_mru(tab_id);
         }
-        let active_index = file
+        let active_index = snapshot
             .active_tab_index
             .min(restored_ids.len().saturating_sub(1));
         if let Some(active_id) = restored_ids.get(active_index).copied() {
@@ -339,7 +339,7 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(crate) fn build_session_snapshot(&self) -> SessionFile {
+    pub(crate) fn build_session_snapshot(&self) -> SessionWindowSnapshot {
         let tabs: Vec<SessionTabSnapshot> = self
             .state
             .tabs
@@ -383,31 +383,10 @@ impl Workspace {
             .active_tab_id
             .and_then(|id| self.state.tabs.tabs.iter().position(|t| t.id == id))
             .unwrap_or(0);
-        SessionFile {
-            version: SessionFile::CURRENT_VERSION,
+        SessionWindowSnapshot {
+            id: self.window_session_id,
             active_tab_index,
             tabs,
-        }
-    }
-
-    pub(crate) fn flush_session(&mut self, cx: &mut Context<Self>) {
-        if self.session_flushed {
-            return;
-        }
-        self.session_flushed = true;
-        // Multi-window MVP: each workspace overwrites session.json on quit.
-        // Last writer wins; if >1 window, log once (design accepts loss of other windows).
-        if cx.windows().len() > 1 {
-            tracing::warn!(
-                windows = cx.windows().len(),
-                "multiple windows open; session.json will reflect this workspace only"
-            );
-        }
-        let snapshot = self.build_session_snapshot();
-        let session = &mut cx.resources_mut().session;
-        session.replace(snapshot);
-        if let Err(error) = session.save() {
-            tracing::warn!(error = %error, "could not save session.json");
         }
     }
     pub(crate) fn active_tab(&self) -> Option<&TabState> {

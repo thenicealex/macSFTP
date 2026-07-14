@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use gpui::{App, Global};
 use macsftp_core::{AppEvent, LocalPath, TabId, Timestamp, TransferId, TransferStore};
 use macsftp_platform::AppPaths;
-use macsftp_storage::{ConfigStore, ProfileStore, RecentsStore, ResidualTempStore, SessionStore};
+use macsftp_storage::{ConfigStore, ProfileStore, RecentsStore, ResidualTempStore};
 use tracing::warn;
 
 /// The disk-backed stores plus the app paths and the shared tab-id
@@ -25,8 +25,6 @@ pub struct AppResources {
     pub config: ConfigStore,
     pub profiles: ProfileStore,
     pub residual_temps: ResidualTempStore,
-    /// Last-window tab layout (host/user/paths). No secrets.
-    pub session: SessionStore,
     /// Recent successful connections (host/user/paths). No secrets.
     pub recents: RecentsStore,
     /// Monotonic tab-id source, shared across every window so ids never
@@ -62,14 +60,12 @@ impl AppResources {
         let residual_temps = reconcile_local_residual_temps(ResidualTempStore::open_or_empty(
             app_paths.residual_temp_file.clone(),
         ));
-        let session = SessionStore::open_or_empty(app_paths.session_file.clone());
         let recents = RecentsStore::open_or_empty(app_paths.recents_file.clone());
         Self {
             app_paths,
             config,
             profiles,
             residual_temps,
-            session,
             recents,
             next_tab_id: Arc::new(AtomicU64::new(1)),
         }

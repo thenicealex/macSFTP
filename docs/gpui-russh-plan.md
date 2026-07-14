@@ -1370,10 +1370,19 @@ remote readlink
 
 > **2026-07-15 更新 —— 多窗口事件边界已收敛。** 上述三点担忧均已解决：
 > - **event routing**：`RuntimeController` 只暴露一个 bounded flume receiver，由进程级 `AppEventCoordinator` 唯一消费。transfer 与 residual-temp 事件只归并/持久化一次；tab/window 事件再投递给全部 workspace，并由既有的 `TabStore::accepts_remote_event` 按 `tab_id + session_id + session_epoch` 过滤。禁止 broadcast lag 覆盖未读结构事件。
-> - **AppModel**：`TransferStore` 与六个持久化资源（config/profiles/keychain/residual_temps/session/recents）+ `AppPaths` + tab-id 计数器提升为进程级 GPUI global（`SharedTransfers` / `AppResources`），所有窗口共享同一实例；tab 集合、模态、焦点仍为每窗口私有。
+> - **AppModel**：`TransferStore` 与持久化资源（config/profiles/keychain/residual_temps/recents）+ `AppPaths` + tab-id 计数器提升为进程级 GPUI global（`SharedTransfers` / `AppResources`），所有窗口共享同一实例；tab 集合、模态、焦点仍为每窗口私有。会话恢复由下述 `SessionCoordinator` 单独持有，避免通用资源容器暴露多写入口。
 > - **modal ownership**：host-key 模态携带 `tab_id`，只在拥有该 tab 的窗口弹出；transfer conflict 由协调器只分配给一个活动窗口，窗口关闭后把仍 pending 的 prompt 重新分配给另一个窗口。
 > - `TabId` 由每实例 `max+1` 改为共享 `Arc<AtomicU64>`，跨窗口绝不冲突（runtime 的 session 注册表按 `TabId` 索引）。
 > - 关闭全部窗口后 app 常驻（原生 macOS 行为），Cmd+N / Dock 图标可重新开窗口。
+
+> **2026-07-15 更新 —— 多窗口会话恢复采用进程级单写者。** `session.json`
+> 升级为 v2：顶层保存有序的窗口快照、活动窗口索引，每个窗口快照保存稳定的
+> `WindowSessionId`、活动 tab 索引和非敏感 tab/路径信息；v1 平面 tab 列表加载时
+> 自动迁移为一个窗口。`SessionCoordinator` 是 `SessionStore` 的唯一所有者：app quit
+> 在 GPUI 拆窗前一次收集并冻结所有 live workspace，之后的窗口关闭回调不得覆盖；
+> 普通手动关窗则在窗口已不可访问后保存剩余窗口，关闭最后窗口保存空会话，Dock
+> 重开得到新窗口。启动按窗口快照逐窗恢复，但不会自动发起远端连接。窗口位置和大小
+> 暂不持久化。
 
 ### 主布局
 

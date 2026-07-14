@@ -11,6 +11,9 @@ pub fn crate_name() -> &'static str {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct TabId(pub u64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub struct WindowSessionId(pub u64);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct SessionId(pub u64);
 

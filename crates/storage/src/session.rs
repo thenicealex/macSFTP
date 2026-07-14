@@ -1,4 +1,4 @@
-use macsftp_core::LocalPath;
+use macsftp_core::{LocalPath, WindowSessionId};
 use serde::{Deserialize, Serialize};
 
 use super::StorageError;
@@ -18,42 +18,85 @@ pub struct SessionTabSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionFile {
-    pub version: u32,
+pub struct SessionWindowSnapshot {
+    pub id: WindowSessionId,
     #[serde(default)]
     pub active_tab_index: usize,
     #[serde(default)]
     pub tabs: Vec<SessionTabSnapshot>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionFile {
+    pub version: u32,
+    #[serde(default)]
+    pub active_window_index: usize,
+    #[serde(default)]
+    pub windows: Vec<SessionWindowSnapshot>,
+}
+
+#[derive(Deserialize)]
+struct SessionVersion {
+    version: u32,
+}
+
+#[derive(Deserialize)]
+struct LegacySessionFileV1 {
+    #[serde(default)]
+    active_tab_index: usize,
+    #[serde(default)]
+    tabs: Vec<SessionTabSnapshot>,
+}
+
 impl SessionFile {
-    pub const CURRENT_VERSION: u32 = 1;
+    pub const CURRENT_VERSION: u32 = 2;
 
     pub fn empty() -> Self {
         Self {
             version: Self::CURRENT_VERSION,
-            active_tab_index: 0,
-            tabs: Vec::new(),
+            active_window_index: 0,
+            windows: Vec::new(),
         }
     }
 
     pub fn load(path: &LocalPath) -> Result<Self, StorageError> {
         match std::fs::read_to_string(path.as_str()) {
             Ok(contents) => {
-                let parsed: SessionFile =
+                let version: SessionVersion =
                     serde_json::from_str(&contents).map_err(|error| StorageError::Parse {
                         message: error.to_string(),
                     })?;
-                if parsed.version > Self::CURRENT_VERSION {
-                    return Err(StorageError::Parse {
+                match version.version {
+                    0 | 1 => {
+                        let legacy: LegacySessionFileV1 =
+                            serde_json::from_str(&contents).map_err(|error| {
+                                StorageError::Parse {
+                                    message: error.to_string(),
+                                }
+                            })?;
+                        Ok(Self {
+                            version: Self::CURRENT_VERSION,
+                            active_window_index: 0,
+                            windows: vec![SessionWindowSnapshot {
+                                id: WindowSessionId(1),
+                                active_tab_index: legacy.active_tab_index,
+                                tabs: legacy.tabs,
+                            }],
+                        })
+                    }
+                    Self::CURRENT_VERSION => {
+                        serde_json::from_str(&contents).map_err(|error| StorageError::Parse {
+                            message: error.to_string(),
+                        })
+                    }
+                    unsupported => Err(StorageError::Parse {
                         message: format!(
                             "unsupported session version {} (max {})",
-                            parsed.version,
+                            unsupported,
                             Self::CURRENT_VERSION
                         ),
-                    });
+                    }),
                 }
-                Ok(parsed)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::empty()),
             Err(error) => Err(StorageError::Io {
@@ -143,34 +186,57 @@ mod tests {
         let mut store = SessionStore::open_or_empty(path.clone());
         store.replace(SessionFile {
             version: SessionFile::CURRENT_VERSION,
-            active_tab_index: 1,
-            tabs: vec![
-                SessionTabSnapshot {
-                    title: "a.example".into(),
-                    profile_id: Some(3),
-                    host: "a.example".into(),
-                    port: 22,
-                    username: "alex".into(),
-                    local_path: Some("/Users/alex".into()),
-                    remote_path: Some("/home/alex".into()),
-                },
-                SessionTabSnapshot {
-                    title: "b.example".into(),
-                    profile_id: None,
-                    host: "b.example".into(),
-                    port: 2222,
-                    username: "root".into(),
-                    local_path: None,
-                    remote_path: None,
-                },
-            ],
+            active_window_index: 0,
+            windows: vec![SessionWindowSnapshot {
+                id: WindowSessionId(7),
+                active_tab_index: 1,
+                tabs: vec![
+                    SessionTabSnapshot {
+                        title: "a.example".into(),
+                        profile_id: Some(3),
+                        host: "a.example".into(),
+                        port: 22,
+                        username: "alex".into(),
+                        local_path: Some("/Users/alex".into()),
+                        remote_path: Some("/home/alex".into()),
+                    },
+                    SessionTabSnapshot {
+                        title: "b.example".into(),
+                        profile_id: None,
+                        host: "b.example".into(),
+                        port: 2222,
+                        username: "root".into(),
+                        local_path: None,
+                        remote_path: None,
+                    },
+                ],
+            }],
         });
         store.save().expect("save session");
         let reloaded = SessionStore::open(path).expect("reopen");
-        assert_eq!(reloaded.file().active_tab_index, 1);
-        assert_eq!(reloaded.file().tabs.len(), 2);
-        assert_eq!(reloaded.file().tabs[0].profile_id, Some(3));
-        assert_eq!(reloaded.file().tabs[1].port, 2222);
+        assert_eq!(reloaded.file().windows[0].id, WindowSessionId(7));
+        assert_eq!(reloaded.file().windows[0].active_tab_index, 1);
+        assert_eq!(reloaded.file().windows[0].tabs.len(), 2);
+        assert_eq!(reloaded.file().windows[0].tabs[0].profile_id, Some(3));
+        assert_eq!(reloaded.file().windows[0].tabs[1].port, 2222);
+    }
+
+    #[test]
+    fn version_one_migrates_to_one_window() {
+        let path = temp_path("v1");
+        std::fs::write(
+            path.as_str(),
+            r#"{"version":1,"active_tab_index":1,"tabs":[{"title":"a","host":"a","port":22,"username":"u"},{"title":"b","host":"b","port":22,"username":"u"}]}"#,
+        )
+        .expect("write v1 session fixture");
+
+        let store = SessionStore::open(path).expect("v1 session should migrate");
+        assert_eq!(store.file().version, SessionFile::CURRENT_VERSION);
+        assert_eq!(store.file().active_window_index, 0);
+        assert_eq!(store.file().windows.len(), 1);
+        assert_eq!(store.file().windows[0].id, WindowSessionId(1));
+        assert_eq!(store.file().windows[0].active_tab_index, 1);
+        assert_eq!(store.file().windows[0].tabs.len(), 2);
     }
 
     #[test]
@@ -178,7 +244,7 @@ mod tests {
         let path = temp_path("corrupt");
         std::fs::write(path.as_str(), "{not json").expect("write corrupt");
         let store = SessionStore::open_or_empty(path);
-        assert!(store.file().tabs.is_empty());
+        assert!(store.file().windows.is_empty());
     }
 
     #[test]
@@ -190,7 +256,7 @@ mod tests {
         )
         .expect("write");
         let store = SessionStore::open_or_empty(path);
-        assert!(store.file().tabs.is_empty());
+        assert!(store.file().windows.is_empty());
     }
 
     #[test]
@@ -199,15 +265,19 @@ mod tests {
         let mut store = SessionStore::open_or_empty(path.clone());
         store.replace(SessionFile {
             version: SessionFile::CURRENT_VERSION,
-            active_tab_index: 0,
-            tabs: vec![SessionTabSnapshot {
-                title: "h".into(),
-                profile_id: None,
-                host: "h".into(),
-                port: 22,
-                username: "u".into(),
-                local_path: None,
-                remote_path: None,
+            active_window_index: 0,
+            windows: vec![SessionWindowSnapshot {
+                id: WindowSessionId(1),
+                active_tab_index: 0,
+                tabs: vec![SessionTabSnapshot {
+                    title: "h".into(),
+                    profile_id: None,
+                    host: "h".into(),
+                    port: 22,
+                    username: "u".into(),
+                    local_path: None,
+                    remote_path: None,
+                }],
             }],
         });
         store.save().expect("save");
@@ -218,5 +288,21 @@ mod tests {
                 "session json must not contain {forbidden}: {raw}"
             );
         }
+    }
+
+    #[test]
+    fn failed_save_preserves_previous_session_file() {
+        let path = temp_path("preserve-on-failure");
+        let mut original = SessionFile::empty();
+        original.active_window_index = 3;
+        original.save(&path).expect("save original session");
+        std::fs::create_dir(format!("{}.tmp", path.as_str()))
+            .expect("block the temporary file path with a directory");
+
+        let replacement = SessionFile::empty();
+        assert!(replacement.save(&path).is_err());
+
+        let reloaded = SessionFile::load(&path).expect("original session should remain readable");
+        assert_eq!(reloaded.active_window_index, 3);
     }
 }

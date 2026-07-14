@@ -132,6 +132,7 @@ mod tests {
         RuntimeBridgeConfig, Timestamp, TransferConflictPrompt, TransferDirection,
         TransferEndpoint, TransferId, TransferJob, TransferPlan, TransferPlanId,
         TransferPlanProgress, TransferPlanSnapshot, TransferPlanState, TransferState,
+        WindowSessionId,
     };
     use macsftp_platform::AppPaths;
     use macsftp_sftp::{BridgeChannels, RuntimeClient};
@@ -157,8 +158,12 @@ mod tests {
         let channels = BridgeChannels::new(&RuntimeBridgeConfig::default());
         let first_client = RuntimeClient::new(channels.command_tx.clone());
         let second_client = RuntimeClient::new(channels.command_tx.clone());
-        let first = cx.add_window(|window, cx| Workspace::new(first_client, false, window, cx));
-        let second = cx.add_window(|window, cx| Workspace::new(second_client, false, window, cx));
+        let first = cx.add_window(|window, cx| {
+            Workspace::new(first_client, WindowSessionId(1), None, window, cx)
+        });
+        let second = cx.add_window(|window, cx| {
+            Workspace::new(second_client, WindowSessionId(2), None, window, cx)
+        });
 
         let now = Timestamp::from_secs_since_epoch(10);
         let plan_id = TransferPlanId(1);

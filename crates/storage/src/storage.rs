@@ -22,9 +22,9 @@ pub use recents::{RecentEntry, RecentEntryInput, RecentsFile, RecentsStore};
 pub mod residual_temp;
 pub use residual_temp::ResidualTempStore;
 
-/// Restorable workspace session tabs (plan §18 / Phase 5): `session.json`.
+/// Restorable workspace windows and tabs (plan §15/§18): `session.json`.
 pub mod session;
-pub use session::{SessionFile, SessionStore, SessionTabSnapshot};
+pub use session::{SessionFile, SessionStore, SessionTabSnapshot, SessionWindowSnapshot};
 
 pub fn crate_name() -> &'static str {
     "macsftp-storage"
