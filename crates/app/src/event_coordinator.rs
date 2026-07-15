@@ -1,10 +1,42 @@
 use gpui::{App, Global, Task, WindowHandle};
-use macsftp_core::{AppEvent, ConflictRequest, Timestamp, TransferConflictPrompt};
+use macsftp_core::{
+    AppEvent, ConflictRequest, EditPhase, LocalPath, Timestamp, TransferConflictPrompt,
+    TransferEndpoint,
+};
 use macsftp_sftp::EventReceiver;
 use tracing::warn;
 
 use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::Workspace;
+
+/// Hook used to open the downloaded temp file in the user's editor. Production
+/// always uses [`macsftp_platform::open_in_editor`]; tests swap in a recording
+/// stub via [`set_edit_opener`]. A `thread_local` cell keeps this safe on the
+/// single-threaded GPUI main loop (and one-thread `#[gpui::test]`) without any
+/// `unsafe`.
+type EditorOpener = fn(&LocalPath, Option<&str>) -> std::io::Result<()>;
+
+#[cfg(test)]
+thread_local! {
+    static EDIT_OPENER: std::cell::Cell<Option<EditorOpener>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn edit_opener() -> EditorOpener {
+    EDIT_OPENER
+        .with(|opener| opener.get())
+        .unwrap_or(macsftp_platform::open_in_editor)
+}
+
+#[cfg(not(test))]
+fn edit_opener() -> EditorOpener {
+    macsftp_platform::open_in_editor
+}
+
+#[cfg(test)]
+pub(crate) fn set_edit_opener(opener: EditorOpener) {
+    EDIT_OPENER.with(|cell| cell.set(Some(opener)));
+}
 
 /// Owns the sole runtime event consumer for the process.
 ///
@@ -43,6 +75,7 @@ fn dispatch_event(event: AppEvent, cx: &mut App) {
         if matches!(event, AppEvent::TransferConflict(_)) {
             present_orphaned_transfer_conflicts(cx);
         }
+        advance_edit_sessions(&event, cx);
         cx.refresh_windows();
         return;
     }
@@ -73,7 +106,66 @@ fn dispatch_event(event: AppEvent, cx: &mut App) {
     }
 }
 
-/// Ensure each pending conflict is presented by exactly one live window.
+/// Correlate a completed/failed transfer back to the edit session it was
+/// downloading for, then advance that session. On success the downloaded
+/// file's mtime becomes the watch baseline, the session moves to
+/// [`EditPhase::Editing`], and the editor opens. On failure the session moves
+/// to [`EditPhase::Failed`] and the editor is not opened. Non-terminal events
+/// (and transfers unrelated to any edit) are ignored.
+///
+/// Runs process-wide, mirroring the transfer reducer, because edit sessions
+/// live in the process-global [`AppResources`], not any single window.
+fn advance_edit_sessions(event: &AppEvent, cx: &mut App) {
+    let (transfer_id, succeeded) = match event {
+        AppEvent::TransferCompleted { transfer_id } => (*transfer_id, true),
+        AppEvent::TransferFailed(failure) => (failure.transfer_id, false),
+        _ => return,
+    };
+    // The completed job's local destination is the edit temp path (downloads
+    // land locally). Extract it as an owned value before mutably borrowing
+    // resources below.
+    let temp_path = match cx.transfers().find_job(transfer_id) {
+        Some(job) => match &job.destination {
+            TransferEndpoint::Local(path) => path.clone(),
+            TransferEndpoint::Remote(_) => return,
+        },
+        None => return,
+    };
+    let session_id = match cx.resources().edit_sessions.find_by_temp_path(&temp_path) {
+        Some(session) if session.phase == EditPhase::Downloading => session.id,
+        _ => return,
+    };
+
+    if !succeeded {
+        if let Some(session) = cx.resources_mut().edit_sessions.get_mut(session_id) {
+            session.phase = EditPhase::Failed {
+                error: macsftp_core::UserFacingError::new(
+                    macsftp_core::ErrorCode::Unknown,
+                    "Edit download failed",
+                    "The file could not be downloaded for editing.",
+                ),
+            };
+        }
+        return;
+    }
+
+    // Record the downloaded file's mtime as the baseline the edit watcher
+    // compares against to detect local saves.
+    let mtime = std::fs::metadata(temp_path.as_str())
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .map(Timestamp::from_system_time);
+    let editor = cx.resources().config.config().external_editor.clone();
+    if let Some(session) = cx.resources_mut().edit_sessions.get_mut(session_id) {
+        session.phase = EditPhase::Editing;
+        session.local_mtime = mtime;
+        session.active_transfer = None;
+    }
+    if let Err(error) = edit_opener()(&temp_path, editor.as_deref()) {
+        warn!(error = %error, "could not open editor for remote edit");
+    }
+}
+
 ///
 /// Called after a conflict arrives, after a new window opens, and after a
 /// window closes. If the owning window disappears, the prompt moves to the
@@ -128,10 +220,11 @@ fn conflict_prompt(conflict: ConflictRequest) -> TransferConflictPrompt {
 mod tests {
     use gpui::TestAppContext;
     use macsftp_core::{
-        AppEvent, ConflictPolicy, ConflictRequestId, LocalPath, MetadataPolicy, RemotePath,
-        RuntimeBridgeConfig, Timestamp, TransferConflictPrompt, TransferDirection,
-        TransferEndpoint, TransferId, TransferJob, TransferPlan, TransferPlanId,
-        TransferPlanProgress, TransferPlanSnapshot, TransferPlanState, TransferState,
+        AppEvent, ConflictPolicy, ConflictRequestId, EditPhase, EditSession, LocalPath,
+        MetadataPolicy, ProfileId, RemotePath, RemoteSnapshot, RuntimeBridgeConfig, TabId,
+        Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferFailure,
+        TransferId, TransferJob, TransferPlan, TransferPlanId, TransferPlanProgress,
+        TransferPlanSnapshot, TransferPlanState, TransferSnapshot, TransferState, UserFacingError,
         WindowSessionId,
     };
     use macsftp_platform::AppPaths;
@@ -139,10 +232,157 @@ mod tests {
     use macsftp_storage::ConfigStore;
     use macsftp_ui::Theme;
 
-    use super::{dispatch_event, present_orphaned_transfer_conflicts};
+    use super::{dispatch_event, present_orphaned_transfer_conflicts, set_edit_opener};
     use crate::app_actions;
-    use crate::resources::{ActiveTransfers, AppResources, SharedTransfers};
+    use crate::resources::{ActiveResources, ActiveTransfers, AppResources, SharedTransfers};
     use crate::workspace::Workspace;
+
+    thread_local! {
+        static OPENER_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    fn mock_edit_opener(_temp: &LocalPath, _editor: Option<&str>) -> std::io::Result<()> {
+        OPENER_CALLS.with(|calls| calls.set(calls.get() + 1));
+        Ok(())
+    }
+
+    /// Register a `Downloading` edit session whose temp path is a real file on
+    /// disk (so the success path's mtime read succeeds) and seed a matching
+    /// download job (id = `transfer_id`, destination = that temp path) into the
+    /// transfer store. Returns the session id and its temp path.
+    fn seed_downloading_edit(
+        cx: &mut TestAppContext,
+        label: &str,
+        transfer_id: TransferId,
+    ) -> (macsftp_core::EditSessionId, LocalPath) {
+        let temp_file = std::env::temp_dir().join(format!(
+            "macsftp-edit-{label}-{}-{}.txt",
+            std::process::id(),
+            transfer_id.0
+        ));
+        std::fs::write(&temp_file, b"remote contents").expect("write edit temp file");
+        let temp_path = LocalPath::new(temp_file.to_string_lossy().as_ref());
+
+        let now = Timestamp::from_secs_since_epoch(10);
+        let session_id = cx.update(|cx| {
+            let id = cx.resources_mut().edit_sessions.next_id();
+            let session = EditSession {
+                id,
+                remote_path: RemotePath::new("/srv/a.txt"),
+                tab_id: TabId(1),
+                session_epoch: 1,
+                profile_id: ProfileId(1),
+                local_temp_path: temp_path.clone(),
+                phase: EditPhase::Downloading,
+                remote_snapshot: RemoteSnapshot {
+                    size: Some(15),
+                    modified_at: Some(now),
+                },
+                local_mtime: None,
+                active_transfer: Some(transfer_id),
+            };
+            cx.resources_mut().edit_sessions.register(session);
+            id
+        });
+
+        let job = TransferJob {
+            id: transfer_id,
+            direction: TransferDirection::Download,
+            source: TransferEndpoint::Remote(RemotePath::new("/srv/a.txt")),
+            destination: TransferEndpoint::Local(temp_path.clone()),
+            state: TransferState::Queued,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        cx.update(|cx| {
+            dispatch_event(AppEvent::TransferQueued(TransferSnapshot { job }), cx);
+        });
+
+        (session_id, temp_path)
+    }
+
+    fn install_test_globals(cx: &mut TestAppContext, label: &str) {
+        let app_paths = test_app_paths(label);
+        let config = ConfigStore::with_defaults(app_paths.config_file.clone());
+        cx.update(|cx| {
+            cx.set_global(Theme::dark());
+            app_actions::init(cx);
+            cx.set_global(AppResources::load_for_test(app_paths, config));
+            cx.set_global(SharedTransfers::default());
+            set_edit_opener(mock_edit_opener);
+        });
+    }
+
+    #[gpui::test]
+    fn download_completion_moves_edit_session_to_editing(cx: &mut TestAppContext) {
+        install_test_globals(cx, "edit-editing");
+        let transfer_id = TransferId(42);
+        let (session_id, _temp_path) = seed_downloading_edit(cx, "editing", transfer_id);
+
+        cx.update(|cx| {
+            dispatch_event(AppEvent::TransferCompleted { transfer_id }, cx);
+        });
+
+        cx.read(|cx| {
+            let session = cx
+                .resources()
+                .edit_sessions
+                .get(session_id)
+                .expect("edit session survives completion");
+            assert_eq!(session.phase, EditPhase::Editing);
+            assert!(
+                session.local_mtime.is_some(),
+                "watch baseline mtime recorded"
+            );
+            assert_eq!(session.active_transfer, None, "active transfer cleared");
+        });
+        assert_eq!(
+            OPENER_CALLS.with(|calls| calls.get()),
+            1,
+            "editor opened exactly once on success"
+        );
+    }
+
+    #[gpui::test]
+    fn download_failure_moves_edit_session_to_failed(cx: &mut TestAppContext) {
+        install_test_globals(cx, "edit-failed");
+        let transfer_id = TransferId(43);
+        let (session_id, _temp_path) = seed_downloading_edit(cx, "failed", transfer_id);
+
+        cx.update(|cx| {
+            dispatch_event(
+                AppEvent::TransferFailed(TransferFailure {
+                    transfer_id,
+                    error: UserFacingError::new(
+                        macsftp_core::ErrorCode::Unknown,
+                        "boom",
+                        "download exploded",
+                    ),
+                }),
+                cx,
+            );
+        });
+
+        cx.read(|cx| {
+            let session = cx
+                .resources()
+                .edit_sessions
+                .get(session_id)
+                .expect("edit session survives failure");
+            assert!(
+                matches!(session.phase, EditPhase::Failed { .. }),
+                "phase becomes Failed, was {:?}",
+                session.phase
+            );
+        });
+        assert_eq!(
+            OPENER_CALLS.with(|calls| calls.get()),
+            0,
+            "editor is not opened on failure"
+        );
+    }
 
     #[gpui::test]
     fn transfer_events_are_reduced_once_and_conflict_has_one_window_owner(cx: &mut TestAppContext) {
