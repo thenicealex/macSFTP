@@ -1,7 +1,7 @@
 use gpui::{App, Global, Task, WindowHandle};
 use macsftp_core::{
-    AppEvent, ConflictRequest, EditPhase, LocalPath, Timestamp, TransferConflictPrompt,
-    TransferEndpoint,
+    AppEvent, ConflictRequest, EditPhase, LocalPath, RemoteSnapshot, Timestamp,
+    TransferConflictPrompt, TransferEndpoint,
 };
 use macsftp_sftp::EventReceiver;
 use tracing::warn;
@@ -106,36 +106,67 @@ fn dispatch_event(event: AppEvent, cx: &mut App) {
     }
 }
 
-/// Correlate a completed/failed transfer back to the edit session it was
-/// downloading for, then advance that session. On success the downloaded
-/// file's mtime becomes the watch baseline, the session moves to
-/// [`EditPhase::Editing`], and the editor opens. On failure the session moves
-/// to [`EditPhase::Failed`] and the editor is not opened. Non-terminal events
-/// (and transfers unrelated to any edit) are ignored.
+/// Correlate a completed/failed transfer back to the edit session it belongs
+/// to, then advance that session. Handles two phases:
 ///
-/// Runs process-wide, mirroring the transfer reducer, because edit sessions
-/// live in the process-global [`AppResources`], not any single window.
+/// - `Downloading` (the initial fetch, correlated by the job's local
+///   *destination*): success records the downloaded file's mtime as the watch
+///   baseline, moves the session to [`EditPhase::Editing`], and opens the
+///   editor; failure moves it to [`EditPhase::Failed`] and does not open.
+/// - `UploadingBack` (the watcher's save-back, correlated by the job's local
+///   *source*): success rebases `remote_snapshot` to the just-uploaded file's
+///   own `(size, mtime)` — an honest zero-round-trip approximation of the new
+///   remote, corrected on the next directory refresh — and returns to
+///   [`EditPhase::Editing`]; failure also returns to `Editing`, keeping the
+///   temp file so the user can save again to retry.
+///
+/// Non-terminal events, other phases, and transfers unrelated to any edit are
+/// ignored. Runs process-wide, mirroring the transfer reducer, because edit
+/// sessions live in the process-global [`AppResources`], not any single window.
 fn advance_edit_sessions(event: &AppEvent, cx: &mut App) {
     let (transfer_id, succeeded) = match event {
         AppEvent::TransferCompleted { transfer_id } => (*transfer_id, true),
         AppEvent::TransferFailed(failure) => (failure.transfer_id, false),
         _ => return,
     };
-    // The completed job's local destination is the edit temp path (downloads
-    // land locally). Extract it as an owned value before mutably borrowing
+    // Correlate to the session by the job's local endpoint: a download lands at
+    // a local *destination*, an upload-back reads from a local *source*. Either
+    // way exactly one side is local. Extract it before mutably borrowing
     // resources below.
     let temp_path = match cx.transfers().find_job(transfer_id) {
-        Some(job) => match &job.destination {
-            TransferEndpoint::Local(path) => path.clone(),
-            TransferEndpoint::Remote(_) => return,
+        Some(job) => match (&job.source, &job.destination) {
+            (_, TransferEndpoint::Local(path)) => path.clone(),
+            (TransferEndpoint::Local(path), _) => path.clone(),
+            _ => return,
         },
         None => return,
     };
-    let session_id = match cx.resources().edit_sessions.find_by_temp_path(&temp_path) {
-        Some(session) if session.phase == EditPhase::Downloading => session.id,
+    let (session_id, phase) = match cx.resources().edit_sessions.find_by_temp_path(&temp_path) {
+        Some(session)
+            if matches!(
+                session.phase,
+                EditPhase::Downloading | EditPhase::UploadingBack
+            ) =>
+        {
+            (session.id, session.phase.clone())
+        }
         _ => return,
     };
 
+    match phase {
+        EditPhase::Downloading => advance_downloading(session_id, &temp_path, succeeded, cx),
+        EditPhase::UploadingBack => advance_uploading_back(session_id, &temp_path, succeeded, cx),
+        _ => {}
+    }
+}
+
+/// Finish an edit download: open the editor on success, mark failed otherwise.
+fn advance_downloading(
+    session_id: macsftp_core::EditSessionId,
+    temp_path: &LocalPath,
+    succeeded: bool,
+    cx: &mut App,
+) {
     if !succeeded {
         if let Some(session) = cx.resources_mut().edit_sessions.get_mut(session_id) {
             session.phase = EditPhase::Failed {
@@ -161,8 +192,44 @@ fn advance_edit_sessions(event: &AppEvent, cx: &mut App) {
         session.local_mtime = mtime;
         session.active_transfer = None;
     }
-    if let Err(error) = edit_opener()(&temp_path, editor.as_deref()) {
+    if let Err(error) = edit_opener()(temp_path, editor.as_deref()) {
         warn!(error = %error, "could not open editor for remote edit");
+    }
+}
+
+/// Finish an edit upload-back: return to `Editing` either way, rebasing the
+/// remote snapshot on success so the next local save is judged against what we
+/// just wrote.
+fn advance_uploading_back(
+    session_id: macsftp_core::EditSessionId,
+    temp_path: &LocalPath,
+    succeeded: bool,
+    cx: &mut App,
+) {
+    // On success the remote now holds our local bytes; take the local file's
+    // own (size, mtime) as the new remote baseline. It is an approximation
+    // (the server may stamp a different mtime) but a self-consistent one, and
+    // the next directory refresh corrects it. On failure we leave the baseline
+    // untouched.
+    let refreshed = succeeded
+        .then(|| std::fs::metadata(temp_path.as_str()).ok())
+        .flatten()
+        .map(|meta| RemoteSnapshot {
+            size: Some(meta.len()),
+            modified_at: meta.modified().ok().map(Timestamp::from_system_time),
+        });
+    if let Some(session) = cx.resources_mut().edit_sessions.get_mut(session_id) {
+        session.phase = EditPhase::Editing;
+        session.active_transfer = None;
+        if let Some(snapshot) = refreshed {
+            session.remote_snapshot = snapshot;
+        }
+    }
+    if !succeeded {
+        warn!(
+            temp = %temp_path.as_str(),
+            "edit upload-back failed; session returned to Editing for retry"
+        );
     }
 }
 
@@ -192,7 +259,7 @@ pub fn present_orphaned_transfer_conflicts(cx: &mut App) {
     }
 }
 
-fn workspace_windows(cx: &App) -> Vec<WindowHandle<Workspace>> {
+pub(crate) fn workspace_windows(cx: &App) -> Vec<WindowHandle<Workspace>> {
     cx.windows()
         .into_iter()
         .filter_map(|window| window.downcast::<Workspace>())
@@ -303,6 +370,62 @@ mod tests {
         (session_id, temp_path)
     }
 
+    /// Register an `UploadingBack` edit session whose temp path is a real file
+    /// on disk, and seed a matching UPLOAD job (id = `transfer_id`, *source* =
+    /// that temp path, destination = the remote origin) into the transfer
+    /// store. `baseline` becomes the session's `remote_snapshot` so a test can
+    /// assert it gets rebased on success. Returns the session id and temp path.
+    fn seed_uploading_back_edit(
+        cx: &mut TestAppContext,
+        label: &str,
+        transfer_id: TransferId,
+        baseline: RemoteSnapshot,
+    ) -> (macsftp_core::EditSessionId, LocalPath) {
+        let temp_file = std::env::temp_dir().join(format!(
+            "macsftp-upload-{label}-{}-{}.txt",
+            std::process::id(),
+            transfer_id.0
+        ));
+        std::fs::write(&temp_file, b"locally edited contents").expect("write edit temp file");
+        let temp_path = LocalPath::new(temp_file.to_string_lossy().as_ref());
+
+        let now = Timestamp::from_secs_since_epoch(10);
+        let session_id = cx.update(|cx| {
+            let id = cx.resources_mut().edit_sessions.next_id();
+            let session = EditSession {
+                id,
+                remote_path: RemotePath::new("/srv/a.txt"),
+                tab_id: TabId(1),
+                session_epoch: 1,
+                profile_id: ProfileId(1),
+                local_temp_path: temp_path.clone(),
+                phase: EditPhase::UploadingBack,
+                remote_snapshot: baseline,
+                local_mtime: Some(now),
+                active_transfer: Some(transfer_id),
+            };
+            cx.resources_mut().edit_sessions.register(session);
+            id
+        });
+
+        let job = TransferJob {
+            id: transfer_id,
+            direction: TransferDirection::Upload,
+            source: TransferEndpoint::Local(temp_path.clone()),
+            destination: TransferEndpoint::Remote(RemotePath::new("/srv/a.txt")),
+            state: TransferState::Queued,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        cx.update(|cx| {
+            dispatch_event(AppEvent::TransferQueued(TransferSnapshot { job }), cx);
+        });
+
+        (session_id, temp_path)
+    }
+
     fn install_test_globals(cx: &mut TestAppContext, label: &str) {
         let app_paths = test_app_paths(label);
         let config = ConfigStore::with_defaults(app_paths.config_file.clone());
@@ -382,6 +505,96 @@ mod tests {
             0,
             "editor is not opened on failure"
         );
+    }
+
+    #[gpui::test]
+    fn upload_back_completion_rebases_snapshot_and_returns_to_editing(cx: &mut TestAppContext) {
+        install_test_globals(cx, "upload-ok");
+        let transfer_id = TransferId(50);
+        // A stale baseline that must be overwritten by the uploaded file's own
+        // (size, mtime) after the upload completes.
+        let stale = RemoteSnapshot {
+            size: Some(1),
+            modified_at: Some(Timestamp::from_secs_since_epoch(1)),
+        };
+        let (session_id, temp_path) = seed_uploading_back_edit(cx, "ok", transfer_id, stale);
+        let disk_len = std::fs::metadata(temp_path.as_str())
+            .expect("temp file exists")
+            .len();
+
+        cx.update(|cx| {
+            dispatch_event(AppEvent::TransferCompleted { transfer_id }, cx);
+        });
+
+        cx.read(|cx| {
+            let session = cx
+                .resources()
+                .edit_sessions
+                .get(session_id)
+                .expect("session survives upload completion");
+            assert_eq!(
+                session.phase,
+                EditPhase::Editing,
+                "successful upload-back returns to Editing"
+            );
+            assert_eq!(session.active_transfer, None, "active transfer cleared");
+            assert_eq!(
+                session.remote_snapshot.size,
+                Some(disk_len),
+                "remote snapshot is rebased to the uploaded file's size"
+            );
+            assert!(
+                session.remote_snapshot != stale,
+                "the stale baseline must be replaced"
+            );
+        });
+        assert_eq!(
+            OPENER_CALLS.with(|calls| calls.get()),
+            0,
+            "upload-back must not reopen the editor"
+        );
+    }
+
+    #[gpui::test]
+    fn upload_back_failure_returns_to_editing_without_rebasing(cx: &mut TestAppContext) {
+        install_test_globals(cx, "upload-fail");
+        let transfer_id = TransferId(51);
+        let baseline = RemoteSnapshot {
+            size: Some(7),
+            modified_at: Some(Timestamp::from_secs_since_epoch(70)),
+        };
+        let (session_id, _temp_path) = seed_uploading_back_edit(cx, "fail", transfer_id, baseline);
+
+        cx.update(|cx| {
+            dispatch_event(
+                AppEvent::TransferFailed(TransferFailure {
+                    transfer_id,
+                    error: UserFacingError::new(
+                        macsftp_core::ErrorCode::Unknown,
+                        "boom",
+                        "upload exploded",
+                    ),
+                }),
+                cx,
+            );
+        });
+
+        cx.read(|cx| {
+            let session = cx
+                .resources()
+                .edit_sessions
+                .get(session_id)
+                .expect("session survives upload failure");
+            assert_eq!(
+                session.phase,
+                EditPhase::Editing,
+                "failed upload-back returns to Editing so the user can retry"
+            );
+            assert_eq!(
+                session.remote_snapshot, baseline,
+                "a failed upload must not rebase the remote snapshot"
+            );
+        });
     }
 
     #[gpui::test]

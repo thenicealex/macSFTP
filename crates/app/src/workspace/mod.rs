@@ -7,8 +7,8 @@ use gpui::{
 };
 use macsftp_core::{
     AppCommand, AppState, CommandDispatchError, ConnectCommand, ConnectionPoolIdentity,
-    ConnectionSettings, ConnectionState, EntryPath, LocalPath, ProfileId, RemotePath, TabId,
-    TabState, WindowSessionId,
+    ConnectionSettings, ConnectionState, EntryPath, LocalPath, ProfileId, RemotePath,
+    RemoteSnapshot, TabId, TabState, WindowSessionId,
 };
 use macsftp_sftp::RuntimeClient;
 use macsftp_storage::{
@@ -586,6 +586,38 @@ impl Workspace {
             }
         }
     }
+    /// Clone of this window's runtime client, for process-wide callers (the
+    /// edit watcher) that need to dispatch a command to the session owning a
+    /// tab without a `Context<Workspace>`. `RuntimeClient` is a cheap channel
+    /// handle.
+    pub(crate) fn runtime_client(&self) -> RuntimeClient {
+        self.runtime_client.clone()
+    }
+    /// Whether this window holds the tab with `tab_id`. Used by the edit
+    /// watcher to find the window that owns an edit session's tab.
+    pub(crate) fn owns_tab(&self, tab_id: TabId) -> bool {
+        self.state.tabs.find_tab(tab_id).is_some()
+    }
+    /// The most recent remote `(size, mtime)` for `remote_path` from the tab's
+    /// existing directory listing, or `None` when the tab or entry is absent.
+    /// This is the zero-round-trip "current remote snapshot" the watcher uses
+    /// to detect that someone else changed the file since it was opened.
+    pub(crate) fn remote_entry_snapshot(
+        &self,
+        tab_id: TabId,
+        remote_path: &RemotePath,
+    ) -> Option<RemoteSnapshot> {
+        let tab = self.state.tabs.find_tab(tab_id)?;
+        let entry = tab
+            .remote
+            .entries
+            .iter()
+            .find(|entry| &entry.path == remote_path)?;
+        Some(RemoteSnapshot {
+            size: entry.size,
+            modified_at: entry.modified_at,
+        })
+    }
     pub(crate) fn request_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.active_tab() else {
             return;
@@ -1108,3 +1140,4 @@ mod transfers;
 mod visible_entries;
 
 use connect_form::ConnectForm;
+pub(crate) use remote_edit::build_edit_upload_command;

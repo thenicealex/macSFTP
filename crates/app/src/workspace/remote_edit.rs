@@ -112,3 +112,27 @@ impl Workspace {
         }
     }
 }
+
+/// Build the `StartTransfer(Upload)` command that sends an edited temp file
+/// back to its remote origin. Mirrors the inline download command in
+/// [`Workspace::start_edit_download`]; factored out so the edit watcher (and
+/// Task 11's conflict modal) share one construction site rather than
+/// duplicating the struct literal.
+pub(crate) fn build_edit_upload_command(
+    temp: &LocalPath,
+    remote_path: &RemotePath,
+    session_epoch: u64,
+    profile_id: ProfileId,
+    tab_id: TabId,
+) -> AppCommand {
+    AppCommand::StartTransfer(StartTransferCommand {
+        tab_id,
+        session_epoch,
+        profile_id,
+        direction: TransferDirection::Upload,
+        sources: vec![TransferEndpoint::Local(temp.clone())],
+        destination: TransferEndpoint::Remote(remote_path.clone()),
+        metadata_policy: MetadataPolicy::default(),
+        conflict_policy: ConflictPolicy::default(),
+    })
+}
