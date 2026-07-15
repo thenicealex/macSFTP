@@ -1,6 +1,6 @@
 use gpui::{App, Global, Task, WindowHandle};
 use macsftp_core::{
-    AppEvent, ConflictRequest, EditPhase, LocalPath, RemoteSnapshot, Timestamp,
+    AppEvent, ConflictRequest, EditPhase, LocalPath, RemotePath, RemoteSnapshot, TabId, Timestamp,
     TransferConflictPrompt, TransferEndpoint,
 };
 use macsftp_sftp::EventReceiver;
@@ -141,21 +141,29 @@ fn advance_edit_sessions(event: &AppEvent, cx: &mut App) {
         },
         None => return,
     };
-    let (session_id, phase) = match cx.resources().edit_sessions.find_by_temp_path(&temp_path) {
-        Some(session)
-            if matches!(
-                session.phase,
-                EditPhase::Downloading | EditPhase::UploadingBack
-            ) =>
-        {
-            (session.id, session.phase.clone())
-        }
-        _ => return,
-    };
+    let (session_id, phase, tab_id, remote_path) =
+        match cx.resources().edit_sessions.find_by_temp_path(&temp_path) {
+            Some(session)
+                if matches!(
+                    session.phase,
+                    EditPhase::Downloading | EditPhase::UploadingBack
+                ) =>
+            {
+                (
+                    session.id,
+                    session.phase.clone(),
+                    session.tab_id,
+                    session.remote_path.clone(),
+                )
+            }
+            _ => return,
+        };
 
     match phase {
         EditPhase::Downloading => advance_downloading(session_id, &temp_path, succeeded, cx),
-        EditPhase::UploadingBack => advance_uploading_back(session_id, &temp_path, succeeded, cx),
+        EditPhase::UploadingBack => {
+            advance_uploading_back(session_id, &temp_path, tab_id, &remote_path, succeeded, cx)
+        }
         _ => {}
     }
 }
@@ -199,10 +207,16 @@ fn advance_downloading(
 
 /// Finish an edit upload-back: return to `Editing` either way, rebasing the
 /// remote snapshot on success so the next local save is judged against what we
-/// just wrote.
+/// just wrote. On success we also rebase the owning tab's directory-listing
+/// entry to the same `(size, mtime)` so both baselines the watcher reads — the
+/// session snapshot and the listing — stay consistent; otherwise a second save
+/// with no manual refresh in between would compare the fresh snapshot against a
+/// stale listing and flag a spurious `RemoteConflict`.
 fn advance_uploading_back(
     session_id: macsftp_core::EditSessionId,
     temp_path: &LocalPath,
+    tab_id: TabId,
+    remote_path: &RemotePath,
     succeeded: bool,
     cx: &mut App,
 ) {
@@ -223,6 +237,20 @@ fn advance_uploading_back(
         session.active_transfer = None;
         if let Some(snapshot) = refreshed {
             session.remote_snapshot = snapshot;
+        }
+    }
+    // Keep the listing baseline in step with the rebased snapshot. Done after
+    // the resources mutation above so the immutable/mutable resource borrow is
+    // dropped before `window.update` re-borrows `cx`. Only one window/tab owns
+    // the tab, so we stop after the first entry we update.
+    if let Some(snapshot) = refreshed {
+        for window in workspace_windows(cx) {
+            let synced = window.update(cx, |workspace, _window, _cx| {
+                workspace.sync_remote_entry_snapshot(tab_id, remote_path, snapshot)
+            });
+            if matches!(synced, Ok(true)) {
+                break;
+            }
         }
     }
     if !succeeded {
@@ -285,14 +313,14 @@ fn conflict_prompt(conflict: ConflictRequest) -> TransferConflictPrompt {
 
 #[cfg(test)]
 mod tests {
-    use gpui::TestAppContext;
+    use gpui::{TestAppContext, WindowHandle};
     use macsftp_core::{
-        AppEvent, ConflictPolicy, ConflictRequestId, EditPhase, EditSession, LocalPath,
-        MetadataPolicy, ProfileId, RemotePath, RemoteSnapshot, RuntimeBridgeConfig, TabId,
-        Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferFailure,
-        TransferId, TransferJob, TransferPlan, TransferPlanId, TransferPlanProgress,
-        TransferPlanSnapshot, TransferPlanState, TransferSnapshot, TransferState, UserFacingError,
-        WindowSessionId,
+        AppEvent, ConflictPolicy, ConflictRequestId, EditPhase, EditSession, FileKind, LocalPath,
+        MetadataPolicy, ProfileId, RemoteEntry, RemotePath, RemoteSnapshot, RuntimeBridgeConfig,
+        TabId, Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint,
+        TransferFailure, TransferId, TransferJob, TransferPlan, TransferPlanId,
+        TransferPlanProgress, TransferPlanSnapshot, TransferPlanState, TransferSnapshot,
+        TransferState, UserFacingError, WindowSessionId,
     };
     use macsftp_platform::AppPaths;
     use macsftp_sftp::{BridgeChannels, RuntimeClient};
@@ -426,6 +454,37 @@ mod tests {
         (session_id, temp_path)
     }
 
+    /// Open a window whose first tab (`TabId(1)`, from the fresh `AppResources`
+    /// counter — matching the seeded session's `tab_id`) has a remote listing
+    /// holding a single entry for `/srv/a.txt` at the given stale
+    /// `(size, modified_at)`. Returns the window so a test can read the entry
+    /// back after dispatching the completion.
+    fn window_with_stale_remote_entry(
+        cx: &mut TestAppContext,
+        size: Option<u64>,
+        modified_at: Option<Timestamp>,
+    ) -> WindowHandle<Workspace> {
+        let channels = BridgeChannels::new(&RuntimeBridgeConfig::default());
+        let client = RuntimeClient::new(channels.command_tx.clone());
+        let window = cx
+            .add_window(|window, cx| Workspace::new(client, WindowSessionId(1), None, window, cx));
+        window
+            .update(cx, |workspace, _window, _cx| {
+                let tab = workspace.active_tab_mut().expect("window opens with a tab");
+                tab.remote.entries = vec![RemoteEntry {
+                    name: "a.txt".to_string(),
+                    path: RemotePath::new("/srv/a.txt"),
+                    kind: FileKind::File,
+                    size,
+                    permissions: Some(0o644),
+                    modified_at,
+                    link_target: None,
+                }];
+            })
+            .expect("seed the tab's remote listing");
+        window
+    }
+
     fn install_test_globals(cx: &mut TestAppContext, label: &str) {
         let app_paths = test_app_paths(label);
         let config = ConfigStore::with_defaults(app_paths.config_file.clone());
@@ -517,6 +576,10 @@ mod tests {
             size: Some(1),
             modified_at: Some(Timestamp::from_secs_since_epoch(1)),
         };
+        // A window whose tab (`TabId(1)`) lists `/srv/a.txt` at the same stale
+        // (size, mtime). Its listing baseline must be rebased alongside the
+        // session snapshot so a second save is not judged against stale data.
+        let window = window_with_stale_remote_entry(cx, stale.size, stale.modified_at);
         let (session_id, temp_path) = seed_uploading_back_edit(cx, "ok", transfer_id, stale);
         let disk_len = std::fs::metadata(temp_path.as_str())
             .expect("temp file exists")
@@ -526,7 +589,7 @@ mod tests {
             dispatch_event(AppEvent::TransferCompleted { transfer_id }, cx);
         });
 
-        cx.read(|cx| {
+        let rebased = cx.read(|cx| {
             let session = cx
                 .resources()
                 .edit_sessions
@@ -546,6 +609,24 @@ mod tests {
             assert!(
                 session.remote_snapshot != stale,
                 "the stale baseline must be replaced"
+            );
+            session.remote_snapshot
+        });
+        // The owning tab's listing entry must be rebased to the SAME values as
+        // the session snapshot, so the watcher's next divergence check compares
+        // consistent baselines and does not flag a spurious RemoteConflict.
+        cx.read(|cx| {
+            let workspace = window.read(cx).expect("window is open");
+            let synced = workspace
+                .remote_entry_snapshot(TabId(1), &RemotePath::new("/srv/a.txt"))
+                .expect("listing still holds the edited file");
+            assert_eq!(
+                synced, rebased,
+                "the listing entry must be rebased to match the session snapshot"
+            );
+            assert!(
+                synced != stale,
+                "the stale listing baseline must be replaced"
             );
         });
         assert_eq!(

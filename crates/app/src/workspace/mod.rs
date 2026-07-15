@@ -618,6 +618,33 @@ impl Workspace {
             modified_at: entry.modified_at,
         })
     }
+    /// Write-side mirror of [`Self::remote_entry_snapshot`]: rebase the tab's
+    /// existing listing entry for `remote_path` to `snapshot`'s `(size, mtime)`
+    /// so the listing baseline stays consistent with the edit session's
+    /// `remote_snapshot` after an upload-back. Returns `true` when an entry was
+    /// found and updated; `false` (a no-op) when the tab or entry is absent —
+    /// the snapshot rebase alone is enough in that case.
+    pub(crate) fn sync_remote_entry_snapshot(
+        &mut self,
+        tab_id: TabId,
+        remote_path: &RemotePath,
+        snapshot: RemoteSnapshot,
+    ) -> bool {
+        let Some(tab) = self.state.tabs.find_tab_mut(tab_id) else {
+            return false;
+        };
+        let Some(entry) = tab
+            .remote
+            .entries
+            .iter_mut()
+            .find(|entry| &entry.path == remote_path)
+        else {
+            return false;
+        };
+        entry.size = snapshot.size;
+        entry.modified_at = snapshot.modified_at;
+        true
+    }
     pub(crate) fn request_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.active_tab() else {
             return;
