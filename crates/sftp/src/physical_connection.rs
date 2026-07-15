@@ -72,16 +72,24 @@ impl client::Handler for ClientHandler {
         match check_result {
             HostKeyCheckResult::Match => {
                 debug!(
+                    target: "macsftp_sftp::connection",
                     host = self.host.as_str(),
                     port = self.port,
+                    tab_id = self.scope.tab_id.0,
+                    session_id = self.scope.session_id.0,
+                    session_epoch = self.scope.session_epoch,
                     "host key matched known_hosts"
                 );
                 Ok::<bool, russh::Error>(true)
             }
             HostKeyCheckResult::Mismatch => {
                 warn!(
+                    target: "macsftp_sftp::connection",
                     host = self.host.as_str(),
                     port = self.port,
+                    tab_id = self.scope.tab_id.0,
+                    session_id = self.scope.session_id.0,
+                    session_epoch = self.scope.session_epoch,
                     "host key MISMATCH — connection blocked (potential MITM)"
                 );
                 let expected =
@@ -101,8 +109,12 @@ impl client::Handler for ClientHandler {
             }
             HostKeyCheckResult::NotFound => {
                 info!(
+                    target: "macsftp_sftp::connection",
                     host = self.host.as_str(),
                     port = self.port,
+                    tab_id = self.scope.tab_id.0,
+                    session_id = self.scope.session_id.0,
+                    session_epoch = self.scope.session_epoch,
                     algorithm = key_algorithm(server_key).as_str(),
                     "unknown host key; prompting user to trust"
                 );
@@ -139,10 +151,18 @@ impl client::Handler for ClientHandler {
                             server_key,
                             &self.trust_config.app_known_hosts_path,
                         );
-                        if let Err(error) = persist_result {
+                        if persist_result.is_err() {
                             // Trust was granted for this session either way;
                             // the user will be prompted again next time.
-                            warn!(error = %error, "known_hosts: failed to persist trusted key");
+                            warn!(
+                                target: "macsftp_sftp::connection",
+                                host = self.host.as_str(),
+                                port = self.port,
+                                tab_id = self.scope.tab_id.0,
+                                session_id = self.scope.session_id.0,
+                                session_epoch = self.scope.session_epoch,
+                                "trusted host key could not be persisted; technical detail redacted"
+                            );
                         }
                         Ok::<bool, russh::Error>(true)
                     }
@@ -152,8 +172,12 @@ impl client::Handler for ClientHandler {
                     }
                     Err(_elapsed) => {
                         warn!(
+                            target: "macsftp_sftp::connection",
                             host = self.host.as_str(),
                             port = self.port,
+                            tab_id = self.scope.tab_id.0,
+                            session_id = self.scope.session_id.0,
+                            session_epoch = self.scope.session_epoch,
                             "host key trust prompt timed out"
                         );
                         // Clean up the registry entry so it can't be
@@ -194,6 +218,14 @@ pub fn connection_error(host: &str, port: u16, _error: &dyn std::fmt::Display) -
     user_error
 }
 
+pub fn sftp_connection_error(
+    title: &'static str,
+    message: &'static str,
+    _error: &dyn std::fmt::Display,
+) -> UserFacingError {
+    UserFacingError::new(ErrorCode::ChannelClosed, title, message).with_retryable(true)
+}
+
 fn validate_private_key_algorithm(algorithm: Algorithm) -> Result<(), UserFacingError> {
     if matches!(algorithm, Algorithm::Rsa { .. }) {
         return Err(UserFacingError::new(
@@ -216,10 +248,15 @@ async fn authenticate(
         AuthCredential::PrivateKey { .. } => "private_key",
     };
     info!(
+        target: "macsftp_sftp::connection",
         host = settings.host.as_str(),
+        port = settings.port,
         username = settings.username.as_str(),
+        tab_id = scope.tab_id.0,
+        session_id = scope.session_id.0,
+        session_epoch = scope.session_epoch,
         method,
-        "authenticating"
+        "authentication started"
     );
 
     let auth_result = match &settings.auth {
@@ -306,7 +343,16 @@ async fn authenticate(
 
     match auth_result {
         russh::client::AuthResult::Success => {
-            debug!("authentication successful");
+            info!(
+                target: "macsftp_sftp::connection",
+                host = settings.host.as_str(),
+                port = settings.port,
+                tab_id = scope.tab_id.0,
+                session_id = scope.session_id.0,
+                session_epoch = scope.session_epoch,
+                method,
+                "authentication succeeded"
+            );
             Ok(())
         }
         russh::client::AuthResult::Failure { .. } => {
@@ -315,7 +361,16 @@ async fn authenticate(
                 "Authentication failed",
                 "The server rejected the credentials.",
             );
-            warn!(method, "authentication rejected by server");
+            warn!(
+                target: "macsftp_sftp::connection",
+                host = settings.host.as_str(),
+                port = settings.port,
+                tab_id = scope.tab_id.0,
+                session_id = scope.session_id.0,
+                session_epoch = scope.session_epoch,
+                method,
+                "authentication rejected by server"
+            );
             let _ = event_tx
                 .send_async(AppEvent::AuthFailed(RemoteScoped::new(
                     scope.clone(),
@@ -361,13 +416,27 @@ pub async fn establish_physical_connection(
         connection_lost,
     };
 
+    info!(
+        target: "macsftp_sftp::connection",
+        host = settings.host.as_str(),
+        port = settings.port,
+        tab_id = scope.tab_id.0,
+        session_id = scope.session_id.0,
+        session_epoch = scope.session_epoch,
+        "SSH transport and handshake started"
+    );
+
     let address = (settings.host.as_str(), settings.port);
     let mut handle = match client::connect(config, address, handler).await {
         Ok(handle) => handle,
         Err(error) => {
             warn!(
+                target: "macsftp_sftp::connection",
                 host = settings.host.as_str(),
                 port = settings.port,
+                tab_id = scope.tab_id.0,
+                session_id = scope.session_id.0,
+                session_epoch = scope.session_epoch,
                 "ssh tcp/handshake failed; technical detail redacted"
             );
             let recorded = rejection
@@ -392,22 +461,72 @@ pub async fn establish_physical_connection(
     Ok(handle)
 }
 
-pub fn log_connect_failure(host: &str, failure: &ConnectFailure) {
+pub fn log_connect_failure(
+    host: &str,
+    port: u16,
+    scope: &RemoteEventScope,
+    failure: &ConnectFailure,
+) {
     match failure {
         ConnectFailure::HostKeyMismatch => {
-            warn!(host, "connection failed: host key mismatch");
+            warn!(
+                target: "macsftp_sftp::connection",
+                host,
+                port,
+                tab_id = scope.tab_id.0,
+                session_id = scope.session_id.0,
+                session_epoch = scope.session_epoch,
+                failure = "host_key_mismatch",
+                "connection failed"
+            );
         }
         ConnectFailure::TrustRejected => {
-            info!(host, "connection aborted: user rejected host key");
+            info!(
+                target: "macsftp_sftp::connection",
+                host,
+                port,
+                tab_id = scope.tab_id.0,
+                session_id = scope.session_id.0,
+                session_epoch = scope.session_epoch,
+                failure = "host_key_rejected",
+                "connection aborted"
+            );
         }
         ConnectFailure::TrustTimeout => {
-            warn!(host, "connection failed: trust prompt timed out");
+            warn!(
+                target: "macsftp_sftp::connection",
+                host,
+                port,
+                tab_id = scope.tab_id.0,
+                session_id = scope.session_id.0,
+                session_epoch = scope.session_epoch,
+                failure = "host_key_prompt_timeout",
+                "connection failed"
+            );
         }
-        ConnectFailure::AuthFailed(auth_failure) => {
-            warn!(host, title = %auth_failure.reason.title, "connection failed: authentication failed");
+        ConnectFailure::AuthFailed(_) => {
+            warn!(
+                target: "macsftp_sftp::connection",
+                host,
+                port,
+                tab_id = scope.tab_id.0,
+                session_id = scope.session_id.0,
+                session_epoch = scope.session_epoch,
+                failure = "authentication_failed",
+                "connection failed"
+            );
         }
-        ConnectFailure::Connection(error) => {
-            warn!(host, title = %error.title, "connection failed: protocol or network error");
+        ConnectFailure::Connection(_) => {
+            warn!(
+                target: "macsftp_sftp::connection",
+                host,
+                port,
+                tab_id = scope.tab_id.0,
+                session_id = scope.session_id.0,
+                session_epoch = scope.session_epoch,
+                failure = "network_or_protocol",
+                "connection failed"
+            );
         }
     }
 }
@@ -423,13 +542,36 @@ fn private_key_file_name(path: &str) -> &str {
 mod tests {
     use ssh_key::Algorithm;
 
-    use super::{connection_error, private_key_file_name, validate_private_key_algorithm};
+    use super::{
+        connection_error, private_key_file_name, sftp_connection_error,
+        validate_private_key_algorithm,
+    };
 
     #[test]
     fn connection_error_does_not_copy_untrusted_technical_detail() {
         let sensitive = "password=do-not-log /Users/alex/.ssh/private-key";
 
         let error = connection_error("example.com", 22, &sensitive);
+        let rendered = format!(
+            "{} {} {}",
+            error.title,
+            error.message,
+            error.detail.as_deref().unwrap_or_default()
+        );
+
+        assert!(!rendered.contains("do-not-log"));
+        assert!(!rendered.contains("/Users/alex/.ssh"));
+    }
+
+    #[test]
+    fn sftp_connection_error_does_not_copy_untrusted_technical_detail() {
+        let sensitive = "password=do-not-log /Users/alex/.ssh/private-key";
+
+        let error = sftp_connection_error(
+            "Could not start SFTP.",
+            "The SFTP subsystem did not become ready.",
+            &sensitive,
+        );
         let rendered = format!(
             "{} {} {}",
             error.title,

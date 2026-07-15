@@ -300,10 +300,6 @@ impl RemoteSessionActor {
     ) {
         let scope = self.scope();
 
-        tracing::info!(
-            session_id = ?self.session_id,
-            "sftp session established; serving requests"
-        );
         let _ = self
             .event_tx
             .send_async(AppEvent::TabConnected(RemoteScoped::new(

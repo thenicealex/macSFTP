@@ -435,6 +435,22 @@ async fn command_dispatch_loop(
 
                         let scope =
                             RemoteEventScope::new(cmd.tab_id, cmd.session_id, cmd.session_epoch);
+                        let connection_started_at = Instant::now();
+                        let authentication_method = match &cmd.settings.auth {
+                            macsftp_core::AuthCredential::Password { .. } => "password",
+                            macsftp_core::AuthCredential::PrivateKey { .. } => "private_key",
+                        };
+                        info!(
+                            target: "macsftp_sftp::connection",
+                            host = cmd.settings.host.as_str(),
+                            port = cmd.settings.port,
+                            username = cmd.settings.username.as_str(),
+                            tab_id = scope.tab_id.0,
+                            session_id = scope.session_id.0,
+                            session_epoch = scope.session_epoch,
+                            authentication_method,
+                            "SFTP connection started"
+                        );
                         let mut receiver = connection_manager.get_or_connect(
                             &cmd.settings,
                             &cmd.pool_identity,
@@ -451,24 +467,53 @@ async fn command_dispatch_loop(
                         let next_conflict_id_clone = next_conflict_id.clone();
                         let cancel_clone = cancel.clone();
                         let host_clone = cmd.settings.host.clone();
+                        let port = cmd.settings.port;
 
                         let join = tokio::spawn(async move {
                             match receiver.recv().await {
                                 Ok(Ok(shared_connection)) => {
                                     let channel_result = async {
                                         let channel = shared_connection.handle.channel_open_session().await.map_err(|error| {
-                                            crate::physical_connection::ConnectFailure::Connection(UserFacingError::new(ErrorCode::ChannelClosed, "Could not open SFTP channel on shared connection", error.to_string()))
+                                            crate::physical_connection::ConnectFailure::Connection(
+                                                crate::physical_connection::sftp_connection_error(
+                                                    "Could not open SFTP channel on shared connection",
+                                                    "The server did not open an SSH channel for SFTP.",
+                                                    &error,
+                                                ),
+                                            )
                                         })?;
                                         channel.request_subsystem(true, "sftp").await.map_err(|error| {
-                                            crate::physical_connection::ConnectFailure::Connection(UserFacingError::new(ErrorCode::ChannelClosed, "The server rejected the SFTP subsystem.", error.to_string()))
+                                            crate::physical_connection::ConnectFailure::Connection(
+                                                crate::physical_connection::sftp_connection_error(
+                                                    "The server rejected the SFTP subsystem.",
+                                                    "The server did not accept the SFTP subsystem request.",
+                                                    &error,
+                                                ),
+                                            )
                                         })?;
                                         russh_sftp::client::SftpSession::new(channel.into_stream()).await.map_err(|error| {
-                                            crate::physical_connection::ConnectFailure::Connection(UserFacingError::new(ErrorCode::ChannelClosed, "Could not start the SFTP session.", error.to_string()))
+                                            crate::physical_connection::ConnectFailure::Connection(
+                                                crate::physical_connection::sftp_connection_error(
+                                                    "Could not start the SFTP session.",
+                                                    "The SFTP subsystem did not become ready.",
+                                                    &error,
+                                                ),
+                                            )
                                         })
                                     }.await;
 
                                     match channel_result {
                                         Ok(sftp) => {
+                                            info!(
+                                                target: "macsftp_sftp::connection",
+                                                host = host_clone.as_str(),
+                                                port,
+                                                tab_id = scope.tab_id.0,
+                                                session_id = scope.session_id.0,
+                                                session_epoch = scope.session_epoch,
+                                                elapsed_ms = connection_started_at.elapsed().as_millis() as u64,
+                                                "SFTP connection succeeded"
+                                            );
                                             let actor = RemoteSessionActor::new(
                                                 cmd.tab_id,
                                                 cmd.session_id,
@@ -483,6 +528,8 @@ async fn command_dispatch_loop(
                                         Err(failure) => {
                                             crate::physical_connection::log_connect_failure(
                                                 &host_clone,
+                                                port,
+                                                &scope,
                                                 &failure,
                                             );
                                             let event = match failure {
@@ -516,6 +563,8 @@ async fn command_dispatch_loop(
                                 Ok(Err(failure)) => {
                                     crate::physical_connection::log_connect_failure(
                                         &host_clone,
+                                        port,
+                                        &scope,
                                         &failure,
                                     );
                                     let event = match failure {
@@ -544,7 +593,18 @@ async fn command_dispatch_loop(
                                         let _ = event_tx_clone.send_async(event).await;
                                     }
                                 }
-                                Err(_) => {}
+                                Err(_) => {
+                                    warn!(
+                                        target: "macsftp_sftp::connection",
+                                        host = host_clone.as_str(),
+                                        port,
+                                        tab_id = scope.tab_id.0,
+                                        session_id = scope.session_id.0,
+                                        session_epoch = scope.session_epoch,
+                                        failure = "connection_result_unavailable",
+                                        "connection failed"
+                                    );
+                                }
                             }
                         });
 

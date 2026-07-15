@@ -1619,6 +1619,8 @@ DEBUG: stale event dropped, command coalesced, known_hosts match details
 TRACE: disabled by default
 ```
 
+MVP 的 SFTP 诊断日志只覆盖一次真实连接尝试的开始到终止结果：连接开始、连接池等待或复用、SSH 握手、host key 校验、认证、SFTP subsystem 初始化，以及连接成功或分类后的失败。每条连接事件携带 `tab_id`、`session_id`、`session_epoch`，便于关联并发连接；允许记录 host、port、username 和认证方式，但不记录 credential、完整私钥路径或第三方错误原文。默认日志过滤器关闭其他 `macsftp_sftp` target，只开启经过审计的 `macsftp_sftp::connection`；因此连接成功后，目录浏览、文件操作和传输过程不会写入 SFTP 诊断日志。开发者仍可通过 `RUST_LOG` 临时覆盖过滤器。
+
 ## 18. 配置与持久化
 
 ### 配置文件

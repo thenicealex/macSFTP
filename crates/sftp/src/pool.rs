@@ -11,9 +11,13 @@ use russh::client;
 use russh_sftp::client::SftpSession;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
+use tracing::info;
 
 use crate::known_hosts::KnownHostsStore;
-use crate::physical_connection::{ClientHandler, ConnectFailure, establish_physical_connection};
+use crate::physical_connection::{
+    ClientHandler, ConnectFailure, establish_physical_connection, log_connect_failure,
+    sftp_connection_error,
+};
 use crate::session_actor::HostTrustConfig;
 use crate::trust::TrustRegistry;
 
@@ -63,8 +67,28 @@ impl ConnectionManager {
 
         if let Some(entry) = pool.get(&key) {
             match entry {
-                PoolEntry::Connecting(rx) => return rx.resubscribe(),
+                PoolEntry::Connecting(rx) => {
+                    info!(
+                        target: "macsftp_sftp::connection",
+                        host = settings.host.as_str(),
+                        port = settings.port,
+                        tab_id = scope.tab_id.0,
+                        session_id = scope.session_id.0,
+                        session_epoch = scope.session_epoch,
+                        "waiting for an in-progress pooled SSH connection"
+                    );
+                    return rx.resubscribe();
+                }
                 PoolEntry::Connected(shared) => {
+                    info!(
+                        target: "macsftp_sftp::connection",
+                        host = settings.host.as_str(),
+                        port = settings.port,
+                        tab_id = scope.tab_id.0,
+                        session_id = scope.session_id.0,
+                        session_epoch = scope.session_epoch,
+                        "reusing an authenticated pooled SSH connection"
+                    );
                     let (tx, rx) = broadcast::channel(1);
                     let _ = tx.send(Ok(shared.clone()));
                     return rx;
@@ -94,37 +118,46 @@ impl ConnectionManager {
                 )
                 .await?;
 
+                info!(
+                    target: "macsftp_sftp::connection",
+                    host = settings.host.as_str(),
+                    port = settings.port,
+                    tab_id = scope.tab_id.0,
+                    session_id = scope.session_id.0,
+                    session_epoch = scope.session_epoch,
+                    "SFTP subsystem initialization started"
+                );
                 let channel = handle.channel_open_session().await.map_err(|error| {
-                    ConnectFailure::Connection(UserFacingError::new(
-                        ErrorCode::ChannelClosed,
+                    ConnectFailure::Connection(sftp_connection_error(
                         "Could not open an SSH channel.",
-                        error.to_string(),
+                        "The server did not open an SSH channel for SFTP.",
+                        &error,
                     ))
                 })?;
                 channel
                     .request_subsystem(true, "sftp")
                     .await
                     .map_err(|error| {
-                        ConnectFailure::Connection(UserFacingError::new(
-                            ErrorCode::ChannelClosed,
+                        ConnectFailure::Connection(sftp_connection_error(
                             "The server rejected the SFTP subsystem.",
-                            error.to_string(),
+                            "The server did not accept the SFTP subsystem request.",
+                            &error,
                         ))
                     })?;
                 let sftp = SftpSession::new(channel.into_stream())
                     .await
                     .map_err(|error| {
-                        ConnectFailure::Connection(UserFacingError::new(
-                            ErrorCode::ChannelClosed,
+                        ConnectFailure::Connection(sftp_connection_error(
                             "Could not start the SFTP session.",
-                            error.to_string(),
+                            "The SFTP subsystem did not become ready.",
+                            &error,
                         ))
                     })?;
                 let root = sftp.canonicalize(".").await.map_err(|error| {
-                    ConnectFailure::Connection(UserFacingError::new(
-                        ErrorCode::ChannelClosed,
+                    ConnectFailure::Connection(sftp_connection_error(
                         "Could not resolve the remote home directory.",
-                        error.to_string(),
+                        "The remote home directory was unavailable after SFTP started.",
+                        &error,
                     ))
                 })?;
 
@@ -166,6 +199,16 @@ impl ConnectionManager {
         event_tx: flume::Sender<AppEvent>,
         connection_lost: CancellationToken,
     ) -> flume::Receiver<Result<(Arc<SharedConnection>, SftpSession), ConnectFailure>> {
+        info!(
+            target: "macsftp_sftp::connection",
+            host = settings.host.as_str(),
+            port = settings.port,
+            username = settings.username.as_str(),
+            tab_id = scope.tab_id.0,
+            session_id = scope.session_id.0,
+            session_epoch = scope.session_epoch,
+            "SFTP connection started"
+        );
         let cm = self.clone();
         let settings = settings.clone();
         let pool_identity = pool_identity.clone();
@@ -206,31 +249,40 @@ impl ConnectionManager {
                     .channel_open_session()
                     .await
                     .map_err(|error| {
-                        ConnectFailure::Connection(UserFacingError::new(
-                            ErrorCode::ChannelClosed,
+                        ConnectFailure::Connection(sftp_connection_error(
                             "Could not open SFTP channel on shared connection",
-                            error.to_string(),
+                            "The server did not open an SSH channel for SFTP.",
+                            &error,
                         ))
                     })?;
                 channel
                     .request_subsystem(true, "sftp")
                     .await
                     .map_err(|error| {
-                        ConnectFailure::Connection(UserFacingError::new(
-                            ErrorCode::ChannelClosed,
+                        ConnectFailure::Connection(sftp_connection_error(
                             "The server rejected the SFTP subsystem.",
-                            error.to_string(),
+                            "The server did not accept the SFTP subsystem request.",
+                            &error,
                         ))
                     })?;
                 let sftp = SftpSession::new(channel.into_stream())
                     .await
                     .map_err(|error| {
-                        ConnectFailure::Connection(UserFacingError::new(
-                            ErrorCode::ChannelClosed,
+                        ConnectFailure::Connection(sftp_connection_error(
                             "Could not start the SFTP session.",
-                            error.to_string(),
+                            "The SFTP subsystem did not become ready.",
+                            &error,
                         ))
                     })?;
+                info!(
+                    target: "macsftp_sftp::connection",
+                    host = settings.host.as_str(),
+                    port = settings.port,
+                    tab_id = scope.tab_id.0,
+                    session_id = scope.session_id.0,
+                    session_epoch = scope.session_epoch,
+                    "SFTP connection succeeded"
+                );
                 Ok((shared, sftp))
             }
             .await;
@@ -239,6 +291,7 @@ impl ConnectionManager {
             // runtime would emit, so callers (integration tests, and any
             // future consumer) observe a consistent event stream.
             if let Err(failure) = &result {
+                log_connect_failure(&settings.host, settings.port, &scope, failure);
                 match failure {
                     ConnectFailure::HostKeyMismatch => {}
                     ConnectFailure::TrustRejected => {

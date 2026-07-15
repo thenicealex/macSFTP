@@ -49,14 +49,20 @@ struct RuntimeHandle {
 
 impl Global for RuntimeHandle {}
 
+const DEFAULT_LOG_FILTER: &str = concat!(
+    "macsftp=info,macsftp_platform=info,macsftp_storage=info,",
+    "macsftp_sftp=off,macsftp_sftp::connection=debug"
+);
+
 /// Install the global tracing subscriber. All diagnostics from the `sftp`
 /// runtime, actor, and `app` UI flow through here.
 ///
 /// - A non-blocking file appender writes to `log_path` (thread-safe for
 ///   the GPUI executor and the Tokio runtime both writing concurrently).
 /// - `stderr` mirrors output for local development.
-/// - Level is controlled by `RUST_LOG` (e.g. `RUST_LOG=debug`),
-///   defaulting to `info`.
+/// - `RUST_LOG` can override the filter for local development. By default,
+///   SFTP diagnostics are limited to the audited connection-lifecycle target;
+///   post-connect browsing and transfer events are not written.
 ///
 /// Returns the [`WorkerGuard`] the caller must keep alive for the process.
 fn init_logging(log_path: &str) -> WorkerGuard {
@@ -72,7 +78,8 @@ fn init_logging(log_path: &str) -> WorkerGuard {
     let appender = tracing_appender::rolling::daily(directory, file_name.as_str());
     let (non_blocking_writer, guard) = tracing_appender::non_blocking(appender);
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_LOG_FILTER));
 
     let file_layer = fmt::layer()
         .with_writer(non_blocking_writer)
@@ -359,4 +366,30 @@ fn restore_workspace_windows(cx: &mut App) -> gpui::Result<()> {
     }
     cx.activate(true);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use tracing::Level;
+    use tracing_subscriber::prelude::*;
+
+    use super::DEFAULT_LOG_FILTER;
+
+    #[test]
+    fn default_filter_limits_sftp_logs_to_connection_lifecycle() {
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::EnvFilter::new(DEFAULT_LOG_FILTER));
+
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(tracing::enabled!(
+                target: "macsftp_sftp::connection",
+                Level::DEBUG
+            ));
+            assert!(!tracing::enabled!(
+                target: "macsftp_sftp::runtime",
+                Level::ERROR
+            ));
+            assert!(!tracing::enabled!(target: "russh", Level::ERROR));
+        });
+    }
 }
