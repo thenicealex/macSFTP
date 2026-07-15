@@ -21,6 +21,9 @@ pub struct AppConfig {
     pub confirm_delete: bool,
     /// When true, file panes show dotfiles (`name` starts with `.`).
     pub show_hidden_files: bool,
+    /// 远程编辑用的外部编辑器应用名。None = 系统默认关联应用。
+    #[serde(default)]
+    pub external_editor: Option<String>,
 }
 
 impl AppConfig {
@@ -34,6 +37,7 @@ impl Default for AppConfig {
             appearance: AppearancePreference::System,
             confirm_delete: true,
             show_hidden_files: false,
+            external_editor: None,
         }
     }
 }
@@ -160,6 +164,18 @@ impl ConfigStore {
             self.initial_error = None;
         } else {
             self.config.show_hidden_files = previous;
+        }
+        result
+    }
+
+    pub fn set_external_editor(&mut self, editor: Option<String>) -> Result<(), ConfigError> {
+        let previous = self.config.external_editor.clone();
+        self.config.external_editor = editor;
+        let result = self.save();
+        if result.is_ok() {
+            self.initial_error = None;
+        } else {
+            self.config.external_editor = previous;
         }
         result
     }
@@ -328,5 +344,18 @@ mod tests {
             "{not json"
         );
         cleanup(&path);
+    }
+
+    #[test]
+    fn external_editor_defaults_none_and_round_trips() {
+        let dir = std::env::temp_dir().join(format!("macsftp-editor-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = LocalPath::new(dir.join("config.json").to_string_lossy().to_string());
+        let mut store = ConfigStore::with_defaults(path.clone());
+        assert_eq!(store.config().external_editor, None);
+        store.set_external_editor(Some("Visual Studio Code".to_string())).expect("persist editor");
+        let restored = ConfigStore::open(path).expect("reopen");
+        assert_eq!(restored.config().external_editor.as_deref(), Some("Visual Studio Code"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
