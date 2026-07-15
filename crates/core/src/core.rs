@@ -1968,6 +1968,38 @@ pub enum EditPhase {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditSession {
+    pub id: EditSessionId,
+    pub remote_path: RemotePath,
+    pub tab_id: TabId,
+    pub session_epoch: u64,
+    pub profile_id: ProfileId,
+    pub local_temp_path: LocalPath,
+    pub phase: EditPhase,
+    pub remote_snapshot: RemoteSnapshot,
+    pub local_mtime: Option<Timestamp>,
+    pub active_transfer: Option<TransferId>,
+}
+
+impl EditSession {
+    /// 仅 Editing 阶段、且本地 mtime 严格变新时返回 true。
+    pub fn local_changed(&self, current_mtime: Option<Timestamp>) -> bool {
+        if self.phase != EditPhase::Editing {
+            return false;
+        }
+        match (self.local_mtime, current_mtime) {
+            (Some(last), Some(now)) => now > last,
+            _ => false,
+        }
+    }
+
+    /// 远程 (size, mtime) 与下载时快照不一致即视为已改动。
+    pub fn remote_diverged(&self, current: RemoteSnapshot) -> bool {
+        current != self.remote_snapshot
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransferFailure {
     pub transfer_id: TransferId,
     pub error: UserFacingError,
@@ -3173,5 +3205,44 @@ mod tests {
         assert_eq!(crate::EditSessionId(3), crate::EditSessionId(3));
         let phase = crate::EditPhase::Editing;
         assert_eq!(phase, crate::EditPhase::Editing);
+    }
+
+    fn sample_edit_session(phase: crate::EditPhase) -> crate::EditSession {
+        crate::EditSession {
+            id: crate::EditSessionId(1),
+            remote_path: crate::RemotePath::new("/srv/a.txt"),
+            tab_id: crate::TabId(1),
+            session_epoch: 1,
+            profile_id: crate::ProfileId(1),
+            local_temp_path: crate::LocalPath::new("/tmp/edits/1/a.txt"),
+            phase,
+            remote_snapshot: crate::RemoteSnapshot { size: Some(10), modified_at: Some(crate::Timestamp::from_secs_since_epoch(100)) },
+            local_mtime: Some(crate::Timestamp::from_secs_since_epoch(200)),
+            active_transfer: None,
+        }
+    }
+
+    #[test]
+    fn local_changed_only_in_editing_phase() {
+        let newer = Some(crate::Timestamp::from_secs_since_epoch(300));
+        assert!(sample_edit_session(crate::EditPhase::Editing).local_changed(newer));
+        assert!(!sample_edit_session(crate::EditPhase::Downloading).local_changed(newer));
+        assert!(!sample_edit_session(crate::EditPhase::UploadingBack).local_changed(newer));
+    }
+
+    #[test]
+    fn local_changed_detects_newer_mtime() {
+        let s = sample_edit_session(crate::EditPhase::Editing);
+        assert!(s.local_changed(Some(crate::Timestamp::from_secs_since_epoch(300))));
+        assert!(!s.local_changed(Some(crate::Timestamp::from_secs_since_epoch(200))));
+        assert!(!s.local_changed(None));
+    }
+
+    #[test]
+    fn remote_diverged_on_size_or_mtime_and_false_when_identical() {
+        let s = sample_edit_session(crate::EditPhase::Editing);
+        assert!(s.remote_diverged(crate::RemoteSnapshot { size: Some(11), modified_at: Some(crate::Timestamp::from_secs_since_epoch(100)) }));
+        assert!(s.remote_diverged(crate::RemoteSnapshot { size: Some(10), modified_at: Some(crate::Timestamp::from_secs_since_epoch(101)) }));
+        assert!(!s.remote_diverged(crate::RemoteSnapshot { size: Some(10), modified_at: Some(crate::Timestamp::from_secs_since_epoch(100)) }));
     }
 }
