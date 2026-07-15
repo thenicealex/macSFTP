@@ -487,14 +487,23 @@ mod tests {
     fn build_open_command_uses_system_default_when_no_editor() {
         let cmd = super::build_open_command(&LocalPath::new("/tmp/edits/1/a.txt"), None);
         assert_eq!(cmd.get_program(), "/usr/bin/open");
-        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
         assert_eq!(args, vec!["/tmp/edits/1/a.txt"]);
     }
 
     #[test]
     fn build_open_command_uses_named_editor() {
-        let cmd = super::build_open_command(&LocalPath::new("/tmp/edits/1/a.txt"), Some("Visual Studio Code"));
-        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+        let cmd = super::build_open_command(
+            &LocalPath::new("/tmp/edits/1/a.txt"),
+            Some("Visual Studio Code"),
+        );
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
         assert_eq!(args, vec!["-a", "Visual Studio Code", "/tmp/edits/1/a.txt"]);
     }
 }

@@ -2007,7 +2007,10 @@ pub struct EditSessionStore {
 
 impl EditSessionStore {
     pub fn new() -> Self {
-        Self { sessions: Vec::new(), next_id: 1 }
+        Self {
+            sessions: Vec::new(),
+            next_id: 1,
+        }
     }
 
     pub fn next_id(&mut self) -> EditSessionId {
@@ -2031,15 +2034,23 @@ impl EditSessionStore {
     }
 
     pub fn find_by_transfer(&self, transfer: TransferId) -> Option<&EditSession> {
-        self.sessions.iter().find(|s| s.active_transfer == Some(transfer))
+        self.sessions
+            .iter()
+            .find(|s| s.active_transfer == Some(transfer))
     }
 
     pub fn find_by_temp_path(&self, path: &LocalPath) -> Option<&EditSession> {
         self.sessions.iter().find(|s| &s.local_temp_path == path)
     }
 
-    pub fn find_active(&self, profile_id: ProfileId, remote_path: &RemotePath) -> Option<&EditSession> {
-        self.sessions.iter().find(|s| s.profile_id == profile_id && &s.remote_path == remote_path)
+    pub fn find_active(
+        &self,
+        profile_id: ProfileId,
+        remote_path: &RemotePath,
+    ) -> Option<&EditSession> {
+        self.sessions
+            .iter()
+            .find(|s| s.profile_id == profile_id && &s.remote_path == remote_path)
     }
 
     pub fn remove(&mut self, id: EditSessionId) -> Option<EditSession> {
@@ -2048,7 +2059,9 @@ impl EditSessionStore {
     }
 
     pub fn editing_sessions(&self) -> impl Iterator<Item = &EditSession> {
-        self.sessions.iter().filter(|s| s.phase == EditPhase::Editing)
+        self.sessions
+            .iter()
+            .filter(|s| s.phase == EditPhase::Editing)
     }
 }
 
@@ -3253,7 +3266,10 @@ mod tests {
 
     #[test]
     fn edit_phase_and_snapshot_construct() {
-        let snap = crate::RemoteSnapshot { size: Some(10), modified_at: Some(crate::Timestamp::from_secs_since_epoch(5)) };
+        let snap = crate::RemoteSnapshot {
+            size: Some(10),
+            modified_at: Some(crate::Timestamp::from_secs_since_epoch(5)),
+        };
         assert_eq!(snap.size, Some(10));
         assert_eq!(crate::EditSessionId(3), crate::EditSessionId(3));
         let phase = crate::EditPhase::Editing;
@@ -3269,7 +3285,10 @@ mod tests {
             profile_id: crate::ProfileId(1),
             local_temp_path: crate::LocalPath::new("/tmp/edits/1/a.txt"),
             phase,
-            remote_snapshot: crate::RemoteSnapshot { size: Some(10), modified_at: Some(crate::Timestamp::from_secs_since_epoch(100)) },
+            remote_snapshot: crate::RemoteSnapshot {
+                size: Some(10),
+                modified_at: Some(crate::Timestamp::from_secs_since_epoch(100)),
+            },
             local_mtime: Some(crate::Timestamp::from_secs_since_epoch(200)),
             active_transfer: None,
         }
@@ -3294,12 +3313,27 @@ mod tests {
     #[test]
     fn remote_diverged_on_size_or_mtime_and_false_when_identical() {
         let s = sample_edit_session(crate::EditPhase::Editing);
-        assert!(s.remote_diverged(crate::RemoteSnapshot { size: Some(11), modified_at: Some(crate::Timestamp::from_secs_since_epoch(100)) }));
-        assert!(s.remote_diverged(crate::RemoteSnapshot { size: Some(10), modified_at: Some(crate::Timestamp::from_secs_since_epoch(101)) }));
-        assert!(!s.remote_diverged(crate::RemoteSnapshot { size: Some(10), modified_at: Some(crate::Timestamp::from_secs_since_epoch(100)) }));
+        assert!(s.remote_diverged(crate::RemoteSnapshot {
+            size: Some(11),
+            modified_at: Some(crate::Timestamp::from_secs_since_epoch(100))
+        }));
+        assert!(s.remote_diverged(crate::RemoteSnapshot {
+            size: Some(10),
+            modified_at: Some(crate::Timestamp::from_secs_since_epoch(101))
+        }));
+        assert!(!s.remote_diverged(crate::RemoteSnapshot {
+            size: Some(10),
+            modified_at: Some(crate::Timestamp::from_secs_since_epoch(100))
+        }));
     }
 
-    fn store_session(id_hint: u64, profile: u64, path: &str, phase: crate::EditPhase, transfer: Option<crate::TransferId>) -> crate::EditSession {
+    fn store_session(
+        id_hint: u64,
+        profile: u64,
+        path: &str,
+        phase: crate::EditPhase,
+        transfer: Option<crate::TransferId>,
+    ) -> crate::EditSession {
         crate::EditSession {
             id: crate::EditSessionId(id_hint),
             remote_path: crate::RemotePath::new(path),
@@ -3308,7 +3342,10 @@ mod tests {
             profile_id: crate::ProfileId(profile),
             local_temp_path: crate::LocalPath::new(format!("/tmp/edits/{id_hint}")),
             phase,
-            remote_snapshot: crate::RemoteSnapshot { size: None, modified_at: None },
+            remote_snapshot: crate::RemoteSnapshot {
+                size: None,
+                modified_at: None,
+            },
             local_mtime: None,
             active_transfer: transfer,
         }
@@ -3318,12 +3355,26 @@ mod tests {
     fn store_register_find_and_remove() {
         let mut store = crate::EditSessionStore::new();
         let id = store.next_id();
-        let mut s = store_session(id.0, 1, "/srv/a.txt", crate::EditPhase::Downloading, Some(crate::TransferId(7)));
+        let mut s = store_session(
+            id.0,
+            1,
+            "/srv/a.txt",
+            crate::EditPhase::Downloading,
+            Some(crate::TransferId(7)),
+        );
         s.id = id;
         store.register(s);
         assert!(store.find_by_transfer(crate::TransferId(7)).is_some());
-        assert!(store.find_by_temp_path(&crate::LocalPath::new(format!("/tmp/edits/{}", id.0))).is_some());
-        assert!(store.find_active(crate::ProfileId(1), &crate::RemotePath::new("/srv/a.txt")).is_some());
+        assert!(
+            store
+                .find_by_temp_path(&crate::LocalPath::new(format!("/tmp/edits/{}", id.0)))
+                .is_some()
+        );
+        assert!(
+            store
+                .find_active(crate::ProfileId(1), &crate::RemotePath::new("/srv/a.txt"))
+                .is_some()
+        );
         assert!(store.get(id).is_some());
         assert!(store.remove(id).is_some());
         assert!(store.get(id).is_none());
@@ -3338,16 +3389,34 @@ mod tests {
         s1.id = id1;
         store.register(s1);
         // 同 profile+path 已有活跃会话可被查到；不同 path 查不到。
-        assert!(store.find_active(crate::ProfileId(1), &crate::RemotePath::new("/srv/a.txt")).is_some());
-        assert!(store.find_active(crate::ProfileId(1), &crate::RemotePath::new("/srv/b.txt")).is_none());
-        assert!(store.find_active(crate::ProfileId(2), &crate::RemotePath::new("/srv/a.txt")).is_none());
+        assert!(
+            store
+                .find_active(crate::ProfileId(1), &crate::RemotePath::new("/srv/a.txt"))
+                .is_some()
+        );
+        assert!(
+            store
+                .find_active(crate::ProfileId(1), &crate::RemotePath::new("/srv/b.txt"))
+                .is_none()
+        );
+        assert!(
+            store
+                .find_active(crate::ProfileId(2), &crate::RemotePath::new("/srv/a.txt"))
+                .is_none()
+        );
     }
 
     #[test]
     fn store_editing_sessions_filters_phase() {
         let mut store = crate::EditSessionStore::new();
-        let a = store.next_id(); let mut sa = store_session(a.0, 1, "/a", crate::EditPhase::Editing, None); sa.id = a; store.register(sa);
-        let b = store.next_id(); let mut sb = store_session(b.0, 1, "/b", crate::EditPhase::Downloading, None); sb.id = b; store.register(sb);
+        let a = store.next_id();
+        let mut sa = store_session(a.0, 1, "/a", crate::EditPhase::Editing, None);
+        sa.id = a;
+        store.register(sa);
+        let b = store.next_id();
+        let mut sb = store_session(b.0, 1, "/b", crate::EditPhase::Downloading, None);
+        sb.id = b;
+        store.register(sb);
         assert_eq!(store.editing_sessions().count(), 1);
     }
 }

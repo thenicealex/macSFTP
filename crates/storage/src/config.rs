@@ -353,9 +353,14 @@ mod tests {
         let path = LocalPath::new(dir.join("config.json").to_string_lossy().to_string());
         let mut store = ConfigStore::with_defaults(path.clone());
         assert_eq!(store.config().external_editor, None);
-        store.set_external_editor(Some("Visual Studio Code".to_string())).expect("persist editor");
+        store
+            .set_external_editor(Some("Visual Studio Code".to_string()))
+            .expect("persist editor");
         let restored = ConfigStore::open(path).expect("reopen");
-        assert_eq!(restored.config().external_editor.as_deref(), Some("Visual Studio Code"));
+        assert_eq!(
+            restored.config().external_editor.as_deref(),
+            Some("Visual Studio Code")
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }
