@@ -32,6 +32,7 @@ pub struct AppPaths {
     pub recents_file: LocalPath,
     pub log_file: LocalPath,
     pub crash_marker_file: LocalPath,
+    pub edits_dir: LocalPath,
 }
 
 impl AppPaths {
@@ -52,6 +53,7 @@ impl AppPaths {
             recents_file: LocalPath::new(format!("{app_support_dir}/recents.json")),
             log_file: LocalPath::new(format!("{log_dir}/macsftp.log")),
             crash_marker_file: LocalPath::new(format!("{log_dir}/last-crash.txt")),
+            edits_dir: LocalPath::new(format!("{app_support_dir}/edits")),
         }
     }
 
@@ -224,6 +226,19 @@ pub fn create_directory(parent: &LocalPath, name: &str) -> std::io::Result<Local
     let path = parent.join(name);
     std::fs::create_dir(path.as_str())?;
     Ok(path)
+}
+
+/// Delete the entire edits directory and recreate it empty. Startup calls this
+/// to discard edit sessions from the previous run (sessions do not persist
+/// across launches). NotFound is treated as success.
+pub fn clear_edits_dir(edits_dir: &LocalPath) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(edits_dir.as_str()) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    std::fs::create_dir_all(edits_dir.as_str())?;
+    std::fs::set_permissions(edits_dir.as_str(), std::fs::Permissions::from_mode(0o700))
 }
 
 /// Map a local IO error into a user-facing error for Fs ops.
@@ -423,5 +438,26 @@ mod tests {
     fn delete_missing_path_returns_error() {
         let result = delete_entry(&LocalPath::new("/nonexistent/macsftp/delete-me"), false);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn app_paths_expose_edits_dir_under_app_support() {
+        let paths = super::AppPaths::from_home_dir("/Users/tester");
+        assert_eq!(
+            paths.edits_dir.as_str(),
+            "/Users/tester/Library/Application Support/macSFTP/edits"
+        );
+    }
+
+    #[test]
+    fn clear_edits_dir_removes_contents_and_recreates() {
+        let base = std::env::temp_dir().join(format!("macsftp-edits-clear-{}", std::process::id()));
+        let edits = macsftp_core::LocalPath::new(base.to_string_lossy().to_string());
+        std::fs::create_dir_all(base.join("session-1")).unwrap();
+        std::fs::write(base.join("session-1/a.txt"), b"x").unwrap();
+        super::clear_edits_dir(&edits).unwrap();
+        assert!(base.exists());
+        assert_eq!(std::fs::read_dir(&base).unwrap().count(), 0);
+        std::fs::remove_dir_all(&base).ok();
     }
 }
