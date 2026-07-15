@@ -260,6 +260,28 @@ pub fn local_fs_error(title: &str, error: &std::io::Error) -> macsftp_core::User
     user_error
 }
 
+/// Construct a command to open a temporary file via macOS `open`. When editor is None,
+/// use the system default associated application; when Some(app), use `open -a <app>`.
+/// Extracted for unit testing argument wiring without spawning.
+pub fn build_open_command(temp: &LocalPath, editor: Option<&str>) -> std::process::Command {
+    let mut cmd = std::process::Command::new("/usr/bin/open");
+    match editor {
+        None => {
+            cmd.arg(temp.as_str());
+        }
+        Some(app) => {
+            cmd.args(["-a", app, temp.as_str()]);
+        }
+    }
+    cmd
+}
+
+/// Open a temporary file for editing. `open` returns immediately, not tying
+/// the subprocess lifecycle to the app, which naturally satisfies app-level monitoring.
+pub fn open_in_editor(temp: &LocalPath, editor: Option<&str>) -> std::io::Result<()> {
+    build_open_command(temp, editor).spawn().map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use macsftp_core::{FileKind, LocalPath, Timestamp};
@@ -459,5 +481,20 @@ mod tests {
         assert!(base.exists());
         assert_eq!(std::fs::read_dir(&base).unwrap().count(), 0);
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn build_open_command_uses_system_default_when_no_editor() {
+        let cmd = super::build_open_command(&LocalPath::new("/tmp/edits/1/a.txt"), None);
+        assert_eq!(cmd.get_program(), "/usr/bin/open");
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+        assert_eq!(args, vec!["/tmp/edits/1/a.txt"]);
+    }
+
+    #[test]
+    fn build_open_command_uses_named_editor() {
+        let cmd = super::build_open_command(&LocalPath::new("/tmp/edits/1/a.txt"), Some("Visual Studio Code"));
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().to_string()).collect();
+        assert_eq!(args, vec!["-a", "Visual Studio Code", "/tmp/edits/1/a.txt"]);
     }
 }
