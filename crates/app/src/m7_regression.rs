@@ -57,6 +57,29 @@ mod tests {
     }
 
     #[test]
+    fn m7_plist_declares_local_network_usage() {
+        let plist = packaging_path("Info.plist.in");
+        let contents =
+            std::fs::read_to_string(&plist).expect("packaging/macos/Info.plist.in must exist");
+        let lines: Vec<&str> = contents.lines().collect();
+        let usage_idx = lines
+            .iter()
+            .position(|line| line.contains("NSLocalNetworkUsageDescription"))
+            .expect("NSLocalNetworkUsageDescription key must be present");
+        let description = lines
+            .get(usage_idx + 1)
+            .expect("NSLocalNetworkUsageDescription must have a value")
+            .trim();
+
+        assert!(
+            description.starts_with("<string>")
+                && description.ends_with("</string>")
+                && description != "<string></string>",
+            "NSLocalNetworkUsageDescription must explain why macSFTP needs local network access"
+        );
+    }
+
+    #[test]
     fn m7_appicon_source_asset_present() {
         for filename in ["AppIcon.svg", "AppIcon.png"] {
             let icon = packaging_path(filename);

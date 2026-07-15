@@ -608,6 +608,13 @@ impl crate::workspace::Workspace {
                 },
             ))
         };
+        let open_local_network_settings_button = |id: &'static str| {
+            text_button(id, "Open Local Network Settings").on_click(cx.listener(
+                |workspace, _event, _window, cx| {
+                    workspace.open_local_network_settings(cx);
+                },
+            ))
+        };
         let retry_directory_button = |id: &'static str| {
             text_button(id, "Retry").on_click(cx.listener(|workspace, _event, window, cx| {
                 let Some(tab) = workspace.active_tab() else {
@@ -708,6 +715,24 @@ impl crate::workspace::Workspace {
                 Some(ConnectionState::AwaitingCredentials { .. }) => {
                     Some(empty_state("Waiting for credentials…", vec![], cx).into_any_element())
                 }
+                Some(ConnectionState::Disconnected {
+                    reason: macsftp_core::DisconnectReason::Error(error),
+                }) if error.code == macsftp_core::ErrorCode::LocalNetworkPermissionDenied => Some(
+                    empty_state(
+                        format!(
+                            "{} — {} {}",
+                            error.title,
+                            error.message,
+                            error.detail.as_deref().unwrap_or_default()
+                        ),
+                        vec![
+                            open_local_network_settings_button("open-local-network-settings"),
+                            connect_button("retry-connect-remote", "Retry"),
+                        ],
+                        cx,
+                    )
+                    .into_any_element(),
+                ),
                 Some(ConnectionState::Disconnected { .. }) => Some(remote_empty_with_recents(
                     "Disconnected".into(),
                     vec![

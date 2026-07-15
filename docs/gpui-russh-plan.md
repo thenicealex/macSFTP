@@ -1002,6 +1002,15 @@ secret，并把清理失败作为 warning 返回调用方。
 key 的旧服务器暂不兼容；待上游提供 constant-time 私钥实现后再复评，不以忽略
 advisory 代替缓解。
 
+**2026-07-15 macOS 本地网络隐私：** macOS 15+ 会把 GUI 应用直连私网地址纳入
+Local Network Privacy。bundle 必须声明非空 `NSLocalNetworkUsageDescription`；打包脚本与
+CI 对最终 `Info.plist` 做门禁。SFTP adapter 只按 `russh::Error` 的结构分类，不复制第三方
+错误文本：`IO(PermissionDenied)` 映射为独立的
+`ErrorCode::LocalNetworkPermissionDenied`，日志记录
+`failure="local_network_permission_denied"`，UI 提供 System Settings → Privacy & Security →
+Local Network 的恢复入口并允许原 tab 直接重试。当前 unsigned 开发包的系统隐私身份可能随
+重建变化；稳定身份依赖后续 Developer ID 签名，不在本轮伪造 ad-hoc 签名方案。
+
 ### keyboard-interactive 扩展点
 
 第一版不做完整 keyboard-interactive UI，但认证流程要保留 challenge/response 扩展点：
@@ -1975,6 +1984,7 @@ symlink 均复制 link 本身，不解引用，并由真实 sshd 集成测试覆
 - Zed-style visual polish；
 - `scripts/build_app.sh` 生成的 unsigned `build/macSFTP.app`；
 - `Info.plist`、完整尺寸 `AppIcon.icns`、macOS 基础菜单和 About；
+- `NSLocalNetworkUsageDescription` 与本地网络权限拒绝后的恢复 UI；
 - logs；
 - 单窗口 settings surface；
 - version 1 `config.json`，MVP 仅持久化 `system` / `light` / `dark` 外观偏好；
@@ -1994,6 +2004,7 @@ symlink 均复制 link 本身，不解引用，并由真实 sshd 集成测试覆
 
 - 手动测试矩阵通过；
 - `plutil -lint build/macSFTP.app/Contents/Info.plist` 通过；
+- 最终 bundle 的 `NSLocalNetworkUsageDescription` 存在且非空；
 - 不签名也可从本地构建产物运行；不承诺下载分发后的 Gatekeeper 行为。
 
 状态：已完成。M7 全部交付物落地：unsigned `build/macSFTP.app`（`plutil -lint` 通过）、

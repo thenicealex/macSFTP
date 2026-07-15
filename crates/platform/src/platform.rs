@@ -6,6 +6,11 @@ use macsftp_core::{FileKind, LocalEntry, LocalPath, Timestamp};
 
 use std::os::unix::fs::PermissionsExt;
 
+/// Deep link to the macOS Local Network privacy pane. GPUI owns URL opening;
+/// this crate owns the platform-specific destination.
+pub const MACOS_LOCAL_NETWORK_SETTINGS_URL: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork";
+
 pub fn crate_name() -> &'static str {
     "macsftp-platform"
 }
@@ -253,6 +258,12 @@ mod tests {
     fn links_core_crate() {
         assert_eq!(crate_name(), "macsftp-platform");
         assert_eq!(core_crate_name(), "macsftp-core");
+    }
+
+    #[test]
+    fn local_network_settings_url_targets_macos_system_settings() {
+        assert!(super::MACOS_LOCAL_NETWORK_SETTINGS_URL.starts_with("x-apple.systempreferences:"));
+        assert!(super::MACOS_LOCAL_NETWORK_SETTINGS_URL.contains("Privacy_LocalNetwork"));
     }
 
     #[test]

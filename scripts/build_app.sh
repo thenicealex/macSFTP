@@ -82,4 +82,11 @@ sed "s/@VERSION@/$version/g" "$plist_template" > "$bundle_dir/Contents/Info.plis
 printf 'APPL????' > "$bundle_dir/Contents/PkgInfo"
 
 plutil -lint "$bundle_dir/Contents/Info.plist"
+local_network_usage_description="$(
+    plutil -extract NSLocalNetworkUsageDescription raw "$bundle_dir/Contents/Info.plist"
+)"
+if [[ -z "$local_network_usage_description" ]]; then
+    echo "error: NSLocalNetworkUsageDescription must not be empty" >&2
+    exit 1
+fi
 echo "Built unsigned app bundle: $bundle_dir"

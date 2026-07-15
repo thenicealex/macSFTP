@@ -151,6 +151,20 @@ mod tests {
         }
     }
 
+    #[gpui::test]
+    fn local_network_recovery_opens_the_macos_privacy_pane(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            workspace.open_local_network_settings(cx);
+        });
+
+        assert_eq!(
+            cx.opened_url().as_deref(),
+            Some(macsftp_platform::MACOS_LOCAL_NETWORK_SETTINGS_URL)
+        );
+    }
+
     /// Drive the mock connect flow up to the host key prompt: send the
     /// connect command and inject the actor's `HostKeyUnknown` event.
     fn connect_and_prompt(

@@ -204,7 +204,67 @@ impl client::Handler for ClientHandler {
     }
 }
 
-pub fn connection_error(host: &str, port: u16, _error: &dyn std::fmt::Display) -> UserFacingError {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransportFailureKind {
+    LocalNetworkPermissionDenied,
+    ConnectionRefused,
+    TimedOut,
+    ProtocolNegotiationFailed,
+    Other,
+}
+
+impl TransportFailureKind {
+    fn from_russh_error(error: &russh::Error) -> Self {
+        match error {
+            russh::Error::IO(error) => match error.kind() {
+                std::io::ErrorKind::PermissionDenied => Self::LocalNetworkPermissionDenied,
+                std::io::ErrorKind::ConnectionRefused => Self::ConnectionRefused,
+                std::io::ErrorKind::TimedOut => Self::TimedOut,
+                _ => Self::Other,
+            },
+            russh::Error::ConnectionTimeout
+            | russh::Error::KeepaliveTimeout
+            | russh::Error::InactivityTimeout
+            | russh::Error::Elapsed(_) => Self::TimedOut,
+            russh::Error::KexInit
+            | russh::Error::NoCommonAlgo { .. }
+            | russh::Error::Version
+            | russh::Error::Kex
+            | russh::Error::PacketAuth
+            | russh::Error::WrongServerSig
+            | russh::Error::StrictKeyExchangeViolation { .. } => Self::ProtocolNegotiationFailed,
+            _ => Self::Other,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalNetworkPermissionDenied => "local_network_permission_denied",
+            Self::ConnectionRefused => "connection_refused",
+            Self::TimedOut => "timed_out",
+            Self::ProtocolNegotiationFailed => "protocol_negotiation_failed",
+            Self::Other => "network_or_protocol",
+        }
+    }
+}
+
+pub fn connection_error(host: &str, port: u16, error: &russh::Error) -> UserFacingError {
+    if TransportFailureKind::from_russh_error(error)
+        == TransportFailureKind::LocalNetworkPermissionDenied
+    {
+        let mut user_error = UserFacingError::new(
+            ErrorCode::LocalNetworkPermissionDenied,
+            "Local network access required",
+            format!("macSFTP was not allowed to connect to {host}:{port}."),
+        )
+        .with_retryable(true);
+        user_error.detail = Some(
+            "Enable macSFTP in System Settings → Privacy & Security → Local Network, then retry."
+                .to_string(),
+        );
+        return user_error;
+    }
+
     let mut user_error = UserFacingError::new(
         ErrorCode::ChannelClosed,
         "Connection failed",
@@ -430,6 +490,7 @@ pub async fn establish_physical_connection(
     let mut handle = match client::connect(config, address, handler).await {
         Ok(handle) => handle,
         Err(error) => {
+            let failure = TransportFailureKind::from_russh_error(&error).as_str();
             warn!(
                 target: "macsftp_sftp::connection",
                 host = settings.host.as_str(),
@@ -437,6 +498,7 @@ pub async fn establish_physical_connection(
                 tab_id = scope.tab_id.0,
                 session_id = scope.session_id.0,
                 session_epoch = scope.session_epoch,
+                failure,
                 "ssh tcp/handshake failed; technical detail redacted"
             );
             let recorded = rejection
@@ -516,7 +578,12 @@ pub fn log_connect_failure(
                 "connection failed"
             );
         }
-        ConnectFailure::Connection(_) => {
+        ConnectFailure::Connection(error) => {
+            let failure = if error.code == ErrorCode::LocalNetworkPermissionDenied {
+                "local_network_permission_denied"
+            } else {
+                "network_or_protocol"
+            };
             warn!(
                 target: "macsftp_sftp::connection",
                 host,
@@ -524,7 +591,7 @@ pub fn log_connect_failure(
                 tab_id = scope.tab_id.0,
                 session_id = scope.session_id.0,
                 session_epoch = scope.session_epoch,
-                failure = "network_or_protocol",
+                failure,
                 "connection failed"
             );
         }
@@ -540,16 +607,20 @@ fn private_key_file_name(path: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use ssh_key::Algorithm;
 
     use super::{
-        connection_error, private_key_file_name, sftp_connection_error,
+        TransportFailureKind, connection_error, private_key_file_name, sftp_connection_error,
         validate_private_key_algorithm,
     };
 
     #[test]
     fn connection_error_does_not_copy_untrusted_technical_detail() {
-        let sensitive = "password=do-not-log /Users/alex/.ssh/private-key";
+        let sensitive = russh::Error::InvalidConfig(
+            "password=do-not-log /Users/alex/.ssh/private-key".to_string(),
+        );
 
         let error = connection_error("example.com", 22, &sensitive);
         let rendered = format!(
@@ -561,6 +632,43 @@ mod tests {
 
         assert!(!rendered.contains("do-not-log"));
         assert!(!rendered.contains("/Users/alex/.ssh"));
+    }
+
+    #[test]
+    fn connection_permission_denied_points_to_local_network_settings() {
+        let transport_error = russh::Error::IO(io::Error::from(io::ErrorKind::PermissionDenied));
+
+        let error = connection_error("10.0.0.10", 22, &transport_error);
+
+        assert_eq!(
+            error.code,
+            macsftp_core::ErrorCode::LocalNetworkPermissionDenied
+        );
+        assert!(error.retryable);
+        assert!(
+            error
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("Local Network"))
+        );
+    }
+
+    #[test]
+    fn transport_failures_have_stable_redacted_log_labels() {
+        let refused = russh::Error::IO(io::Error::from(io::ErrorKind::ConnectionRefused));
+
+        assert_eq!(
+            TransportFailureKind::from_russh_error(&refused).as_str(),
+            "connection_refused"
+        );
+        assert_eq!(
+            TransportFailureKind::from_russh_error(&russh::Error::ConnectionTimeout).as_str(),
+            "timed_out"
+        );
+        assert_eq!(
+            TransportFailureKind::from_russh_error(&russh::Error::Version).as_str(),
+            "protocol_negotiation_failed"
+        );
     }
 
     #[test]

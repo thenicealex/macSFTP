@@ -51,6 +51,7 @@ jobs:
         run: |
           test -x build/macSFTP.app/Contents/MacOS/macsftp
           plutil -lint build/macSFTP.app/Contents/Info.plist
+          plutil -extract NSLocalNetworkUsageDescription raw build/macSFTP.app/Contents/Info.plist >/dev/null
 
   dependencies:
     name: Dependency policy

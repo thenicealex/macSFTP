@@ -26,5 +26,7 @@
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>macSFTP needs local network access to connect to SSH and SFTP servers.</string>
 </dict>
 </plist>

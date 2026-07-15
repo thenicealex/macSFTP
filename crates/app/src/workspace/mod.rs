@@ -683,6 +683,9 @@ impl Workspace {
             cx.reveal_path(directory);
         }
     }
+    pub(crate) fn open_local_network_settings(&self, cx: &mut Context<Self>) {
+        cx.open_url(macsftp_platform::MACOS_LOCAL_NETWORK_SETTINGS_URL);
+    }
     pub(crate) fn copy_version_info(&self, cx: &mut Context<Self>) {
         cx.write_to_clipboard(ClipboardItem::new_string(format!(
             "macSFTP {} ({})",
