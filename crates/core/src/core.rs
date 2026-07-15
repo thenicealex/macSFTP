@@ -1949,6 +1949,24 @@ impl ConflictRequest {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EditSessionId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteSnapshot {
+    pub size: Option<u64>,
+    pub modified_at: Option<Timestamp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditPhase {
+    Downloading,
+    Editing,
+    UploadingBack,
+    RemoteConflict,
+    Failed { error: UserFacingError },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransferFailure {
     pub transfer_id: TransferId,
@@ -3146,5 +3164,14 @@ mod tests {
         assert_eq!(json, "1234567890");
         let restored: Timestamp = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(restored, ts);
+    }
+
+    #[test]
+    fn edit_phase_and_snapshot_construct() {
+        let snap = crate::RemoteSnapshot { size: Some(10), modified_at: Some(crate::Timestamp::from_secs_since_epoch(5)) };
+        assert_eq!(snap.size, Some(10));
+        assert_eq!(crate::EditSessionId(3), crate::EditSessionId(3));
+        let phase = crate::EditPhase::Editing;
+        assert_eq!(phase, crate::EditPhase::Editing);
     }
 }
