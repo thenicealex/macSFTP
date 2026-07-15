@@ -7,7 +7,7 @@ use macsftp_core::{
 };
 use russh::client;
 use russh::keys::{PrivateKeyWithHashAlg, load_secret_key};
-use ssh_key::Algorithm;
+use ssh_key::{Algorithm, EcdsaCurve, HashAlg};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -60,6 +60,14 @@ impl ClientHandler {
     }
 }
 
+fn legacy_rsa_host_key_bits(server_key: &russh::keys::PublicKey) -> Option<u32> {
+    server_key
+        .key_data()
+        .rsa()
+        .map(|public_key| public_key.key_size())
+        .filter(|bits| *bits < 2048)
+}
+
 impl client::Handler for ClientHandler {
     type Error = russh::Error;
 
@@ -67,6 +75,18 @@ impl client::Handler for ClientHandler {
         &mut self,
         server_key: &russh::keys::PublicKey,
     ) -> Result<bool, Self::Error> {
+        if let Some(rsa_bits) = legacy_rsa_host_key_bits(server_key) {
+            warn!(
+                target: "macsftp_sftp::connection",
+                host = self.host.as_str(),
+                port = self.port,
+                tab_id = self.scope.tab_id.0,
+                session_id = self.scope.session_id.0,
+                session_epoch = self.scope.session_epoch,
+                rsa_bits,
+                "legacy RSA host key accepted; server upgrade recommended"
+            );
+        }
         let check_result = lock_store(&self.known_hosts).check(&self.host, self.port, server_key);
 
         match check_result {
@@ -209,6 +229,7 @@ enum TransportFailureKind {
     LocalNetworkPermissionDenied,
     ConnectionRefused,
     TimedOut,
+    HostKeyAlgorithmUnsupported,
     ProtocolNegotiationFailed,
     Other,
 }
@@ -226,6 +247,10 @@ impl TransportFailureKind {
             | russh::Error::KeepaliveTimeout
             | russh::Error::InactivityTimeout
             | russh::Error::Elapsed(_) => Self::TimedOut,
+            russh::Error::NoCommonAlgo {
+                kind: russh::AlgorithmKind::Key,
+                ..
+            } => Self::HostKeyAlgorithmUnsupported,
             russh::Error::KexInit
             | russh::Error::NoCommonAlgo { .. }
             | russh::Error::Version
@@ -242,6 +267,7 @@ impl TransportFailureKind {
             Self::LocalNetworkPermissionDenied => "local_network_permission_denied",
             Self::ConnectionRefused => "connection_refused",
             Self::TimedOut => "timed_out",
+            Self::HostKeyAlgorithmUnsupported => "host_key_algorithm_unsupported",
             Self::ProtocolNegotiationFailed => "protocol_negotiation_failed",
             Self::Other => "network_or_protocol",
         }
@@ -249,9 +275,8 @@ impl TransportFailureKind {
 }
 
 pub fn connection_error(host: &str, port: u16, error: &russh::Error) -> UserFacingError {
-    if TransportFailureKind::from_russh_error(error)
-        == TransportFailureKind::LocalNetworkPermissionDenied
-    {
+    let failure = TransportFailureKind::from_russh_error(error);
+    if failure == TransportFailureKind::LocalNetworkPermissionDenied {
         let mut user_error = UserFacingError::new(
             ErrorCode::LocalNetworkPermissionDenied,
             "Local network access required",
@@ -261,6 +286,18 @@ pub fn connection_error(host: &str, port: u16, error: &russh::Error) -> UserFaci
         user_error.detail = Some(
             "Enable macSFTP in System Settings → Privacy & Security → Local Network, then retry."
                 .to_string(),
+        );
+        return user_error;
+    }
+
+    if failure == TransportFailureKind::HostKeyAlgorithmUnsupported {
+        let mut user_error = UserFacingError::new(
+            ErrorCode::ChannelClosed,
+            "Unsupported SSH host key",
+            format!("{host}:{port} does not offer a host key macSFTP can verify safely."),
+        );
+        user_error.detail = Some(
+            "Ask the server administrator to enable an Ed25519 or ECDSA host key.".to_string(),
         );
         return user_error;
     }
@@ -276,6 +313,36 @@ pub fn connection_error(host: &str, port: u16, error: &russh::Error) -> UserFaci
     user_error.detail =
         Some("Check the server address, network connection, and SSH configuration.".to_string());
     user_error
+}
+
+fn client_config() -> client::Config {
+    let mut config = client::Config {
+        keepalive_interval: Some(Duration::from_secs(15)),
+        keepalive_max: 3,
+        ..client::Config::default()
+    };
+    // The local russh patch verifies RSA-SHA2 host signatures with AWS-LC.
+    // Legacy SHA-1 `ssh-rsa` remains excluded, as does RSA private-key auth.
+    config.preferred.key = vec![
+        Algorithm::Ed25519,
+        Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP256,
+        },
+        Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP384,
+        },
+        Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP521,
+        },
+        Algorithm::Rsa {
+            hash: Some(HashAlg::Sha512),
+        },
+        Algorithm::Rsa {
+            hash: Some(HashAlg::Sha256),
+        },
+    ]
+    .into();
+    config
 }
 
 pub fn sftp_connection_error(
@@ -456,11 +523,7 @@ pub async fn establish_physical_connection(
     event_tx: flume::Sender<AppEvent>,
     connection_lost: CancellationToken,
 ) -> Result<client::Handle<ClientHandler>, ConnectFailure> {
-    let config = Arc::new(client::Config {
-        keepalive_interval: Some(Duration::from_secs(15)),
-        keepalive_max: 3,
-        ..client::Config::default()
-    });
+    let config = Arc::new(client_config());
 
     let rejection: Arc<Mutex<Option<HostKeyRejection>>> = Arc::new(Mutex::new(None));
     let handler = ClientHandler {
@@ -609,11 +672,11 @@ fn private_key_file_name(path: &str) -> &str {
 mod tests {
     use std::io;
 
-    use ssh_key::Algorithm;
+    use ssh_key::{Algorithm, HashAlg};
 
     use super::{
-        TransportFailureKind, connection_error, private_key_file_name, sftp_connection_error,
-        validate_private_key_algorithm,
+        TransportFailureKind, client_config, connection_error, legacy_rsa_host_key_bits,
+        private_key_file_name, sftp_connection_error, validate_private_key_algorithm,
     };
 
     #[test]
@@ -668,6 +731,70 @@ mod tests {
         assert_eq!(
             TransportFailureKind::from_russh_error(&russh::Error::Version).as_str(),
             "protocol_negotiation_failed"
+        );
+        assert_eq!(
+            TransportFailureKind::from_russh_error(&russh::Error::NoCommonAlgo {
+                kind: russh::AlgorithmKind::Key,
+                ours: vec!["ssh-ed25519".to_string()],
+                theirs: vec!["rsa-sha2-512".to_string()],
+            })
+            .as_str(),
+            "host_key_algorithm_unsupported"
+        );
+    }
+
+    #[test]
+    fn client_advertises_only_rsa_sha2_host_key_algorithms() {
+        let config = client_config();
+
+        assert!(config.preferred.key.iter().any(|algorithm| matches!(
+            algorithm,
+            Algorithm::Rsa {
+                hash: Some(HashAlg::Sha512)
+            }
+        )));
+        assert!(config.preferred.key.iter().any(|algorithm| matches!(
+            algorithm,
+            Algorithm::Rsa {
+                hash: Some(HashAlg::Sha256)
+            }
+        )));
+        assert!(
+            config
+                .preferred
+                .key
+                .iter()
+                .all(|algorithm| !matches!(algorithm, Algorithm::Rsa { hash: None }))
+        );
+    }
+
+    #[test]
+    fn legacy_rsa_host_key_is_identified_for_diagnostics() {
+        let public_key = ssh_key::PublicKey::from_openssh(
+            "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQDRlWNDvO+ijXnvpTOKXqqFDPe2SdQjjo2INk7DrpiRlhr0x4xGtl9prDIy/ETQfnT/a6W6/ljLyZNGQPqei6bvnUXq9iYfQM0O0miFYREV8fo0J6oEI++Tz3iuwVVWb6LKggTNeNT+h1rx0Rb9fG/YBTjVrt+7/bmU4OI3U47gXQ==",
+        )
+        .expect("static RSA host-key diagnostic vector must parse");
+
+        assert_eq!(legacy_rsa_host_key_bits(&public_key), Some(1024));
+    }
+
+    #[test]
+    fn unsupported_host_key_algorithm_has_actionable_guidance() {
+        let transport_error = russh::Error::NoCommonAlgo {
+            kind: russh::AlgorithmKind::Key,
+            ours: vec!["ssh-ed25519".to_string()],
+            theirs: vec!["rsa-sha2-512".to_string()],
+        };
+
+        let error = connection_error("10.0.0.10", 8022, &transport_error);
+
+        assert_eq!(error.title, "Unsupported SSH host key");
+        assert!(!error.retryable);
+        assert!(
+            error
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("Ed25519 or ECDSA"))
         );
     }
 

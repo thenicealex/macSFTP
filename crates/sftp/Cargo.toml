@@ -19,9 +19,9 @@ sha1 = "0.11"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "fs", "io-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 # RSA private operations in the current RustCrypto stack are covered by
-# RUSTSEC-2023-0071. Keep modern Ed25519/ECDSA authentication and host keys,
-# but do not compile russh's RSA feature until a constant-time backend lands.
-russh = { version = "0.62", default-features = false, features = ["flate2", "aws-lc-rs"] }
+# RUSTSEC-2023-0071. The local russh patch uses AWS-LC only for public RSA-SHA2
+# host-key verification; the feature that compiles RSA private signing remains off.
+russh = { version = "0.62", default-features = false, features = ["flate2", "aws-lc-rs", "rsa-sha2-host-key"] }
 russh-sftp = "2.3"
 ssh-key = "0.7.0-rc.11"
 tracing = "0.1.44"

@@ -8,6 +8,7 @@ members = [
     "crates/test_support",
     "crates/ui",
 ]
+exclude = ["crates/vendor-russh"]
 resolver = "3"
 
 [workspace.package]
@@ -27,3 +28,4 @@ unwrap_used = "deny"
 
 [patch.crates-io]
 block = { path = "crates/vendor-block" }
+russh = { path = "crates/vendor-russh" }

@@ -996,11 +996,14 @@ secret，并把清理失败作为 warning 返回调用方。
 `Debug` 始终脱敏。第三方 SSH/IO 错误原文不直接进入 `UserFacingError` 或认证日志；
 私钥诊断最多记录文件名，不记录完整路径。
 
-**2026-07-14 RSA 临时策略：** `russh` 的 RSA feature 暂时关闭，RSA 客户端私钥
+**2026-07-15 RSA 边界策略：** `russh` 的完整 RSA feature 保持关闭，RSA 客户端私钥
 会在认证前被明确拒绝；建议使用 Ed25519 或 ECDSA。原因是当前传递的 RustCrypto
-`rsa` 仍受 RUSTSEC-2023-0071 timing advisory 影响。该限制也意味着只提供 RSA host
-key 的旧服务器暂不兼容；待上游提供 constant-time 私钥实现后再复评，不以忽略
-advisory 代替缓解。
+`rsa` 仍受 RUSTSEC-2023-0071 timing advisory 影响。为兼容只提供 RSA host key 的
+堡垒机，仓库维护最小 `russh` 补丁：只使用 AWS-LC 验证服务端 `rsa-sha2-256/512`
+签名，不编译 RustCrypto RSA 私钥操作，也不启用 SHA-1 `ssh-rsa`。为兼容系统
+OpenSSH 默认仍接受的旧堡垒机，RSA host key 下限为 1024 bit；低于 2048 bit 必须记录
+legacy WARN。客户端 host key 协商列表必须与此边界一致；Cargo feature、算法列表和
+RSA 私钥拒绝测试共同作为门禁。
 
 **2026-07-15 macOS 本地网络隐私：** macOS 15+ 会把 GUI 应用直连私网地址纳入
 Local Network Privacy。bundle 必须声明非空 `NSLocalNetworkUsageDescription`；打包脚本与

@@ -5,3 +5,4 @@ build/
 .workbuddy/
 .DS_Store
 .worktrees/
+.superpowers/

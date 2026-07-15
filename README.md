@@ -33,10 +33,10 @@ bash scripts/build_app.sh
 
 The last command creates the unsigned bundle at `build/macSFTP.app`.
 
-RSA private-key authentication and RSA-only server host keys are temporarily
-disabled because the current upstream RSA implementation is affected by
-RUSTSEC-2023-0071. Use Ed25519 or ECDSA keys; the restriction will be reviewed
-when the upstream stack provides a constant-time implementation.
+RSA private-key authentication remains disabled because the current upstream
+implementation is affected by RUSTSEC-2023-0071. RSA-SHA2 server host keys are
+verified separately with AWS-LC, including legacy 1024-bit gateway keys; SHA-1
+`ssh-rsa` is not negotiated. Use Ed25519 or ECDSA for client private keys.
 
 ## Architecture
 
