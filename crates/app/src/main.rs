@@ -192,6 +192,12 @@ fn main() {
         cx.set_global(SessionCoordinator::new(SessionStore::open_or_empty(
             app_paths.session_file.clone(),
         )));
+        // Clear any edit temp files left by a previous run before `app_paths`
+        // is moved into `AppResources::load`; the edit-session registry it
+        // builds starts empty, so on-disk edits must be cleared to match.
+        if let Err(error) = macsftp_platform::clear_edits_dir(&app_paths.edits_dir) {
+            warn!(error = %error, "could not clear stale edits directory at launch");
+        }
         cx.set_global(AppResources::load(app_paths, config_store));
         cx.set_global(SharedTransfers::default());
         let event_coordinator = AppEventCoordinator::start(event_receiver, cx);

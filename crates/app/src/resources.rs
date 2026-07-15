@@ -11,7 +11,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui::{App, Global};
-use macsftp_core::{AppEvent, LocalPath, TabId, Timestamp, TransferId, TransferStore};
+use macsftp_core::{
+    AppEvent, EditSessionStore, LocalPath, TabId, Timestamp, TransferId, TransferStore,
+};
 use macsftp_platform::AppPaths;
 use macsftp_storage::{ConfigStore, ProfileStore, RecentsStore, ResidualTempStore};
 use tracing::warn;
@@ -27,6 +29,12 @@ pub struct AppResources {
     pub residual_temps: ResidualTempStore,
     /// Recent successful connections (host/user/paths). No secrets.
     pub recents: RecentsStore,
+    /// Consumed starting Task 8 (begin_edit / edit watcher). Registered here
+    /// so the store is process-wide and shared across windows. Empty at
+    /// launch; the edits directory is cleared in `main()` before this is
+    /// built.
+    #[allow(dead_code)]
+    pub edit_sessions: EditSessionStore,
     /// Monotonic tab-id source, shared across every window so ids never
     /// collide (the runtime keys its session registry by `TabId`). An
     /// injected `Arc<AtomicU64>` rather than a `static`, so each test gets
@@ -78,6 +86,7 @@ impl AppResources {
             profiles,
             residual_temps,
             recents,
+            edit_sessions: EditSessionStore::new(),
             next_tab_id: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -241,4 +250,20 @@ fn reconcile_local_residual_temps(mut store: ResidualTempStore) -> ResidualTempS
         warn!(error = %error, "could not persist residual temp store at launch");
     }
     store
+}
+
+#[cfg(test)]
+mod edit_tests {
+    use super::AppResources;
+    use macsftp_platform::AppPaths;
+    use macsftp_storage::ConfigStore;
+
+    #[test]
+    fn app_resources_start_with_empty_edit_sessions() {
+        let home = std::env::temp_dir().join(format!("macsftp-res-edit-{}", std::process::id()));
+        let app_paths = AppPaths::from_home_dir(home.to_string_lossy().as_ref());
+        let config = ConfigStore::with_defaults(app_paths.config_file.clone());
+        let resources = AppResources::load_for_test(app_paths, config);
+        assert_eq!(resources.edit_sessions.editing_sessions().count(), 0);
+    }
 }
