@@ -43,12 +43,12 @@ mod tests {
     use macsftp_core::{
         AppCommand, AppEvent, AuthCredential, AuthMethod, AuthMethodKind, ConflictDecision,
         ConflictPolicy, ConflictRequestId, ConnectionPoolIdentity, ConnectionSettings,
-        ConnectionState, DisconnectReason, EntryPath, ErrorCode, FileKind, FileSortField,
-        HostKeyPrompt, LocalPath, MetadataPolicy, ProfileId, RemoteDirSnapshot, RemoteEntry,
-        RemoteEventScope, RemoteOperationFailure, RemotePath, RemoteScoped, RuntimeBridgeConfig,
-        SessionId, SortDirection, TabConnected, TabDisconnected, TabId, Timestamp,
-        TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferId, TransferJob,
-        TransferPlanId, TransferPlanProgress, TransferPlanSnapshot, TransferPlanState,
+        ConnectionState, DisconnectReason, EditPhase, EntryPath, ErrorCode, FileKind,
+        FileSortField, HostKeyPrompt, LocalPath, MetadataPolicy, ProfileId, RemoteDirSnapshot,
+        RemoteEntry, RemoteEventScope, RemoteOperationFailure, RemotePath, RemoteScoped,
+        RuntimeBridgeConfig, SessionId, SortDirection, TabConnected, TabDisconnected, TabId,
+        Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferId,
+        TransferJob, TransferPlanId, TransferPlanProgress, TransferPlanSnapshot, TransferPlanState,
         TransferState, TrustRequestId, UserFacingError, WindowSessionId,
     };
     use macsftp_sftp::{BridgeChannels, EventReceiver, RuntimeClient};
@@ -1866,6 +1866,141 @@ mod tests {
         assert_eq!(
             command.destination,
             TransferEndpoint::Local(LocalPath::new("/tmp/downloads/project"))
+        );
+    }
+
+    /// Drive a workspace to Connected so `begin_edit` sees a live transfer
+    /// session, then drain the command channel (TabConnected enqueues a
+    /// ReadRemoteDir) so the next receive is the command under test.
+    fn connect_and_drain(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+        channels: &BridgeChannels,
+    ) {
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
+        });
+        let _ = channels.command_rx.try_recv();
+        let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                AppEvent::TabConnected(RemoteScoped::new(
+                    scope,
+                    TabConnected {
+                        remote_root: RemotePath::new(TEST_REMOTE_ROOT),
+                    },
+                )),
+                window,
+                cx,
+            );
+        });
+        while channels.command_rx.try_recv().is_ok() {}
+    }
+
+    #[gpui::test]
+    fn edit_small_file_starts_download_to_edits_dir(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        connect_and_drain(&workspace, &mut cx, &channels);
+
+        let entry = RemoteEntry {
+            name: "notes.txt".to_string(),
+            path: RemotePath::new("/home/tester/notes.txt"),
+            kind: FileKind::File,
+            size: Some(2_048),
+            permissions: Some(0o644),
+            modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+            link_target: None,
+        };
+
+        let edits_dir = workspace.read_with(&cx, |_workspace, cx| {
+            cx.resources().app_paths.edits_dir.as_str().to_string()
+        });
+
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            workspace.begin_edit(entry.path.clone(), entry.size, entry.modified_at, cx);
+        });
+
+        // A single Downloading session is registered, temp path landing under
+        // <edits_dir>/<session-id>/<filename>.
+        let expected_temp = workspace.read_with(&cx, |workspace, cx| {
+            assert!(
+                workspace.large_edit_confirm.is_none(),
+                "a small file must not raise the large-file confirmation"
+            );
+            let store = &cx.resources().edit_sessions;
+            let session = store
+                .find_active(ProfileId(0), &entry.path)
+                .expect("small-file edit must register an active session");
+            assert_eq!(session.phase, EditPhase::Downloading);
+            assert!(session.active_transfer.is_none());
+            assert_eq!(session.remote_path, entry.path);
+            let expected = format!("{}/{}/notes.txt", edits_dir, session.id.0);
+            assert_eq!(
+                session.local_temp_path.as_str(),
+                expected,
+                "temp path must be <edits_dir>/<id>/<filename>"
+            );
+            expected
+        });
+
+        // The download command targets that temp path.
+        let command = channels
+            .command_rx
+            .try_recv()
+            .expect("begin_edit must enqueue a StartTransfer download");
+        let AppCommand::StartTransfer(command) = command else {
+            panic!("expected StartTransfer for edit download, got {command:?}");
+        };
+        assert_eq!(command.direction, TransferDirection::Download);
+        assert_eq!(
+            command.sources,
+            vec![TransferEndpoint::Remote(entry.path.clone())]
+        );
+        assert_eq!(
+            command.destination,
+            TransferEndpoint::Local(LocalPath::new(expected_temp))
+        );
+    }
+
+    #[gpui::test]
+    fn edit_large_file_requires_confirmation_first(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        connect_and_drain(&workspace, &mut cx, &channels);
+
+        let entry = RemoteEntry {
+            name: "huge.bin".to_string(),
+            path: RemotePath::new("/home/tester/huge.bin"),
+            kind: FileKind::File,
+            size: Some(200 * 1024 * 1024), // > 100 MiB threshold
+            permissions: Some(0o644),
+            modified_at: Some(Timestamp::from_secs_since_epoch(200)),
+            link_target: None,
+        };
+
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            workspace.begin_edit(entry.path.clone(), entry.size, entry.modified_at, cx);
+        });
+
+        // A large file arms the confirmation and does not download or register
+        // a session yet.
+        workspace.read_with(&cx, |workspace, cx| {
+            let pending = workspace
+                .large_edit_confirm
+                .as_ref()
+                .expect("large file must arm the confirmation");
+            assert_eq!(pending.remote_path, entry.path);
+            assert_eq!(pending.size, entry.size);
+            assert!(
+                cx.resources()
+                    .edit_sessions
+                    .find_active(ProfileId(0), &entry.path)
+                    .is_none(),
+                "no session may be registered before the user confirms"
+            );
+        });
+        assert!(
+            channels.command_rx.try_recv().is_err(),
+            "no StartTransfer may be sent before the user confirms"
         );
     }
 

@@ -104,6 +104,9 @@ pub struct Workspace {
     profile_editor: Option<ProfileEditorState>,
     /// Pending profile delete confirmation (Settings / Connect). View-local.
     profile_delete_confirm: Option<ProfileId>,
+    /// Pending large-file edit confirmation. Holds the edit params until the
+    /// user accepts the size warning; accepting starts the download.
+    large_edit_confirm: Option<remote_edit::PendingEdit>,
     about_open: bool,
     drawer_open: bool,
     drawer_height: Pixels,
@@ -201,6 +204,7 @@ impl Workspace {
             selected_profile_id: None,
             profile_editor: None,
             profile_delete_confirm: None,
+            large_edit_confirm: None,
             about_open: false,
             drawer_open: true,
             drawer_height: drawer_height::DEFAULT_DRAWER_HEIGHT,
@@ -1094,6 +1098,7 @@ mod modals;
 mod nav;
 mod panes;
 mod profiles;
+mod remote_edit;
 mod render;
 mod settings_render;
 #[cfg(test)]

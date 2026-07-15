@@ -29,11 +29,10 @@ pub struct AppResources {
     pub residual_temps: ResidualTempStore,
     /// Recent successful connections (host/user/paths). No secrets.
     pub recents: RecentsStore,
-    /// Consumed starting Task 8 (begin_edit / edit watcher). Registered here
-    /// so the store is process-wide and shared across windows. Empty at
+    /// Active remote-edit sessions (begin_edit / edit watcher). Registered
+    /// here so the store is process-wide and shared across windows. Empty at
     /// launch; the edits directory is cleared in `main()` before this is
     /// built.
-    #[allow(dead_code)]
     pub edit_sessions: EditSessionStore,
     /// Monotonic tab-id source, shared across every window so ids never
     /// collide (the runtime keys its session registry by `TabId`). An
