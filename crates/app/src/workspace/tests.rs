@@ -51,6 +51,7 @@ mod tests {
         TransferJob, TransferPlanId, TransferPlanProgress, TransferPlanSnapshot, TransferPlanState,
         TransferState, TrustRequestId, UserFacingError, WindowSessionId,
     };
+    use macsftp_core::{EditSession, EditSessionId, RemoteSnapshot};
     use macsftp_sftp::{BridgeChannels, EventReceiver, RuntimeClient};
     use macsftp_storage::{
         AppearancePreference, SessionFile, SessionStore, SessionTabSnapshot, SessionWindowSnapshot,
@@ -69,6 +70,7 @@ mod tests {
     };
     use crate::resources::{ActiveResources, ActiveTransfers};
     use crate::session_coordinator::SessionCoordinator;
+    use crate::workspace::ConflictChoice;
     use crate::workspace::nav::HistoryOp;
     use crate::workspace::profiles::{SettingsSection, profile_matches_filter};
     use macsftp_ui::InputState;
@@ -2001,6 +2003,211 @@ mod tests {
         assert!(
             channels.command_rx.try_recv().is_err(),
             "no StartTransfer may be sent before the user confirms"
+        );
+    }
+
+    #[gpui::test]
+    fn confirm_large_edit_starts_download(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        connect_and_drain(&workspace, &mut cx, &channels);
+
+        let entry = RemoteEntry {
+            name: "huge.bin".to_string(),
+            path: RemotePath::new("/home/tester/huge.bin"),
+            kind: FileKind::File,
+            size: Some(200 * 1024 * 1024), // > 100 MiB threshold
+            permissions: Some(0o644),
+            modified_at: Some(Timestamp::from_secs_since_epoch(200)),
+            link_target: None,
+        };
+
+        // Arm the large-file confirmation.
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            workspace.begin_edit(entry.path.clone(), entry.size, entry.modified_at, cx);
+        });
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(
+                workspace.large_edit_confirm.is_some(),
+                "large file must arm the confirmation"
+            );
+        });
+
+        // Confirming the large-file edit clears the pending state and starts the
+        // download.
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.confirm_large_edit(cx);
+        });
+
+        let expected_temp = workspace.read_with(&cx, |workspace, cx| {
+            assert!(
+                workspace.large_edit_confirm.is_none(),
+                "confirming must clear the pending large-file edit"
+            );
+            let store = &cx.resources().edit_sessions;
+            let session = store
+                .find_active(ProfileId(0), &entry.path)
+                .expect("confirm must register an active download session");
+            assert_eq!(session.phase, EditPhase::Downloading);
+            session.local_temp_path.clone()
+        });
+
+        let command = channels
+            .command_rx
+            .try_recv()
+            .expect("confirm_large_edit must enqueue a StartTransfer download");
+        let AppCommand::StartTransfer(command) = command else {
+            panic!("expected StartTransfer for edit download, got {command:?}");
+        };
+        assert_eq!(command.direction, TransferDirection::Download);
+        assert_eq!(
+            command.sources,
+            vec![TransferEndpoint::Remote(entry.path.clone())]
+        );
+        assert_eq!(command.destination, TransferEndpoint::Local(expected_temp));
+    }
+
+    /// Register a `RemoteConflict` edit session directly in the store and return
+    /// its id, so the conflict-resolution tests can drive
+    /// `resolve_edit_conflict` without replaying a full download+watch cycle.
+    fn register_conflict_session(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+        remote_path: RemotePath,
+        temp_path: LocalPath,
+    ) -> EditSessionId {
+        workspace.update(cx, |_workspace, cx| {
+            let id = cx.resources_mut().edit_sessions.next_id();
+            cx.resources_mut().edit_sessions.register(EditSession {
+                id,
+                remote_path,
+                tab_id: TabId(1),
+                session_epoch: 1,
+                profile_id: ProfileId(0),
+                local_temp_path: temp_path,
+                phase: EditPhase::RemoteConflict,
+                remote_snapshot: RemoteSnapshot {
+                    size: Some(10),
+                    modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+                },
+                local_mtime: None,
+                active_transfer: None,
+            });
+            id
+        })
+    }
+
+    #[gpui::test]
+    fn resolve_conflict_overwrite_uploads(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+
+        let remote_path = RemotePath::new("/home/tester/edit.txt");
+        let temp_path = LocalPath::new("/tmp/edits/1/edit.txt");
+        let id =
+            register_conflict_session(&workspace, &mut cx, remote_path.clone(), temp_path.clone());
+        while channels.command_rx.try_recv().is_ok() {}
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.resolve_edit_conflict(id, ConflictChoice::Overwrite, cx);
+        });
+
+        workspace.read_with(&cx, |_workspace, cx| {
+            let session = cx
+                .resources()
+                .edit_sessions
+                .get(id)
+                .expect("session survives an overwrite");
+            assert_eq!(session.phase, EditPhase::UploadingBack);
+        });
+
+        let command = channels
+            .command_rx
+            .try_recv()
+            .expect("overwrite must enqueue a StartTransfer upload");
+        let AppCommand::StartTransfer(command) = command else {
+            panic!("expected StartTransfer for upload, got {command:?}");
+        };
+        assert_eq!(command.direction, TransferDirection::Upload);
+        assert_eq!(
+            command.sources,
+            vec![TransferEndpoint::Local(temp_path.clone())]
+        );
+        assert_eq!(
+            command.destination,
+            TransferEndpoint::Remote(remote_path.clone())
+        );
+    }
+
+    #[gpui::test]
+    fn resolve_conflict_later_returns_to_editing(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+
+        let id = register_conflict_session(
+            &workspace,
+            &mut cx,
+            RemotePath::new("/home/tester/edit.txt"),
+            LocalPath::new("/tmp/edits/1/edit.txt"),
+        );
+        while channels.command_rx.try_recv().is_ok() {}
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.resolve_edit_conflict(id, ConflictChoice::Later, cx);
+        });
+
+        workspace.read_with(&cx, |_workspace, cx| {
+            let session = cx
+                .resources()
+                .edit_sessions
+                .get(id)
+                .expect("session survives a Later choice");
+            assert_eq!(session.phase, EditPhase::Editing);
+        });
+        assert!(
+            channels.command_rx.try_recv().is_err(),
+            "Later must not enqueue any command"
+        );
+    }
+
+    #[gpui::test]
+    fn resolve_conflict_discard_local_redownloads(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+
+        let remote_path = RemotePath::new("/home/tester/edit.txt");
+        let id = register_conflict_session(
+            &workspace,
+            &mut cx,
+            remote_path.clone(),
+            LocalPath::new("/tmp/edits/1/edit.txt"),
+        );
+        while channels.command_rx.try_recv().is_ok() {}
+
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.resolve_edit_conflict(id, ConflictChoice::DiscardLocal, cx);
+        });
+
+        // The conflicted session is gone; a fresh Downloading session replaces it.
+        workspace.read_with(&cx, |_workspace, cx| {
+            let store = &cx.resources().edit_sessions;
+            assert!(
+                store.get(id).is_none(),
+                "discarding must remove the conflicted session"
+            );
+            let fresh = store
+                .find_active(ProfileId(0), &remote_path)
+                .expect("discard must re-register a fresh session");
+            assert_eq!(fresh.phase, EditPhase::Downloading);
+        });
+
+        let command = channels
+            .command_rx
+            .try_recv()
+            .expect("discard must enqueue a StartTransfer download");
+        let AppCommand::StartTransfer(command) = command else {
+            panic!("expected StartTransfer for re-download, got {command:?}");
+        };
+        assert_eq!(command.direction, TransferDirection::Download);
+        assert_eq!(
+            command.sources,
+            vec![TransferEndpoint::Remote(remote_path.clone())]
         );
     }
 

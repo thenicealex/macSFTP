@@ -1139,6 +1139,8 @@ impl Render for Workspace {
             .children(self.render_transfer_conflict_modal(cx))
             .children(self.render_delete_confirm_modal(cx))
             .children(self.render_profile_delete_confirm_modal(cx))
+            .children(self.render_large_edit_modal(cx))
+            .children(self.render_edit_conflict_modal(cx))
             .children(self.render_go_to_path_modal(cx))
             .children(self.render_context_menu(cx))
             .children(self.render_about(cx))
@@ -1167,4 +1169,6 @@ mod transfers;
 mod visible_entries;
 
 use connect_form::ConnectForm;
+#[cfg(test)]
+pub(crate) use remote_edit::ConflictChoice;
 pub(crate) use remote_edit::build_edit_upload_command;

@@ -2063,6 +2063,12 @@ impl EditSessionStore {
             .iter()
             .filter(|s| s.phase == EditPhase::Editing)
     }
+
+    pub fn conflict_sessions(&self) -> impl Iterator<Item = &EditSession> {
+        self.sessions
+            .iter()
+            .filter(|s| s.phase == EditPhase::RemoteConflict)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3418,5 +3424,19 @@ mod tests {
         sb.id = b;
         store.register(sb);
         assert_eq!(store.editing_sessions().count(), 1);
+    }
+
+    #[test]
+    fn store_conflict_sessions_filters_phase() {
+        let mut store = crate::EditSessionStore::new();
+        let a = store.next_id();
+        let mut sa = store_session(a.0, 1, "/a", crate::EditPhase::RemoteConflict, None);
+        sa.id = a;
+        store.register(sa);
+        let b = store.next_id();
+        let mut sb = store_session(b.0, 1, "/b", crate::EditPhase::Editing, None);
+        sb.id = b;
+        store.register(sb);
+        assert_eq!(store.conflict_sessions().count(), 1);
     }
 }

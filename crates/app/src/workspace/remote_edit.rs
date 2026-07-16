@@ -1,9 +1,10 @@
-use gpui::Context;
+use gpui::{Context, FontWeight, IntoElement, ParentElement, Styled, div, prelude::*, px};
 use macsftp_core::{
-    AppCommand, ConflictPolicy, EditPhase, EditSession, LocalPath, MetadataPolicy, ProfileId,
-    RemotePath, RemoteSnapshot, StartTransferCommand, TabId, Timestamp, TransferDirection,
-    TransferEndpoint,
+    AppCommand, ConflictPolicy, EditPhase, EditSession, EditSessionId, LocalPath, MetadataPolicy,
+    ProfileId, RemotePath, RemoteSnapshot, StartTransferCommand, TabId, Timestamp,
+    TransferDirection, TransferEndpoint,
 };
+use macsftp_ui::{ActiveTheme, format_size, text_button};
 
 use crate::resources::ActiveResources;
 use crate::workspace::Workspace;
@@ -19,6 +20,17 @@ pub(crate) struct PendingEdit {
     pub session_epoch: u64,
     pub profile_id: ProfileId,
     pub tab_id: TabId,
+}
+
+/// How the user chose to resolve a remote-changed-under-edit conflict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConflictChoice {
+    /// Force the local temp file back over the (changed) remote.
+    Overwrite,
+    /// Throw away local edits and re-download the current remote.
+    DiscardLocal,
+    /// Dismiss for now; the session returns to `Editing`.
+    Later,
 }
 
 impl Workspace {
@@ -66,7 +78,6 @@ impl Workspace {
         self.start_edit_download(pending, cx);
     }
 
-    #[allow(dead_code)] // Called by begin_edit and (Task 12) the large-file confirm handler.
     pub(crate) fn start_edit_download(&mut self, pending: PendingEdit, cx: &mut Context<Self>) {
         let edits_dir = cx.resources().app_paths.edits_dir.clone();
         let id = cx.resources_mut().edit_sessions.next_id();
@@ -110,6 +121,231 @@ impl Workspace {
             self.status_message = Some("Opening for edit…".into());
             cx.notify();
         }
+    }
+
+    /// User confirmed the large-file edit warning: proceed with the download.
+    pub(crate) fn confirm_large_edit(&mut self, cx: &mut Context<Self>) {
+        if let Some(pending) = self.large_edit_confirm.take() {
+            self.start_edit_download(pending, cx);
+        }
+    }
+
+    /// User dismissed the large-file edit warning: drop the pending edit.
+    pub(crate) fn cancel_large_edit(&mut self, cx: &mut Context<Self>) {
+        self.large_edit_confirm = None;
+        cx.notify();
+    }
+
+    /// Resolve a `RemoteConflict` edit session per the user's `choice`.
+    pub(crate) fn resolve_edit_conflict(
+        &mut self,
+        id: EditSessionId,
+        choice: ConflictChoice,
+        cx: &mut Context<Self>,
+    ) {
+        // Clone the session out first so we do not hold a resources borrow
+        // across the resources_mut()/send_command() calls below.
+        let Some(session) = cx.resources().edit_sessions.get(id).cloned() else {
+            return;
+        };
+        match choice {
+            ConflictChoice::Overwrite => {
+                let command = build_edit_upload_command(
+                    &session.local_temp_path,
+                    &session.remote_path,
+                    session.session_epoch,
+                    session.profile_id,
+                    session.tab_id,
+                );
+                if let Some(s) = cx.resources_mut().edit_sessions.get_mut(id) {
+                    s.phase = EditPhase::UploadingBack;
+                }
+                self.send_command(command, cx);
+            }
+            ConflictChoice::DiscardLocal => {
+                // Re-download the current remote over the local temp; the fresh
+                // session starts back at Downloading.
+                let pending = PendingEdit {
+                    remote_path: session.remote_path.clone(),
+                    size: session.remote_snapshot.size,
+                    modified_at: session.remote_snapshot.modified_at,
+                    session_epoch: session.session_epoch,
+                    profile_id: session.profile_id,
+                    tab_id: session.tab_id,
+                };
+                cx.resources_mut().edit_sessions.remove(id);
+                self.start_edit_download(pending, cx);
+            }
+            ConflictChoice::Later => {
+                if let Some(s) = cx.resources_mut().edit_sessions.get_mut(id) {
+                    s.phase = EditPhase::Editing;
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn render_large_edit_modal(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let size = self.large_edit_confirm.as_ref()?.size;
+        let theme = cx.theme().clone();
+        let body = match size {
+            Some(size) => format!(
+                "This file is large ({}). Download it for editing?",
+                format_size(Some(size))
+            ),
+            None => "This file is large. Download it for editing?".to_string(),
+        };
+
+        let card = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .w(px(420.0))
+            .p_4()
+            .bg(theme.colors.elevated_surface)
+            .border_1()
+            .border_color(theme.colors.border)
+            .rounded_md()
+            .font_family(theme.fonts.ui_family.clone())
+            .child(
+                div()
+                    .text_size(px(14.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.colors.text)
+                    .child("Edit large file?"),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme.colors.text_muted)
+                    .child(body),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        text_button("large-edit-cancel", "Cancel").on_click(cx.listener(
+                            |workspace, _event, _window, cx| {
+                                workspace.cancel_large_edit(cx);
+                            },
+                        )),
+                    )
+                    .child(
+                        text_button("large-edit-confirm", "Edit")
+                            .primary(true)
+                            .on_click(cx.listener(|workspace, _event, _window, cx| {
+                                workspace.confirm_large_edit(cx);
+                            })),
+                    ),
+            );
+
+        Some(
+            div()
+                .id("large-edit-scrim")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
+                .child(card)
+                .into_any_element(),
+        )
+    }
+
+    pub(crate) fn render_edit_conflict_modal(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let active_tab_id = self.active_tab()?.id;
+        let id = cx
+            .resources()
+            .edit_sessions
+            .conflict_sessions()
+            .find(|s| s.tab_id == active_tab_id)
+            .map(|s| s.id)?;
+        let theme = cx.theme().clone();
+
+        let card = div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .w(px(420.0))
+            .p_4()
+            .bg(theme.colors.elevated_surface)
+            .border_1()
+            .border_color(theme.colors.border)
+            .rounded_md()
+            .font_family(theme.fonts.ui_family.clone())
+            .child(
+                div()
+                    .text_size(px(14.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.colors.text)
+                    .child("Remote file changed"),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme.colors.text_muted)
+                    .child(
+                        "The remote file changed since you opened it for editing. \
+                         Overwriting will discard the remote changes.",
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        text_button("edit-conflict-later", "Later").on_click(cx.listener(
+                            move |workspace, _event, _window, cx| {
+                                workspace.resolve_edit_conflict(id, ConflictChoice::Later, cx);
+                            },
+                        )),
+                    )
+                    .child(
+                        text_button("edit-conflict-discard", "Discard local changes").on_click(
+                            cx.listener(move |workspace, _event, _window, cx| {
+                                workspace.resolve_edit_conflict(
+                                    id,
+                                    ConflictChoice::DiscardLocal,
+                                    cx,
+                                );
+                            }),
+                        ),
+                    )
+                    .child(
+                        text_button("edit-conflict-overwrite", "Overwrite remote")
+                            .danger(true)
+                            .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                                workspace.resolve_edit_conflict(id, ConflictChoice::Overwrite, cx);
+                            })),
+                    ),
+            );
+
+        Some(
+            div()
+                .id("edit-conflict-scrim")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
+                .child(card)
+                .into_any_element(),
+        )
     }
 }
 
