@@ -124,6 +124,29 @@ fn install_panic_hook(crash_marker_path: &str) {
     }));
 }
 
+/// Remove all edit temp files/dirs on quit (edit sessions are in-memory only,
+/// so nothing needs to survive shutdown). Best-effort: quit proceeds
+/// regardless. Mirrors the launch-time clear in `main`.
+fn cleanup_edit_temps(cx: &App) {
+    if !cx.has_global::<AppResources>() {
+        return;
+    }
+    let dir = cx.global::<AppResources>().app_paths.edits_dir.clone();
+    clear_edit_temps_dir(&dir);
+}
+
+/// Clear the edits directory — removing the per-session subdirectories and the
+/// files inside them, then recreating it empty. Extracted from
+/// `cleanup_edit_temps` so the real work is unit-testable without constructing
+/// an `App` and its globals. Reuses the same `clear_edits_dir` helper as the
+/// launch-time cleanup, so nested `<edits_dir>/<session-id>/<file>` layouts are
+/// removed wholesale (a flat `remove_file` sweep would silently skip them).
+fn clear_edit_temps_dir(edits_dir: &macsftp_core::LocalPath) {
+    if let Err(error) = macsftp_platform::clear_edits_dir(edits_dir) {
+        warn!(error = %error, "could not clear edits directory on quit");
+    }
+}
+
 fn main() {
     let app = Application::new().with_assets(Assets);
     // Native macOS behavior: the app stays alive with no windows open;
@@ -179,6 +202,7 @@ fn main() {
         });
         cx.on_app_quit(|cx| {
             checkpoint_before_quit(cx);
+            cleanup_edit_temps(cx);
             if cx.has_global::<RuntimeHandle>()
                 && let Some(controller) = cx.remove_global::<RuntimeHandle>().controller
             {
@@ -402,5 +426,39 @@ mod tests {
             ));
             assert!(!tracing::enabled!(target: "russh", Level::ERROR));
         });
+    }
+
+    #[test]
+    fn clear_edit_temps_dir_removes_nested_session_dirs() {
+        // Mirror the real on-disk layout: edit temps live in per-session
+        // SUBDIRECTORIES (`<edits_dir>/<session-id>/<file>`), not as flat
+        // files. A `remove_file` sweep would silently skip the subdirs and
+        // leave everything behind; this asserts the nested layout is cleared.
+        let base =
+            std::env::temp_dir().join(format!("macsftp-quit-cleanup-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let edits_dir = macsftp_core::LocalPath::new(base.to_string_lossy().to_string());
+        let session_dir = base.join("1");
+        std::fs::create_dir_all(&session_dir).expect("create session temp dir");
+        let temp_file = session_dir.join("config.json");
+        std::fs::write(&temp_file, b"{\"k\":1}").expect("write temp file");
+
+        super::clear_edit_temps_dir(&edits_dir);
+
+        assert!(!temp_file.exists(), "nested temp file should be removed");
+        assert!(
+            !session_dir.exists(),
+            "per-session subdir should be removed"
+        );
+        assert!(
+            base.exists(),
+            "edits_dir itself should be recreated empty by clear_edits_dir"
+        );
+        assert_eq!(
+            std::fs::read_dir(&base).expect("read edits dir").count(),
+            0,
+            "edits_dir should be empty after cleanup"
+        );
+        std::fs::remove_dir_all(&base).ok();
     }
 }

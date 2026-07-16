@@ -349,7 +349,7 @@ mod tests {
     #[test]
     fn external_editor_defaults_none_and_round_trips() {
         let dir = std::env::temp_dir().join(format!("macsftp-editor-cfg-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(&dir).expect("create editor config dir");
         let path = LocalPath::new(dir.join("config.json").to_string_lossy().to_string());
         let mut store = ConfigStore::with_defaults(path.clone());
         assert_eq!(store.config().external_editor, None);

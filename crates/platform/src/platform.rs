@@ -475,11 +475,11 @@ mod tests {
     fn clear_edits_dir_removes_contents_and_recreates() {
         let base = std::env::temp_dir().join(format!("macsftp-edits-clear-{}", std::process::id()));
         let edits = macsftp_core::LocalPath::new(base.to_string_lossy().to_string());
-        std::fs::create_dir_all(base.join("session-1")).unwrap();
-        std::fs::write(base.join("session-1/a.txt"), b"x").unwrap();
-        super::clear_edits_dir(&edits).unwrap();
+        std::fs::create_dir_all(base.join("session-1")).expect("create session dir");
+        std::fs::write(base.join("session-1/a.txt"), b"x").expect("write temp file");
+        super::clear_edits_dir(&edits).expect("clear edits dir");
         assert!(base.exists());
-        assert_eq!(std::fs::read_dir(&base).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(&base).expect("read edits dir").count(), 0);
         std::fs::remove_dir_all(&base).ok();
     }
 
