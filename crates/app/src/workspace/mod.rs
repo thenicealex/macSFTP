@@ -98,6 +98,11 @@ pub struct Workspace {
     profile_filter: InputState,
     /// `true` while the Profiles filter field owns key events.
     profile_filter_focused: bool,
+    /// Settings → General external-editor override field. Committed to config
+    /// on every edit (empty → None).
+    external_editor_input: InputState,
+    /// `true` while the External editor field owns key events.
+    external_editor_focused: bool,
     /// Selected profile in Settings → Profiles (None when the list is empty).
     selected_profile_id: Option<ProfileId>,
     /// Draft for New / Edit profile in Settings → Profiles.
@@ -180,6 +185,19 @@ impl Workspace {
             .map(|_| SharedString::from("Could not load config.json; using defaults."));
         let log_file = cx.resources().app_paths.log_file.clone();
 
+        let external_editor_input = {
+            let mut input = InputState::new();
+            let current = cx
+                .resources()
+                .config
+                .config()
+                .external_editor
+                .clone()
+                .unwrap_or_default();
+            input.set_value(current);
+            input
+        };
+
         let appearance_subscription =
             cx.observe_window_appearance(window, |_workspace, window, cx| {
                 if cx.resources().config.config().appearance == AppearancePreference::System {
@@ -201,6 +219,8 @@ impl Workspace {
             settings_section: SettingsSection::General,
             profile_filter: InputState::new(),
             profile_filter_focused: false,
+            external_editor_input,
+            external_editor_focused: false,
             selected_profile_id: None,
             profile_editor: None,
             profile_delete_confirm: None,

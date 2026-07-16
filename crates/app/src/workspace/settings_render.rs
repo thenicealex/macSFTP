@@ -1,6 +1,12 @@
-use gpui::{Context, FontWeight, IntoElement, ParentElement, Styled, div, prelude::*, px};
+use gpui::{
+    Context, FontWeight, IntoElement, KeyDownEvent, ParentElement, Styled, Window, div, prelude::*,
+    px,
+};
 use macsftp_core::AuthMethodKind;
-use macsftp_ui::{ActiveTheme, InputState, TextFieldModel, empty_state, text_button, text_field};
+use macsftp_ui::{
+    ActiveTheme, InputKeyResult, InputState, TextFieldModel, empty_state, text_button, text_field,
+};
+use tracing::warn;
 
 use crate::resources::ActiveResources;
 use crate::workspace::profiles::{ProfileEditorField, SettingsSection, profile_list_label};
@@ -80,6 +86,8 @@ impl crate::workspace::Workspace {
                 .flex_1()
                 .min_w_0()
                 .p_6()
+                .track_focus(&self.workspace_focus)
+                .on_key_down(cx.listener(Self::handle_external_editor_key))
                 .child(
                     div()
                         .max_w(px(560.0))
@@ -139,6 +147,45 @@ impl crate::workspace::Workspace {
                                 .text_color(theme.colors.error)
                                 .child(error)
                         }))
+                        .child(div().h(px(1.0)).bg(theme.colors.border))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .text_size(px(14.0))
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child("External editor"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .text_color(theme.colors.text_muted)
+                                        .child(
+                                            "Command or app used to open remote files for editing. \
+                                             Leave blank for the system default.",
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .id("settings-external-editor")
+                                        .on_click(cx.listener(|workspace, _event, window, cx| {
+                                            workspace.focus_external_editor(window, cx);
+                                        }))
+                                        .child(text_field(
+                                            ("settings-external-editor-input", 0usize),
+                                            TextFieldModel {
+                                                state: &self.external_editor_input,
+                                                placeholder: "System default",
+                                                focused: self.external_editor_focused,
+                                                masked: false,
+                                            },
+                                            cx,
+                                        )),
+                                ),
+                        )
                         .child(div().h(px(1.0)).bg(theme.colors.border))
                         .child(
                             div()
@@ -240,6 +287,59 @@ impl crate::workspace::Workspace {
                     .child(body),
             )
             .into_any_element()
+    }
+
+    /// Focus the Settings → General external-editor field (click or key entry).
+    pub(crate) fn focus_external_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.external_editor_focused = true;
+        window.focus(&self.workspace_focus);
+        cx.notify();
+    }
+
+    pub(crate) fn handle_external_editor_key(
+        &mut self,
+        event: &KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.external_editor_focused {
+            return;
+        }
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.platform && keystroke.key == "v" {
+            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                self.external_editor_input.insert(&text);
+                self.commit_external_editor(cx);
+                cx.stop_propagation();
+                cx.notify();
+            }
+            return;
+        }
+        if self.external_editor_input.handle_keystroke(keystroke) == InputKeyResult::Handled {
+            self.commit_external_editor(cx);
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
+    /// Persist the External editor field to config on every edit. An empty
+    /// value (after trim) clears the override (`None`); otherwise the trimmed
+    /// value is stored. Mirrors the other config setters' error handling.
+    pub(crate) fn commit_external_editor(&mut self, cx: &mut Context<Self>) {
+        let trimmed = self.external_editor_input.value().trim().to_string();
+        let editor = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        };
+        match cx.resources_mut().config.set_external_editor(editor) {
+            Ok(()) => self.config_error = None,
+            Err(error) => {
+                warn!(error = %error, "could not save external_editor");
+                self.config_error =
+                    Some("Could not write config.json. Check file permissions.".into());
+            }
+        }
     }
 
     /// Settings → Profiles: list on the left, editor form on the right.

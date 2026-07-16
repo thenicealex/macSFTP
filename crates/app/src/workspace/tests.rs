@@ -2066,6 +2066,156 @@ mod tests {
         assert_eq!(command.destination, TransferEndpoint::Local(expected_temp));
     }
 
+    #[gpui::test]
+    fn request_edit_on_remote_file_starts_edit(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        connect_and_drain(&workspace, &mut cx, &channels);
+
+        let file_path = RemotePath::new("/home/tester/notes.txt");
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            let tab = workspace.active_tab_mut().expect("active tab");
+            tab.remote.entries = vec![RemoteEntry {
+                name: "notes.txt".to_string(),
+                path: file_path.clone(),
+                kind: FileKind::File,
+                size: Some(2_048),
+                permissions: Some(0o644),
+                modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+                link_target: None,
+            }];
+            tab.selection.selected_paths = vec![EntryPath::Remote(file_path.clone())];
+            workspace.request_edit_selection(cx);
+        });
+
+        // A small remote file goes straight to a Downloading edit session (no
+        // large-file confirmation).
+        workspace.read_with(&cx, |workspace, cx| {
+            assert!(
+                workspace.large_edit_confirm.is_none(),
+                "a small file must not raise the large-file confirmation"
+            );
+            let session = cx
+                .resources()
+                .edit_sessions
+                .find_active(ProfileId(0), &file_path)
+                .expect("request_edit_selection on a remote file registers a session");
+            assert_eq!(session.phase, EditPhase::Downloading);
+        });
+
+        let command = channels
+            .command_rx
+            .try_recv()
+            .expect("request_edit_selection must enqueue a StartTransfer download");
+        let AppCommand::StartTransfer(command) = command else {
+            panic!("expected StartTransfer for edit download, got {command:?}");
+        };
+        assert_eq!(command.direction, TransferDirection::Download);
+        assert_eq!(command.sources, vec![TransferEndpoint::Remote(file_path)]);
+    }
+
+    #[gpui::test]
+    fn request_edit_on_remote_directory_is_noop(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        connect_and_drain(&workspace, &mut cx, &channels);
+
+        let dir_path = RemotePath::new("/home/tester/project");
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            let tab = workspace.active_tab_mut().expect("active tab");
+            tab.remote.entries = vec![RemoteEntry {
+                name: "project".to_string(),
+                path: dir_path.clone(),
+                kind: FileKind::Directory,
+                size: None,
+                permissions: Some(0o755),
+                modified_at: None,
+                link_target: None,
+            }];
+            tab.selection.selected_paths = vec![EntryPath::Remote(dir_path.clone())];
+            workspace.request_edit_selection(cx);
+        });
+
+        // A directory is not editable: no session, no command.
+        workspace.read_with(&cx, |workspace, cx| {
+            assert!(
+                workspace.large_edit_confirm.is_none(),
+                "a directory must not arm any edit confirmation"
+            );
+            assert!(
+                cx.resources()
+                    .edit_sessions
+                    .find_active(ProfileId(0), &dir_path)
+                    .is_none(),
+                "selecting a directory must not register an edit session"
+            );
+        });
+        assert!(
+            channels.command_rx.try_recv().is_err(),
+            "editing a directory must not enqueue any command"
+        );
+    }
+
+    #[gpui::test]
+    fn settings_external_editor_typing_persists_and_round_trips(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        // Open Settings → General and focus the external-editor field, then type
+        // a value through the real key handler the GUI routes to.
+        cx.dispatch_action(OpenSettings);
+        let config_path = workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.focus_external_editor(window, cx);
+            for ch in ["v", "i", "m"] {
+                let event = gpui::KeyDownEvent {
+                    keystroke: gpui::Keystroke {
+                        modifiers: gpui::Modifiers::default(),
+                        key: ch.to_string(),
+                        key_char: Some(ch.to_string()),
+                    },
+                    is_held: false,
+                };
+                workspace.handle_external_editor_key(&event, window, cx);
+            }
+            cx.resources().app_paths.config_file.clone()
+        });
+
+        // Committed to the in-memory config on every keystroke.
+        workspace.read_with(&cx, |_workspace, cx| {
+            assert_eq!(
+                cx.resources().config.config().external_editor.as_deref(),
+                Some("vim"),
+                "typing must commit the external editor to config"
+            );
+        });
+
+        // And persisted to config.json (round-trips through a fresh store).
+        let reloaded = macsftp_storage::ConfigStore::open(config_path.clone())
+            .expect("config.json must be readable after commit");
+        assert_eq!(
+            reloaded.config().external_editor.as_deref(),
+            Some("vim"),
+            "external editor must persist to disk"
+        );
+
+        // Clearing the field (empty → None) removes the override and round-trips.
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.external_editor_input.set_value("");
+            workspace.commit_external_editor(cx);
+        });
+        workspace.read_with(&cx, |_workspace, cx| {
+            assert_eq!(
+                cx.resources().config.config().external_editor,
+                None,
+                "an empty value clears the override"
+            );
+        });
+        let reloaded = macsftp_storage::ConfigStore::open(config_path)
+            .expect("config.json must be readable after clearing");
+        assert_eq!(
+            reloaded.config().external_editor,
+            None,
+            "cleared override must persist to disk"
+        );
+    }
+
     /// Register a `RemoteConflict` edit session directly in the store and return
     /// its id, so the conflict-resolution tests can drive
     /// `resolve_edit_conflict` without replaying a full download+watch cycle.

@@ -319,14 +319,16 @@ impl crate::workspace::Workspace {
                 }
             }
             PaneSide::Remote => {
-                let remote_directory = tab
-                    .remote
-                    .entries
-                    .get(real_index)
-                    .filter(|entry| entry.kind == FileKind::Directory)
-                    .map(|entry| entry.path.clone());
-                if let Some(path) = remote_directory {
+                let Some(entry) = tab.remote.entries.get(real_index) else {
+                    return;
+                };
+                if entry.kind == FileKind::Directory {
+                    let path = entry.path.clone();
                     self.navigate_pane_remote(path, HistoryOp::Push, cx);
+                } else {
+                    let (path, size, modified_at) =
+                        (entry.path.clone(), entry.size, entry.modified_at);
+                    self.begin_edit(path, size, modified_at, cx);
                 }
             }
         }

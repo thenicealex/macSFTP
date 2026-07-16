@@ -689,6 +689,15 @@ impl crate::workspace::Workspace {
         }
         if has_entry && !is_local && connected {
             items.push(
+                text_button("ctx-edit", "Edit")
+                    .on_click(cx.listener(|workspace, _event, _window, cx| {
+                        workspace.context_menu = None;
+                        workspace.focused_side = PaneSide::Remote;
+                        workspace.request_edit_selection(cx);
+                    }))
+                    .into_any_element(),
+            );
+            items.push(
                 text_button("ctx-download", "Download")
                     .on_click(cx.listener(|workspace, _event, _window, cx| {
                         workspace.context_menu = None;
