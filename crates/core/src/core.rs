@@ -55,6 +55,21 @@ impl Timestamp {
     pub fn from_system_time(time: SystemTime) -> Self {
         Self(time)
     }
+
+    /// Truncate to whole seconds since the Unix epoch, discarding any
+    /// sub-second component. SFTP servers report mtime at whole-second
+    /// precision, so a snapshot derived from a local file's `SystemTime`
+    /// (which carries nanoseconds) must be truncated to that granularity
+    /// before it can be compared against a server listing without spurious
+    /// divergence. Times before the epoch collapse to the epoch.
+    pub fn truncated_to_secs(self) -> Self {
+        let seconds = self
+            .0
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        Self::from_secs_since_epoch(seconds)
+    }
 }
 
 impl Default for Timestamp {
@@ -1958,6 +1973,28 @@ pub struct RemoteSnapshot {
     pub modified_at: Option<Timestamp>,
 }
 
+impl RemoteSnapshot {
+    /// A copy with `modified_at` truncated to whole seconds. Used when a
+    /// snapshot is derived from a LOCAL file's `SystemTime` (sub-second
+    /// precision) so it matches the whole-second mtime an SFTP server — and
+    /// therefore a future directory listing — will report.
+    pub fn truncated_to_secs(self) -> Self {
+        Self {
+            size: self.size,
+            modified_at: self.modified_at.map(Timestamp::truncated_to_secs),
+        }
+    }
+
+    /// Whether two snapshots agree once both mtimes are truncated to whole
+    /// seconds. Size must match exactly; mtime only at second granularity.
+    /// This is the "sub-second noise only" test: `true` means the sole
+    /// possible difference is nanoseconds within the same second, which is an
+    /// artifact of our own local-file rebase, not a real remote change.
+    pub fn agrees_at_second_granularity(self, other: Self) -> bool {
+        self.truncated_to_secs() == other.truncated_to_secs()
+    }
+}
+
 /// The lifecycle phase of a remote-edit session. Every variant is a *live*
 /// (non-terminal) phase: a session is only stored while it is actively being
 /// downloaded, edited, uploaded back, or resolving a remote conflict. A
@@ -2075,6 +2112,19 @@ impl EditSessionStore {
         self.sessions
             .iter()
             .filter(|s| s.phase == EditPhase::Editing)
+    }
+
+    /// `Editing`-phase sessions belonging to `tab_id`. Used when a directory
+    /// listing (re)loads for a tab: only `Editing` sessions matter, because
+    /// that is the phase in which the watcher actively compares the session
+    /// baseline against the listing, so it is the phase whose baseline must be
+    /// re-synced to absorb sub-second mtime drift. `RemoteConflict` sessions
+    /// are deliberately excluded so a real, already-surfaced conflict is never
+    /// masked by a refresh.
+    pub fn editing_sessions_for_tab(&self, tab_id: TabId) -> impl Iterator<Item = &EditSession> {
+        self.sessions
+            .iter()
+            .filter(move |s| s.phase == EditPhase::Editing && s.tab_id == tab_id)
     }
 
     pub fn conflict_sessions(&self) -> impl Iterator<Item = &EditSession> {
@@ -3344,6 +3394,74 @@ mod tests {
             size: Some(10),
             modified_at: Some(crate::Timestamp::from_secs_since_epoch(100))
         }));
+    }
+
+    #[test]
+    fn timestamp_truncated_to_secs_drops_sub_second_component() {
+        let sub_second = crate::Timestamp::from_system_time(
+            std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_234_837),
+        );
+        let truncated = sub_second.truncated_to_secs();
+        assert_eq!(truncated, crate::Timestamp::from_secs_since_epoch(1_234));
+        // Already whole-second timestamps are unchanged.
+        let whole = crate::Timestamp::from_secs_since_epoch(1_234);
+        assert_eq!(whole.truncated_to_secs(), whole);
+    }
+
+    #[test]
+    fn snapshot_agrees_at_second_granularity_absorbs_sub_second_noise() {
+        let sub_second = crate::RemoteSnapshot {
+            size: Some(20),
+            modified_at: Some(crate::Timestamp::from_system_time(
+                std::time::UNIX_EPOCH + std::time::Duration::from_millis(1_234_837),
+            )),
+        };
+        let whole_second = crate::RemoteSnapshot {
+            size: Some(20),
+            modified_at: Some(crate::Timestamp::from_secs_since_epoch(1_234)),
+        };
+        // Same size + same whole second, differing only by sub-second noise.
+        assert!(sub_second.agrees_at_second_granularity(whole_second));
+        // truncated_to_secs makes them byte-for-byte equal.
+        assert_eq!(sub_second.truncated_to_secs(), whole_second);
+        // A different whole second is a real change, not noise.
+        let next_second = crate::RemoteSnapshot {
+            size: Some(20),
+            modified_at: Some(crate::Timestamp::from_secs_since_epoch(1_235)),
+        };
+        assert!(!sub_second.agrees_at_second_granularity(next_second));
+        // A different size is a real change even at the same second.
+        let bigger = crate::RemoteSnapshot {
+            size: Some(21),
+            modified_at: Some(crate::Timestamp::from_secs_since_epoch(1_234)),
+        };
+        assert!(!whole_second.agrees_at_second_granularity(bigger));
+    }
+
+    #[test]
+    fn editing_sessions_for_tab_excludes_other_tabs_and_non_editing() {
+        let mut store = crate::EditSessionStore::new();
+        let mut with = |tab: u64, phase: crate::EditPhase| {
+            let id = store.next_id();
+            let mut session = sample_edit_session(phase);
+            session.id = id;
+            session.tab_id = crate::TabId(tab);
+            store.register(session);
+            id
+        };
+        let editing_tab1 = with(1, crate::EditPhase::Editing);
+        let _conflict_tab1 = with(1, crate::EditPhase::RemoteConflict);
+        let _editing_tab2 = with(2, crate::EditPhase::Editing);
+
+        let ids: Vec<_> = store
+            .editing_sessions_for_tab(crate::TabId(1))
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![editing_tab1],
+            "only the Editing session on tab 1 is yielded"
+        );
     }
 
     fn store_session(

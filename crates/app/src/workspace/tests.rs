@@ -2577,6 +2577,226 @@ mod tests {
         });
     }
 
+    /// Connect the workspace and land its tab on `TEST_REMOTE_ROOT` so a
+    /// subsequent `RemoteDirLoaded` for that path is accepted. Returns the
+    /// remote scope for building further events.
+    fn connect_and_land_on_root(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+        channels: &BridgeChannels,
+    ) -> RemoteEventScope {
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
+        });
+        let _ = channels.command_rx.try_recv();
+        let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                AppEvent::TabConnected(RemoteScoped::new(
+                    scope.clone(),
+                    TabConnected {
+                        remote_root: RemotePath::new(TEST_REMOTE_ROOT),
+                    },
+                )),
+                window,
+                cx,
+            );
+        });
+        let _ = channels.command_rx.try_recv();
+        scope
+    }
+
+    /// Register an `Editing` edit session on `TabId(1)` for
+    /// `/home/tester/doc.txt` with `snapshot` as its remote baseline.
+    fn seed_editing_session_on_tab1(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+        snapshot: RemoteSnapshot,
+    ) -> EditSessionId {
+        workspace.update_in(cx, |_workspace, _window, cx| {
+            let id = cx.resources_mut().edit_sessions.next_id();
+            cx.resources_mut().edit_sessions.register(EditSession {
+                id,
+                remote_path: RemotePath::new("/home/tester/doc.txt"),
+                tab_id: TabId(1),
+                session_epoch: 1,
+                profile_id: ProfileId(1),
+                local_temp_path: LocalPath::new("/tmp/edits/doc.txt"),
+                phase: EditPhase::Editing,
+                remote_snapshot: snapshot,
+                local_mtime: None,
+                active_transfer: None,
+            });
+            id
+        })
+    }
+
+    fn remote_dir_loaded_with_doc(
+        scope: RemoteEventScope,
+        size: Option<u64>,
+        modified_at: Option<Timestamp>,
+    ) -> AppEvent {
+        AppEvent::RemoteDirLoaded(RemoteScoped::new(
+            scope,
+            RemoteDirSnapshot {
+                path: RemotePath::new(TEST_REMOTE_ROOT),
+                entries: vec![RemoteEntry {
+                    name: "doc.txt".to_string(),
+                    path: RemotePath::new("/home/tester/doc.txt"),
+                    kind: FileKind::File,
+                    size,
+                    permissions: Some(0o644),
+                    modified_at,
+                    link_target: None,
+                }],
+            },
+        ))
+    }
+
+    fn session_snapshot(
+        workspace: &Entity<Workspace>,
+        cx: &VisualTestContext,
+        id: EditSessionId,
+    ) -> RemoteSnapshot {
+        workspace.read_with(cx, |_workspace, cx| {
+            cx.resources()
+                .edit_sessions
+                .get(id)
+                .expect("edit session survives refresh")
+                .remote_snapshot
+        })
+    }
+
+    #[gpui::test]
+    fn refresh_adopts_listing_when_only_sub_second_mtime_differs(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        let scope = connect_and_land_on_root(&workspace, &mut cx, &channels);
+        // Session baseline carries a sub-second mtime (as an upload-back rebase
+        // could historically leave); the same whole second, same size.
+        let sub_second = Timestamp::from_system_time(
+            std::time::UNIX_EPOCH
+                + std::time::Duration::from_nanos(1_000 * 1_000_000_000 + 837_000_000),
+        );
+        let baseline = RemoteSnapshot {
+            size: Some(20),
+            modified_at: Some(sub_second),
+        };
+        let id = seed_editing_session_on_tab1(&workspace, &mut cx, baseline);
+
+        // The server lists the file at the WHOLE-second mtime, same size — the
+        // difference is pure sub-second noise from our own write.
+        let listed = RemoteSnapshot {
+            size: Some(20),
+            modified_at: Some(Timestamp::from_secs_since_epoch(1_000)),
+        };
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                remote_dir_loaded_with_doc(scope, listed.size, listed.modified_at),
+                window,
+                cx,
+            );
+        });
+
+        let after = session_snapshot(&workspace, &cx, id);
+        assert_eq!(
+            after, listed,
+            "the session baseline must adopt the listing's exact values, \
+             normalizing away the sub-second drift"
+        );
+        // The watcher flags a conflict when `listing != baseline`. After
+        // adoption the session no longer diverges from the same listing, so the
+        // next save would upload cleanly instead of popping RemoteConflict.
+        let diverged = workspace.read_with(&cx, |_workspace, cx| {
+            cx.resources()
+                .edit_sessions
+                .get(id)
+                .expect("edit session survives refresh")
+                .remote_diverged(listed)
+        });
+        assert!(
+            !diverged,
+            "adopted baseline must not diverge from the listing (no false conflict)"
+        );
+    }
+
+    #[gpui::test]
+    fn refresh_preserves_baseline_when_remote_genuinely_changed(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        let scope = connect_and_land_on_root(&workspace, &mut cx, &channels);
+        let baseline = RemoteSnapshot {
+            size: Some(20),
+            modified_at: Some(Timestamp::from_secs_since_epoch(1_000)),
+        };
+        let id = seed_editing_session_on_tab1(&workspace, &mut cx, baseline);
+
+        // The server lists the file at a DIFFERENT whole second — someone else
+        // changed it. This must NOT be silently adopted.
+        let changed = RemoteSnapshot {
+            size: Some(20),
+            modified_at: Some(Timestamp::from_secs_since_epoch(2_000)),
+        };
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                remote_dir_loaded_with_doc(scope, changed.size, changed.modified_at),
+                window,
+                cx,
+            );
+        });
+
+        let after = session_snapshot(&workspace, &cx, id);
+        assert_eq!(
+            after, baseline,
+            "a genuine remote change must not be adopted as the new baseline"
+        );
+        // The watcher's divergence check (baseline != current listing) still
+        // fires, so the RemoteConflict path remains reachable.
+        assert_ne!(
+            after, changed,
+            "the preserved baseline still diverges from the changed listing"
+        );
+        let diverged = workspace.read_with(&cx, |_workspace, cx| {
+            cx.resources()
+                .edit_sessions
+                .get(id)
+                .expect("edit session survives refresh")
+                .remote_diverged(changed)
+        });
+        assert!(
+            diverged,
+            "a genuine remote change must remain detectable as divergence"
+        );
+    }
+
+    #[gpui::test]
+    fn refresh_preserves_baseline_when_size_changed_at_same_second(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        let scope = connect_and_land_on_root(&workspace, &mut cx, &channels);
+        let baseline = RemoteSnapshot {
+            size: Some(20),
+            modified_at: Some(Timestamp::from_secs_since_epoch(1_000)),
+        };
+        let id = seed_editing_session_on_tab1(&workspace, &mut cx, baseline);
+
+        // Same whole second, DIFFERENT size → a real change, not mtime noise.
+        let bigger = RemoteSnapshot {
+            size: Some(21),
+            modified_at: Some(Timestamp::from_secs_since_epoch(1_000)),
+        };
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                remote_dir_loaded_with_doc(scope, bigger.size, bigger.modified_at),
+                window,
+                cx,
+            );
+        });
+
+        let after = session_snapshot(&workspace, &cx, id);
+        assert_eq!(
+            after, baseline,
+            "a size change at the same second must not be adopted"
+        );
+    }
+
     #[gpui::test]
     fn navigate_back_restores_previous_local_path(cx: &mut TestAppContext) {
         let (workspace, mut cx, _channels) = init_workspace(cx);

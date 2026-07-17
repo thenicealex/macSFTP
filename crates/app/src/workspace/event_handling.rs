@@ -1,5 +1,8 @@
 use gpui::{Context, UniformListScrollHandle, Window};
-use macsftp_core::{AppEvent, ErrorCode, ModalRequest, UserFacingError, sort_entries};
+use macsftp_core::{
+    AppEvent, EditSessionId, ErrorCode, ModalRequest, RemotePath, RemoteSnapshot, TabId,
+    UserFacingError, sort_entries,
+};
 
 use tracing::{debug, warn};
 
@@ -177,8 +180,15 @@ impl crate::workspace::Workspace {
                 }
             }
             AppEvent::RemoteDirLoaded(scoped) => {
+                let tab_id = scoped.scope.tab_id;
                 let mut entries = scoped.payload.entries;
-                if let Some(tab) = self.state.tabs.find_tab_mut(scoped.scope.tab_id)
+                // The (path, snapshot) pairs of the freshly-applied listing,
+                // captured while we hold the tab so active edit sessions can be
+                // re-synced after that borrow is dropped. `None` when the
+                // listing is obsolete (a newer navigation superseded it) and
+                // therefore was not applied — no re-sync in that case.
+                let mut applied_listing: Option<Vec<(RemotePath, RemoteSnapshot)>> = None;
+                if let Some(tab) = self.state.tabs.find_tab_mut(tab_id)
                     // A later navigation request can be queued while an
                     // earlier listing is still in flight. Keep the newer
                     // path and ignore the obsolete result.
@@ -190,6 +200,24 @@ impl crate::workspace::Workspace {
                     tab.remote.error = None;
                     tab.selection.selected_paths.clear();
                     self.remote_scroll = UniformListScrollHandle::new();
+                    applied_listing = Some(
+                        tab.remote
+                            .entries
+                            .iter()
+                            .map(|entry| {
+                                (
+                                    entry.path.clone(),
+                                    RemoteSnapshot {
+                                        size: entry.size,
+                                        modified_at: entry.modified_at,
+                                    },
+                                )
+                            })
+                            .collect(),
+                    );
+                }
+                if let Some(listing) = applied_listing {
+                    Self::resync_edit_baselines_on_refresh(tab_id, &listing, cx);
                 }
             }
             AppEvent::RemoteOperationFailed(scoped) => {
@@ -260,5 +288,55 @@ impl crate::workspace::Workspace {
             _ => {}
         }
         cx.notify();
+    }
+
+    /// Re-sync active-edit baselines against a just-loaded directory listing.
+    ///
+    /// A directory refresh replaces the tab's listing with the server's
+    /// ground-truth `(size, mtime)`. The edit watcher detects "someone changed
+    /// the remote underneath me" by comparing each session's stored
+    /// `remote_snapshot` against that listing, so the two must not drift apart
+    /// when nobody touched the remote. They otherwise do: an upload-back rebases
+    /// the snapshot from the LOCAL temp file's mtime, and even after truncating
+    /// to whole seconds (Part A) a later refresh re-reads the server's own
+    /// mtime — usually identical, but this normalization makes the two byte-for-
+    /// byte equal so no residual noise survives.
+    ///
+    /// The adoption rule is deliberately narrow to preserve real-conflict
+    /// detection: for each `Editing` session whose file is in the listing, adopt
+    /// the listing entry's exact `(size, mtime)` as the new baseline ONLY when
+    /// it agrees with the current baseline at whole-second granularity (same
+    /// size, same whole-second mtime). If they differ at that granularity, the
+    /// remote genuinely changed since we last synced — that is the signal the
+    /// watcher/conflict UI must surface, so we leave the baseline untouched.
+    /// `RemoteConflict` sessions are excluded entirely (see
+    /// [`macsftp_core::EditSessionStore::editing_sessions_for_tab`]) so an
+    /// already-surfaced conflict is never masked by a refresh.
+    fn resync_edit_baselines_on_refresh(
+        tab_id: TabId,
+        listing: &[(RemotePath, RemoteSnapshot)],
+        cx: &mut Context<Self>,
+    ) {
+        // Decide adoptions under an immutable borrow, then apply them, so the
+        // resource borrow does not overlap the mutable one below.
+        let adoptions: Vec<(EditSessionId, RemoteSnapshot)> = cx
+            .resources()
+            .edit_sessions
+            .editing_sessions_for_tab(tab_id)
+            .filter_map(|session| {
+                let (_, listed) = listing
+                    .iter()
+                    .find(|(path, _)| path == &session.remote_path)?;
+                session
+                    .remote_snapshot
+                    .agrees_at_second_granularity(*listed)
+                    .then_some((session.id, *listed))
+            })
+            .collect();
+        for (id, snapshot) in adoptions {
+            if let Some(session) = cx.resources_mut().edit_sessions.get_mut(id) {
+                session.remote_snapshot = snapshot;
+            }
+        }
     }
 }

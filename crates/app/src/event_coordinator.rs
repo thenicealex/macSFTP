@@ -117,9 +117,10 @@ fn dispatch_event(event: AppEvent, cx: &mut App) {
 /// - `UploadingBack` (the watcher's save-back, correlated by the job's local
 ///   *source*): success rebases `remote_snapshot` to the just-uploaded file's
 ///   own `(size, mtime)` — an honest zero-round-trip approximation of the new
-///   remote, corrected on the next directory refresh — and returns to
-///   [`EditPhase::Editing`]; failure also returns to `Editing`, keeping the
-///   temp file so the user can save again to retry.
+///   remote, with the mtime truncated to whole seconds so a later directory
+///   refresh (which carries the server's whole-second mtime) agrees with it —
+///   and returns to [`EditPhase::Editing`]; failure also returns to `Editing`,
+///   keeping the temp file so the user can save again to retry.
 ///
 /// Non-terminal events, other phases, and transfers unrelated to any edit are
 /// ignored. Runs process-wide, mirroring the transfer reducer, because edit
@@ -242,15 +243,21 @@ fn advance_uploading_back(
 ) {
     // On success the remote now holds our local bytes; take the local file's
     // own (size, mtime) as the new remote baseline. It is an approximation
-    // (the server may stamp a different mtime) but a self-consistent one, and
-    // the next directory refresh corrects it. On failure we leave the baseline
-    // untouched.
+    // (the server may stamp a different mtime) but a self-consistent one. The
+    // mtime is TRUNCATED to whole seconds so it matches the granularity the
+    // SFTP server — and therefore a future `RemoteDirLoaded` refresh — reports;
+    // without this, the sub-second component would make an untouched remote
+    // look changed after the next refresh and flag a spurious conflict. On
+    // failure we leave the baseline untouched.
     let refreshed = succeeded
         .then(|| std::fs::metadata(temp_path.as_str()).ok())
         .flatten()
-        .map(|meta| RemoteSnapshot {
-            size: Some(meta.len()),
-            modified_at: meta.modified().ok().map(Timestamp::from_system_time),
+        .map(|meta| {
+            RemoteSnapshot {
+                size: Some(meta.len()),
+                modified_at: meta.modified().ok().map(Timestamp::from_system_time),
+            }
+            .truncated_to_secs()
         });
     if let Some(session) = cx.resources_mut().edit_sessions.get_mut(session_id) {
         session.phase = EditPhase::Editing;
@@ -691,6 +698,69 @@ mod tests {
             0,
             "upload-back must not reopen the editor"
         );
+    }
+
+    #[gpui::test]
+    fn upload_back_truncates_rebased_snapshot_mtime_to_whole_seconds(cx: &mut TestAppContext) {
+        install_test_globals(cx, "upload-trunc");
+        let transfer_id = TransferId(52);
+        let stale = RemoteSnapshot {
+            size: Some(1),
+            modified_at: Some(Timestamp::from_secs_since_epoch(1)),
+        };
+        let window = window_with_stale_remote_entry(cx, stale.size, stale.modified_at);
+        let (session_id, temp_path) = seed_uploading_back_edit(cx, "trunc", transfer_id, stale);
+        // Stamp the temp file with a mtime carrying a sub-second component, so a
+        // naive rebase would store that fractional mtime and later disagree with
+        // the server's whole-second listing.
+        let sub_second = std::time::UNIX_EPOCH
+            + std::time::Duration::from_secs(1_234)
+            + std::time::Duration::from_nanos(837_000_000);
+        std::fs::File::open(temp_path.as_str())
+            .expect("temp file exists")
+            .set_times(std::fs::FileTimes::new().set_modified(sub_second))
+            .expect("stamp sub-second mtime");
+
+        cx.update(|cx| {
+            dispatch_event(AppEvent::TransferCompleted { transfer_id }, cx);
+        });
+
+        cx.read(|cx| {
+            let session = cx
+                .resources()
+                .edit_sessions
+                .get(session_id)
+                .expect("session survives upload completion");
+            let modified = session
+                .remote_snapshot
+                .modified_at
+                .expect("rebased snapshot carries a mtime");
+            // The rebased mtime must equal its own whole-second truncation:
+            // no fractional component survives.
+            assert_eq!(
+                modified,
+                modified.truncated_to_secs(),
+                "rebased snapshot mtime must be truncated to whole seconds"
+            );
+            assert_eq!(
+                modified,
+                Timestamp::from_secs_since_epoch(1_234),
+                "the whole-second part of the local mtime is preserved"
+            );
+        });
+        // The tab's listing entry is rebased to the same truncated value, so a
+        // subsequent refresh with the server's whole-second mtime agrees.
+        cx.read(|cx| {
+            let workspace = window.read(cx).expect("window is open");
+            let synced = workspace
+                .remote_entry_snapshot(TabId(1), &RemotePath::new("/srv/a.txt"))
+                .expect("listing still holds the edited file");
+            assert_eq!(
+                synced.modified_at,
+                Some(Timestamp::from_secs_since_epoch(1_234)),
+                "the listing baseline is also whole-second"
+            );
+        });
     }
 
     #[gpui::test]
