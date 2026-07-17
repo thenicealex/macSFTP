@@ -13,7 +13,9 @@
 use std::time::Duration;
 
 use gpui::{App, Global, Task};
-use macsftp_core::{AppCommand, EditPhase, RemotePath, RemoteSnapshot, TabId, Timestamp};
+use macsftp_core::{
+    AppCommand, EditPhase, EditSessionId, RemotePath, RemoteSnapshot, TabId, Timestamp,
+};
 use tracing::warn;
 
 use crate::event_coordinator::workspace_windows;
@@ -116,7 +118,7 @@ pub(crate) fn poll_edit_sessions(cx: &mut App) {
             session.phase = EditPhase::UploadingBack;
             session.local_mtime = current;
         }
-        dispatch_edit_command(cx, tab_id, command);
+        dispatch_edit_command(cx, id, tab_id, command);
     }
 }
 
@@ -137,9 +139,19 @@ fn current_remote_snapshot(
 }
 
 /// Send `command` through the runtime client of the window that owns `tab_id`.
-/// If the owning window has closed, the command is logged and dropped — the
-/// session's temp file remains, so the user can save again once reconnected.
-fn dispatch_edit_command(cx: &App, tab_id: TabId, command: AppCommand) {
+/// If the owning window has closed, revert the session (`session_id`) from
+/// `UploadingBack` back to `Editing` so it re-enters the watch set and is not
+/// stranded — a stuck `UploadingBack` session would never be polled again and,
+/// via [`find_active`], would permanently block re-editing the file. The temp
+/// file is kept, so the user's next save re-triggers the upload.
+///
+/// [`find_active`]: macsftp_core::EditSessionStore::find_active
+fn dispatch_edit_command(
+    cx: &mut App,
+    session_id: EditSessionId,
+    tab_id: TabId,
+    command: AppCommand,
+) {
     let client = workspace_windows(cx).into_iter().find_map(|window| {
         window
             .read(cx)
@@ -154,7 +166,13 @@ fn dispatch_edit_command(cx: &App, tab_id: TabId, command: AppCommand) {
             }
         }
         None => {
-            warn!(tab_id = ?tab_id, "no window owns the tab for edit upload; command dropped");
+            warn!(
+                tab_id = ?tab_id,
+                "no window owns the tab for edit upload; reverting session to Editing"
+            );
+            if let Some(session) = cx.resources_mut().edit_sessions.get_mut(session_id) {
+                session.phase = EditPhase::Editing;
+            }
         }
     }
 }
@@ -389,6 +407,33 @@ mod tests {
         assert!(
             channels.command_rx.try_recv().is_err(),
             "no upload may be dispatched when the remote diverged"
+        );
+    }
+
+    #[gpui::test]
+    fn poll_reverts_to_editing_when_owning_window_closed(cx: &mut TestAppContext) {
+        install_globals(cx, "no-window");
+        let snapshot = RemoteSnapshot {
+            size: Some(20),
+            modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+        };
+        // No window is opened, so nothing owns the session's tab. A changed
+        // local file drives the session toward UploadingBack, but the dispatch
+        // finds no owning window and must revert the session to Editing rather
+        // than strand it (a stuck UploadingBack would block re-editing forever).
+        let (id, _temp_path) = seed_editing_session(
+            cx,
+            "no-window",
+            snapshot,
+            Some(Timestamp::from_secs_since_epoch(1)),
+        );
+
+        cx.update(poll_edit_sessions);
+
+        assert_eq!(
+            session_phase(cx, id),
+            EditPhase::Editing,
+            "a window-less upload dispatch must revert the session to Editing"
         );
     }
 }

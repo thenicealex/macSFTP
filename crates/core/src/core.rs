@@ -1958,13 +1958,20 @@ pub struct RemoteSnapshot {
     pub modified_at: Option<Timestamp>,
 }
 
+/// The lifecycle phase of a remote-edit session. Every variant is a *live*
+/// (non-terminal) phase: a session is only stored while it is actively being
+/// downloaded, edited, uploaded back, or resolving a remote conflict. A
+/// download that fails has no terminal `Failed` state — the session is removed
+/// outright (see `advance_downloading` in the app), so [`find_active`] can
+/// treat every stored session as re-edit-blocking.
+///
+/// [`find_active`]: EditSessionStore::find_active
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditPhase {
     Downloading,
     Editing,
     UploadingBack,
     RemoteConflict,
-    Failed { error: UserFacingError },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2043,6 +2050,12 @@ impl EditSessionStore {
         self.sessions.iter().find(|s| &s.local_temp_path == path)
     }
 
+    /// Find an active edit session for `(profile_id, remote_path)`, used to
+    /// dedup a re-edit of the same file. Every stored session is in a live
+    /// (non-terminal) [`EditPhase`] — `Downloading`, `Editing`, `UploadingBack`,
+    /// or `RemoteConflict` — because failed downloads are removed rather than
+    /// parked in a terminal phase. So matching on `(profile_id, remote_path)`
+    /// alone never wrongly blocks a re-edit against a dead session.
     pub fn find_active(
         &self,
         profile_id: ProfileId,
@@ -3410,6 +3423,39 @@ mod tests {
                 .find_active(crate::ProfileId(2), &crate::RemotePath::new("/srv/a.txt"))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn store_find_active_matches_live_phases_only() {
+        // Every stored phase is live, so `find_active` must return a session in
+        // any of them (blocking a duplicate edit)...
+        for phase in [
+            crate::EditPhase::Downloading,
+            crate::EditPhase::Editing,
+            crate::EditPhase::UploadingBack,
+            crate::EditPhase::RemoteConflict,
+        ] {
+            let mut store = crate::EditSessionStore::new();
+            let id = store.next_id();
+            let mut s = store_session(id.0, 1, "/srv/a.txt", phase.clone(), None);
+            s.id = id;
+            store.register(s);
+            assert!(
+                store
+                    .find_active(crate::ProfileId(1), &crate::RemotePath::new("/srv/a.txt"))
+                    .is_some(),
+                "a live {phase:?} session must block a re-edit"
+            );
+            // ...and once a (e.g. failed) session is removed, the same file is
+            // free to be edited again.
+            store.remove(id);
+            assert!(
+                store
+                    .find_active(crate::ProfileId(1), &crate::RemotePath::new("/srv/a.txt"))
+                    .is_none(),
+                "removing the session must unblock re-editing (was {phase:?})"
+            );
+        }
     }
 
     #[test]

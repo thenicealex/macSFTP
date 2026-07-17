@@ -112,7 +112,8 @@ fn dispatch_event(event: AppEvent, cx: &mut App) {
 /// - `Downloading` (the initial fetch, correlated by the job's local
 ///   *destination*): success records the downloaded file's mtime as the watch
 ///   baseline, moves the session to [`EditPhase::Editing`], and opens the
-///   editor; failure moves it to [`EditPhase::Failed`] and does not open.
+///   editor; failure removes the session, deletes its temp directory, and
+///   surfaces a status message to the owning window so the user can retry.
 /// - `UploadingBack` (the watcher's save-back, correlated by the job's local
 ///   *source*): success rebases `remote_snapshot` to the just-uploaded file's
 ///   own `(size, mtime)` — an honest zero-round-trip approximation of the new
@@ -168,7 +169,13 @@ fn advance_edit_sessions(event: &AppEvent, cx: &mut App) {
     }
 }
 
-/// Finish an edit download: open the editor on success, mark failed otherwise.
+/// Finish an edit download: open the editor on success. On failure, tear the
+/// session down entirely — remove it from the store, delete its temp directory,
+/// and surface a status message to the window owning its tab — so the user gets
+/// feedback and can retry the edit (a lingering session would silently block
+/// re-editing via [`find_active`]).
+///
+/// [`find_active`]: macsftp_core::EditSessionStore::find_active
 fn advance_downloading(
     session_id: macsftp_core::EditSessionId,
     temp_path: &LocalPath,
@@ -176,14 +183,27 @@ fn advance_downloading(
     cx: &mut App,
 ) {
     if !succeeded {
-        if let Some(session) = cx.resources_mut().edit_sessions.get_mut(session_id) {
-            session.phase = EditPhase::Failed {
-                error: macsftp_core::UserFacingError::new(
-                    macsftp_core::ErrorCode::Unknown,
-                    "Edit download failed",
-                    "The file could not be downloaded for editing.",
-                ),
-            };
+        // Drop the dead session and remember its tab so we can tell that
+        // window's user why the edit did not open.
+        let (tab_id, name) = match cx.resources_mut().edit_sessions.remove(session_id) {
+            Some(session) => (session.tab_id, file_name_of(session.remote_path.as_str())),
+            None => return,
+        };
+        // Clean up the per-session temp directory (`<edits_dir>/<id>/<file>`);
+        // best-effort, so ignore errors (e.g. it was never created).
+        if let Some(parent) = std::path::Path::new(temp_path.as_str()).parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+        // Surface the failure in the owning window's status bar. Edit sessions
+        // are process-global, so the owner is whichever window holds the tab.
+        let message = format!("Could not download {name} for editing");
+        for window in workspace_windows(cx) {
+            let shown = window.update(cx, |workspace, _window, cx| {
+                workspace.set_edit_status(tab_id, message.clone(), cx)
+            });
+            if matches!(shown, Ok(true)) {
+                break;
+            }
         }
         return;
     }
@@ -299,6 +319,17 @@ fn active_workspace_window(cx: &App) -> Option<WindowHandle<Workspace>> {
         .and_then(|window| window.downcast::<Workspace>())
 }
 
+/// The trailing path component of a remote path, for user-facing messages.
+/// Falls back to the whole path when there is no separator.
+fn file_name_of(remote_path: &str) -> String {
+    remote_path
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(remote_path)
+        .to_string()
+}
+
 fn conflict_prompt(conflict: ConflictRequest) -> TransferConflictPrompt {
     TransferConflictPrompt {
         request_id: conflict.id,
@@ -350,11 +381,16 @@ mod tests {
         label: &str,
         transfer_id: TransferId,
     ) -> (macsftp_core::EditSessionId, LocalPath) {
-        let temp_file = std::env::temp_dir().join(format!(
-            "macsftp-edit-{label}-{}-{}.txt",
+        // Mirror production's `<edits_dir>/<session>/<file>` layout: a per-call
+        // session directory holding the temp file. The failure path removes
+        // this directory, so it must NOT be the shared OS temp dir.
+        let session_dir = std::env::temp_dir().join(format!(
+            "macsftp-edit-{label}-{}-{}",
             std::process::id(),
             transfer_id.0
         ));
+        std::fs::create_dir_all(&session_dir).expect("create edit session dir");
+        let temp_file = session_dir.join("a.txt");
         std::fs::write(&temp_file, b"remote contents").expect("write edit temp file");
         let temp_path = LocalPath::new(temp_file.to_string_lossy().as_ref());
 
@@ -528,10 +564,23 @@ mod tests {
     }
 
     #[gpui::test]
-    fn download_failure_moves_edit_session_to_failed(cx: &mut TestAppContext) {
+    fn download_failure_removes_session_and_surfaces_error(cx: &mut TestAppContext) {
         install_test_globals(cx, "edit-failed");
+        // A window owning the session's tab (`TabId(1)`) so the failure status
+        // has somewhere to land.
+        let window = window_with_stale_remote_entry(cx, Some(15), None);
         let transfer_id = TransferId(43);
-        let (session_id, _temp_path) = seed_downloading_edit(cx, "failed", transfer_id);
+        let (session_id, temp_path) = seed_downloading_edit(cx, "failed", transfer_id);
+        // The temp file's parent dir is the per-session directory the fix must
+        // clean up on failure.
+        let session_dir = std::path::Path::new(temp_path.as_str())
+            .parent()
+            .expect("temp file has a parent dir")
+            .to_path_buf();
+        assert!(
+            session_dir.exists(),
+            "session temp dir exists before failure"
+        );
 
         cx.update(|cx| {
             dispatch_event(
@@ -548,15 +597,23 @@ mod tests {
         });
 
         cx.read(|cx| {
-            let session = cx
-                .resources()
-                .edit_sessions
-                .get(session_id)
-                .expect("edit session survives failure");
             assert!(
-                matches!(session.phase, EditPhase::Failed { .. }),
-                "phase becomes Failed, was {:?}",
-                session.phase
+                cx.resources().edit_sessions.get(session_id).is_none(),
+                "a failed download must remove the session, not park it as Failed"
+            );
+        });
+        assert!(
+            !session_dir.exists(),
+            "the session's temp directory must be cleaned up on failure"
+        );
+        cx.read(|cx| {
+            let workspace = window.read(cx).expect("window is open");
+            let status = workspace
+                .status_message_for_test()
+                .expect("failure surfaces a status message");
+            assert!(
+                status.contains("a.txt"),
+                "status names the file, was {status:?}"
             );
         });
         assert_eq!(

@@ -665,6 +665,28 @@ impl Workspace {
         entry.modified_at = snapshot.modified_at;
         true
     }
+    /// Show `message` in this window's status bar, but only if this window owns
+    /// `tab_id`. Returns `true` when it did (so a process-wide caller iterating
+    /// windows can stop after the owning one). Used by the event coordinator to
+    /// surface an edit-session failure, which has no single owning window of its
+    /// own — the owner is the window holding the session's tab.
+    pub(crate) fn set_edit_status(
+        &mut self,
+        tab_id: TabId,
+        message: String,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.owns_tab(tab_id) {
+            return false;
+        }
+        self.status_message = Some(message.into());
+        cx.notify();
+        true
+    }
+    #[cfg(test)]
+    pub(crate) fn status_message_for_test(&self) -> Option<String> {
+        self.status_message.as_ref().map(|s| s.to_string())
+    }
     pub(crate) fn request_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.active_tab() else {
             return;
