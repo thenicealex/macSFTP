@@ -145,7 +145,9 @@ impl Workspace {
             sources: vec![TransferEndpoint::Remote(pending.remote_path)],
             destination: TransferEndpoint::Local(local_temp_path),
             metadata_policy: MetadataPolicy::default(),
-            conflict_policy: ConflictPolicy::default(),
+            // An edit temp is always ours to overwrite; a download must never
+            // prompt the user (see build_edit_upload_command for the rationale).
+            conflict_policy: ConflictPolicy::OverwriteAll,
         });
         if self.send_command(command, cx) {
             self.status_message = Some("Opening for edit…".into());
@@ -399,6 +401,10 @@ pub(crate) fn build_edit_upload_command(
         sources: vec![TransferEndpoint::Local(temp.clone())],
         destination: TransferEndpoint::Remote(remote_path.clone()),
         metadata_policy: MetadataPolicy::default(),
-        conflict_policy: ConflictPolicy::default(),
+        // The edit layer already ran its own (size, mtime) divergence check, or
+        // the user explicitly chose "Overwrite remote". The pipeline-level
+        // existence prompt would be redundant (the origin file always exists),
+        // so overwrite unconditionally rather than emitting a TransferConflict.
+        conflict_policy: ConflictPolicy::OverwriteAll,
     })
 }

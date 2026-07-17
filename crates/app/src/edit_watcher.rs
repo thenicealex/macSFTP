@@ -163,8 +163,8 @@ fn dispatch_edit_command(cx: &App, tab_id: TabId, command: AppCommand) {
 mod tests {
     use gpui::{TestAppContext, WindowHandle};
     use macsftp_core::{
-        AppCommand, EditPhase, EditSession, EditSessionId, FileKind, LocalPath, ProfileId,
-        RemoteEntry, RemotePath, RemoteSnapshot, RuntimeBridgeConfig, TabId, Timestamp,
+        AppCommand, ConflictPolicy, EditPhase, EditSession, EditSessionId, FileKind, LocalPath,
+        ProfileId, RemoteEntry, RemotePath, RemoteSnapshot, RuntimeBridgeConfig, TabId, Timestamp,
         TransferDirection, TransferEndpoint, WindowSessionId,
     };
     use macsftp_platform::AppPaths;
@@ -322,6 +322,11 @@ mod tests {
             command.destination,
             TransferEndpoint::Remote(RemotePath::new(REMOTE_FILE))
         );
+        // The edit layer runs its own divergence check before uploading, so the
+        // pipeline-level existence prompt (Ask) would be redundant against the
+        // always-present remote origin. Pin OverwriteAll so the save-back stays
+        // silent instead of popping the generic conflict modal.
+        assert_eq!(command.conflict_policy, ConflictPolicy::OverwriteAll);
     }
 
     #[gpui::test]
