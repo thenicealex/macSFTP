@@ -139,7 +139,7 @@ fn cleanup_edit_temps(cx: &App) {
 /// files inside them, then recreating it empty. Extracted from
 /// `cleanup_edit_temps` so the real work is unit-testable without constructing
 /// an `App` and its globals. Reuses the same `clear_edits_dir` helper as the
-/// launch-time cleanup, so nested `<edits_dir>/<session-id>/<file>` layouts are
+/// launch-time cleanup, so nested `<edits_dir>/<run-id>/<session-id>/<file>` layouts are
 /// removed wholesale (a flat `remove_file` sweep would silently skip them).
 fn clear_edit_temps_dir(edits_dir: &macsftp_core::LocalPath) {
     if let Err(error) = macsftp_platform::clear_edits_dir(edits_dir) {
@@ -154,6 +154,10 @@ fn main() {
     // when zero windows are open. Registered on the builder (not `App`);
     // the callback runs later, once the globals it reads are set.
     app.on_reopen(|cx: &mut App| {
+        // `on_reopen` only runs with zero windows. Reap any edit sessions left
+        // by an older build or interrupted close callback before a fresh tab
+        // can encounter them through `find_active`.
+        crate::workspace::cleanup_orphaned_edit_sessions(cx);
         if let Err(error) = open_workspace_window(cx, None) {
             error!(error = ?error, "failed to reopen window");
         }
@@ -432,7 +436,7 @@ mod tests {
     #[test]
     fn clear_edit_temps_dir_removes_nested_session_dirs() {
         // Mirror the real on-disk layout: edit temps live in per-session
-        // SUBDIRECTORIES (`<edits_dir>/<session-id>/<file>`), not as flat
+        // SUBDIRECTORIES (`<edits_dir>/<run-id>/<session-id>/<file>`), not as flat
         // files. A `remove_file` sweep would silently skip the subdirs and
         // leave everything behind; this asserts the nested layout is cleared.
         let base =

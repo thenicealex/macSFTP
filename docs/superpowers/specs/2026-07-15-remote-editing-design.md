@@ -271,11 +271,12 @@ pub fn open_in_editor(temp: &LocalPath, editor: Option<&str>) -> std::io::Result
 
 ```
 ~/Library/Application Support/macSFTP/edits/
-    <edit-session-id>/
-        <原始文件名>          ← 保留原名，编辑器标题栏显示正确，后缀关联正确
+    <app-run-id>/
+        <edit-session-id>/
+            <原始文件名>      ← 保留原名，编辑器标题栏显示正确，后缀关联正确
 ```
 
-每会话独立子目录，避免不同远程路径的同名文件冲突（如两个 `config.json`）。
+每次进程运行使用唯一目录，避免外部编辑器在 macSFTP 重启后把新文件误认为上次运行中已打开、后被删除的同一路径文档。每会话独立子目录，避免不同远程路径的同名文件冲突（如两个 `config.json`）。
 
 ## 7. 测试策略
 

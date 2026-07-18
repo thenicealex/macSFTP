@@ -6,6 +6,7 @@ use macsftp_core::{
 };
 use macsftp_ui::{ActiveTheme, format_size, text_button};
 
+use crate::event_coordinator::workspace_windows;
 use crate::resources::ActiveResources;
 use crate::workspace::Workspace;
 use crate::workspace::helpers::connected_transfer_session;
@@ -81,16 +82,29 @@ impl Workspace {
             return;
         };
         let tab_id = tab.id;
-        // 查重：同 profile + 远程路径已有活跃会话 → 复用，不重复下载。
-        if cx
+        // Deduplicate a genuinely live edit, but do not let a session whose
+        // owning tab disappeared with a closed window block this path forever.
+        // Window-close cleanup is the primary lifecycle boundary; this check is
+        // the self-healing guard if that boundary was missed by an older build
+        // or interrupted lifecycle.
+        if let Some(existing_tab_id) = cx
             .resources()
             .edit_sessions
             .find_active(profile_id, &remote_path)
-            .is_some()
+            .map(|session| session.tab_id)
         {
-            self.status_message = Some("This file is already open for editing".into());
-            cx.notify();
-            return;
+            let owner_is_live = self.owns_tab(existing_tab_id)
+                || workspace_windows(cx).into_iter().any(|window| {
+                    window
+                        .read(cx)
+                        .is_ok_and(|workspace| workspace.owns_tab(existing_tab_id))
+                });
+            if owner_is_live {
+                self.status_message = Some("This file is already open for editing".into());
+                cx.notify();
+                return;
+            }
+            cleanup_edit_sessions_for_tab(cx, existing_tab_id);
         }
         let pending = PendingEdit {
             remote_path,
@@ -110,13 +124,19 @@ impl Workspace {
 
     pub(crate) fn start_edit_download(&mut self, pending: PendingEdit, cx: &mut Context<Self>) {
         let edits_dir = cx.resources().app_paths.edits_dir.clone();
+        let edit_run_id = cx.resources().edit_run_id.clone();
         let id = cx.resources_mut().edit_sessions.next_id();
         let file_name = std::path::Path::new(pending.remote_path.as_str())
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "file".to_string());
-        let local_temp_path =
-            LocalPath::new(format!("{}/{}/{}", edits_dir.as_str(), id.0, file_name));
+        let local_temp_path = LocalPath::new(format!(
+            "{}/{}/{}/{}",
+            edits_dir.as_str(),
+            edit_run_id,
+            id.0,
+            file_name
+        ));
         // 建会话目录（忽略已存在）。
         if let Some(parent) = std::path::Path::new(local_temp_path.as_str()).parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -260,7 +280,7 @@ impl Workspace {
                 };
                 cx.resources_mut().edit_sessions.remove(id);
                 // start_edit_download mints a NEW session id (and a new temp
-                // dir), so the discarded session's `<edits>/<old_id>/` directory
+                // dir), so the discarded session's `<edits>/<run>/<old_id>/` directory
                 // would orphan. Delete it now rather than leaking it until quit.
                 if let Some(parent) =
                     std::path::Path::new(session.local_temp_path.as_str()).parent()
@@ -467,8 +487,9 @@ pub(crate) fn cleanup_edit_sessions_for_tab(cx: &mut gpui::App, tab_id: TabId) {
 /// up its own sessions eagerly, but closing a whole window destroys its tabs
 /// without routing each through `close_tab_by_id`; this sweep removes any edit
 /// session whose owning tab is no longer held by *any* surviving window. Called
-/// from the window-closed hook. Enumerating live windows first, then removing
-/// the unmatched sessions, avoids a borrow conflict on `cx`.
+/// from the window-closed hook and again before reopening from zero windows.
+/// Enumerating live windows first, then removing the unmatched sessions,
+/// avoids a borrow conflict on `cx`.
 pub(crate) fn cleanup_orphaned_edit_sessions(cx: &mut gpui::App) {
     let live_tabs: std::collections::HashSet<TabId> =
         crate::event_coordinator::workspace_windows(cx)

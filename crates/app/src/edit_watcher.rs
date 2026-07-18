@@ -105,7 +105,7 @@ pub(crate) fn poll_edit_sessions(cx: &mut App) {
                 .unwrap_or(false);
             if over_limit && let Some(session) = cx.resources_mut().edit_sessions.remove(id) {
                 // Delete the now-orphaned per-session temp directory too, not
-                // just the store entry, so an empty `<edits>/<id>/` is not left
+                // just the store entry, so an empty `<edits>/<run>/<id>/` is not left
                 // behind until quit (symmetric with advance_downloading's
                 // failure cleanup).
                 if let Some(parent) =

@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui::{App, Global};
 use macsftp_core::{
@@ -34,6 +35,11 @@ pub struct AppResources {
     /// launch; the edits directory is cleared in `main()` before this is
     /// built.
     pub edit_sessions: EditSessionStore,
+    /// Per-process namespace for remote-edit temp paths. `EditSessionId`
+    /// restarts at one on every launch, so using it alone would reuse the same
+    /// document URL while an external editor may still remember the previous
+    /// run's deleted file.
+    pub edit_run_id: String,
     /// Monotonic tab-id source, shared across every window so ids never
     /// collide (the runtime keys its session registry by `TabId`). An
     /// injected `Arc<AtomicU64>` rather than a `static`, so each test gets
@@ -86,6 +92,7 @@ impl AppResources {
             residual_temps,
             recents,
             edit_sessions: EditSessionStore::new(),
+            edit_run_id: next_edit_run_id(),
             next_tab_id: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -94,6 +101,16 @@ impl AppResources {
     pub fn next_tab_id(&self) -> TabId {
         TabId(self.next_tab_id.fetch_add(1, Ordering::Relaxed))
     }
+}
+
+fn next_edit_run_id() -> String {
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let launched_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{launched_at}-{sequence}", std::process::id())
 }
 
 fn remove_legacy_transfer_history(path: &LocalPath) {
@@ -264,5 +281,22 @@ mod edit_tests {
         let config = ConfigStore::with_defaults(app_paths.config_file.clone());
         let resources = AppResources::load_for_test(app_paths, config);
         assert_eq!(resources.edit_sessions.editing_sessions().count(), 0);
+    }
+
+    #[test]
+    fn app_resources_use_a_unique_edit_namespace_per_run() {
+        let home =
+            std::env::temp_dir().join(format!("macsftp-res-edit-run-{}", std::process::id()));
+        let app_paths = AppPaths::from_home_dir(home.to_string_lossy().as_ref());
+        let first = AppResources::load_for_test(
+            app_paths.clone(),
+            ConfigStore::with_defaults(app_paths.config_file.clone()),
+        );
+        let second = AppResources::load_for_test(
+            app_paths.clone(),
+            ConfigStore::with_defaults(app_paths.config_file.clone()),
+        );
+
+        assert_ne!(first.edit_run_id, second.edit_run_id);
     }
 }

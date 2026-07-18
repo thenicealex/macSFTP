@@ -213,7 +213,7 @@ fn advance_downloading(
             Some(session) => (session.tab_id, file_name_of(session.remote_path.as_str())),
             None => return,
         };
-        // Clean up the per-session temp directory (`<edits_dir>/<id>/<file>`);
+        // Clean up the per-session temp directory (`<edits_dir>/<run>/<id>/<file>`);
         // best-effort, so ignore errors (e.g. it was never created).
         if let Some(parent) = std::path::Path::new(temp_path.as_str()).parent() {
             let _ = std::fs::remove_dir_all(parent);
@@ -411,7 +411,7 @@ mod tests {
         label: &str,
         transfer_id: TransferId,
     ) -> (macsftp_core::EditSessionId, LocalPath) {
-        // Mirror production's `<edits_dir>/<session>/<file>` layout: a per-call
+        // Mirror production's `<edits_dir>/<run>/<session>/<file>` layout: a per-call
         // session directory holding the temp file. The failure path removes
         // this directory, so it must NOT be the shared OS temp dir.
         let session_dir = std::env::temp_dir().join(format!(

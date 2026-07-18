@@ -1914,8 +1914,11 @@ mod tests {
             link_target: None,
         };
 
-        let edits_dir = workspace.read_with(&cx, |_workspace, cx| {
-            cx.resources().app_paths.edits_dir.as_str().to_string()
+        let (edits_dir, edit_run_id) = workspace.read_with(&cx, |_workspace, cx| {
+            (
+                cx.resources().app_paths.edits_dir.as_str().to_string(),
+                cx.resources().edit_run_id.clone(),
+            )
         });
 
         workspace.update_in(&mut cx, |workspace, _window, cx| {
@@ -1923,7 +1926,7 @@ mod tests {
         });
 
         // A single Downloading session is registered, temp path landing under
-        // <edits_dir>/<session-id>/<filename>.
+        // <edits_dir>/<run-id>/<session-id>/<filename>.
         let expected_temp = workspace.read_with(&cx, |workspace, cx| {
             assert!(
                 workspace.large_edit_confirm.is_none(),
@@ -1936,11 +1939,11 @@ mod tests {
             assert_eq!(session.phase, EditPhase::Downloading);
             assert!(session.active_transfer.is_none());
             assert_eq!(session.remote_path, entry.path);
-            let expected = format!("{}/{}/notes.txt", edits_dir, session.id.0);
+            let expected = format!("{}/{}/{}/notes.txt", edits_dir, edit_run_id, session.id.0);
             assert_eq!(
                 session.local_temp_path.as_str(),
                 expected,
-                "temp path must be <edits_dir>/<id>/<filename>"
+                "temp path must be <edits_dir>/<run-id>/<id>/<filename>"
             );
             expected
         });
@@ -1961,6 +1964,75 @@ mod tests {
         assert_eq!(
             command.destination,
             TransferEndpoint::Local(LocalPath::new(expected_temp))
+        );
+    }
+
+    #[gpui::test]
+    fn edit_reaps_orphaned_existing_session_and_retries(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        connect_and_drain(&workspace, &mut cx, &channels);
+        let remote_path = RemotePath::new("/home/tester/notes.txt");
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+        let stale_dir = std::env::temp_dir().join(format!(
+            "macsftp-stale-edit-{}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&stale_dir).expect("create stale edit directory");
+        let stale_file = stale_dir.join("notes.txt");
+        std::fs::write(&stale_file, b"stale").expect("write stale edit file");
+        let stale_temp = LocalPath::new(stale_file.to_string_lossy().to_string());
+        let stale_id = workspace.update_in(&mut cx, |_workspace, _window, cx| {
+            let id = cx.resources_mut().edit_sessions.next_id();
+            cx.resources_mut().edit_sessions.register(EditSession {
+                id,
+                remote_path: remote_path.clone(),
+                tab_id: TabId(999),
+                session_epoch: 1,
+                profile_id: ProfileId(0),
+                local_temp_path: stale_temp,
+                phase: EditPhase::Editing,
+                remote_snapshot: RemoteSnapshot {
+                    size: Some(5),
+                    modified_at: None,
+                },
+                local_mtime: None,
+                active_transfer: None,
+                missing_ticks: 0,
+            });
+            id
+        });
+
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            workspace.begin_edit(
+                remote_path.clone(),
+                Some(2_048),
+                Some(Timestamp::from_secs_since_epoch(100)),
+                cx,
+            );
+        });
+
+        workspace.read_with(&cx, |_workspace, cx| {
+            assert!(cx.resources().edit_sessions.get(stale_id).is_none());
+            let fresh = cx
+                .resources()
+                .edit_sessions
+                .find_active(ProfileId(0), &remote_path)
+                .expect("orphaned session must be replaced by a fresh download");
+            assert_ne!(fresh.id, stale_id);
+            assert_eq!(fresh.phase, EditPhase::Downloading);
+        });
+        assert!(
+            matches!(
+                channels.command_rx.try_recv(),
+                Ok(AppCommand::StartTransfer(_))
+            ),
+            "re-editing after a stale session must dispatch a fresh download"
+        );
+        assert!(
+            !stale_dir.exists(),
+            "reaping the stale session must remove its temp directory"
         );
     }
 
@@ -4736,7 +4808,7 @@ mod tests {
         cx.dispatch_action(NewTab); // TabId(2)
 
         // A real temp dir on disk so the cleanup has something to remove,
-        // mirroring production's `<edits>/<id>/<file>` layout.
+        // mirroring production's `<edits>/<run>/<id>/<file>` layout.
         let session_dir =
             std::env::temp_dir().join(format!("macsftp-close-tab-{}", std::process::id()));
         std::fs::create_dir_all(&session_dir).expect("create session temp dir");
@@ -4780,6 +4852,50 @@ mod tests {
             "closing a tab must delete its edit session's temp directory"
         );
         std::fs::remove_dir_all(&session_dir).ok();
+    }
+
+    #[gpui::test]
+    fn window_closed_callback_reaps_orphaned_edit_session(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _) = init_workspace(cx);
+        let app = cx.cx.clone();
+        cx.update(|_window, cx| {
+            cx.on_window_closed(crate::workspace::cleanup_orphaned_edit_sessions)
+                .detach();
+        });
+        let session_dir =
+            std::env::temp_dir().join(format!("macsftp-close-window-edit-{}", std::process::id()));
+        std::fs::create_dir_all(&session_dir).expect("create session temp dir");
+        let temp_file = session_dir.join("doc.txt");
+        std::fs::write(&temp_file, b"edited").expect("write temp file");
+        let temp_path = LocalPath::new(temp_file.to_string_lossy().to_string());
+        let id = workspace.update_in(&mut cx, |_workspace, _window, cx| {
+            let id = cx.resources_mut().edit_sessions.next_id();
+            cx.resources_mut().edit_sessions.register(EditSession {
+                id,
+                remote_path: RemotePath::new("/srv/doc.txt"),
+                tab_id: TabId(1),
+                session_epoch: 1,
+                profile_id: ProfileId(1),
+                local_temp_path: temp_path,
+                phase: EditPhase::Editing,
+                remote_snapshot: RemoteSnapshot {
+                    size: Some(6),
+                    modified_at: None,
+                },
+                local_mtime: None,
+                active_transfer: None,
+                missing_ticks: 0,
+            });
+            id
+        });
+
+        workspace.update_in(&mut cx, |_workspace, window, _cx| window.remove_window());
+
+        assert!(
+            app.read(|cx| cx.resources().edit_sessions.get(id).is_none()),
+            "the real window-close callback must remove orphaned edit sessions"
+        );
+        assert!(!session_dir.exists());
     }
 
     #[gpui::test]
