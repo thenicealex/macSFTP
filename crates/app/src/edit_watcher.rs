@@ -352,11 +352,15 @@ mod tests {
         snapshot: RemoteSnapshot,
         local_mtime: Option<Timestamp>,
     ) -> (EditSessionId, LocalPath) {
-        let temp_file = std::env::temp_dir().join(format!(
-            "macsftp-watch-{label}-{}-{}.txt",
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+        let session_dir = std::env::temp_dir().join(format!(
+            "macsftp-watch-{label}-{}-{}",
             std::process::id(),
-            snapshot.size.unwrap_or(0)
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
+        std::fs::create_dir_all(&session_dir).expect("create isolated edit session directory");
+        let temp_file = session_dir.join("edited.txt");
         std::fs::write(&temp_file, b"edited contents").expect("write edit temp file");
         let temp_path = LocalPath::new(temp_file.to_string_lossy().as_ref());
         let id = cx.update(|cx| {
@@ -768,6 +772,15 @@ mod tests {
             modified_at: Some(Timestamp::from_secs_since_epoch(100)),
         };
         let (id, temp_path) = seed_editing_session(cx, "conflict-missing", snapshot, None);
+        let session_dir = std::path::Path::new(temp_path.as_str())
+            .parent()
+            .expect("edit fixture has a session directory")
+            .to_path_buf();
+        assert_ne!(
+            session_dir,
+            std::env::temp_dir(),
+            "edit cleanup must never target the process-wide temporary directory"
+        );
         cx.update(|cx| {
             cx.resources_mut()
                 .edit_sessions
@@ -784,6 +797,14 @@ mod tests {
         assert!(
             cx.read(|cx| cx.resources().edit_sessions.get(id).is_none()),
             "a conflict whose temp file is gone must be reaped"
+        );
+        assert!(
+            !session_dir.exists(),
+            "reaping the session must remove only its isolated directory"
+        );
+        assert!(
+            std::env::temp_dir().exists(),
+            "reaping an edit session must preserve the process-wide temporary directory"
         );
     }
 

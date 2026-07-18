@@ -994,6 +994,8 @@ pub enum AuthMethod {
 实现选型：
 
 - macOS 第一版优先使用 `security-framework` crate 直接访问 Keychain；
+- `security-framework` 只作为 macOS target dependency 编译；Linux CI 只允许显式的
+  memory backend，调用 OS Keychain 必须返回 platform-unavailable，禁止静默降级；
 - secret value 在内存中使用可清零容器，例如 `zeroize`；
 - log 和 error 里只能出现 `SecretRef`，不能出现 secret value；
 - passphrase 默认可记住到 Keychain，但 profile 里必须保存 `remember_passphrase`，用户可关闭。
