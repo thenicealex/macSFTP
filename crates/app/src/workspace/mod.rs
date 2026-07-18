@@ -457,6 +457,13 @@ impl Workspace {
         if self.state.tabs.close_tab(tab_id).is_none() {
             return;
         }
+        if self
+            .large_edit_confirm
+            .as_ref()
+            .is_some_and(|pending| pending.tab_id == tab_id)
+        {
+            self.large_edit_confirm = None;
+        }
         // Tear down any edit sessions on this tab and delete their temp dirs.
         // A closed tab can never advance its edit sessions, and a lingering
         // session would block re-editing the file forever (find_active keys on
@@ -622,6 +629,17 @@ impl Workspace {
     /// watcher to find the window that owns an edit session's tab.
     pub(crate) fn owns_tab(&self, tab_id: TabId) -> bool {
         self.state.tabs.find_tab(tab_id).is_some()
+    }
+    /// Whether the tab's remote listing is authoritative enough for edit
+    /// conflict detection. A connection transition or in-flight directory
+    /// refresh must defer the check instead of turning an empty/stale listing
+    /// into a false conflict.
+    pub(crate) fn tab_remote_is_ready(&self, tab_id: TabId) -> bool {
+        self.state.tabs.find_tab(tab_id).is_some_and(|tab| {
+            matches!(tab.connection, ConnectionState::Connected { .. })
+                && tab.remote.path.is_some()
+                && !tab.remote.is_refreshing
+        })
     }
     /// The ids of every tab this window currently holds. Used after a window
     /// closes to garbage-collect edit sessions whose owning tab no longer

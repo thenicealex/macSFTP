@@ -2007,6 +2007,58 @@ mod tests {
     }
 
     #[gpui::test]
+    fn closing_tab_clears_its_large_edit_confirmation(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        connect_and_drain(&workspace, &mut cx, &channels);
+
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            workspace.begin_edit(
+                RemotePath::new("/home/tester/huge.bin"),
+                Some(200 * 1024 * 1024),
+                Some(Timestamp::from_secs_since_epoch(200)),
+                cx,
+            );
+        });
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.close_tab_by_id(TabId(1), window, cx);
+        });
+
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(
+                workspace.large_edit_confirm.is_none(),
+                "closing the owning tab must dismiss its large-file confirmation"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn closing_another_tab_preserves_large_edit_confirmation(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        connect_and_drain(&workspace, &mut cx, &channels);
+
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            workspace.begin_edit(
+                RemotePath::new("/home/tester/huge.bin"),
+                Some(200 * 1024 * 1024),
+                Some(Timestamp::from_secs_since_epoch(200)),
+                cx,
+            );
+        });
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.open_new_tab(window, cx);
+            workspace.close_tab_by_id(TabId(2), window, cx);
+        });
+
+        workspace.read_with(&cx, |workspace, _| {
+            let pending = workspace
+                .large_edit_confirm
+                .as_ref()
+                .expect("closing another tab must preserve the confirmation");
+            assert_eq!(pending.tab_id, TabId(1));
+        });
+    }
+
+    #[gpui::test]
     fn confirm_large_edit_starts_download(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
         connect_and_drain(&workspace, &mut cx, &channels);

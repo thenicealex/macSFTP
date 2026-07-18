@@ -2,13 +2,13 @@
 //! files and uploads the changes back.
 //!
 //! Mirrors [`crate::event_coordinator::AppEventCoordinator::start`]: a
-//! `cx.spawn` loop wakes every [`POLL_INTERVAL`] and `stat`s each `Editing`
-//! session's temp file. When the local file changed, it compares the file's
-//! most recent remote `(size, mtime)` — read from the tab's existing remote
-//! listing, no extra SFTP round-trip — against the session's baseline. If the
-//! remote is unchanged it uploads the file back (session → `UploadingBack`);
-//! if it diverged it flags a conflict (session → `RemoteConflict`, resolved by
-//! Task 11's modal).
+//! `cx.spawn` loop wakes every [`POLL_INTERVAL`] and `stat`s each `Editing` or
+//! `RemoteConflict` session's temp file. When an editing file changed, it
+//! compares the file's most recent remote `(size, mtime)` — read from the tab's
+//! existing remote listing, no extra SFTP round-trip — against the session's
+//! baseline. If the remote is unchanged it uploads the file back (session →
+//! `UploadingBack`); if it diverged it flags a conflict (session →
+//! `RemoteConflict`, resolved by Task 11's modal).
 
 use std::time::Duration;
 
@@ -51,20 +51,23 @@ impl EditWatcher {
     }
 }
 
-/// One watch tick: for every `Editing` session, detect a local save and either
-/// upload the file back (remote unchanged) or flag a conflict (remote
-/// diverged). Pure app logic with no timer, so tests call it directly.
+/// One watch tick: reap sessions whose temp files are gone, and for every
+/// `Editing` session detect a local save and either upload the file back
+/// (remote unchanged) or flag a conflict (remote diverged). Pure app logic
+/// with no timer, so tests call it directly.
 pub(crate) fn poll_edit_sessions(cx: &mut App) {
-    // Snapshot the editing sessions as owned tuples first, so the immutable
+    // Snapshot the watched sessions as owned tuples first, so the immutable
     // resource borrow is dropped before we touch the filesystem, read windows,
     // or mutate the store below.
     let candidates: Vec<_> = cx
         .resources()
         .edit_sessions
         .editing_sessions()
+        .chain(cx.resources().edit_sessions.conflict_sessions())
         .map(|session| {
             (
                 session.id,
+                session.phase.clone(),
                 session.local_temp_path.clone(),
                 session.remote_path.clone(),
                 session.remote_snapshot,
@@ -76,7 +79,7 @@ pub(crate) fn poll_edit_sessions(cx: &mut App) {
         })
         .collect();
 
-    for (id, temp, remote_path, snapshot, last_mtime, epoch, profile, tab_id) in candidates {
+    for (id, phase, temp, remote_path, snapshot, last_mtime, epoch, profile, tab_id) in candidates {
         let metadata = std::fs::metadata(temp.as_str());
         let current = metadata
             .as_ref()
@@ -110,11 +113,20 @@ pub(crate) fn poll_edit_sessions(cx: &mut App) {
                 {
                     let _ = std::fs::remove_dir_all(parent);
                 }
+                if phase == EditPhase::RemoteConflict {
+                    cx.refresh_windows();
+                }
             }
             continue;
         }
         if let Some(session) = cx.resources_mut().edit_sessions.get_mut(id) {
             session.missing_ticks = 0;
+        }
+        // Conflict sessions only participate in lifecycle cleanup. Their
+        // remote comparison and upload behavior remains exclusively driven by
+        // the user's modal choice.
+        if phase == EditPhase::RemoteConflict {
+            continue;
         }
         let changed = match (last_mtime, current) {
             (Some(last), Some(now)) => now > last,
@@ -126,32 +138,30 @@ pub(crate) fn poll_edit_sessions(cx: &mut App) {
         // The file's current remote (size, mtime), read from the tab's existing
         // directory listing — no extra SFTP round-trip.
         //
-        // Upload back ONLY when the remote is CONFIRMED unchanged: a window owns
-        // the tab AND its listing holds this file at the baseline (size, mtime).
-        // Two distinct "not confirmed" cases are handled differently:
+        // Upload back ONLY when the remote is CONFIRMED unchanged: the owning
+        // tab is connected, its directory listing is fully loaded, and that
+        // listing holds this file at the baseline (size, mtime).
         //
-        // - The tab IS owned but the file is absent or diverged in its listing
+        // - A ready tab whose file is absent or diverged in its listing
         //   → flag a RemoteConflict. Absent means the tab navigated away or the
         //   remote deleted the file: with no proof the remote is unchanged, an
         //   OverwriteAll upload could silently clobber a concurrent remote edit,
-        //   so detect-and-warn instead. A spurious prompt is the safe failure
-        //   mode; silent data loss is not.
-        // - NO window owns the tab (a transient lifecycle race between windows)
-        //   → leave the session in Editing and retry next tick. Flagging a
-        //   conflict here would be pointless: there is no window to render the
-        //   modal, and the tab may reappear momentarily.
-        let tab_owned = tab_is_owned(cx, tab_id);
+        //   so detect-and-warn instead.
+        // - A disconnected, reconnecting, refreshing, or unowned tab has no
+        //   authoritative listing → leave the session and its old local mtime
+        //   untouched so the save is retried once the tab becomes ready.
+        if !tab_remote_is_ready(cx, tab_id) {
+            continue;
+        }
         let remote_now = current_remote_snapshot(cx, tab_id, &remote_path);
         let confirmed_unchanged = remote_now == Some(snapshot);
         if !confirmed_unchanged {
-            if tab_owned && let Some(session) = cx.resources_mut().edit_sessions.get_mut(id) {
+            if let Some(session) = cx.resources_mut().edit_sessions.get_mut(id) {
                 session.phase = EditPhase::RemoteConflict;
                 // Record this mtime so the conflict is not re-flagged next tick.
                 session.local_mtime = current;
                 cx.refresh_windows();
             }
-            // Unowned tab: fall through without mutating — the session stays in
-            // Editing and this save is retried once a window owns the tab again.
             continue;
         }
         // Remote confirmed unchanged → upload the edited file back to its origin.
@@ -184,15 +194,13 @@ fn current_remote_snapshot(
     })
 }
 
-/// Whether any live window currently owns `tab_id`. Distinguishes "the tab is
-/// open but the file left its listing" (a real remote-divergence signal) from
-/// "no window owns the tab" (a transient lifecycle race), which
-/// [`current_remote_snapshot`] alone collapses into the same `None`.
-fn tab_is_owned(cx: &App, tab_id: TabId) -> bool {
+/// Whether a live window owns `tab_id` and its remote listing is authoritative
+/// enough for edit-conflict detection.
+fn tab_remote_is_ready(cx: &App, tab_id: TabId) -> bool {
     workspace_windows(cx).into_iter().any(|window| {
         window
             .read(cx)
-            .is_ok_and(|workspace| workspace.owns_tab(tab_id))
+            .is_ok_and(|workspace| workspace.tab_remote_is_ready(tab_id))
     })
 }
 
@@ -259,9 +267,10 @@ fn revert_stranded_upload(
 mod tests {
     use gpui::{TestAppContext, WindowHandle};
     use macsftp_core::{
-        AppCommand, ConflictPolicy, EditPhase, EditSession, EditSessionId, FileKind, LocalPath,
-        ProfileId, RemoteEntry, RemotePath, RemoteSnapshot, RuntimeBridgeConfig, TabId, Timestamp,
-        TransferDirection, TransferEndpoint, WindowSessionId,
+        AppCommand, ConflictPolicy, ConnectionState, DisconnectReason, EditPhase, EditSession,
+        EditSessionId, FileKind, LocalPath, ProfileId, RemoteEntry, RemotePath, RemoteSnapshot,
+        RuntimeBridgeConfig, SessionId, TabId, Timestamp, TransferDirection, TransferEndpoint,
+        WindowSessionId,
     };
     use macsftp_platform::AppPaths;
     use macsftp_sftp::{BridgeChannels, RuntimeClient};
@@ -315,6 +324,13 @@ mod tests {
         window
             .update(cx, |workspace, _window, _cx| {
                 let tab = workspace.active_tab_mut().expect("window opens with a tab");
+                tab.session_epoch = 1;
+                tab.connection = ConnectionState::Connected {
+                    session_id: SessionId(1),
+                    session_epoch: 1,
+                    connected_at: Timestamp::from_secs_since_epoch(1),
+                };
+                tab.remote.path = Some(RemotePath::new("/srv"));
                 tab.remote.entries = vec![RemoteEntry {
                     name: "a.txt".to_string(),
                     path: RemotePath::new(REMOTE_FILE),
@@ -505,7 +521,18 @@ mod tests {
         let client = RuntimeClient::new(channels.command_tx.clone());
         let _window = cx
             .add_window(|window, cx| Workspace::new(client, WindowSessionId(1), None, window, cx));
-        // The window's tab is TabId(1) with an empty remote listing by default.
+        _window
+            .update(cx, |workspace, _window, _cx| {
+                let tab = workspace.active_tab_mut().expect("window opens with a tab");
+                tab.session_epoch = 1;
+                tab.connection = ConnectionState::Connected {
+                    session_id: SessionId(1),
+                    session_epoch: 1,
+                    connected_at: Timestamp::from_secs_since_epoch(1),
+                };
+                tab.remote.path = Some(RemotePath::new("/srv"));
+            })
+            .expect("mark the empty remote listing ready");
         let (id, _temp_path) = seed_editing_session(
             cx,
             "out-of-listing",
@@ -551,6 +578,77 @@ mod tests {
             session_phase(cx, id),
             EditPhase::Editing,
             "a window-less upload dispatch must revert the session to Editing"
+        );
+    }
+
+    #[gpui::test]
+    fn poll_defers_changed_file_until_disconnected_tab_is_ready(cx: &mut TestAppContext) {
+        install_globals(cx, "disconnected");
+        let snapshot = RemoteSnapshot {
+            size: Some(20),
+            modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+        };
+        let (window, channels) = window_with_remote_entry(cx, snapshot.size, snapshot.modified_at);
+        let baseline = Timestamp::from_secs_since_epoch(1);
+        let (id, _temp_path) = seed_editing_session(cx, "disconnected", snapshot, Some(baseline));
+        window
+            .update(cx, |workspace, _window, _cx| {
+                let tab = workspace.active_tab_mut().expect("active tab");
+                tab.connection = ConnectionState::Disconnected {
+                    reason: DisconnectReason::ConnectionLost,
+                };
+                tab.remote.path = None;
+                tab.remote.entries.clear();
+            })
+            .expect("disconnect tab");
+
+        cx.update(poll_edit_sessions);
+
+        assert_eq!(session_phase(cx, id), EditPhase::Editing);
+        let deferred_mtime = cx.read(|cx| {
+            cx.resources()
+                .edit_sessions
+                .get(id)
+                .expect("session survives disconnect")
+                .local_mtime
+        });
+        assert_eq!(
+            deferred_mtime,
+            Some(baseline),
+            "deferring must preserve the old mtime so reconnect retries the save"
+        );
+        assert!(channels.command_rx.try_recv().is_err());
+
+        window
+            .update(cx, |workspace, _window, _cx| {
+                let tab = workspace.active_tab_mut().expect("active tab");
+                tab.connection = ConnectionState::Connected {
+                    session_id: SessionId(2),
+                    session_epoch: 1,
+                    connected_at: Timestamp::from_secs_since_epoch(2),
+                };
+                tab.remote.path = Some(RemotePath::new("/srv"));
+                tab.remote.entries = vec![RemoteEntry {
+                    name: "a.txt".to_string(),
+                    path: RemotePath::new(REMOTE_FILE),
+                    kind: FileKind::File,
+                    size: snapshot.size,
+                    permissions: Some(0o644),
+                    modified_at: snapshot.modified_at,
+                    link_target: None,
+                }];
+            })
+            .expect("restore ready remote listing");
+
+        cx.update(poll_edit_sessions);
+
+        assert_eq!(session_phase(cx, id), EditPhase::UploadingBack);
+        assert!(
+            matches!(
+                channels.command_rx.try_recv(),
+                Ok(AppCommand::StartTransfer(_))
+            ),
+            "the deferred save must upload once the tab is ready again"
         );
     }
 
@@ -660,5 +758,64 @@ mod tests {
             cx.read(|cx| cx.resources().edit_sessions.get(id).is_none()),
             "a genuinely deleted temp (LIMIT consecutive misses) must reap the session"
         );
+    }
+
+    #[gpui::test]
+    fn poll_reaps_remote_conflict_after_temp_file_is_deleted(cx: &mut TestAppContext) {
+        install_globals(cx, "conflict-missing");
+        let snapshot = RemoteSnapshot {
+            size: Some(20),
+            modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+        };
+        let (id, temp_path) = seed_editing_session(cx, "conflict-missing", snapshot, None);
+        cx.update(|cx| {
+            cx.resources_mut()
+                .edit_sessions
+                .get_mut(id)
+                .expect("session exists")
+                .phase = EditPhase::RemoteConflict;
+        });
+        std::fs::remove_file(temp_path.as_str()).expect("remove conflict temp file");
+
+        for _ in 0..macsftp_core::EDIT_MISSING_TICKS_LIMIT {
+            cx.update(poll_edit_sessions);
+        }
+
+        assert!(
+            cx.read(|cx| cx.resources().edit_sessions.get(id).is_none()),
+            "a conflict whose temp file is gone must be reaped"
+        );
+    }
+
+    #[gpui::test]
+    fn poll_keeps_present_remote_conflict_unchanged(cx: &mut TestAppContext) {
+        install_globals(cx, "conflict-present");
+        let snapshot = RemoteSnapshot {
+            size: Some(20),
+            modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+        };
+        let baseline = Timestamp::from_secs_since_epoch(1);
+        let (id, _temp_path) =
+            seed_editing_session(cx, "conflict-present", snapshot, Some(baseline));
+        cx.update(|cx| {
+            cx.resources_mut()
+                .edit_sessions
+                .get_mut(id)
+                .expect("session exists")
+                .phase = EditPhase::RemoteConflict;
+        });
+
+        cx.update(poll_edit_sessions);
+
+        let (phase, local_mtime) = cx.read(|cx| {
+            let session = cx
+                .resources()
+                .edit_sessions
+                .get(id)
+                .expect("present conflict survives");
+            (session.phase.clone(), session.local_mtime)
+        });
+        assert_eq!(phase, EditPhase::RemoteConflict);
+        assert_eq!(local_mtime, Some(baseline));
     }
 }

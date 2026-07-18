@@ -243,3 +243,30 @@
 
 **测试计数**: 新增 10 个回归测试(platform 1、core 2、event_coordinator 1、edit_watcher 3、workspace 3)。全工作区测试通过,clippy `-D warnings` 无告警。
 
+---
+
+## 第二阶段分析(2026-07-18)
+
+在合并第一批修复之后，我们开展了第二轮一丝不苟的深度审查，发现了 **3 项全新的高/中严重度逻辑与可用性缺陷**：
+
+### 1. 🟠 High — 断线/重连期间保存触发伪冲突，可能导致用户丢弃改动
+- **位置**: `crates/app/src/edit_watcher.rs:130`
+- **触发**: 用户处于断线或正在重连状态（标签页拥有者尚在，但连接状态非 `Connected`）。此时连接处理层已将 `tab.remote.entries` 清空。用户在编辑器中保存文件。`EditWatcher` 轮询到变更，调用 `current_remote_snapshot` 得到 `None`（因为列表为空）。由于 `tab_owned` 为 `true`，轮询判定「未能确认远程未偏离」，从而错误地将编辑会话置为 `RemoteConflict` 并弹窗显示「远程文件已在别处被修改」。
+- **后果**: 用户看到伪冲突弹窗，极易误判并点击「丢弃本地修改」（导致真实工作丢弃），或点击「覆盖远程」（在断线状态下派发失败/搁浅）。
+- **修复建议**: 引入 `tab_remote_is_ready` 状态守卫。只有当标签页处于 `Connected` 状态且 remote 目录加载完毕、未在刷新时（即 `tab.remote.path.is_some() && !tab.remote.is_refreshing`），才进行偏离校验。否则跳过此次轮询，保持 `Editing` 相位和旧 `local_mtime`，等待重连完毕后自动上传。
+
+### 2. 🟠 High — `RemoteConflict` 状态下临时文件被删无法自动回收
+- **位置**: `crates/app/src/edit_watcher.rs:61`
+- **触发**: 编辑会话处于 `RemoteConflict` 状态（冲突弹窗开启中）。用户在本地编辑器中彻底删除了临时文件（或编辑器通过某些手段抹去了该文件），此时 poll 循环中只有 `editing_sessions` 接受轮询，导致 `RemoteConflict` 阶段的会话永远无法累加 `missing_ticks`，因而无法被回收。
+- **后果**: 冲突 modal 永远挂在 UI 上，即使用户在外部删除了临时文件；`find_active` 永远阻塞针对该文件的下一次编辑；用户点击 Overwrite 也会因为找不到源文件而报错。
+- **修复建议**: 将 poll 候选集合从 `editing_sessions()` 扩展为 `editing_sessions().chain(conflict_sessions())`。在 metadata 读取失败时同样计算 missing_ticks 累加并进行回收。若 stat 成功但会话是 `RemoteConflict`，则直接 `continue`（跳过偏离/回传检查）。
+
+### 3. 🟡 Medium — 关闭标签页时泄漏 `large_edit_confirm` 导致 modal 挂起
+- **位置**: `crates/app/src/workspace/mod.rs:451` (`close_tab_by_id`)
+- **触发**: 用户双击大文件，Modal 弹出提示确认下载（此时 `Workspace.large_edit_confirm = Some(PendingEdit)`）。用户在此状态下直接关闭该 Tab 页。
+- **后果**: `close_tab_by_id` 移除了 Tab，但未清空 `large_edit_confirm`。该大文件确认 modal 依然残留并悬浮在 UI 顶层。用户点击确认会因为找不到 Tab 退出，但 modal 仍永久留存阻塞视线，且泄漏了 PendingEdit 结构体。
+- **修复建议**: 在 `close_tab_by_id` 内，如果 `large_edit_confirm` 的 `tab_id` 匹配要关闭的标签页，则将其置为 `None`。
+
+### 第二阶段修复记录(2026-07-18)
+
+上述 3 项均已修复并加入回归测试：未就绪的远端标签会保留 `Editing` 与旧 `local_mtime`，恢复就绪后重试上传；`RemoteConflict` 会话纳入临时文件生命周期回收；关闭标签只清除属于该标签的 `large_edit_confirm`。`cargo test -p macsftp-app` 与 `bash scripts/check.sh` 通过。
