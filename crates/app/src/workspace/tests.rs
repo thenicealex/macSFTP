@@ -2067,6 +2067,81 @@ mod tests {
     }
 
     #[gpui::test]
+    fn confirm_large_edit_uses_refreshed_epoch_after_reconnect(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        connect_and_drain(&workspace, &mut cx, &channels); // Connected at epoch 1
+
+        let entry = RemoteEntry {
+            name: "huge.bin".to_string(),
+            path: RemotePath::new("/home/tester/huge.bin"),
+            kind: FileKind::File,
+            size: Some(200 * 1024 * 1024),
+            permissions: Some(0o644),
+            modified_at: Some(Timestamp::from_secs_since_epoch(200)),
+            link_target: None,
+        };
+
+        // Arm the large-file confirmation while at epoch 1.
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            workspace.begin_edit(entry.path.clone(), entry.size, entry.modified_at, cx);
+        });
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(workspace.large_edit_confirm.is_some());
+        });
+
+        // While the modal is up, the tab reconnects → epoch bumps to 2. Complete
+        // the handshake so the tab is Connected again (a reconnect in flight
+        // would correctly defer the edit; here we test the refreshed-epoch
+        // dispatch once reconnected).
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
+        });
+        let _ = channels.command_rx.try_recv();
+        let reconnect_scope = RemoteEventScope::new(TabId(1), SessionId(2), 2);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                AppEvent::TabConnected(RemoteScoped::new(
+                    reconnect_scope,
+                    TabConnected {
+                        remote_root: RemotePath::new(TEST_REMOTE_ROOT),
+                    },
+                )),
+                window,
+                cx,
+            );
+        });
+        while channels.command_rx.try_recv().is_ok() {}
+        let live_epoch = workspace.read_with(&cx, |workspace, _| {
+            workspace
+                .state
+                .tabs
+                .find_tab(TabId(1))
+                .expect("tab exists")
+                .session_epoch
+        });
+        assert_eq!(live_epoch, 2, "reconnect must bump the tab epoch");
+
+        // Confirming must dispatch the download with the REFRESHED epoch, not the
+        // stale epoch 1 captured when the modal opened (which the runtime would
+        // silently drop, stranding the session in Downloading).
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.confirm_large_edit(cx);
+        });
+
+        let command = channels
+            .command_rx
+            .try_recv()
+            .expect("confirm_large_edit must enqueue a StartTransfer download");
+        let AppCommand::StartTransfer(command) = command else {
+            panic!("expected StartTransfer for edit download, got {command:?}");
+        };
+        assert_eq!(
+            command.session_epoch, live_epoch,
+            "download must carry the refreshed epoch, not the stale captured one"
+        );
+    }
+
+    #[gpui::test]
     fn request_edit_on_remote_file_starts_edit(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
         connect_and_drain(&workspace, &mut cx, &channels);
@@ -2241,6 +2316,7 @@ mod tests {
                 },
                 local_mtime: None,
                 active_transfer: None,
+                missing_ticks: 0,
             });
             id
         })
@@ -2284,6 +2360,33 @@ mod tests {
         assert_eq!(
             command.destination,
             TransferEndpoint::Remote(remote_path.clone())
+        );
+    }
+
+    #[gpui::test]
+    fn resolve_conflict_double_overwrite_dispatches_once(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+
+        let remote_path = RemotePath::new("/home/tester/edit.txt");
+        let temp_path = LocalPath::new("/tmp/edits/1/edit.txt");
+        let id = register_conflict_session(&workspace, &mut cx, remote_path, temp_path);
+        while channels.command_rx.try_recv().is_ok() {}
+
+        // Two clicks before the modal is torn down. The phase guard must make the
+        // second a no-op (the first moved the session out of RemoteConflict), so
+        // only ONE upload command is dispatched.
+        workspace.update(&mut cx, |workspace, cx| {
+            workspace.resolve_edit_conflict(id, ConflictChoice::Overwrite, cx);
+            workspace.resolve_edit_conflict(id, ConflictChoice::Overwrite, cx);
+        });
+
+        assert!(
+            channels.command_rx.try_recv().is_ok(),
+            "the first overwrite must dispatch an upload"
+        );
+        assert!(
+            channels.command_rx.try_recv().is_err(),
+            "a double-click overwrite must not dispatch a second upload"
         );
     }
 
@@ -2626,6 +2729,7 @@ mod tests {
                 remote_snapshot: snapshot,
                 local_mtime: None,
                 active_transfer: None,
+                missing_ticks: 0,
             });
             id
         })
@@ -4572,6 +4676,58 @@ mod tests {
             assert!(!ws.tab_mru.contains(&TabId(3)));
             assert_eq!(ws.tab_mru.len(), 2);
         });
+    }
+
+    #[gpui::test]
+    fn close_tab_tears_down_its_edit_sessions_and_temp_dir(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _) = init_workspace(cx);
+        cx.dispatch_action(NewTab); // TabId(2)
+
+        // A real temp dir on disk so the cleanup has something to remove,
+        // mirroring production's `<edits>/<id>/<file>` layout.
+        let session_dir =
+            std::env::temp_dir().join(format!("macsftp-close-tab-{}", std::process::id()));
+        std::fs::create_dir_all(&session_dir).expect("create session temp dir");
+        let temp_file = session_dir.join("doc.txt");
+        std::fs::write(&temp_file, b"edited").expect("write temp file");
+        let temp_path = LocalPath::new(temp_file.to_string_lossy().to_string());
+
+        let id = workspace.update_in(&mut cx, |_ws, _window, cx| {
+            let id = cx.resources_mut().edit_sessions.next_id();
+            cx.resources_mut().edit_sessions.register(EditSession {
+                id,
+                remote_path: RemotePath::new("/srv/doc.txt"),
+                tab_id: TabId(2),
+                session_epoch: 1,
+                profile_id: ProfileId(1),
+                local_temp_path: temp_path.clone(),
+                phase: EditPhase::Editing,
+                remote_snapshot: RemoteSnapshot {
+                    size: Some(6),
+                    modified_at: None,
+                },
+                local_mtime: None,
+                active_transfer: None,
+                missing_ticks: 0,
+            });
+            id
+        });
+
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            ws.close_tab_by_id(TabId(2), window, cx);
+        });
+
+        workspace.read_with(&cx, |_ws, cx| {
+            assert!(
+                cx.resources().edit_sessions.get(id).is_none(),
+                "closing a tab must remove its edit sessions so re-edit is not blocked"
+            );
+        });
+        assert!(
+            !session_dir.exists(),
+            "closing a tab must delete its edit session's temp directory"
+        );
+        std::fs::remove_dir_all(&session_dir).ok();
     }
 
     #[gpui::test]

@@ -83,12 +83,38 @@ pub(crate) fn poll_edit_sessions(cx: &mut App) {
             .ok()
             .and_then(|meta| meta.modified().ok())
             .map(Timestamp::from_system_time);
-        // The temp file is gone (session dir wiped, user deleted it) → drop the
-        // session. A readable file whose mtime is merely unavailable is left
-        // alone (treated as unchanged).
+        // A metadata error is NOT proof the file is gone: an editor's atomic
+        // save briefly unlinks-then-renames, leaving a sub-second window where
+        // the path does not resolve; `EINTR` and mount hiccups do the same.
+        // Removing on the first miss would destroy a live session mid-save and
+        // silently drop every later save. Instead count consecutive misses and
+        // only tear the session down after EDIT_MISSING_TICKS_LIMIT of them; a
+        // single successful stat resets the counter.
         if metadata.is_err() {
-            cx.resources_mut().edit_sessions.remove(id);
+            let over_limit = cx
+                .resources_mut()
+                .edit_sessions
+                .get_mut(id)
+                .map(|session| {
+                    session.missing_ticks += 1;
+                    session.missing_ticks >= macsftp_core::EDIT_MISSING_TICKS_LIMIT
+                })
+                .unwrap_or(false);
+            if over_limit && let Some(session) = cx.resources_mut().edit_sessions.remove(id) {
+                // Delete the now-orphaned per-session temp directory too, not
+                // just the store entry, so an empty `<edits>/<id>/` is not left
+                // behind until quit (symmetric with advance_downloading's
+                // failure cleanup).
+                if let Some(parent) =
+                    std::path::Path::new(session.local_temp_path.as_str()).parent()
+                {
+                    let _ = std::fs::remove_dir_all(parent);
+                }
+            }
             continue;
+        }
+        if let Some(session) = cx.resources_mut().edit_sessions.get_mut(id) {
+            session.missing_ticks = 0;
         }
         let changed = match (last_mtime, current) {
             (Some(last), Some(now)) => now > last,
@@ -97,28 +123,48 @@ pub(crate) fn poll_edit_sessions(cx: &mut App) {
         if !changed {
             continue;
         }
-        // The file's current remote (size, mtime) taken from the tab's existing
-        // directory listing — no extra SFTP round-trip. `None` means the file
-        // is not in the current listing, so divergence cannot be determined:
-        // `is_some_and` yields `false` there (matching the brief), so we do NOT
-        // flag a false conflict and fall through to upload.
+        // The file's current remote (size, mtime), read from the tab's existing
+        // directory listing — no extra SFTP round-trip.
+        //
+        // Upload back ONLY when the remote is CONFIRMED unchanged: a window owns
+        // the tab AND its listing holds this file at the baseline (size, mtime).
+        // Two distinct "not confirmed" cases are handled differently:
+        //
+        // - The tab IS owned but the file is absent or diverged in its listing
+        //   → flag a RemoteConflict. Absent means the tab navigated away or the
+        //   remote deleted the file: with no proof the remote is unchanged, an
+        //   OverwriteAll upload could silently clobber a concurrent remote edit,
+        //   so detect-and-warn instead. A spurious prompt is the safe failure
+        //   mode; silent data loss is not.
+        // - NO window owns the tab (a transient lifecycle race between windows)
+        //   → leave the session in Editing and retry next tick. Flagging a
+        //   conflict here would be pointless: there is no window to render the
+        //   modal, and the tab may reappear momentarily.
+        let tab_owned = tab_is_owned(cx, tab_id);
         let remote_now = current_remote_snapshot(cx, tab_id, &remote_path);
-        if remote_now.is_some_and(|now| now != snapshot) {
-            if let Some(session) = cx.resources_mut().edit_sessions.get_mut(id) {
+        let confirmed_unchanged = remote_now == Some(snapshot);
+        if !confirmed_unchanged {
+            if tab_owned && let Some(session) = cx.resources_mut().edit_sessions.get_mut(id) {
                 session.phase = EditPhase::RemoteConflict;
                 // Record this mtime so the conflict is not re-flagged next tick.
                 session.local_mtime = current;
+                cx.refresh_windows();
             }
-            cx.refresh_windows();
+            // Unowned tab: fall through without mutating — the session stays in
+            // Editing and this save is retried once a window owns the tab again.
             continue;
         }
-        // Remote unchanged → upload the edited file back to its origin.
+        // Remote confirmed unchanged → upload the edited file back to its origin.
+        // Capture the pre-save baseline so a failed dispatch can restore it
+        // (below): poll flips local_mtime to `current` before dispatch, so a
+        // revert that only reset the phase would leave the next poll seeing no
+        // change and never retry the upload.
         let command = build_edit_upload_command(&temp, &remote_path, epoch, profile, tab_id);
         if let Some(session) = cx.resources_mut().edit_sessions.get_mut(id) {
             session.phase = EditPhase::UploadingBack;
             session.local_mtime = current;
         }
-        dispatch_edit_command(cx, id, tab_id, command);
+        dispatch_edit_command(cx, id, tab_id, last_mtime, command);
     }
 }
 
@@ -138,18 +184,35 @@ fn current_remote_snapshot(
     })
 }
 
+/// Whether any live window currently owns `tab_id`. Distinguishes "the tab is
+/// open but the file left its listing" (a real remote-divergence signal) from
+/// "no window owns the tab" (a transient lifecycle race), which
+/// [`current_remote_snapshot`] alone collapses into the same `None`.
+fn tab_is_owned(cx: &App, tab_id: TabId) -> bool {
+    workspace_windows(cx).into_iter().any(|window| {
+        window
+            .read(cx)
+            .is_ok_and(|workspace| workspace.owns_tab(tab_id))
+    })
+}
+
 /// Send `command` through the runtime client of the window that owns `tab_id`.
-/// If the owning window has closed, revert the session (`session_id`) from
-/// `UploadingBack` back to `Editing` so it re-enters the watch set and is not
-/// stranded — a stuck `UploadingBack` session would never be polled again and,
-/// via [`find_active`], would permanently block re-editing the file. The temp
-/// file is kept, so the user's next save re-triggers the upload.
+/// On any failure to hand the command off — the owning window has closed, or
+/// the command channel rejects the send (full/closed) — revert the session
+/// (`session_id`) from `UploadingBack` back to `Editing` and restore its
+/// pre-save `local_mtime` (`restore_mtime`) so it re-enters the watch set and
+/// the next save re-triggers the upload. Without both the phase and the mtime
+/// revert the session would strand: a stuck `UploadingBack` is never polled
+/// again and, via [`find_active`], permanently blocks re-editing the file; and
+/// a phase-only revert would leave `local_mtime` at the just-saved value so the
+/// next poll sees no change and never retries. The temp file is kept either way.
 ///
 /// [`find_active`]: macsftp_core::EditSessionStore::find_active
 fn dispatch_edit_command(
     cx: &mut App,
     session_id: EditSessionId,
     tab_id: TabId,
+    restore_mtime: Option<Timestamp>,
     command: AppCommand,
 ) {
     let client = workspace_windows(cx).into_iter().find_map(|window| {
@@ -162,7 +225,11 @@ fn dispatch_edit_command(
     match client {
         Some(client) => {
             if let Err(error) = client.try_send(command) {
-                warn!(error = ?error, "edit upload command could not be dispatched");
+                // The command never entered the channel (full/closed). No
+                // transfer is in flight to advance the session, so revert it —
+                // symmetric with the window-closed branch below.
+                warn!(error = ?error, "edit upload command could not be dispatched; reverting session to Editing");
+                revert_stranded_upload(cx, session_id, restore_mtime);
             }
         }
         None => {
@@ -170,10 +237,21 @@ fn dispatch_edit_command(
                 tab_id = ?tab_id,
                 "no window owns the tab for edit upload; reverting session to Editing"
             );
-            if let Some(session) = cx.resources_mut().edit_sessions.get_mut(session_id) {
-                session.phase = EditPhase::Editing;
-            }
+            revert_stranded_upload(cx, session_id, restore_mtime);
         }
+    }
+}
+
+/// Return an `UploadingBack` session to `Editing` and restore its pre-save
+/// `local_mtime` so the watcher's next tick re-detects the save and retries.
+fn revert_stranded_upload(
+    cx: &mut App,
+    session_id: EditSessionId,
+    restore_mtime: Option<Timestamp>,
+) {
+    if let Some(session) = cx.resources_mut().edit_sessions.get_mut(session_id) {
+        session.phase = EditPhase::Editing;
+        session.local_mtime = restore_mtime;
     }
 }
 
@@ -278,6 +356,7 @@ mod tests {
                 remote_snapshot: snapshot,
                 local_mtime,
                 active_transfer: None,
+                missing_ticks: 0,
             });
             id
         });
@@ -411,6 +490,44 @@ mod tests {
     }
 
     #[gpui::test]
+    fn poll_flags_conflict_when_file_left_the_listing(cx: &mut TestAppContext) {
+        install_globals(cx, "out-of-listing");
+        let snapshot = RemoteSnapshot {
+            size: Some(20),
+            modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+        };
+        // A window owns the tab, but its remote listing does NOT contain the
+        // edited file (the tab navigated to another directory). The remote
+        // (size, mtime) is therefore indeterminate. The watcher must NOT blindly
+        // OverwriteAll — it flags a conflict so a concurrent remote change is not
+        // silently clobbered.
+        let channels = BridgeChannels::new(&RuntimeBridgeConfig::default());
+        let client = RuntimeClient::new(channels.command_tx.clone());
+        let _window = cx
+            .add_window(|window, cx| Workspace::new(client, WindowSessionId(1), None, window, cx));
+        // The window's tab is TabId(1) with an empty remote listing by default.
+        let (id, _temp_path) = seed_editing_session(
+            cx,
+            "out-of-listing",
+            snapshot,
+            Some(Timestamp::from_secs_since_epoch(1)),
+        );
+        while channels.command_rx.try_recv().is_ok() {}
+
+        cx.update(poll_edit_sessions);
+
+        assert_eq!(
+            session_phase(cx, id),
+            EditPhase::RemoteConflict,
+            "a file no longer in the tab's listing must flag a conflict, not blind-overwrite"
+        );
+        assert!(
+            channels.command_rx.try_recv().is_err(),
+            "no upload may be dispatched when remote state is indeterminate"
+        );
+    }
+
+    #[gpui::test]
     fn poll_reverts_to_editing_when_owning_window_closed(cx: &mut TestAppContext) {
         install_globals(cx, "no-window");
         let snapshot = RemoteSnapshot {
@@ -434,6 +551,114 @@ mod tests {
             session_phase(cx, id),
             EditPhase::Editing,
             "a window-less upload dispatch must revert the session to Editing"
+        );
+    }
+
+    #[gpui::test]
+    fn poll_reverts_to_editing_when_command_channel_full(cx: &mut TestAppContext) {
+        install_globals(cx, "chan-full");
+        let snapshot = RemoteSnapshot {
+            size: Some(20),
+            modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+        };
+        // An owning window exists, but its command channel is saturated so
+        // try_send returns ChannelFull. The session must NOT strand in
+        // UploadingBack: it reverts to Editing and its pre-save mtime is
+        // restored so the next poll re-detects the save and retries.
+        let (_window, channels) = window_with_remote_entry(cx, snapshot.size, snapshot.modified_at);
+        let baseline = Timestamp::from_secs_since_epoch(1);
+        let (id, _temp_path) = seed_editing_session(cx, "chan-full", snapshot, Some(baseline));
+        // Fill the bounded command channel to force ChannelFull on dispatch.
+        // The receiver is never drained, so every slot stays occupied.
+        loop {
+            if channels
+                .command_tx
+                .try_send(AppCommand::CloseTab { tab_id: TabId(999) })
+                .is_err()
+            {
+                break;
+            }
+        }
+
+        cx.update(poll_edit_sessions);
+
+        assert_eq!(
+            session_phase(cx, id),
+            EditPhase::Editing,
+            "a channel-full upload dispatch must revert the session to Editing, not strand it"
+        );
+        let restored = cx.read(|cx| {
+            cx.resources()
+                .edit_sessions
+                .get(id)
+                .expect("session survives")
+                .local_mtime
+        });
+        assert_eq!(
+            restored,
+            Some(baseline),
+            "the pre-save mtime must be restored so the next poll retries the upload"
+        );
+    }
+
+    #[gpui::test]
+    fn poll_tolerates_transient_stat_miss_then_reaps_after_limit(cx: &mut TestAppContext) {
+        install_globals(cx, "transient-miss");
+        let snapshot = RemoteSnapshot {
+            size: Some(20),
+            modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+        };
+        let (_window, _channels) =
+            window_with_remote_entry(cx, snapshot.size, snapshot.modified_at);
+        let (id, temp_path) = seed_editing_session(cx, "transient-miss", snapshot, None);
+
+        // Delete the temp file to simulate the window during an editor's atomic
+        // save (unlink-then-rename) where metadata() transiently fails.
+        std::fs::remove_file(temp_path.as_str()).expect("remove temp to force a stat miss");
+
+        // The first LIMIT-1 misses must NOT drop the session: a live edit must
+        // survive a brief unreadable window.
+        for tick in 1..macsftp_core::EDIT_MISSING_TICKS_LIMIT {
+            cx.update(poll_edit_sessions);
+            let missing = cx.read(|cx| {
+                cx.resources()
+                    .edit_sessions
+                    .get(id)
+                    .map(|session| session.missing_ticks)
+            });
+            assert_eq!(
+                missing,
+                Some(tick),
+                "tick {tick}: session must survive a transient miss and count it"
+            );
+        }
+
+        // A successful stat before the limit resets the counter, proving the
+        // session recovers from a transient miss rather than accumulating
+        // forever.
+        std::fs::write(temp_path.as_str(), b"back again").expect("recreate temp file");
+        cx.update(poll_edit_sessions);
+        let after_recovery = cx.read(|cx| {
+            cx.resources()
+                .edit_sessions
+                .get(id)
+                .map(|session| session.missing_ticks)
+        });
+        assert_eq!(
+            after_recovery,
+            Some(0),
+            "a successful stat must reset the miss counter"
+        );
+
+        // Now a sustained absence (LIMIT consecutive misses) must finally reap
+        // the session.
+        std::fs::remove_file(temp_path.as_str()).expect("remove temp again");
+        for _ in 0..macsftp_core::EDIT_MISSING_TICKS_LIMIT {
+            cx.update(poll_edit_sessions);
+        }
+        assert!(
+            cx.read(|cx| cx.resources().edit_sessions.get(id).is_none()),
+            "a genuinely deleted temp (LIMIT consecutive misses) must reap the session"
         );
     }
 }

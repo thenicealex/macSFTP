@@ -135,6 +135,7 @@ impl Workspace {
             },
             local_mtime: None,
             active_transfer: None,
+            missing_ticks: 0,
         };
         cx.resources_mut().edit_sessions.register(session);
         let command = AppCommand::StartTransfer(StartTransferCommand {
@@ -152,14 +153,48 @@ impl Workspace {
         if self.send_command(command, cx) {
             self.status_message = Some("Opening for edit…".into());
             cx.notify();
+        } else {
+            // The command never entered the channel (full/closed). The
+            // Downloading session we just registered has no in-flight transfer
+            // to advance it, so it would strand: never polled (not Editing),
+            // never rendered (not RemoteConflict), never cleaned up — and
+            // find_active would block re-editing this file forever. Roll it back
+            // and delete its temp directory. send_command already set a
+            // "Busy — try again" status.
+            if let Some(session) = cx.resources_mut().edit_sessions.remove(id)
+                && let Some(parent) =
+                    std::path::Path::new(session.local_temp_path.as_str()).parent()
+            {
+                let _ = std::fs::remove_dir_all(parent);
+            }
         }
     }
 
     /// User confirmed the large-file edit warning: proceed with the download.
+    /// The `PendingEdit` was captured when the modal opened; the connection may
+    /// have changed while it was up (a reconnect bumps the tab's epoch, a
+    /// disconnect drops it). Re-validate against the live tab and refresh the
+    /// epoch before downloading, so we never dispatch with a stale epoch (which
+    /// the runtime silently drops, stranding the session in `Downloading`).
     pub(crate) fn confirm_large_edit(&mut self, cx: &mut Context<Self>) {
-        if let Some(pending) = self.large_edit_confirm.take() {
-            self.start_edit_download(pending, cx);
-        }
+        let Some(mut pending) = self.large_edit_confirm.take() else {
+            return;
+        };
+        let Some(tab) = self.state.tabs.find_tab(pending.tab_id) else {
+            // The tab closed while the modal was open; nothing to edit into.
+            self.status_message = Some("Connect before editing".into());
+            cx.notify();
+            return;
+        };
+        let Some((session_epoch, profile_id)) = connected_transfer_session(tab) else {
+            self.status_message = Some("Connect before editing".into());
+            cx.notify();
+            return;
+        };
+        // Adopt the live epoch/profile; the captured ones may predate a reconnect.
+        pending.session_epoch = session_epoch;
+        pending.profile_id = profile_id;
+        self.start_edit_download(pending, cx);
     }
 
     /// User dismissed the large-file edit warning: drop the pending edit.
@@ -180,6 +215,15 @@ impl Workspace {
         let Some(session) = cx.resources().edit_sessions.get(id).cloned() else {
             return;
         };
+        // Only a session actually in RemoteConflict may be resolved. The
+        // conflict modal is rendered from a snapshot, so a double-click (two
+        // clicks before the modal is torn down) can dispatch this twice; the
+        // guard makes the second call a no-op instead of, e.g., firing a second
+        // Overwrite upload. Existence alone is not enough — the first click may
+        // have already moved the session to UploadingBack/Editing.
+        if session.phase != EditPhase::RemoteConflict {
+            return;
+        }
         match choice {
             ConflictChoice::Overwrite => {
                 let command = build_edit_upload_command(
@@ -192,7 +236,16 @@ impl Workspace {
                 if let Some(s) = cx.resources_mut().edit_sessions.get_mut(id) {
                     s.phase = EditPhase::UploadingBack;
                 }
-                self.send_command(command, cx);
+                // If the command never entered the channel, the UploadingBack
+                // session has no in-flight transfer to advance it and would
+                // strand invisibly. Roll back to RemoteConflict so the modal
+                // stays up and the user can retry. send_command already set a
+                // "Busy — try again" status.
+                if !self.send_command(command, cx)
+                    && let Some(s) = cx.resources_mut().edit_sessions.get_mut(id)
+                {
+                    s.phase = EditPhase::RemoteConflict;
+                }
             }
             ConflictChoice::DiscardLocal => {
                 // Re-download the current remote over the local temp; the fresh
@@ -206,6 +259,14 @@ impl Workspace {
                     tab_id: session.tab_id,
                 };
                 cx.resources_mut().edit_sessions.remove(id);
+                // start_edit_download mints a NEW session id (and a new temp
+                // dir), so the discarded session's `<edits>/<old_id>/` directory
+                // would orphan. Delete it now rather than leaking it until quit.
+                if let Some(parent) =
+                    std::path::Path::new(session.local_temp_path.as_str()).parent()
+                {
+                    let _ = std::fs::remove_dir_all(parent);
+                }
                 self.start_edit_download(pending, cx);
             }
             ConflictChoice::Later => {
@@ -381,11 +442,51 @@ impl Workspace {
     }
 }
 
-/// Build the `StartTransfer(Upload)` command that sends an edited temp file
-/// back to its remote origin. Mirrors the inline download command in
-/// [`Workspace::start_edit_download`]; factored out so the edit watcher (and
-/// Task 11's conflict modal) share one construction site rather than
-/// duplicating the struct literal.
+/// Remove every edit session belonging to `tab_id` and delete each one's
+/// on-disk temp directory. Called when a tab or its window closes (and on
+/// disconnect): the session can no longer make progress once its owning tab is
+/// gone, and leaving it registered would strand its temp files and — because
+/// [`find_active`] keys on `(profile_id, remote_path)` regardless of tab —
+/// permanently block re-editing the same file. Best-effort on the filesystem;
+/// a temp dir that was never created is ignored.
+///
+/// Takes `&mut App` (not `Context<Workspace>`) so it can run from both the
+/// tab-close path (where `Context` derefs to `App`) and the window-closed hook.
+///
+/// [`find_active`]: macsftp_core::EditSessionStore::find_active
+pub(crate) fn cleanup_edit_sessions_for_tab(cx: &mut gpui::App, tab_id: TabId) {
+    let removed = cx.resources_mut().edit_sessions.remove_for_tab(tab_id);
+    for session in removed {
+        if let Some(parent) = std::path::Path::new(session.local_temp_path.as_str()).parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+    }
+}
+
+/// Garbage-collect edit sessions orphaned by a window close. A tab-close cleans
+/// up its own sessions eagerly, but closing a whole window destroys its tabs
+/// without routing each through `close_tab_by_id`; this sweep removes any edit
+/// session whose owning tab is no longer held by *any* surviving window. Called
+/// from the window-closed hook. Enumerating live windows first, then removing
+/// the unmatched sessions, avoids a borrow conflict on `cx`.
+pub(crate) fn cleanup_orphaned_edit_sessions(cx: &mut gpui::App) {
+    let live_tabs: std::collections::HashSet<TabId> =
+        crate::event_coordinator::workspace_windows(cx)
+            .into_iter()
+            .filter_map(|window| window.read(cx).ok().map(|workspace| workspace.tab_ids()))
+            .flatten()
+            .collect();
+    let orphaned: Vec<TabId> = cx
+        .resources()
+        .edit_sessions
+        .session_tab_ids()
+        .into_iter()
+        .filter(|tab_id| !live_tabs.contains(tab_id))
+        .collect();
+    for tab_id in orphaned {
+        cleanup_edit_sessions_for_tab(cx, tab_id);
+    }
+}
 pub(crate) fn build_edit_upload_command(
     temp: &LocalPath,
     remote_path: &RemotePath,

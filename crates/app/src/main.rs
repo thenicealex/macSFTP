@@ -233,6 +233,7 @@ fn main() {
         cx.set_global(edit_watcher);
         cx.on_window_closed(|cx| {
             checkpoint_after_window_closed(cx);
+            crate::workspace::cleanup_orphaned_edit_sessions(cx);
             present_orphaned_transfer_conflicts(cx);
         })
         .detach();

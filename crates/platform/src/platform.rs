@@ -260,14 +260,29 @@ pub fn local_fs_error(title: &str, error: &std::io::Error) -> macsftp_core::User
     user_error
 }
 
-/// Construct a command to open a temporary file via macOS `open`. When editor is None,
-/// use the system default associated application; when Some(app), use `open -a <app>`.
+/// Construct a command to open a temporary edit file via macOS `open`.
+///
+/// When editor is `Some(app)`, use `open -a <app>` (the user pinned a specific
+/// application, which forces that handler).
+///
+/// When editor is `None`, use `open -t` to open with the default **text
+/// editor** rather than the file's default associated application. This is a
+/// security boundary, not a preference: a bare `open <file>` dispatches by
+/// content type through LaunchServices, so a remote file named `evil.command`,
+/// `evil.terminal`, `evil.webloc`, or `evil.workflow` would be *executed* (or
+/// navigate to an attacker URL) on a single click rather than edited — and the
+/// download preserves the remote exec bit, so the file is already +x. `-t`
+/// always routes to a text editor and never executes, closing that vector
+/// regardless of the extension or mode. Editing a non-text file this way is a
+/// deliberate tradeoff; a user who needs another app pins one via
+/// `external_editor` (the `Some` branch).
+///
 /// Extracted for unit testing argument wiring without spawning.
 pub fn build_open_command(temp: &LocalPath, editor: Option<&str>) -> std::process::Command {
     let mut cmd = std::process::Command::new("/usr/bin/open");
     match editor {
         None => {
-            cmd.arg(temp.as_str());
+            cmd.args(["-t", temp.as_str()]);
         }
         Some(app) => {
             cmd.args(["-a", app, temp.as_str()]);
@@ -484,14 +499,17 @@ mod tests {
     }
 
     #[test]
-    fn build_open_command_uses_system_default_when_no_editor() {
+    fn build_open_command_uses_text_editor_when_no_editor() {
+        // The None branch must force `-t` (default TEXT editor), never a bare
+        // `open <file>` that would dispatch by content type and EXECUTE a
+        // remote-named .command/.terminal/.webloc/.workflow file.
         let cmd = super::build_open_command(&LocalPath::new("/tmp/edits/1/a.txt"), None);
         assert_eq!(cmd.get_program(), "/usr/bin/open");
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
             .collect();
-        assert_eq!(args, vec!["/tmp/edits/1/a.txt"]);
+        assert_eq!(args, vec!["-t", "/tmp/edits/1/a.txt"]);
     }
 
     #[test]

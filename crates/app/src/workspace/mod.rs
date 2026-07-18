@@ -457,6 +457,11 @@ impl Workspace {
         if self.state.tabs.close_tab(tab_id).is_none() {
             return;
         }
+        // Tear down any edit sessions on this tab and delete their temp dirs.
+        // A closed tab can never advance its edit sessions, and a lingering
+        // session would block re-editing the file forever (find_active keys on
+        // profile+path, not tab).
+        cleanup_edit_sessions_for_tab(cx, tab_id);
         self.tab_mru.retain(|id| *id != tab_id);
         self.tab_nav.remove(&tab_id);
         self.restored_targets.remove(&tab_id);
@@ -618,6 +623,12 @@ impl Workspace {
     pub(crate) fn owns_tab(&self, tab_id: TabId) -> bool {
         self.state.tabs.find_tab(tab_id).is_some()
     }
+    /// The ids of every tab this window currently holds. Used after a window
+    /// closes to garbage-collect edit sessions whose owning tab no longer
+    /// exists in any window.
+    pub(crate) fn tab_ids(&self) -> Vec<TabId> {
+        self.state.tabs.tabs.iter().map(|tab| tab.id).collect()
+    }
     /// The most recent remote `(size, mtime)` for `remote_path` from the tab's
     /// existing directory listing, or `None` when the tab or entry is absent.
     /// This is the zero-round-trip "current remote snapshot" the watcher uses
@@ -750,6 +761,14 @@ impl Workspace {
                 tab.begin_connect(session_id);
             }
         }
+        // A reconnect bumps the tab's epoch. Any edit session preserved across
+        // the disconnect still holds the OLD epoch; refresh it to the new epoch
+        // so its save-back is accepted by the runtime instead of being silently
+        // dropped as stale (which would strand the session in UploadingBack and
+        // block re-editing the file).
+        cx.resources_mut()
+            .edit_sessions
+            .update_epoch_for_tab(tab_id, next_epoch);
         // Keep the credentials for this tab's lifetime so Reconnect
         // works without re-typing. The persisted copy lives in the
         // Keychain (plan §11); this in-memory copy is dropped with the
@@ -1214,3 +1233,5 @@ use connect_form::ConnectForm;
 #[cfg(test)]
 pub(crate) use remote_edit::ConflictChoice;
 pub(crate) use remote_edit::build_edit_upload_command;
+pub(crate) use remote_edit::cleanup_edit_sessions_for_tab;
+pub(crate) use remote_edit::cleanup_orphaned_edit_sessions;

@@ -2011,6 +2011,14 @@ pub enum EditPhase {
     RemoteConflict,
 }
 
+/// Number of *consecutive* watcher ticks on which an edit temp file's metadata
+/// must be unreadable before the session is torn down. The watcher polls once a
+/// second, so this tolerates a few seconds of transient unavailability (atomic
+/// saves, `EINTR`, mount hiccups) while still reaping a session whose file the
+/// user genuinely deleted. One tick is not enough: an editor's rename-over save
+/// leaves a sub-second window in which the path does not resolve.
+pub const EDIT_MISSING_TICKS_LIMIT: u32 = 3;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditSession {
     pub id: EditSessionId,
@@ -2023,6 +2031,12 @@ pub struct EditSession {
     pub remote_snapshot: RemoteSnapshot,
     pub local_mtime: Option<Timestamp>,
     pub active_transfer: Option<TransferId>,
+    /// Consecutive watcher ticks on which the temp file's metadata could not be
+    /// read. A single miss is treated as transient (an editor's atomic save
+    /// briefly unlinks the file, `EINTR`, a mount hiccup) and does not tear the
+    /// session down; only [`EDIT_MISSING_TICKS_LIMIT`] consecutive misses are
+    /// taken as "the file is really gone". Reset to 0 on any successful stat.
+    pub missing_ticks: u32,
 }
 
 impl EditSession {
@@ -2108,6 +2122,39 @@ impl EditSessionStore {
         Some(self.sessions.remove(index))
     }
 
+    /// Remove every edit session belonging to `tab_id`, returning them so the
+    /// caller can delete their on-disk temp directories. Used when a tab or its
+    /// window closes: the session can never make progress once its owning tab is
+    /// gone, and leaving it registered would make [`find_active`] block a future
+    /// re-edit of the same file forever.
+    ///
+    /// [`find_active`]: EditSessionStore::find_active
+    pub fn remove_for_tab(&mut self, tab_id: TabId) -> Vec<EditSession> {
+        let mut removed = Vec::new();
+        let mut index = 0;
+        while index < self.sessions.len() {
+            if self.sessions[index].tab_id == tab_id {
+                removed.push(self.sessions.remove(index));
+            } else {
+                index += 1;
+            }
+        }
+        removed
+    }
+
+    /// Refresh the `session_epoch` of every edit session on `tab_id` to
+    /// `session_epoch`. A session captures the tab's epoch when it is created,
+    /// but a reconnect bumps the tab's epoch; without this the session's
+    /// save-back would carry the stale epoch and the runtime would silently drop
+    /// it (an epoch mismatch is filtered with no terminal event), stranding the
+    /// session in `UploadingBack` forever. Called on every (re)connect after the
+    /// tab's epoch is bumped, so a preserved edit survives a reconnect.
+    pub fn update_epoch_for_tab(&mut self, tab_id: TabId, session_epoch: u64) {
+        for session in self.sessions.iter_mut().filter(|s| s.tab_id == tab_id) {
+            session.session_epoch = session_epoch;
+        }
+    }
+
     pub fn editing_sessions(&self) -> impl Iterator<Item = &EditSession> {
         self.sessions
             .iter()
@@ -2131,6 +2178,19 @@ impl EditSessionStore {
         self.sessions
             .iter()
             .filter(|s| s.phase == EditPhase::RemoteConflict)
+    }
+
+    /// The distinct `tab_id`s across all registered sessions. Used after a
+    /// window closes to find sessions whose owning tab no longer exists in any
+    /// surviving window so they can be torn down.
+    pub fn session_tab_ids(&self) -> Vec<TabId> {
+        let mut ids: Vec<TabId> = Vec::new();
+        for session in &self.sessions {
+            if !ids.contains(&session.tab_id) {
+                ids.push(session.tab_id);
+            }
+        }
+        ids
     }
 }
 
@@ -3360,6 +3420,7 @@ mod tests {
             },
             local_mtime: Some(crate::Timestamp::from_secs_since_epoch(200)),
             active_transfer: None,
+            missing_ticks: 0,
         }
     }
 
@@ -3485,6 +3546,7 @@ mod tests {
             },
             local_mtime: None,
             active_transfer: transfer,
+            missing_ticks: 0,
         }
     }
 
@@ -3602,5 +3664,58 @@ mod tests {
         sb.id = b;
         store.register(sb);
         assert_eq!(store.conflict_sessions().count(), 1);
+    }
+
+    /// Register a session on an explicit tab so tab-scoped store operations can
+    /// be exercised. `store_session` alone always uses `TabId(1)`.
+    fn store_session_on_tab(
+        store: &mut crate::EditSessionStore,
+        tab: u64,
+        path: &str,
+        epoch: u64,
+    ) -> crate::EditSessionId {
+        let id = store.next_id();
+        let mut session = store_session(id.0, 1, path, crate::EditPhase::Editing, None);
+        session.id = id;
+        session.tab_id = crate::TabId(tab);
+        session.session_epoch = epoch;
+        store.register(session);
+        id
+    }
+
+    #[test]
+    fn store_remove_for_tab_removes_only_that_tab_and_returns_them() {
+        let mut store = crate::EditSessionStore::new();
+        let a = store_session_on_tab(&mut store, 1, "/srv/a.txt", 1);
+        let b = store_session_on_tab(&mut store, 1, "/srv/b.txt", 1);
+        let other = store_session_on_tab(&mut store, 2, "/srv/c.txt", 1);
+
+        let removed = store.remove_for_tab(crate::TabId(1));
+
+        let removed_ids: std::collections::HashSet<_> = removed.iter().map(|s| s.id).collect();
+        assert_eq!(removed_ids, std::collections::HashSet::from([a, b]));
+        assert!(store.get(a).is_none(), "tab-1 session a removed");
+        assert!(store.get(b).is_none(), "tab-1 session b removed");
+        assert!(store.get(other).is_some(), "tab-2 session untouched");
+    }
+
+    #[test]
+    fn store_update_epoch_for_tab_refreshes_only_that_tab() {
+        let mut store = crate::EditSessionStore::new();
+        let a = store_session_on_tab(&mut store, 1, "/srv/a.txt", 1);
+        let other = store_session_on_tab(&mut store, 2, "/srv/c.txt", 1);
+
+        store.update_epoch_for_tab(crate::TabId(1), 5);
+
+        assert_eq!(
+            store.get(a).expect("session a survives").session_epoch,
+            5,
+            "tab-1 session epoch refreshed to the reconnect epoch"
+        );
+        assert_eq!(
+            store.get(other).expect("session c survives").session_epoch,
+            1,
+            "tab-2 session epoch left untouched"
+        );
     }
 }

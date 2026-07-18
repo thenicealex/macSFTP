@@ -1,7 +1,7 @@
 use gpui::{App, Global, Task, WindowHandle};
 use macsftp_core::{
     AppEvent, ConflictRequest, EditPhase, LocalPath, RemotePath, RemoteSnapshot, TabId, Timestamp,
-    TransferConflictPrompt, TransferEndpoint,
+    TransferConflictPrompt, TransferDirection, TransferEndpoint,
 };
 use macsftp_sftp::EventReceiver;
 use tracing::warn;
@@ -131,17 +131,19 @@ fn advance_edit_sessions(event: &AppEvent, cx: &mut App) {
         AppEvent::TransferFailed(failure) => (failure.transfer_id, false),
         _ => return,
     };
-    // Correlate to the session by the job's local endpoint: a download lands at
-    // a local *destination*, an upload-back reads from a local *source*. Either
-    // way exactly one side is local. Extract it before mutably borrowing
-    // resources below.
-    let temp_path = match cx.transfers().find_job(transfer_id) {
-        Some(job) => match (&job.source, &job.destination) {
-            (_, TransferEndpoint::Local(path)) => path.clone(),
-            (TransferEndpoint::Local(path), _) => path.clone(),
-            _ => return,
-        },
+    // Capture the job's full shape (direction + both endpoints) before mutably
+    // borrowing resources below. Correlating on the local-path string alone is
+    // not enough: an unrelated transfer whose local endpoint happens to equal an
+    // edit temp path could otherwise drive — or tear down — the edit session.
+    let (direction, source, destination) = match cx.transfers().find_job(transfer_id) {
+        Some(job) => (job.direction, job.source.clone(), job.destination.clone()),
         None => return,
+    };
+    // Exactly one endpoint is local for an edit transfer; that is the temp path.
+    let temp_path = match (&source, &destination) {
+        (_, TransferEndpoint::Local(path)) => path.clone(),
+        (TransferEndpoint::Local(path), _) => path.clone(),
+        _ => return,
     };
     let (session_id, phase, tab_id, remote_path) =
         match cx.resources().edit_sessions.find_by_temp_path(&temp_path) {
@@ -160,6 +162,27 @@ fn advance_edit_sessions(event: &AppEvent, cx: &mut App) {
             }
             _ => return,
         };
+
+    // Verify the job's direction and remote endpoint match what this session's
+    // phase expects. A download lands the remote origin at the local temp
+    // (Remote source → Local destination); an upload-back sends the local temp
+    // to the remote origin (Local source → Remote destination). A transfer that
+    // merely shares the temp path but is the wrong direction or targets a
+    // different remote path is NOT this edit's transfer and must be ignored.
+    let job_matches_phase = match phase {
+        EditPhase::Downloading => {
+            direction == TransferDirection::Download
+                && matches!(&source, TransferEndpoint::Remote(remote) if remote == &remote_path)
+        }
+        EditPhase::UploadingBack => {
+            direction == TransferDirection::Upload
+                && matches!(&destination, TransferEndpoint::Remote(remote) if remote == &remote_path)
+        }
+        _ => false,
+    };
+    if !job_matches_phase {
+        return;
+    }
 
     match phase {
         EditPhase::Downloading => advance_downloading(session_id, &temp_path, succeeded, cx),
@@ -418,6 +441,7 @@ mod tests {
                 },
                 local_mtime: None,
                 active_transfer: Some(transfer_id),
+                missing_ticks: 0,
             };
             cx.resources_mut().edit_sessions.register(session);
             id
@@ -474,6 +498,7 @@ mod tests {
                 remote_snapshot: baseline,
                 local_mtime: Some(now),
                 active_transfer: Some(transfer_id),
+                missing_ticks: 0,
             };
             cx.resources_mut().edit_sessions.register(session);
             id
@@ -567,6 +592,61 @@ mod tests {
             OPENER_CALLS.with(|calls| calls.get()),
             1,
             "editor opened exactly once on success"
+        );
+    }
+
+    #[gpui::test]
+    fn unrelated_transfer_sharing_temp_path_does_not_drive_edit_session(cx: &mut TestAppContext) {
+        install_test_globals(cx, "edit-misattr");
+        // A Downloading edit session for /srv/a.txt whose temp path the unrelated
+        // transfer below will collide with.
+        let edit_transfer = TransferId(60);
+        let (session_id, temp_path) = seed_downloading_edit(cx, "misattr", edit_transfer);
+
+        // A SEPARATE transfer that happens to write to the SAME local temp path
+        // but is an UPLOAD to a DIFFERENT remote — e.g. a stray user transfer
+        // whose destination collided. Its completion must NOT advance the edit
+        // session out of Downloading (which would open the editor before the
+        // real download landed).
+        let now = Timestamp::from_secs_since_epoch(10);
+        let unrelated = TransferId(61);
+        let job = TransferJob {
+            id: unrelated,
+            direction: TransferDirection::Upload,
+            source: TransferEndpoint::Local(temp_path.clone()),
+            destination: TransferEndpoint::Remote(RemotePath::new("/srv/unrelated.txt")),
+            state: TransferState::Queued,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        cx.update(|cx| {
+            dispatch_event(AppEvent::TransferQueued(TransferSnapshot { job }), cx);
+            dispatch_event(
+                AppEvent::TransferCompleted {
+                    transfer_id: unrelated,
+                },
+                cx,
+            );
+        });
+
+        cx.read(|cx| {
+            let session = cx
+                .resources()
+                .edit_sessions
+                .get(session_id)
+                .expect("edit session must survive an unrelated transfer");
+            assert_eq!(
+                session.phase,
+                EditPhase::Downloading,
+                "an unrelated transfer sharing the temp path must not advance the edit session"
+            );
+        });
+        assert_eq!(
+            OPENER_CALLS.with(|calls| calls.get()),
+            0,
+            "the editor must not open for an unrelated transfer"
         );
     }
 
