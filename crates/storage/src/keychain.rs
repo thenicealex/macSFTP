@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use macsftp_core::SecretRef;
+#[cfg(target_os = "macos")]
 use security_framework::passwords::{
     delete_generic_password, get_generic_password, set_generic_password,
 };
@@ -9,10 +10,12 @@ use security_framework::passwords::{
 /// Keychain service name under which every macSFTP credential is stored.
 /// The `account` field of each Keychain item is the `SecretRef` string,
 /// so a given profile secret resolves to exactly one Keychain entry.
+#[cfg(target_os = "macos")]
 const SERVICE: &str = "macsftp";
 
 /// `errSecItemNotFound` — returned by the Security framework when a
 /// generic-password lookup or delete finds no matching entry.
+#[cfg(target_os = "macos")]
 const ERRSEC_ITEM_NOT_FOUND: i32 = -25300;
 
 /// Errors from the credential store. Messages are sanitized — they never
@@ -55,6 +58,7 @@ impl OsKeychain {
 }
 
 impl KeychainBackend for OsKeychain {
+    #[cfg(target_os = "macos")]
     fn store(&self, secret_ref: &SecretRef, secret: &str) -> Result<(), KeychainError> {
         // `set_generic_password` creates or overwrites the entry, so
         // re-saving a profile is idempotent.
@@ -62,6 +66,12 @@ impl KeychainBackend for OsKeychain {
             .map_err(|error| KeychainError::Os(error.to_string()))
     }
 
+    #[cfg(not(target_os = "macos"))]
+    fn store(&self, _secret_ref: &SecretRef, _secret: &str) -> Result<(), KeychainError> {
+        Err(unsupported_platform_error())
+    }
+
+    #[cfg(target_os = "macos")]
     fn load(&self, secret_ref: &SecretRef) -> Result<Option<String>, KeychainError> {
         match get_generic_password(SERVICE, secret_ref.as_str()) {
             Ok(data) => Ok(Some(String::from_utf8_lossy(&data).into_owned())),
@@ -71,6 +81,12 @@ impl KeychainBackend for OsKeychain {
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
+    fn load(&self, _secret_ref: &SecretRef) -> Result<Option<String>, KeychainError> {
+        Err(unsupported_platform_error())
+    }
+
+    #[cfg(target_os = "macos")]
     fn delete(&self, secret_ref: &SecretRef) -> Result<(), KeychainError> {
         match delete_generic_password(SERVICE, secret_ref.as_str()) {
             Ok(()) => Ok(()),
@@ -79,6 +95,16 @@ impl KeychainBackend for OsKeychain {
             Err(error) => Err(KeychainError::Os(error.to_string())),
         }
     }
+
+    #[cfg(not(target_os = "macos"))]
+    fn delete(&self, _secret_ref: &SecretRef) -> Result<(), KeychainError> {
+        Err(unsupported_platform_error())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn unsupported_platform_error() -> KeychainError {
+    KeychainError::Os("macOS Keychain is unavailable on this platform".to_string())
 }
 
 /// In-memory backend for tests. Never touches the OS Keychain, so
@@ -195,6 +221,7 @@ mod tests {
     // Touches the active macOS Keychain and may prompt for access, so it is
     // opt-in. The release gate runs it against an isolated temporary Keychain.
     #[test]
+    #[cfg(target_os = "macos")]
     #[ignore = "touches macOS Keychain; run through scripts/test_keychain.sh"]
     fn os_backend_stores_loads_and_deletes() {
         let store = KeychainStore::new_os();
@@ -214,5 +241,20 @@ mod tests {
 
         store.delete(&secret_ref).expect("delete");
         assert_eq!(store.load(&secret_ref).expect("load after delete"), None);
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn os_backend_rejects_unsupported_platform() {
+        let store = KeychainStore::new_os();
+        let secret_ref = SecretRef::new("keychain:macsftp:test:unsupported");
+
+        let error = store
+            .load(&secret_ref)
+            .expect_err("non-macOS builds must not pretend an OS Keychain exists");
+        assert!(
+            error.to_string().contains("unavailable on this platform"),
+            "unsupported-platform error must be actionable"
+        );
     }
 }
