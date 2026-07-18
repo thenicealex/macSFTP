@@ -1,8 +1,12 @@
+use std::collections::HashSet;
+
 use gpui::{
     AppContext, Context, CursorStyle, DragMoveEvent, Hsla, IntoElement, MouseButton,
     MouseDownEvent, ParentElement, SharedString, Styled, Window, div, prelude::*, px,
 };
-use macsftp_core::{EntryPath, TransferId, TransferJob, TransferState};
+use macsftp_core::{
+    EntryPath, TransferId, TransferJob, TransferPlanState, TransferState, TransferStore,
+};
 use macsftp_ui::{
     ActiveTheme, IconName, connection_status, format_size, icon, section_header_static,
     text_tooltip, transfer_row, transfer_title,
@@ -11,6 +15,40 @@ use macsftp_ui::{
 use crate::palette_commands::labeled_shortcut;
 use crate::resources::ActiveTransfers;
 use crate::workspace::PaneSide;
+
+fn visible_transfer_jobs(store: &TransferStore) -> Vec<&TransferJob> {
+    let mut hidden_job_ids = HashSet::new();
+
+    for plan in &store.plans {
+        let children_are_terminal = !plan.child_jobs.is_empty()
+            && plan.child_jobs.iter().all(|child_id| {
+                store.find_job(*child_id).is_some_and(|job| {
+                    matches!(
+                        job.state,
+                        TransferState::Completed
+                            | TransferState::Skipped
+                            | TransferState::Failed { .. }
+                    )
+                })
+            });
+        let show_root = plan.child_jobs.is_empty()
+            || matches!(plan.state, TransferPlanState::Planning)
+            || matches!(plan.state, TransferPlanState::Cancelled)
+            || (matches!(plan.state, TransferPlanState::Failed { .. }) && !children_are_terminal);
+
+        if show_root {
+            hidden_job_ids.extend(plan.child_jobs.iter().copied());
+        } else {
+            hidden_job_ids.insert(plan.root_job_id);
+        }
+    }
+
+    store
+        .jobs
+        .iter()
+        .filter(|job| !hidden_job_ids.contains(&job.id))
+        .collect()
+}
 
 impl crate::workspace::Workspace {
     pub(crate) fn render_transfer_drawer(
@@ -30,7 +68,10 @@ impl crate::workspace::Workspace {
         let workspace_entity = cx.entity();
         // Cloned (not borrowed) so the shared transfer store isn't held
         // borrowed across the `render_transfer_job(job, cx)` calls below.
-        let jobs = cx.transfers().jobs.clone();
+        let jobs: Vec<_> = visible_transfer_jobs(cx.transfers())
+            .into_iter()
+            .cloned()
+            .collect();
         let jobs = &jobs;
 
         let now = std::time::Instant::now();
@@ -447,8 +488,7 @@ impl crate::workspace::Workspace {
 
         let selected_count = self.focused_selection_count();
 
-        let transfers = cx.transfers();
-        let jobs = &transfers.jobs;
+        let jobs = visible_transfer_jobs(cx.transfers());
         let active_count = jobs
             .iter()
             .filter(|job| {
@@ -543,5 +583,126 @@ impl crate::workspace::Workspace {
                         )
                     }),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use macsftp_core::{
+        ConflictPolicy, ErrorCode, LocalPath, MetadataPolicy, RemotePath, Timestamp,
+        TransferDirection, TransferEndpoint, TransferId, TransferJob, TransferPlan, TransferPlanId,
+        TransferPlanState, TransferState, TransferStore, UserFacingError,
+    };
+
+    use super::visible_transfer_jobs;
+
+    fn job(id: u64, state: TransferState) -> TransferJob {
+        TransferJob {
+            id: TransferId(id),
+            direction: TransferDirection::Upload,
+            source: TransferEndpoint::Local(LocalPath::new("/tmp/file.txt")),
+            destination: TransferEndpoint::Remote(RemotePath::new("/srv/file.txt")),
+            state,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: Timestamp::from_secs_since_epoch(1),
+        }
+    }
+
+    fn store_with_child(
+        plan_state: TransferPlanState,
+        root_state: TransferState,
+        child_state: TransferState,
+    ) -> TransferStore {
+        TransferStore {
+            plans: vec![TransferPlan {
+                id: TransferPlanId(1),
+                root_job_id: TransferId(1),
+                source_root: TransferEndpoint::Local(LocalPath::new("/tmp/file.txt")),
+                destination_root: TransferEndpoint::Remote(RemotePath::new("/srv/file.txt")),
+                state: plan_state,
+                planned_count: 1,
+                total_bytes: Some(10),
+                child_jobs: vec![TransferId(2)],
+                conflict_policy: ConflictPolicy::default(),
+            }],
+            jobs: vec![job(1, root_state), job(2, child_state)],
+            pending_conflicts: Vec::new(),
+        }
+    }
+
+    fn visible_ids(store: &TransferStore) -> Vec<TransferId> {
+        visible_transfer_jobs(store)
+            .into_iter()
+            .map(|job| job.id)
+            .collect()
+    }
+
+    #[test]
+    fn planning_plan_shows_only_root_placeholder() {
+        let store = store_with_child(
+            TransferPlanState::Planning,
+            TransferState::Planning,
+            TransferState::Queued,
+        );
+
+        assert_eq!(visible_ids(&store), vec![TransferId(1)]);
+    }
+
+    #[test]
+    fn planned_single_file_shows_only_executable_child() {
+        let store = store_with_child(
+            TransferPlanState::Queued,
+            TransferState::Queued,
+            TransferState::Queued,
+        );
+
+        assert_eq!(visible_ids(&store), vec![TransferId(2)]);
+    }
+
+    #[test]
+    fn partial_planning_failure_shows_only_root_error() {
+        let error = UserFacingError::new(
+            ErrorCode::Unknown,
+            "Planning failed",
+            "Try the transfer again.",
+        );
+        let store = store_with_child(
+            TransferPlanState::Failed {
+                error: error.clone(),
+            },
+            TransferState::Failed {
+                error,
+                retryable: true,
+            },
+            TransferState::Queued,
+        );
+
+        assert_eq!(visible_ids(&store), vec![TransferId(1)]);
+    }
+
+    #[test]
+    fn execution_failure_shows_only_terminal_child() {
+        let error = UserFacingError::new(
+            ErrorCode::Unknown,
+            "Transfer failed",
+            "Try the transfer again.",
+        );
+        let store = store_with_child(
+            TransferPlanState::Failed {
+                error: error.clone(),
+            },
+            TransferState::Failed {
+                error: error.clone(),
+                retryable: true,
+            },
+            TransferState::Failed {
+                error,
+                retryable: true,
+            },
+        );
+
+        assert_eq!(visible_ids(&store), vec![TransferId(2)]);
     }
 }
