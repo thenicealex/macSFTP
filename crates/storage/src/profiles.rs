@@ -232,7 +232,7 @@ impl ProfileStore {
                 passphrase_ref,
                 ..
             } => {
-                let path_hash = format!("{:x}", Sha256::digest(key_path.as_str().as_bytes()));
+                let path_hash = hex::encode(Sha256::digest(key_path.as_str().as_bytes()));
                 Some(AuthFingerprint::private_key(
                     path_hash,
                     passphrase_ref.clone(),

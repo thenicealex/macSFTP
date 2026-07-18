@@ -3717,11 +3717,12 @@ dependencies = [
 name = "macsftp-storage"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "macsftp-core",
  "security-framework",
  "serde",
  "serde_json",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "zeroize",
 ]
 
