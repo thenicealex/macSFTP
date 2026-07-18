@@ -1,0 +1,19 @@
+[package]
+name = "macsftp-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "macsftp_ui"
+path = "src/ui.rs"
+
+[dependencies]
+gpui = "=0.2.2"
+macsftp-core = { path = "../core" }
+zeroize = "1"
+
+[lints]
+workspace = true

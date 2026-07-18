@@ -1,0 +1,50 @@
+name: Bug report
+description: Report a reproducible macSFTP defect without sensitive data.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include passwords, private keys, host fingerprints, or private paths. Report security issues through SECURITY.md.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the observed and expected behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      placeholder: "1. Open…\n2. Connect…\n3. Observe…"
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Version or commit
+      description: Use the app version or git commit; do not attach configuration files.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Connection or authentication
+        - Host key or known hosts
+        - Local or remote browser
+        - Transfer or conflict handling
+        - Profiles or persistence
+        - User interface
+        - Build or tests
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Paste only logs you have reviewed and redacted. This field is optional.

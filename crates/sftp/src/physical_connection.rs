@@ -1,0 +1,838 @@
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
+
+use macsftp_core::{
+    AppEvent, AuthCredential, AuthFailure, ConnectionSettings, ErrorCode, HostKeyMismatch,
+    HostKeyPrompt, RemoteEventScope, RemoteScoped, TrustDecision, TrustRequestId, UserFacingError,
+};
+use russh::client;
+use russh::keys::{PrivateKeyWithHashAlg, load_secret_key};
+use ssh_key::{Algorithm, EcdsaCurve, HashAlg};
+use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, info, warn};
+
+use crate::known_hosts::{HostKeyCheckResult, KnownHostsStore, fingerprint_sha256, key_algorithm};
+use crate::session_actor::HostTrustConfig;
+use crate::trust::{TrustRegistry, TrustRegistryEntry};
+
+pub fn lock_store(store: &Mutex<KnownHostsStore>) -> MutexGuard<'_, KnownHostsStore> {
+    store
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostKeyRejection {
+    Mismatch,
+    UserRejected,
+    PromptTimeout,
+}
+
+#[derive(Debug, Clone)]
+pub enum ConnectFailure {
+    HostKeyMismatch,
+    TrustRejected,
+    TrustTimeout,
+    AuthFailed(AuthFailure),
+    Connection(UserFacingError),
+}
+
+pub struct ClientHandler {
+    pub host: String,
+    pub port: u16,
+    pub scope: RemoteEventScope,
+    pub trust_request_id: TrustRequestId,
+    pub known_hosts: Arc<Mutex<KnownHostsStore>>,
+    pub trust_config: Arc<HostTrustConfig>,
+    pub trust_registry: Arc<TrustRegistry>,
+    pub event_tx: flume::Sender<AppEvent>,
+    pub rejection: Arc<Mutex<Option<HostKeyRejection>>>,
+    pub connection_lost: CancellationToken,
+}
+
+impl ClientHandler {
+    pub fn record_rejection(&self, rejection: HostKeyRejection) {
+        *self
+            .rejection
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(rejection);
+    }
+}
+
+fn legacy_rsa_host_key_bits(server_key: &russh::keys::PublicKey) -> Option<u32> {
+    server_key
+        .key_data()
+        .rsa()
+        .map(|public_key| public_key.key_size())
+        .filter(|bits| *bits < 2048)
+}
+
+impl client::Handler for ClientHandler {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        server_key: &russh::keys::PublicKey,
+    ) -> Result<bool, Self::Error> {
+        if let Some(rsa_bits) = legacy_rsa_host_key_bits(server_key) {
+            warn!(
+                target: "macsftp_sftp::connection",
+                host = self.host.as_str(),
+                port = self.port,
+                tab_id = self.scope.tab_id.0,
+                session_id = self.scope.session_id.0,
+                session_epoch = self.scope.session_epoch,
+                rsa_bits,
+                "legacy RSA host key accepted; server upgrade recommended"
+            );
+        }
+        let check_result = lock_store(&self.known_hosts).check(&self.host, self.port, server_key);
+
+        match check_result {
+            HostKeyCheckResult::Match => {
+                debug!(
+                    target: "macsftp_sftp::connection",
+                    host = self.host.as_str(),
+                    port = self.port,
+                    tab_id = self.scope.tab_id.0,
+                    session_id = self.scope.session_id.0,
+                    session_epoch = self.scope.session_epoch,
+                    "host key matched known_hosts"
+                );
+                Ok::<bool, russh::Error>(true)
+            }
+            HostKeyCheckResult::Mismatch => {
+                warn!(
+                    target: "macsftp_sftp::connection",
+                    host = self.host.as_str(),
+                    port = self.port,
+                    tab_id = self.scope.tab_id.0,
+                    session_id = self.scope.session_id.0,
+                    session_epoch = self.scope.session_epoch,
+                    "host key MISMATCH — connection blocked (potential MITM)"
+                );
+                let expected =
+                    lock_store(&self.known_hosts).expected_fingerprint(&self.host, self.port);
+                let _ = self
+                    .event_tx
+                    .send_async(AppEvent::HostKeyMismatch(HostKeyMismatch {
+                        tab_id: self.scope.tab_id,
+                        host: self.host.clone(),
+                        port: self.port,
+                        expected_fingerprint_sha256: expected,
+                        actual_fingerprint_sha256: fingerprint_sha256(server_key),
+                    }))
+                    .await;
+                self.record_rejection(HostKeyRejection::Mismatch);
+                Ok::<bool, russh::Error>(false)
+            }
+            HostKeyCheckResult::NotFound => {
+                info!(
+                    target: "macsftp_sftp::connection",
+                    host = self.host.as_str(),
+                    port = self.port,
+                    tab_id = self.scope.tab_id.0,
+                    session_id = self.scope.session_id.0,
+                    session_epoch = self.scope.session_epoch,
+                    algorithm = key_algorithm(server_key).as_str(),
+                    "unknown host key; prompting user to trust"
+                );
+                let (responder, decision_rx) = oneshot::channel();
+                self.trust_registry.register(
+                    self.trust_request_id,
+                    TrustRegistryEntry {
+                        tab_id: self.scope.tab_id,
+                        session_epoch: self.scope.session_epoch,
+                        responder,
+                    },
+                );
+                let _ = self
+                    .event_tx
+                    .send_async(AppEvent::HostKeyUnknown(HostKeyPrompt {
+                        request_id: self.trust_request_id,
+                        tab_id: self.scope.tab_id,
+                        session_id: self.scope.session_id,
+                        session_epoch: self.scope.session_epoch,
+                        host: self.host.clone(),
+                        port: self.port,
+                        algorithm: key_algorithm(server_key),
+                        fingerprint_sha256: fingerprint_sha256(server_key),
+                    }))
+                    .await;
+
+                let decision =
+                    tokio::time::timeout(self.trust_config.trust_prompt_timeout, decision_rx).await;
+                match decision {
+                    Ok(Ok(TrustDecision::TrustAndSave)) => {
+                        let persist_result = lock_store(&self.known_hosts).add_trusted(
+                            &self.host,
+                            self.port,
+                            server_key,
+                            &self.trust_config.app_known_hosts_path,
+                        );
+                        if persist_result.is_err() {
+                            // Trust was granted for this session either way;
+                            // the user will be prompted again next time.
+                            warn!(
+                                target: "macsftp_sftp::connection",
+                                host = self.host.as_str(),
+                                port = self.port,
+                                tab_id = self.scope.tab_id.0,
+                                session_id = self.scope.session_id.0,
+                                session_epoch = self.scope.session_epoch,
+                                "trusted host key could not be persisted; technical detail redacted"
+                            );
+                        }
+                        Ok::<bool, russh::Error>(true)
+                    }
+                    Ok(Ok(_)) | Ok(Err(_)) => {
+                        self.record_rejection(HostKeyRejection::UserRejected);
+                        Ok::<bool, russh::Error>(false)
+                    }
+                    Err(_elapsed) => {
+                        warn!(
+                            target: "macsftp_sftp::connection",
+                            host = self.host.as_str(),
+                            port = self.port,
+                            tab_id = self.scope.tab_id.0,
+                            session_id = self.scope.session_id.0,
+                            session_epoch = self.scope.session_epoch,
+                            "host key trust prompt timed out"
+                        );
+                        // Clean up the registry entry so it can't be
+                        // resolved later.
+                        self.trust_registry
+                            .resolve(self.trust_request_id, TrustDecision::TimedOut);
+                        self.record_rejection(HostKeyRejection::PromptTimeout);
+                        Ok::<bool, russh::Error>(false)
+                    }
+                }
+            }
+        }
+    }
+
+    async fn disconnected(
+        &mut self,
+        reason: client::DisconnectReason<Self::Error>,
+    ) -> Result<(), Self::Error> {
+        self.connection_lost.cancel();
+        match reason {
+            client::DisconnectReason::ReceivedDisconnect(_) => Ok(()),
+            client::DisconnectReason::Error(error) => Err(error),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransportFailureKind {
+    LocalNetworkPermissionDenied,
+    ConnectionRefused,
+    TimedOut,
+    HostKeyAlgorithmUnsupported,
+    ProtocolNegotiationFailed,
+    Other,
+}
+
+impl TransportFailureKind {
+    fn from_russh_error(error: &russh::Error) -> Self {
+        match error {
+            russh::Error::IO(error) => match error.kind() {
+                std::io::ErrorKind::PermissionDenied => Self::LocalNetworkPermissionDenied,
+                std::io::ErrorKind::ConnectionRefused => Self::ConnectionRefused,
+                std::io::ErrorKind::TimedOut => Self::TimedOut,
+                _ => Self::Other,
+            },
+            russh::Error::ConnectionTimeout
+            | russh::Error::KeepaliveTimeout
+            | russh::Error::InactivityTimeout
+            | russh::Error::Elapsed(_) => Self::TimedOut,
+            russh::Error::NoCommonAlgo {
+                kind: russh::AlgorithmKind::Key,
+                ..
+            } => Self::HostKeyAlgorithmUnsupported,
+            russh::Error::KexInit
+            | russh::Error::NoCommonAlgo { .. }
+            | russh::Error::Version
+            | russh::Error::Kex
+            | russh::Error::PacketAuth
+            | russh::Error::WrongServerSig
+            | russh::Error::StrictKeyExchangeViolation { .. } => Self::ProtocolNegotiationFailed,
+            _ => Self::Other,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalNetworkPermissionDenied => "local_network_permission_denied",
+            Self::ConnectionRefused => "connection_refused",
+            Self::TimedOut => "timed_out",
+            Self::HostKeyAlgorithmUnsupported => "host_key_algorithm_unsupported",
+            Self::ProtocolNegotiationFailed => "protocol_negotiation_failed",
+            Self::Other => "network_or_protocol",
+        }
+    }
+}
+
+pub fn connection_error(host: &str, port: u16, error: &russh::Error) -> UserFacingError {
+    let failure = TransportFailureKind::from_russh_error(error);
+    if failure == TransportFailureKind::LocalNetworkPermissionDenied {
+        let mut user_error = UserFacingError::new(
+            ErrorCode::LocalNetworkPermissionDenied,
+            "Local network access required",
+            format!("macSFTP was not allowed to connect to {host}:{port}."),
+        )
+        .with_retryable(true);
+        user_error.detail = Some(
+            "Enable macSFTP in System Settings → Privacy & Security → Local Network, then retry."
+                .to_string(),
+        );
+        return user_error;
+    }
+
+    if failure == TransportFailureKind::HostKeyAlgorithmUnsupported {
+        let mut user_error = UserFacingError::new(
+            ErrorCode::ChannelClosed,
+            "Unsupported SSH host key",
+            format!("{host}:{port} does not offer a host key macSFTP can verify safely."),
+        );
+        user_error.detail = Some(
+            "Ask the server administrator to enable an Ed25519 or ECDSA host key.".to_string(),
+        );
+        return user_error;
+    }
+
+    let mut user_error = UserFacingError::new(
+        ErrorCode::ChannelClosed,
+        "Connection failed",
+        format!("Could not connect to {host}:{port}."),
+    )
+    .with_retryable(true);
+    // Third-party technical text is deliberately not copied into UI state
+    // because it is not a trustworthy redaction boundary.
+    user_error.detail =
+        Some("Check the server address, network connection, and SSH configuration.".to_string());
+    user_error
+}
+
+fn client_config() -> client::Config {
+    let mut config = client::Config {
+        keepalive_interval: Some(Duration::from_secs(15)),
+        keepalive_max: 3,
+        ..client::Config::default()
+    };
+    // The local russh patch verifies RSA-SHA2 host signatures with AWS-LC.
+    // Legacy SHA-1 `ssh-rsa` remains excluded, as does RSA private-key auth.
+    config.preferred.key = vec![
+        Algorithm::Ed25519,
+        Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP256,
+        },
+        Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP384,
+        },
+        Algorithm::Ecdsa {
+            curve: EcdsaCurve::NistP521,
+        },
+        Algorithm::Rsa {
+            hash: Some(HashAlg::Sha512),
+        },
+        Algorithm::Rsa {
+            hash: Some(HashAlg::Sha256),
+        },
+    ]
+    .into();
+    config
+}
+
+pub fn sftp_connection_error(
+    title: &'static str,
+    message: &'static str,
+    _error: &dyn std::fmt::Display,
+) -> UserFacingError {
+    UserFacingError::new(ErrorCode::ChannelClosed, title, message).with_retryable(true)
+}
+
+fn validate_private_key_algorithm(algorithm: Algorithm) -> Result<(), UserFacingError> {
+    if matches!(algorithm, Algorithm::Rsa { .. }) {
+        return Err(UserFacingError::new(
+            ErrorCode::AuthFailed,
+            "RSA private keys are disabled",
+            "Use an Ed25519 or ECDSA private key. RSA signing is disabled until its dependency provides a constant-time implementation.",
+        ));
+    }
+    Ok(())
+}
+
+async fn authenticate(
+    handle: &mut client::Handle<ClientHandler>,
+    settings: &ConnectionSettings,
+    scope: &RemoteEventScope,
+    event_tx: &flume::Sender<AppEvent>,
+) -> Result<(), ConnectFailure> {
+    let method = match &settings.auth {
+        AuthCredential::Password { .. } => "password",
+        AuthCredential::PrivateKey { .. } => "private_key",
+    };
+    info!(
+        target: "macsftp_sftp::connection",
+        host = settings.host.as_str(),
+        port = settings.port,
+        username = settings.username.as_str(),
+        tab_id = scope.tab_id.0,
+        session_id = scope.session_id.0,
+        session_epoch = scope.session_epoch,
+        method,
+        "authentication started"
+    );
+
+    let auth_result = match &settings.auth {
+        AuthCredential::Password { password } => handle
+            .authenticate_password(settings.username.clone(), password.clone())
+            .await
+            .map_err(|error| {
+                ConnectFailure::Connection(connection_error(&settings.host, settings.port, &error))
+            })?,
+        AuthCredential::PrivateKey {
+            key_path,
+            passphrase,
+        } => {
+            // Surface key-load failures as an `AuthFailed` event, mirroring
+            // the `AuthResult::Failure` branch below so the UI always sees a
+            // single, consistent auth-failure signal regardless of *where*
+            // the authentication step failed.
+            let key = match load_secret_key(key_path, passphrase.as_deref()) {
+                Ok(key) => key,
+                Err(_) => {
+                    let key_file = private_key_file_name(key_path);
+                    warn!(
+                        key_file,
+                        "private key could not be read or decrypted; technical detail redacted"
+                    );
+                    let reason = UserFacingError::new(
+                        ErrorCode::AuthFailed,
+                        "Could not load private key",
+                        "The selected private key could not be read or decrypted.",
+                    );
+                    let _ = event_tx
+                        .send_async(AppEvent::AuthFailed(RemoteScoped::new(
+                            scope.clone(),
+                            AuthFailure {
+                                reason: reason.clone(),
+                            },
+                        )))
+                        .await;
+                    return Err(ConnectFailure::AuthFailed(AuthFailure { reason }));
+                }
+            };
+            if let Err(reason) = validate_private_key_algorithm(key.algorithm()) {
+                let key_file = private_key_file_name(key_path);
+                warn!(
+                    key_file,
+                    "RSA private key authentication blocked by security policy"
+                );
+                let _ = event_tx
+                    .send_async(AppEvent::AuthFailed(RemoteScoped::new(
+                        scope.clone(),
+                        AuthFailure {
+                            reason: reason.clone(),
+                        },
+                    )))
+                    .await;
+                return Err(ConnectFailure::AuthFailed(AuthFailure { reason }));
+            }
+            let best_hash = handle
+                .best_supported_rsa_hash()
+                .await
+                .map_err(|error| {
+                    ConnectFailure::Connection(connection_error(
+                        &settings.host,
+                        settings.port,
+                        &error,
+                    ))
+                })?
+                .flatten();
+            handle
+                .authenticate_publickey(
+                    settings.username.clone(),
+                    PrivateKeyWithHashAlg::new(Arc::new(key), best_hash),
+                )
+                .await
+                .map_err(|error| {
+                    ConnectFailure::Connection(connection_error(
+                        &settings.host,
+                        settings.port,
+                        &error,
+                    ))
+                })?
+        }
+    };
+
+    match auth_result {
+        russh::client::AuthResult::Success => {
+            info!(
+                target: "macsftp_sftp::connection",
+                host = settings.host.as_str(),
+                port = settings.port,
+                tab_id = scope.tab_id.0,
+                session_id = scope.session_id.0,
+                session_epoch = scope.session_epoch,
+                method,
+                "authentication succeeded"
+            );
+            Ok(())
+        }
+        russh::client::AuthResult::Failure { .. } => {
+            let reason = UserFacingError::new(
+                ErrorCode::AuthFailed,
+                "Authentication failed",
+                "The server rejected the credentials.",
+            );
+            warn!(
+                target: "macsftp_sftp::connection",
+                host = settings.host.as_str(),
+                port = settings.port,
+                tab_id = scope.tab_id.0,
+                session_id = scope.session_id.0,
+                session_epoch = scope.session_epoch,
+                method,
+                "authentication rejected by server"
+            );
+            let _ = event_tx
+                .send_async(AppEvent::AuthFailed(RemoteScoped::new(
+                    scope.clone(),
+                    AuthFailure {
+                        reason: reason.clone(),
+                    },
+                )))
+                .await;
+            Err(ConnectFailure::AuthFailed(AuthFailure { reason }))
+        }
+    }
+}
+
+/// Trust registry, known_hosts, and event_tx are co-required for host-key flow.
+#[allow(clippy::too_many_arguments)]
+pub async fn establish_physical_connection(
+    settings: &ConnectionSettings,
+    scope: &RemoteEventScope,
+    trust_request_id: TrustRequestId,
+    known_hosts: Arc<Mutex<KnownHostsStore>>,
+    trust_config: Arc<HostTrustConfig>,
+    trust_registry: Arc<TrustRegistry>,
+    event_tx: flume::Sender<AppEvent>,
+    connection_lost: CancellationToken,
+) -> Result<client::Handle<ClientHandler>, ConnectFailure> {
+    let config = Arc::new(client_config());
+
+    let rejection: Arc<Mutex<Option<HostKeyRejection>>> = Arc::new(Mutex::new(None));
+    let handler = ClientHandler {
+        host: settings.host.clone(),
+        port: settings.port,
+        scope: scope.clone(),
+        trust_request_id,
+        known_hosts,
+        trust_config,
+        trust_registry,
+        event_tx: event_tx.clone(),
+        rejection: rejection.clone(),
+        connection_lost,
+    };
+
+    info!(
+        target: "macsftp_sftp::connection",
+        host = settings.host.as_str(),
+        port = settings.port,
+        tab_id = scope.tab_id.0,
+        session_id = scope.session_id.0,
+        session_epoch = scope.session_epoch,
+        "SSH transport and handshake started"
+    );
+
+    let address = (settings.host.as_str(), settings.port);
+    let mut handle = match client::connect(config, address, handler).await {
+        Ok(handle) => handle,
+        Err(error) => {
+            let failure = TransportFailureKind::from_russh_error(&error).as_str();
+            warn!(
+                target: "macsftp_sftp::connection",
+                host = settings.host.as_str(),
+                port = settings.port,
+                tab_id = scope.tab_id.0,
+                session_id = scope.session_id.0,
+                session_epoch = scope.session_epoch,
+                failure,
+                "ssh tcp/handshake failed; technical detail redacted"
+            );
+            let recorded = rejection
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            return Err(match recorded {
+                Some(HostKeyRejection::Mismatch) => ConnectFailure::HostKeyMismatch,
+                Some(HostKeyRejection::UserRejected) => ConnectFailure::TrustRejected,
+                Some(HostKeyRejection::PromptTimeout) => ConnectFailure::TrustTimeout,
+                None => ConnectFailure::Connection(connection_error(
+                    &settings.host,
+                    settings.port,
+                    &error,
+                )),
+            });
+        }
+    };
+
+    authenticate(&mut handle, settings, scope, &event_tx).await?;
+
+    Ok(handle)
+}
+
+pub fn log_connect_failure(
+    host: &str,
+    port: u16,
+    scope: &RemoteEventScope,
+    failure: &ConnectFailure,
+) {
+    match failure {
+        ConnectFailure::HostKeyMismatch => {
+            warn!(
+                target: "macsftp_sftp::connection",
+                host,
+                port,
+                tab_id = scope.tab_id.0,
+                session_id = scope.session_id.0,
+                session_epoch = scope.session_epoch,
+                failure = "host_key_mismatch",
+                "connection failed"
+            );
+        }
+        ConnectFailure::TrustRejected => {
+            info!(
+                target: "macsftp_sftp::connection",
+                host,
+                port,
+                tab_id = scope.tab_id.0,
+                session_id = scope.session_id.0,
+                session_epoch = scope.session_epoch,
+                failure = "host_key_rejected",
+                "connection aborted"
+            );
+        }
+        ConnectFailure::TrustTimeout => {
+            warn!(
+                target: "macsftp_sftp::connection",
+                host,
+                port,
+                tab_id = scope.tab_id.0,
+                session_id = scope.session_id.0,
+                session_epoch = scope.session_epoch,
+                failure = "host_key_prompt_timeout",
+                "connection failed"
+            );
+        }
+        ConnectFailure::AuthFailed(_) => {
+            warn!(
+                target: "macsftp_sftp::connection",
+                host,
+                port,
+                tab_id = scope.tab_id.0,
+                session_id = scope.session_id.0,
+                session_epoch = scope.session_epoch,
+                failure = "authentication_failed",
+                "connection failed"
+            );
+        }
+        ConnectFailure::Connection(error) => {
+            let failure = if error.code == ErrorCode::LocalNetworkPermissionDenied {
+                "local_network_permission_denied"
+            } else {
+                "network_or_protocol"
+            };
+            warn!(
+                target: "macsftp_sftp::connection",
+                host,
+                port,
+                tab_id = scope.tab_id.0,
+                session_id = scope.session_id.0,
+                session_epoch = scope.session_epoch,
+                failure,
+                "connection failed"
+            );
+        }
+    }
+}
+
+fn private_key_file_name(path: &str) -> &str {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("[unknown]")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use ssh_key::{Algorithm, HashAlg};
+
+    use super::{
+        TransportFailureKind, client_config, connection_error, legacy_rsa_host_key_bits,
+        private_key_file_name, sftp_connection_error, validate_private_key_algorithm,
+    };
+
+    #[test]
+    fn connection_error_does_not_copy_untrusted_technical_detail() {
+        let sensitive = russh::Error::InvalidConfig(
+            "password=do-not-log /Users/alex/.ssh/private-key".to_string(),
+        );
+
+        let error = connection_error("example.com", 22, &sensitive);
+        let rendered = format!(
+            "{} {} {}",
+            error.title,
+            error.message,
+            error.detail.as_deref().unwrap_or_default()
+        );
+
+        assert!(!rendered.contains("do-not-log"));
+        assert!(!rendered.contains("/Users/alex/.ssh"));
+    }
+
+    #[test]
+    fn connection_permission_denied_points_to_local_network_settings() {
+        let transport_error = russh::Error::IO(io::Error::from(io::ErrorKind::PermissionDenied));
+
+        let error = connection_error("10.0.0.10", 22, &transport_error);
+
+        assert_eq!(
+            error.code,
+            macsftp_core::ErrorCode::LocalNetworkPermissionDenied
+        );
+        assert!(error.retryable);
+        assert!(
+            error
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("Local Network"))
+        );
+    }
+
+    #[test]
+    fn transport_failures_have_stable_redacted_log_labels() {
+        let refused = russh::Error::IO(io::Error::from(io::ErrorKind::ConnectionRefused));
+
+        assert_eq!(
+            TransportFailureKind::from_russh_error(&refused).as_str(),
+            "connection_refused"
+        );
+        assert_eq!(
+            TransportFailureKind::from_russh_error(&russh::Error::ConnectionTimeout).as_str(),
+            "timed_out"
+        );
+        assert_eq!(
+            TransportFailureKind::from_russh_error(&russh::Error::Version).as_str(),
+            "protocol_negotiation_failed"
+        );
+        assert_eq!(
+            TransportFailureKind::from_russh_error(&russh::Error::NoCommonAlgo {
+                kind: russh::AlgorithmKind::Key,
+                ours: vec!["ssh-ed25519".to_string()],
+                theirs: vec!["rsa-sha2-512".to_string()],
+            })
+            .as_str(),
+            "host_key_algorithm_unsupported"
+        );
+    }
+
+    #[test]
+    fn client_advertises_only_rsa_sha2_host_key_algorithms() {
+        let config = client_config();
+
+        assert!(config.preferred.key.iter().any(|algorithm| matches!(
+            algorithm,
+            Algorithm::Rsa {
+                hash: Some(HashAlg::Sha512)
+            }
+        )));
+        assert!(config.preferred.key.iter().any(|algorithm| matches!(
+            algorithm,
+            Algorithm::Rsa {
+                hash: Some(HashAlg::Sha256)
+            }
+        )));
+        assert!(
+            config
+                .preferred
+                .key
+                .iter()
+                .all(|algorithm| !matches!(algorithm, Algorithm::Rsa { hash: None }))
+        );
+    }
+
+    #[test]
+    fn legacy_rsa_host_key_is_identified_for_diagnostics() {
+        let public_key = ssh_key::PublicKey::from_openssh(
+            "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAAgQDRlWNDvO+ijXnvpTOKXqqFDPe2SdQjjo2INk7DrpiRlhr0x4xGtl9prDIy/ETQfnT/a6W6/ljLyZNGQPqei6bvnUXq9iYfQM0O0miFYREV8fo0J6oEI++Tz3iuwVVWb6LKggTNeNT+h1rx0Rb9fG/YBTjVrt+7/bmU4OI3U47gXQ==",
+        )
+        .expect("static RSA host-key diagnostic vector must parse");
+
+        assert_eq!(legacy_rsa_host_key_bits(&public_key), Some(1024));
+    }
+
+    #[test]
+    fn unsupported_host_key_algorithm_has_actionable_guidance() {
+        let transport_error = russh::Error::NoCommonAlgo {
+            kind: russh::AlgorithmKind::Key,
+            ours: vec!["ssh-ed25519".to_string()],
+            theirs: vec!["rsa-sha2-512".to_string()],
+        };
+
+        let error = connection_error("10.0.0.10", 8022, &transport_error);
+
+        assert_eq!(error.title, "Unsupported SSH host key");
+        assert!(!error.retryable);
+        assert!(
+            error
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("Ed25519 or ECDSA"))
+        );
+    }
+
+    #[test]
+    fn sftp_connection_error_does_not_copy_untrusted_technical_detail() {
+        let sensitive = "password=do-not-log /Users/alex/.ssh/private-key";
+
+        let error = sftp_connection_error(
+            "Could not start SFTP.",
+            "The SFTP subsystem did not become ready.",
+            &sensitive,
+        );
+        let rendered = format!(
+            "{} {} {}",
+            error.title,
+            error.message,
+            error.detail.as_deref().unwrap_or_default()
+        );
+
+        assert!(!rendered.contains("do-not-log"));
+        assert!(!rendered.contains("/Users/alex/.ssh"));
+    }
+
+    #[test]
+    fn private_key_log_label_omits_parent_directories() {
+        assert_eq!(
+            private_key_file_name("/Users/alex/.ssh/id_ed25519"),
+            "id_ed25519"
+        );
+    }
+
+    #[test]
+    fn rsa_private_key_authentication_is_blocked() {
+        let Err(error) = validate_private_key_algorithm(Algorithm::Rsa { hash: None }) else {
+            panic!("RSA private keys must remain blocked while RUSTSEC-2023-0071 applies");
+        };
+
+        assert_eq!(error.code, macsftp_core::ErrorCode::AuthFailed);
+        assert!(validate_private_key_algorithm(Algorithm::Ed25519).is_ok());
+    }
+}

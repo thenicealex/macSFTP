@@ -1,0 +1,45 @@
+<!-- Editable source for AppIcon.png, the raster consumed by scripts/build_app.sh. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="transfer-blue" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#29b6f6"/>
+      <stop offset="1" stop-color="#007acc"/>
+    </linearGradient>
+    <filter id="tile-shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="28" stdDeviation="30" flood-color="#111827" flood-opacity="0.24"/>
+    </filter>
+    <filter id="transfer-shadow" x="-20%" y="-30%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#007acc" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+
+  <!-- Keep the white tile inset so macOS can render a clean silhouette at small sizes. -->
+  <rect
+    x="76"
+    y="64"
+    width="872"
+    height="872"
+    rx="208"
+    fill="#ffffff"
+    filter="url(#tile-shadow)"
+  />
+
+  <!-- Two remote/local endpoints, reduced to their essential outlines. -->
+  <g fill="#f2f4f7" stroke="#343a46" stroke-width="42">
+    <rect x="232" y="286" width="222" height="452" rx="58"/>
+    <rect x="570" y="286" width="222" height="452" rx="58"/>
+  </g>
+
+  <!-- Bidirectional transfer remains the macSFTP product mark. -->
+  <g
+    fill="none"
+    stroke="url(#transfer-blue)"
+    stroke-width="50"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    filter="url(#transfer-shadow)"
+  >
+    <path d="M370 430h270l-50-50m50 50-50 50"/>
+    <path d="M654 594H384l50 50m-50-50 50-50"/>
+  </g>
+</svg>

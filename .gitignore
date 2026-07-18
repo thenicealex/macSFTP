@@ -1,0 +1,8 @@
+target/
+build/
+.claude/
+.codegraph/
+.workbuddy/
+.DS_Store
+.worktrees/
+.superpowers/

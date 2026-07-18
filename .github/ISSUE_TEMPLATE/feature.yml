@@ -1,0 +1,34 @@
+name: Feature proposal
+description: Propose a focused product or engineering improvement.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What concrete workflow or maintenance problem needs solving?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest useful outcome, not only an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include a simpler workaround if one exists.
+  - type: checkboxes
+    id: impact
+    attributes:
+      label: Impact areas
+      options:
+        - label: Actions or keyboard behavior
+        - label: Persistence or migration
+        - label: Credentials, host trust, or other security boundary
+        - label: Runtime, network, or transfer behavior
+        - label: Performance or accessibility
