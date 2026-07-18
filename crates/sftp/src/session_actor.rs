@@ -86,6 +86,9 @@ pub enum RemoteSessionRequest {
     ReadDir {
         path: RemotePath,
     },
+    AcquireTransferConnection {
+        responder: oneshot::Sender<Arc<crate::pool::SharedConnection>>,
+    },
     RunTransferJobs {
         plan_id: TransferPlanId,
         jobs: Vec<TransferJob>,
@@ -145,15 +148,15 @@ struct QueuedTransfer {
 }
 
 #[derive(Clone)]
-struct TransferConflictContext {
-    waiters: Arc<Mutex<HashMap<ConflictRequestId, ConflictWaiter>>>,
-    next_id: Arc<AtomicU64>,
-    plan_policies: Arc<Mutex<HashMap<TransferPlanId, ConflictPolicy>>>,
+pub(crate) struct TransferConflictContext {
+    pub(crate) waiters: Arc<Mutex<HashMap<ConflictRequestId, ConflictWaiter>>>,
+    pub(crate) next_id: Arc<AtomicU64>,
+    pub(crate) plan_policies: Arc<Mutex<HashMap<TransferPlanId, ConflictPolicy>>>,
 }
 
-struct ConflictWaiter {
-    plan_id: TransferPlanId,
-    sender: oneshot::Sender<ConflictDecision>,
+pub(crate) struct ConflictWaiter {
+    pub(crate) plan_id: TransferPlanId,
+    pub(crate) sender: oneshot::Sender<ConflictDecision>,
 }
 
 fn resolve_waiters_for_plan(
@@ -326,6 +329,21 @@ impl RemoteSessionActor {
                     tracing::debug!(session_id = ?self.session_id, "session cancelled by user");
                     break;
                 }
+                _ = self.shared_connection.connection_lost.cancelled() => {
+                    if let Err(error) = self
+                        .event_tx
+                        .send_async(AppEvent::TabDisconnected(RemoteScoped::new(
+                            scope.clone(),
+                            macsftp_core::TabDisconnected {
+                                reason: macsftp_core::DisconnectReason::ConnectionLost,
+                            },
+                        )))
+                        .await
+                    {
+                        warn!(error = %error, "physical disconnect event dropped");
+                    }
+                    break;
+                }
                 request = request_rx.recv_async() => {
                     let Ok(request) = request else {
                         break;
@@ -485,6 +503,11 @@ impl RemoteSessionActor {
         match request {
             RemoteSessionRequest::ReadDir { path } => {
                 self.read_remote_dir(&self.sftp, scope, path).await
+            }
+            RemoteSessionRequest::AcquireTransferConnection { responder } => {
+                if responder.send(self.shared_connection.clone()).is_err() {
+                    warn!("transfer connection lease was not received");
+                }
             }
             RemoteSessionRequest::PlanRemoteDownload {
                 command,
@@ -830,7 +853,7 @@ impl RemoteSessionActor {
     }
 }
 
-async fn open_transfer_sftp(
+pub(crate) async fn open_transfer_sftp(
     handle: &client::Handle<crate::physical_connection::ClientHandler>,
 ) -> Result<SftpSession, UserFacingError> {
     let channel = handle.channel_open_session().await.map_err(|error| {
@@ -867,7 +890,7 @@ async fn open_transfer_sftp(
 /// Stream a remote download plan from a dedicated SFTP channel. Planning
 /// needs remote metadata, but it must not monopolize the browsing channel:
 /// each discovered entry becomes a child job before recursion continues.
-async fn plan_remote_download(
+pub(crate) async fn plan_remote_download(
     sftp: SftpSession,
     command: StartTransferCommand,
     plan_id: TransferPlanId,
@@ -1154,7 +1177,13 @@ fn local_download_destination(
     ))
 }
 
-async fn run_transfer_job(
+pub(crate) enum TransferJobOutcome {
+    Completed,
+    Skipped,
+    Failed { retryable: bool },
+}
+
+pub(crate) async fn run_transfer_job(
     sftp: SftpSession,
     mut job: TransferJob,
     plan_id: TransferPlanId,
@@ -1162,7 +1191,7 @@ async fn run_transfer_job(
     cancel: CancellationToken,
     conflict_context: TransferConflictContext,
     connection_key: String,
-) {
+) -> TransferJobOutcome {
     let result = match resolve_transfer_conflict(
         &sftp,
         &mut job,
@@ -1184,21 +1213,34 @@ async fn run_transfer_job(
         Err(error) => Err(error),
     };
 
-    let terminal_event = match result {
-        Ok(()) => AppEvent::TransferCompleted {
-            transfer_id: job.id,
-        },
-        Err(error) if error.code == ErrorCode::Cancelled => AppEvent::TransferSkipped {
-            transfer_id: job.id,
-        },
-        Err(error) => AppEvent::TransferFailed(TransferFailure {
-            transfer_id: job.id,
-            error,
-        }),
+    let (terminal_event, outcome) = match result {
+        Ok(()) => (
+            AppEvent::TransferCompleted {
+                transfer_id: job.id,
+            },
+            TransferJobOutcome::Completed,
+        ),
+        Err(error) if error.code == ErrorCode::Cancelled => (
+            AppEvent::TransferSkipped {
+                transfer_id: job.id,
+            },
+            TransferJobOutcome::Skipped,
+        ),
+        Err(error) => {
+            let retryable = error.retryable;
+            (
+                AppEvent::TransferFailed(TransferFailure {
+                    transfer_id: job.id,
+                    error,
+                }),
+                TransferJobOutcome::Failed { retryable },
+            )
+        }
     };
     if let Err(error) = event_tx.send_async(terminal_event).await {
         warn!(error = %error, "transfer terminal event dropped");
     }
+    outcome
 }
 
 async fn resolve_transfer_conflict(
@@ -1209,6 +1251,9 @@ async fn resolve_transfer_conflict(
     cancel: &CancellationToken,
     conflict_context: TransferConflictContext,
 ) -> Result<(), UserFacingError> {
+    if directories_can_merge(sftp, job).await? {
+        return Ok(());
+    }
     if !destination_exists(sftp, job).await? {
         return Ok(());
     }
@@ -1333,6 +1378,59 @@ async fn resolve_transfer_conflict(
                 ConflictDecision::CancelJob => Err(cancelled_transfer_error()),
             }
         }
+    }
+}
+
+async fn directories_can_merge(
+    sftp: &SftpSession,
+    job: &TransferJob,
+) -> Result<bool, UserFacingError> {
+    match (&job.source, &job.destination) {
+        (TransferEndpoint::Local(source), TransferEndpoint::Remote(destination)) => {
+            let source_metadata = tokio::fs::symlink_metadata(source.as_str())
+                .await
+                .map_err(|error| local_transfer_error("Could not inspect upload source", &error))?;
+            if !source_metadata.is_dir() {
+                return Ok(false);
+            }
+            match sftp.symlink_metadata(destination.as_str()).await {
+                Ok(metadata) => Ok(metadata.file_type() == SftpFileType::Dir),
+                Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => {
+                    Ok(false)
+                }
+                Err(error) => Err(transfer_error(
+                    ErrorCode::Unknown,
+                    "Could not inspect remote directory",
+                    "The remote destination could not be checked. Try again.",
+                    error.to_string(),
+                )),
+            }
+        }
+        (TransferEndpoint::Remote(source), TransferEndpoint::Local(destination)) => {
+            let source_metadata =
+                sftp.symlink_metadata(source.as_str())
+                    .await
+                    .map_err(|error| {
+                        transfer_error(
+                            ErrorCode::Unknown,
+                            "Could not inspect remote source",
+                            "The remote source could not be checked. Try again.",
+                            error.to_string(),
+                        )
+                    })?;
+            if source_metadata.file_type() != SftpFileType::Dir {
+                return Ok(false);
+            }
+            match tokio::fs::symlink_metadata(destination.as_str()).await {
+                Ok(metadata) => Ok(metadata.is_dir()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(local_transfer_error(
+                    "Could not inspect download directory",
+                    &error,
+                )),
+            }
+        }
+        _ => Ok(false),
     }
 }
 

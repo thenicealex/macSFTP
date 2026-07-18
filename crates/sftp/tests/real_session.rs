@@ -85,7 +85,6 @@ fn spawn_actor(
         trust_config,
         trust_registry.clone(),
         event_tx.clone(),
-        CancellationToken::new(),
     );
 
     let actor_cancel = cancel.clone();
@@ -922,7 +921,7 @@ async fn runtime_plans_and_executes_single_file_upload_and_download() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn runtime_executes_directory_upload_with_a_bounded_session_queue() {
+async fn runtime_directory_upload_survives_browsing_tab_close() {
     let Some(server) = SshTestServer::spawn() else {
         return;
     };
@@ -990,9 +989,16 @@ async fn runtime_executes_directory_upload_with_a_bounded_session_queue() {
 
     let mut planned_jobs = 0;
     let mut completed_jobs = 0;
-    while completed_jobs < 3 {
+    let mut browsing_tab_closed = false;
+    while completed_jobs < 4 {
         match next_runtime_event(&mut events, "directory upload event").await {
-            AppEvent::TransferPlanStarted(_) | AppEvent::TransferPlanCompleted { .. } => {}
+            AppEvent::TransferPlanStarted(_) => {}
+            AppEvent::TransferPlanCompleted { .. } => {
+                client
+                    .try_send(AppCommand::CloseTab { tab_id: TAB })
+                    .expect("browsing tab close should reach runtime");
+                browsing_tab_closed = true;
+            }
             AppEvent::TransferPlanProgress(progress) => {
                 planned_jobs += progress.child_jobs.len();
             }
@@ -1006,15 +1012,21 @@ async fn runtime_executes_directory_upload_with_a_bounded_session_queue() {
         }
     }
     assert_eq!(
-        planned_jobs, 3,
+        planned_jobs, 4,
         "directory planner must produce all child jobs"
     );
+    assert!(
+        browsing_tab_closed,
+        "the regression must close the browsing tab before transfer completion"
+    );
     assert_eq!(
-        std::fs::read(destination_root.join("first.txt")).expect("read first result"),
+        std::fs::read(destination_root.join("directory-upload-source/first.txt"))
+            .expect("read first result"),
         b"first"
     );
     assert_eq!(
-        std::fs::read(destination_root.join("nested/second.txt")).expect("read nested result"),
+        std::fs::read(destination_root.join("directory-upload-source/nested/second.txt"))
+            .expect("read nested result"),
         b"second"
     );
 

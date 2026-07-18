@@ -28,6 +28,7 @@ use crate::app_actions::{
     ToggleHiddenFiles, UploadSelection, ZoomWindow,
 };
 use crate::resources::ActiveResources;
+use crate::session_coordinator::SessionCoordinator;
 use crate::workspace::file_ops::{ContextMenuState, DeleteConfirmState, InlineEditState};
 use crate::workspace::nav::{HistoryOp, TabNavState};
 use crate::workspace::profiles::{ProfileEditorState, SettingsSection};
@@ -161,6 +162,10 @@ pub struct Workspace {
     tab_settings: HashMap<TabId, ConnectionSettings>,
     /// Per-tab local/remote back-forward history (session-only).
     tab_nav: HashMap<TabId, TabNavState>,
+    /// Monotonic local-directory request generation per tab. A path alone is
+    /// insufficient when navigation returns to the same directory before an
+    /// older background scan completes.
+    local_read_epochs: HashMap<TabId, u64>,
     /// Connection meta restored from `session.json` (form prefill / path).
     restored_targets: HashMap<TabId, RestoredTabTarget>,
     _appearance_subscription: Subscription,
@@ -205,7 +210,6 @@ impl Workspace {
                     cx.notify();
                 }
             });
-
         let mut workspace = Self {
             window_session_id,
             state,
@@ -258,6 +262,7 @@ impl Workspace {
             selection_anchor: None,
             tab_settings: HashMap::new(),
             tab_nav: HashMap::new(),
+            local_read_epochs: HashMap::new(),
             restored_targets: HashMap::new(),
             _appearance_subscription: appearance_subscription,
         };
@@ -268,6 +273,7 @@ impl Workspace {
         if workspace.state.tabs.tabs.is_empty() {
             workspace.open_new_tab(window, cx);
         }
+        workspace.register_runtime_tabs(cx);
         workspace.update_window_title(window);
         workspace
     }
@@ -320,16 +326,12 @@ impl Workspace {
             let mut tab = TabState::new(tab_id, title);
             tab.profile_id = snap.profile_id.map(ProfileId);
             tab.connection = ConnectionState::Empty;
-            if let Some(local) = &snap.local_path {
-                let path = LocalPath::new(local.clone());
-                if let Some(message) = Self::load_local_directory(&path, &mut tab) {
-                    self.status_message = Some(message.into());
-                }
-            } else if let Some(message) =
-                Self::load_local_directory(&self.default_local_path, &mut tab)
-            {
-                self.status_message = Some(message.into());
-            }
+            let local_path = snap
+                .local_path
+                .as_ref()
+                .map(|local| LocalPath::new(local.clone()))
+                .unwrap_or_else(|| self.default_local_path.clone());
+            tab.local.path = Some(local_path.clone());
             if let Some(remote) = &snap.remote_path {
                 tab.remote.path = Some(RemotePath::new(remote.clone()));
                 tab.remote.entries.clear();
@@ -348,6 +350,7 @@ impl Workspace {
                 },
             );
             self.state.tabs.open_tab(tab);
+            self.request_local_directory(tab_id, local_path, cx);
             restored_ids.push(tab_id);
             self.touch_mru(tab_id);
         }
@@ -436,10 +439,11 @@ impl Workspace {
     pub(crate) fn open_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let tab_id = cx.resources().next_tab_id();
         let mut tab = TabState::new(tab_id, "New Connection");
-        if let Some(message) = Self::load_local_directory(&self.default_local_path, &mut tab) {
-            self.status_message = Some(message.into());
-        }
+        let local_path = self.default_local_path.clone();
+        tab.local.path = Some(local_path.clone());
         self.state.tabs.open_tab(tab);
+        self.register_runtime_tab(tab_id, cx);
+        self.request_local_directory(tab_id, local_path, cx);
         self.state.tabs.active_tab_id = Some(tab_id);
         self.touch_mru(tab_id);
         self.clear_filters();
@@ -471,6 +475,7 @@ impl Workspace {
         cleanup_edit_sessions_for_tab(cx, tab_id);
         self.tab_mru.retain(|id| *id != tab_id);
         self.tab_nav.remove(&tab_id);
+        self.local_read_epochs.remove(&tab_id);
         self.restored_targets.remove(&tab_id);
         // Keep MRU front aligned with the newly active tab after close
         // (TabStore promotes another tab without going through activate_tab).
@@ -488,7 +493,11 @@ impl Workspace {
         // Tell the runtime to cancel the tab's actor and reject its
         // pending trust requests; late events are dropped by the stale
         // event guard because the tab no longer exists.
-        self.send_command(AppCommand::CloseTab { tab_id }, cx);
+        if self.send_command(AppCommand::CloseTab { tab_id }, cx) {
+            self.mark_runtime_tab_released(tab_id, cx);
+        } else {
+            self.retry_close_tab(tab_id, cx);
+        }
         // Modals bound to the closed tab's session are now stale; drop
         // them so their confirm buttons can never act (plan §7).
         self.state.drain_expired_modals();
@@ -617,6 +626,63 @@ impl Workspace {
                 false
             }
         }
+    }
+
+    fn register_runtime_tabs(&self, cx: &mut App) {
+        if !cx.has_global::<SessionCoordinator>() {
+            return;
+        }
+        let tab_ids = self.state.tabs.tabs.iter().map(|tab| tab.id);
+        cx.global_mut::<SessionCoordinator>().register_runtime_tabs(
+            self.window_session_id,
+            self.runtime_client.clone(),
+            tab_ids,
+        );
+    }
+
+    fn register_runtime_tab(&self, tab_id: TabId, cx: &mut App) {
+        if cx.has_global::<SessionCoordinator>() {
+            cx.global_mut::<SessionCoordinator>().register_runtime_tabs(
+                self.window_session_id,
+                self.runtime_client.clone(),
+                std::iter::once(tab_id),
+            );
+        }
+    }
+
+    fn mark_runtime_tab_released(&self, tab_id: TabId, cx: &mut App) {
+        if cx.has_global::<SessionCoordinator>() {
+            cx.global_mut::<SessionCoordinator>()
+                .mark_runtime_tab_released(self.window_session_id, tab_id);
+        }
+    }
+
+    fn retry_close_tab(&self, tab_id: TabId, cx: &mut App) {
+        let runtime_client = self.runtime_client.clone();
+        let window_session_id = self.window_session_id;
+        cx.spawn(async move |cx| {
+            match runtime_client
+                .send_async(AppCommand::CloseTab { tab_id })
+                .await
+            {
+                Ok(()) => {
+                    let _ = cx.update(|cx| {
+                        if cx.has_global::<SessionCoordinator>() {
+                            cx.global_mut::<SessionCoordinator>()
+                                .mark_runtime_tab_released(window_session_id, tab_id);
+                        }
+                    });
+                }
+                Err(error) => {
+                    warn!(
+                        tab_id = tab_id.0,
+                        ?error,
+                        "failed to release closed tab session"
+                    );
+                }
+            }
+        })
+        .detach();
     }
     /// Clone of this window's runtime client, for process-wide callers (the
     /// edit watcher) that need to dispatch a command to the session owning a

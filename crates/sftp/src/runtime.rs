@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 use crate::known_hosts::KnownHostsStore;
 use crate::mock_actor::{MockRemoteSessionActor, MockSessionConfig};
 use crate::session_actor::{HostTrustConfig, RemoteSessionActor, RemoteSessionRequest};
+use crate::transfer_manager::{TransferManager, TransferManagerRequest};
 use crate::transfer_planner::{new_plan, plan_local_upload};
 use crate::trust::TrustRegistry;
 use tracing::{info, warn};
@@ -79,6 +80,16 @@ impl RuntimeClient {
             Err(flume::TrySendError::Full(_)) => Err(CommandDispatchError::ChannelFull),
             Err(flume::TrySendError::Disconnected(_)) => Err(CommandDispatchError::ChannelClosed),
         }
+    }
+
+    /// Await command-channel capacity without blocking the GPUI main thread.
+    /// Intended for detached lifecycle cleanup where dropping a command would
+    /// leak a browsing session, not for ordinary interactive actions.
+    pub async fn send_async(&self, command: AppCommand) -> Result<(), CommandDispatchError> {
+        self.command_tx
+            .send_async(command)
+            .await
+            .map_err(|_| CommandDispatchError::ChannelClosed)
     }
 }
 
@@ -360,13 +371,6 @@ async fn dispatch_fs_command(
     }
 }
 
-#[derive(Clone)]
-struct TransferRoute {
-    request_tx: flume::Sender<RemoteSessionRequest>,
-    plan_id: TransferPlanId,
-    job: TransferJob,
-}
-
 /// The command dispatch loop running on the Tokio runtime.
 ///
 /// Receives `AppCommand`s from the GPUI side, routes them to mock actors
@@ -394,10 +398,19 @@ async fn command_dispatch_loop(
     let mut next_plan_id: u64 = 1;
     let next_transfer_id = Arc::new(AtomicU64::new(1));
     let next_conflict_id = Arc::new(AtomicU64::new(1));
-    let transfer_routes: Arc<Mutex<HashMap<TransferId, TransferRoute>>> =
-        Arc::new(Mutex::new(HashMap::new()));
+    let connection_manager = Arc::new(crate::pool::ConnectionManager::new());
+    let (transfer_manager_tx, transfer_manager_rx) = flume::bounded(64);
+    let transfer_manager = TransferManager::new(
+        event_tx.clone(),
+        next_conflict_id.clone(),
+        connection_manager.clone(),
+    );
+    let transfer_manager_handle = tokio::spawn(transfer_manager.run(transfer_manager_rx));
     let planning_cancellations: Arc<Mutex<HashMap<TransferId, CancellationToken>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    let planning_retries: Arc<Mutex<HashMap<TransferId, macsftp_core::StartTransferCommand>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    let mut pending_commands = VecDeque::new();
 
     // Real sessions share one known_hosts store so a trust decision in
     // one tab covers later sessions to the same host (plan ADR-003).
@@ -412,9 +425,12 @@ async fn command_dispatch_loop(
         SessionBackend::Mock(_) => None,
     };
 
-    let connection_manager = Arc::new(crate::pool::ConnectionManager::new());
     loop {
-        match command_rx.recv_async().await {
+        let command = match pending_commands.pop_front() {
+            Some(command) => Ok(command),
+            None => command_rx.recv_async().await,
+        };
+        match command {
             Ok(AppCommand::Shutdown) => break,
 
             Ok(AppCommand::ConnectTab(cmd)) => {
@@ -460,7 +476,6 @@ async fn command_dispatch_loop(
                             trust_config.clone(),
                             trust_registry.clone(),
                             event_tx.clone(),
-                            cancel.clone(),
                         );
 
                         let event_tx_clone = event_tx.clone();
@@ -660,6 +675,15 @@ async fn command_dispatch_loop(
                 trust_registry.reject_all_for_tab(tab_id);
             }
 
+            Ok(AppCommand::CloseTabs { tab_ids }) => {
+                for tab_id in tab_ids {
+                    if let Some(handle) = sessions.remove(&tab_id) {
+                        handle.cancel.cancel();
+                    }
+                    trust_registry.reject_all_for_tab(tab_id);
+                }
+            }
+
             Ok(AppCommand::RemoveRemoteTempFile {
                 tab_id,
                 transfer_id,
@@ -726,10 +750,33 @@ async fn command_dispatch_loop(
                     .get(&command.tab_id)
                     .filter(|session| session.session_epoch == command.session_epoch)
                     .and_then(|session| session.request_tx.clone());
+                let transfer_connection_rx = transfer_request_tx.as_ref().and_then(|request_tx| {
+                    let (responder, response) = oneshot::channel();
+                    request_tx
+                        .try_send(RemoteSessionRequest::AcquireTransferConnection { responder })
+                        .ok()
+                        .map(|()| response)
+                });
                 let plan_id = TransferPlanId(next_plan_id);
                 next_plan_id += 1;
                 let root_job_id = TransferId(next_transfer_id.fetch_add(1, Ordering::Relaxed));
                 let planning_cancel = CancellationToken::new();
+                if let Ok(mut retries) = planning_retries.lock() {
+                    retries.insert(root_job_id, command.clone());
+                } else {
+                    let _ = event_tx
+                        .send_async(AppEvent::TransferPlanFailed {
+                            plan_id,
+                            error: UserFacingError::new(
+                                ErrorCode::Unknown,
+                                "Could not start transfer planning",
+                                "The transfer retry service is unavailable. Try again.",
+                            )
+                            .with_retryable(true),
+                        })
+                        .await;
+                    continue;
+                }
                 if let Ok(mut cancellations) = planning_cancellations.lock() {
                     cancellations.insert(root_job_id, planning_cancel.clone());
                 } else {
@@ -765,9 +812,12 @@ async fn command_dispatch_loop(
 
                 let event_tx = event_tx.clone();
                 let next_transfer_id = next_transfer_id.clone();
-                let routes = transfer_routes.clone();
                 let cancellations = planning_cancellations.clone();
+                let retries = planning_retries.clone();
                 let planner_request_tx = transfer_request_tx.clone();
+                let manager_tx = transfer_manager_tx.clone();
+                let terminal_event_tx = event_tx.clone();
+                let planning_cancel_after_task = planning_cancel.clone();
                 let planning_task: JoinHandle<Option<Vec<TransferJob>>> = match command.direction {
                     TransferDirection::Upload => tokio::task::spawn_blocking(move || {
                         plan_local_upload(
@@ -824,38 +874,53 @@ async fn command_dispatch_loop(
                     }),
                 };
                 std::mem::drop(tokio::spawn(async move {
-                    let Ok(Some(jobs)) = planning_task.await else {
-                        if let Ok(mut cancellations) = cancellations.lock() {
-                            cancellations.remove(&root_job_id);
-                        }
-                        return;
-                    };
+                    let planning_result = planning_task.await;
                     if let Ok(mut cancellations) = cancellations.lock() {
                         cancellations.remove(&root_job_id);
                     }
-                    let Some(request_tx) = transfer_request_tx else {
+                    let Ok(Some(jobs)) = planning_result else {
+                        if planning_cancel_after_task.is_cancelled()
+                            && let Ok(mut retries) = retries.lock()
+                        {
+                            retries.remove(&root_job_id);
+                        }
                         return;
                     };
-                    if let Ok(mut routes) = routes.lock() {
-                        for job in &jobs {
-                            routes.insert(
-                                job.id,
-                                TransferRoute {
-                                    request_tx: request_tx.clone(),
-                                    plan_id,
-                                    job: job.clone(),
-                                },
-                            );
-                        }
-                    } else {
-                        warn!("transfer route registry is unavailable");
-                        return;
+                    if let Ok(mut retries) = retries.lock() {
+                        retries.remove(&root_job_id);
                     }
-                    if let Err(error) = request_tx
-                        .send_async(RemoteSessionRequest::RunTransferJobs { plan_id, jobs })
+                    let Some(connection_rx) = transfer_connection_rx else {
+                        return;
+                    };
+                    let Ok(connection) = connection_rx.await else {
+                        for job in jobs {
+                            if terminal_event_tx
+                                .send_async(AppEvent::TransferFailed(macsftp_core::TransferFailure {
+                                    transfer_id: job.id,
+                                    error: UserFacingError::new(
+                                        ErrorCode::ChannelClosed,
+                                        "Could not start transfer",
+                                        "The connected session closed before the transfer acquired its connection.",
+                                    )
+                                    .with_retryable(true),
+                                }))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        return;
+                    };
+                    if let Err(error) = manager_tx
+                        .send_async(TransferManagerRequest::Enqueue {
+                            connection,
+                            plan_id,
+                            jobs,
+                        })
                         .await
                     {
-                        warn!(error = %error, "planned transfer could not reach session actor");
+                        warn!(error = %error, "planned transfer could not reach transfer manager");
                     }
                 }));
             }
@@ -869,56 +934,42 @@ async fn command_dispatch_loop(
                     cancel.cancel();
                     continue;
                 }
-                let route = transfer_routes
-                    .lock()
-                    .ok()
-                    .and_then(|routes| routes.get(&transfer_id).cloned());
-                if let Some(route) = route
-                    && let Err(error) = route
-                        .request_tx
-                        .try_send(RemoteSessionRequest::CancelTransfer { transfer_id })
+                if let Err(error) = transfer_manager_tx
+                    .send_async(TransferManagerRequest::Cancel { transfer_id })
+                    .await
                 {
-                    eprintln!("WARN: transfer cancellation could not reach session actor: {error}");
+                    eprintln!(
+                        "WARN: transfer cancellation could not reach transfer manager: {error}"
+                    );
                 }
             }
 
             Ok(AppCommand::RetryTransfer { transfer_id }) => {
-                let route = transfer_routes
+                let planning_retry = planning_retries
                     .lock()
                     .ok()
-                    .and_then(|routes| routes.get(&transfer_id).cloned());
-                if let Some(route) = route
-                    && let Err(error) =
-                        route
-                            .request_tx
-                            .try_send(RemoteSessionRequest::RetryTransfer {
-                                plan_id: route.plan_id,
-                                job: route.job,
-                            })
+                    .and_then(|mut retries| retries.remove(&transfer_id));
+                if let Some(command) = planning_retry {
+                    pending_commands.push_back(AppCommand::StartTransfer(command));
+                    continue;
+                }
+                if let Err(error) = transfer_manager_tx
+                    .send_async(TransferManagerRequest::Retry { transfer_id })
+                    .await
                 {
-                    eprintln!("WARN: transfer retry could not reach session actor: {error}");
+                    eprintln!("WARN: transfer retry could not reach transfer manager: {error}");
                 }
             }
 
             Ok(AppCommand::ResolveTransferConflict(command)) => {
-                for session in sessions.values() {
-                    if let Some(request_tx) = &session.request_tx {
-                        let request_tx = request_tx.clone();
-                        let request_id = command.request_id;
-                        let decision = command.decision.clone();
-                        std::mem::drop(tokio::spawn(async move {
-                            if request_tx
-                                .send_async(RemoteSessionRequest::ResolveTransferConflict {
-                                    request_id,
-                                    decision,
-                                })
-                                .await
-                                .is_err()
-                            {
-                                warn!("conflict decision session actor is unavailable");
-                            }
-                        }));
-                    }
+                if let Err(error) = transfer_manager_tx
+                    .send_async(TransferManagerRequest::ResolveConflict {
+                        request_id: command.request_id,
+                        decision: command.decision,
+                    })
+                    .await
+                {
+                    warn!(error = %error, "conflict decision transfer manager is unavailable");
                 }
             }
 
@@ -938,6 +989,10 @@ async fn command_dispatch_loop(
     // Shutdown cleanup: cancel all actors and reject all pending requests.
     for (_, handle) in sessions.drain() {
         handle.cancel.cancel();
+    }
+    drop(transfer_manager_tx);
+    if let Err(error) = transfer_manager_handle.await {
+        warn!(error = %error, "transfer manager did not shut down cleanly");
     }
     trust_registry.reject_all();
 }
@@ -1377,6 +1432,74 @@ mod tests {
 
         controller.shutdown();
         std::fs::remove_file(&fixture_path).expect("remove planning fixture");
+    }
+
+    #[test]
+    fn retry_transfer_restarts_failed_local_planning() {
+        let fixture_path = std::env::temp_dir().join(format!(
+            "macsftp-runtime-planning-retry-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&fixture_path);
+        let mut controller = RuntimeController::start(
+            RuntimeBridgeConfig::default(),
+            SessionBackend::Mock(MockSessionConfig::default()),
+        );
+        let client = controller.client();
+        let mut events = controller
+            .take_event_receiver()
+            .expect("event receiver should be available once");
+
+        controller.runtime().block_on(async {
+            client
+                .try_send(AppCommand::StartTransfer(StartTransferCommand {
+                    tab_id: TabId(1),
+                    session_epoch: 1,
+                    profile_id: ProfileId(1),
+                    direction: TransferDirection::Upload,
+                    sources: vec![TransferEndpoint::Local(LocalPath::new(
+                        fixture_path.display().to_string(),
+                    ))],
+                    destination: TransferEndpoint::Remote(RemotePath::new("/uploads/retry.txt")),
+                    metadata_policy: MetadataPolicy::default(),
+                    conflict_policy: ConflictPolicy::default(),
+                }))
+                .expect("start transfer should send");
+
+            let first_root_id = match recv_timeout(&mut events, "first plan started").await {
+                AppEvent::TransferPlanStarted(snapshot) => snapshot.root_job.id,
+                other => panic!("expected first TransferPlanStarted, got {other:?}"),
+            };
+            assert!(matches!(
+                recv_timeout(&mut events, "first plan failed").await,
+                AppEvent::TransferPlanFailed { .. }
+            ));
+
+            std::fs::write(&fixture_path, b"retry").expect("create retry planning source");
+            client
+                .try_send(AppCommand::RetryTransfer {
+                    transfer_id: first_root_id,
+                })
+                .expect("retry command should send");
+
+            match recv_timeout(&mut events, "retry plan started").await {
+                AppEvent::TransferPlanStarted(snapshot) => {
+                    assert_ne!(snapshot.root_job.id, first_root_id);
+                }
+                other => panic!("expected retry TransferPlanStarted, got {other:?}"),
+            }
+            assert!(matches!(
+                recv_timeout(&mut events, "retry plan progress").await,
+                AppEvent::TransferPlanProgress(_)
+            ));
+            assert!(matches!(
+                recv_timeout(&mut events, "retry plan completed").await,
+                AppEvent::TransferPlanCompleted { .. }
+            ));
+        });
+
+        controller.shutdown();
+        std::fs::remove_file(&fixture_path).expect("remove retry planning fixture");
     }
 
     // ── M2c: Mock actor full loop integration tests ───────────────

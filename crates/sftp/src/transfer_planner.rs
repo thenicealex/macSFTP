@@ -193,7 +193,16 @@ impl LocalUploadPlanner {
         let metadata = fs::symlink_metadata(&source_path)
             .map_err(|error| planning_io_error("Could not read upload source", &error))?;
         if metadata.file_type().is_dir() {
-            self.plan_directory(&source_path, &source_path, destination_root)
+            let name = source_path.file_name().ok_or_else(|| {
+                UserFacingError::new(
+                    ErrorCode::NotFound,
+                    "Upload directory has no name",
+                    "Choose a directory with a valid name and try again.",
+                )
+            })?;
+            let directory_destination = join_remote_path(destination_root, Path::new(name));
+            self.emit_child(source_path.clone(), directory_destination.clone(), 0)?;
+            self.plan_directory(&source_path, &source_path, &directory_destination)
         } else {
             let destination = if self.command.sources.len() == 1 {
                 destination_root.clone()
@@ -451,20 +460,68 @@ mod tests {
             }
         }
 
-        assert_eq!(final_count, Some(3));
+        let root_name = fixture_root
+            .file_name()
+            .expect("fixture root name")
+            .to_string_lossy();
+        assert_eq!(final_count, Some(4));
         assert!(
             planned_paths.contains(&TransferEndpoint::Remote(macsftp_core::RemotePath::new(
-                "/uploads/alpha.txt"
+                format!("/uploads/{root_name}/alpha.txt")
             )))
         );
         assert!(
             planned_paths.contains(&TransferEndpoint::Remote(macsftp_core::RemotePath::new(
-                "/uploads/nested"
+                format!("/uploads/{root_name}/nested")
             )))
         );
         assert!(
             planned_paths.contains(&TransferEndpoint::Remote(macsftp_core::RemotePath::new(
-                "/uploads/nested/beta.txt"
+                format!("/uploads/{root_name}/nested/beta.txt")
+            )))
+        );
+
+        std::fs::remove_dir_all(&fixture_root).expect("remove fixture directory");
+    }
+
+    #[test]
+    fn empty_directory_plans_its_named_remote_directory() {
+        let fixture_root = std::env::temp_dir().join(format!(
+            "macsftp-transfer-plan-empty-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&fixture_root).expect("create empty fixture directory");
+        let command = command(
+            LocalPath::new(fixture_root.display().to_string()),
+            "/uploads",
+        );
+        let (_, root_job) = new_plan(
+            &command,
+            TransferPlanId(4),
+            TransferId(4),
+            macsftp_core::Timestamp::from_secs_since_epoch(1),
+        );
+        let (event_tx, _event_rx) = flume::bounded(4);
+
+        let planned = plan_local_upload(
+            command,
+            TransferPlanId(4),
+            root_job,
+            std::sync::Arc::new(AtomicU64::new(5)),
+            event_tx,
+            CancellationToken::new(),
+        )
+        .expect("empty directory planning should complete");
+
+        assert_eq!(planned.len(), 1);
+        let root_name = fixture_root
+            .file_name()
+            .expect("fixture root name")
+            .to_string_lossy();
+        assert_eq!(
+            planned[0].destination,
+            TransferEndpoint::Remote(macsftp_core::RemotePath::new(format!(
+                "/uploads/{root_name}"
             )))
         );
 
@@ -512,9 +569,9 @@ mod tests {
                 final_count = Some(progress.planned_count);
             }
         }
-        assert_eq!(planned.len(), 300);
-        assert_eq!(batch_sizes, vec![1, 128, 128, 43]);
-        assert_eq!(final_count, Some(300));
+        assert_eq!(planned.len(), 301);
+        assert_eq!(batch_sizes, vec![1, 128, 128, 44]);
+        assert_eq!(final_count, Some(301));
 
         std::fs::remove_dir_all(&fixture_root).expect("remove fixture directory");
     }

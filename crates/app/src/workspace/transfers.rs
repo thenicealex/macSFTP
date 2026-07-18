@@ -141,9 +141,10 @@ impl crate::workspace::Workspace {
         transfer_id: macsftp_core::TransferId,
         cx: &mut Context<Self>,
     ) {
-        cx.mark_transfer_cancelling(transfer_id);
-        self.send_command(AppCommand::CancelTransfer { transfer_id }, cx);
-        cx.notify();
+        if self.send_command(AppCommand::CancelTransfer { transfer_id }, cx) {
+            cx.mark_transfer_cancelling(transfer_id);
+            cx.notify();
+        }
     }
     pub(crate) fn retry_transfer(
         &mut self,

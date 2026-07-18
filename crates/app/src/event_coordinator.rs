@@ -38,6 +38,13 @@ pub(crate) fn set_edit_opener(opener: EditorOpener) {
     EDIT_OPENER.with(|cell| cell.set(Some(opener)));
 }
 
+/// Open an edit-session temp file through the production editor launcher or
+/// the test hook. Shared by the initial download-complete path and a later
+/// request to reopen the same active edit.
+pub(crate) fn open_edit_temp(temp: &LocalPath, editor: Option<&str>) -> std::io::Result<()> {
+    edit_opener()(temp, editor)
+}
+
 /// Owns the sole runtime event consumer for the process.
 ///
 /// Process-wide transfer and persistence events are applied once here.
@@ -244,7 +251,7 @@ fn advance_downloading(
         session.local_mtime = mtime;
         session.active_transfer = None;
     }
-    if let Err(error) = edit_opener()(temp_path, editor.as_deref()) {
+    if let Err(error) = open_edit_temp(temp_path, editor.as_deref()) {
         warn!(error = %error, "could not open editor for remote edit");
     }
 }

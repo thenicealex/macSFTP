@@ -4,6 +4,7 @@ mod physical_connection;
 pub mod pool;
 mod runtime;
 mod session_actor;
+mod transfer_manager;
 mod transfer_planner;
 mod trust;
 

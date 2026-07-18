@@ -618,6 +618,20 @@ TransferSession
   - 负责 upload/download 和 metadata preservation
 ```
 
+实现约束（2026-07-18）：`TransferSession` 的独立性指 runtime 所有权、队列、取消域和
+SFTP channel 独立；它可以持有已经认证的 SSH 物理连接 `ConnectionLease`，不要求为每个
+plan 重做握手。BrowsingSession 关闭只释放自己的 lease，不能取消或关闭 TransferManager
+持有的 lease。物理连接断开时，连接池必须按 generation 失效该 entry，并向所有 browsing
+和 transfer lease 广播；后续 acquire 必须建立新连接，禁止复用死 handle。最后一个 lease
+释放后连接进入有界 idle grace period，超时从池中移除。
+
+落地加固（2026-07-18）：TransferManager 为进程级唯一 owner；成功或跳过的 job 立即
+释放 retry route，可重试失败只保留 `Weak<SharedConnection>` 与非敏感 `ConnectionKey`，
+不能阻止 idle eviction；用户重连后 Retry 从连接池取得新 generation。窗口通过 `SessionCoordinator` 登记
+尚未释放的 tab，窗口关闭后用一条 `CloseTabs` 批量释放 browsing actor；普通 tab 关闭在
+command channel 满时使用异步补发。物理断连 token 同时驱动连接池 generation 淘汰和
+browsing actor 的 `ConnectionLost` 事件。
+
 这个取舍优先保证：
 
 - 大文件传输不阻塞目录浏览；
@@ -1659,6 +1673,11 @@ pub struct ProfilesFile {
 
 第一版也要加版本号，避免后续迁移被迫写猜测逻辑。
 
+会话文件恢复（2026-07-18）：`session.json` 无法解析或版本不受支持时，启动仍使用空的
+内存快照，但第一次 checkpoint 必须先把原始字节原样保存为权限 `0600` 的
+`session.json.corrupt[.N]`，备份成功后才允许原子写入新快照；恢复成功后正常 checkpoint
+必须重新开放。禁止因一次损坏永久关闭本次进程的会话持久化，也禁止无备份覆盖原文件。
+
 Profile 结构预留：
 
 - `group_id: Option<ProfileGroupId>`：MVP 不实现 folder/group UI，但数据结构预留；
@@ -1933,8 +1952,9 @@ Keychain-backed profile 仍留待后续里程碑。
 状态：已交付。跨连接 residual temp 持久化与清理缺口已闭合（见 §1893 起），M5 ≈ 100%。`StartTransfer` 先建立 `TransferPlan`，本地
 目录扫描在 blocking worker 中流式回传 `TransferPlanProgress`：首个 child 立即回传，
 后续 child 按 128 个一批并在完成前冲刷尾批；drawer 在
-planning 期间显示发现数量与总字节。每个真实 session 用固定 4 槽队列执行
-child job，目录浏览保持在独立 SFTP channel；规划、队列和运行态均可取消，失败
+planning 期间显示发现数量与总字节。进程级 TransferManager 最多并发 4 个不同 plan；
+同一 plan 的 child 按规划顺序串行，避免目录创建与子文件传输竞态。目录浏览保持在独立
+SFTP channel；规划、队列和运行态均可取消，失败
 job 可重试。目标已存在时 job 进入 conflict state，modal 支持 overwrite、skip、
 keep both、自定义 rename，以及 overwrite/skip/rename apply-to-all（作用域为
 `TransferPlanId`）。自定义 rename 默认建议副本名，输入仅接受同目录文件名，并可用
@@ -1961,6 +1981,10 @@ symlink 均复制 link 本身，不解引用，并由真实 sshd 集成测试覆
 执行远端递归 listing，并按同一首条即时 + 128 条批量规则发出 `TransferPlanProgress` 后才入队；这样远端扫描不占用
 浏览 channel，取消仍复用 root planning 的 cancellation token。目录 child job 会创建
 本地空目录与嵌套父目录，保留目录 metadata，文件与 symlink 继续走既有执行路径。
+目录上传保留每个选中目录的顶层名称，多目录不会把相对路径铺平到同一个目标；空目录也
+生成 child job。已有同名目录按 merge 处理，文件级冲突仍逐项进入 plan-scoped 决策。
+本地目录 listing 及递归删除/rename/mkdir 已移到 GPUI background executor；每个 tab 用
+单调 local request epoch 丢弃过期结果，路径相同也不能绕过陈旧结果校验。
 
 ### M6: Conflict + metadata
 

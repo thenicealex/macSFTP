@@ -260,7 +260,7 @@ pub fn open_in_editor(temp: &LocalPath, editor: Option<&str>) -> std::io::Result
 |---|---|
 | 下载失败 | 会话进 `Failed`，状态栏提示；不打开编辑器；临时文件按现有传输残留机制清理 |
 | 回传时连接已断/session_epoch 过期 | 用现有 stale-event guard 判断；会话**保留**在 `Editing`，状态栏明确提示「已断线，重连后可继续保存」——临时文件和会话不丢 |
-| 同一远程文件被 Edit 两次 | 注册表按 `(profile_id, remote_path)` 查重：已存在活跃会话则聚焦提示「已在编辑中」，复用同一临时文件，不重复下载 |
+| 同一远程文件被 Edit 两次 | 注册表按 `(profile_id, remote_path)` 查重：`Editing` / `UploadingBack` 会话再次调用 `open_in_editor` 打开已有临时文件，不重复下载；`Downloading` 等待完成；`RemoteConflict` 先处理冲突 |
 | 编辑器原子替换文件（inode 变了） | 轮询用路径 `stat` 而非 fd，mtime 变化照样捕获；mtime 变即回传 |
 | 临时文件被用户手动删除 | 轮询 `stat` 报 NotFound → 会话标记结束并从注册表移除，状态栏提示 |
 | 回传中用户又保存一次 | `UploadingBack` 阶段不触发新回传（去抖）；完成刷新基准后回 `Editing`，后续保存正常触发 |

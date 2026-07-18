@@ -5,8 +5,9 @@ use macsftp_core::{
     Timestamp, TransferDirection, TransferEndpoint,
 };
 use macsftp_ui::{ActiveTheme, format_size, text_button};
+use tracing::warn;
 
-use crate::event_coordinator::workspace_windows;
+use crate::event_coordinator::{open_edit_temp, workspace_windows};
 use crate::resources::ActiveResources;
 use crate::workspace::Workspace;
 use crate::workspace::helpers::connected_transfer_session;
@@ -87,11 +88,17 @@ impl Workspace {
         // Window-close cleanup is the primary lifecycle boundary; this check is
         // the self-healing guard if that boundary was missed by an older build
         // or interrupted lifecycle.
-        if let Some(existing_tab_id) = cx
+        if let Some((existing_tab_id, existing_phase, existing_temp_path)) = cx
             .resources()
             .edit_sessions
             .find_active(profile_id, &remote_path)
-            .map(|session| session.tab_id)
+            .map(|session| {
+                (
+                    session.tab_id,
+                    session.phase.clone(),
+                    session.local_temp_path.clone(),
+                )
+            })
         {
             let owner_is_live = self.owns_tab(existing_tab_id)
                 || workspace_windows(cx).into_iter().any(|window| {
@@ -100,7 +107,22 @@ impl Workspace {
                         .is_ok_and(|workspace| workspace.owns_tab(existing_tab_id))
                 });
             if owner_is_live {
-                self.status_message = Some("This file is already open for editing".into());
+                self.status_message = Some(match existing_phase {
+                    EditPhase::Editing | EditPhase::UploadingBack => {
+                        let editor = cx.resources().config.config().external_editor.clone();
+                        match open_edit_temp(&existing_temp_path, editor.as_deref()) {
+                            Ok(()) => "Reopened file for editing".into(),
+                            Err(error) => {
+                                warn!(error = %error, "could not reopen editor for remote edit");
+                                "Could not open file for editing".into()
+                            }
+                        }
+                    }
+                    EditPhase::Downloading => "File is still downloading for editing".into(),
+                    EditPhase::RemoteConflict => {
+                        "Resolve the remote edit conflict before reopening".into()
+                    }
+                });
                 cx.notify();
                 return;
             }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use macsftp_core::{
     AppEvent, ConnectionKey, ConnectionPoolIdentity, ConnectionSettings, ErrorCode,
@@ -22,11 +22,28 @@ use crate::session_actor::HostTrustConfig;
 use crate::trust::TrustRegistry;
 
 pub struct SharedConnection {
+    pub connection_key: ConnectionKey,
     pub handle: client::Handle<ClientHandler>,
     pub remote_root: String,
     pub host_port_string: String,
     pub active_channels: AtomicUsize,
     pub last_used: Mutex<Instant>,
+    pub connection_lost: CancellationToken,
+}
+
+impl std::fmt::Debug for SharedConnection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SharedConnection")
+            .field("host_port", &self.host_port_string)
+            .field(
+                "active_channels",
+                &self
+                    .active_channels
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 pub enum PoolEntry {
@@ -36,12 +53,14 @@ pub enum PoolEntry {
 
 pub struct ConnectionManager {
     pool: Mutex<HashMap<ConnectionKey, PoolEntry>>,
+    idle_timeout: Duration,
 }
 
 impl ConnectionManager {
     pub fn new() -> Self {
         Self {
             pool: Mutex::new(HashMap::new()),
+            idle_timeout: Duration::from_secs(30),
         }
     }
 
@@ -57,13 +76,19 @@ impl ConnectionManager {
         trust_config: Arc<HostTrustConfig>,
         trust_registry: Arc<TrustRegistry>,
         event_tx: flume::Sender<AppEvent>,
-        connection_lost: CancellationToken,
     ) -> broadcast::Receiver<Result<Arc<SharedConnection>, ConnectFailure>> {
         let key = ConnectionKey::new(settings, pool_identity.clone());
         let mut pool = self
             .pool
             .lock()
-            .expect("connection pool mutex must not be poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        if matches!(
+            pool.get(&key),
+            Some(PoolEntry::Connected(shared)) if shared.connection_lost.is_cancelled()
+        ) {
+            pool.remove(&key);
+        }
 
         if let Some(entry) = pool.get(&key) {
             match entry {
@@ -105,6 +130,7 @@ impl ConnectionManager {
         let manager = self.clone();
         let key_clone = key.clone();
         tokio::spawn(async move {
+            let connection_lost = CancellationToken::new();
             let result = async {
                 let handle = establish_physical_connection(
                     &settings,
@@ -114,7 +140,7 @@ impl ConnectionManager {
                     trust_config,
                     trust_registry,
                     event_tx,
-                    connection_lost,
+                    connection_lost.clone(),
                 )
                 .await?;
 
@@ -162,11 +188,13 @@ impl ConnectionManager {
                 })?;
 
                 Ok(Arc::new(SharedConnection {
+                    connection_key: key_clone.clone(),
                     handle,
                     remote_root: root,
                     host_port_string: format!("{}:{}", settings.host, settings.port),
                     active_channels: AtomicUsize::new(0),
                     last_used: Mutex::new(Instant::now()),
+                    connection_lost,
                 }))
             }
             .await;
@@ -197,7 +225,6 @@ impl ConnectionManager {
         trust_config: Arc<HostTrustConfig>,
         trust_registry: Arc<TrustRegistry>,
         event_tx: flume::Sender<AppEvent>,
-        connection_lost: CancellationToken,
     ) -> flume::Receiver<Result<(Arc<SharedConnection>, SftpSession), ConnectFailure>> {
         info!(
             target: "macsftp_sftp::connection",
@@ -230,7 +257,6 @@ impl ConnectionManager {
             trust_config,
             trust_registry,
             event_tx,
-            connection_lost,
         );
 
         let (tx, rx) = flume::bounded(1);
@@ -339,20 +365,73 @@ impl ConnectionManager {
         rx
     }
 
-    pub fn mark_connected(&self, key: &ConnectionKey, shared: Arc<SharedConnection>) {
+    pub fn mark_connected(self: &Arc<Self>, key: &ConnectionKey, shared: Arc<SharedConnection>) {
         let mut pool = self
             .pool
             .lock()
-            .expect("connection pool mutex must not be poisoned");
-        pool.insert(key.clone(), PoolEntry::Connected(shared));
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        pool.insert(key.clone(), PoolEntry::Connected(shared.clone()));
+        drop(pool);
+
+        let manager = self.clone();
+        let key = key.clone();
+        let idle_timeout = self.idle_timeout;
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = shared.connection_lost.cancelled() => {
+                        manager.remove_if_same(&key, &shared);
+                        return;
+                    }
+                    _ = tokio::time::sleep(idle_timeout) => {
+                        let idle = shared
+                            .last_used
+                            .lock()
+                            .map(|last_used| last_used.elapsed() >= idle_timeout)
+                            .unwrap_or(false);
+                        if idle
+                            && shared.active_channels.load(std::sync::atomic::Ordering::Relaxed) == 0
+                            && Arc::strong_count(&shared) == 2
+                        {
+                            manager.remove_if_same(&key, &shared);
+                            return;
+                        }
+                    }
+                }
+            }
+        });
     }
 
     pub fn remove(&self, key: &ConnectionKey) {
         let mut pool = self
             .pool
             .lock()
-            .expect("connection pool mutex must not be poisoned");
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         pool.remove(key);
+    }
+
+    pub(crate) fn connected(&self, key: &ConnectionKey) -> Option<Arc<SharedConnection>> {
+        let pool = self
+            .pool
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match pool.get(key) {
+            Some(PoolEntry::Connected(shared)) if !shared.connection_lost.is_cancelled() => {
+                Some(shared.clone())
+            }
+            _ => None,
+        }
+    }
+
+    fn remove_if_same(&self, key: &ConnectionKey, shared: &Arc<SharedConnection>) {
+        let mut pool = self
+            .pool
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if matches!(pool.get(key), Some(PoolEntry::Connected(current)) if Arc::ptr_eq(current, shared))
+        {
+            pool.remove(key);
+        }
     }
 }
 

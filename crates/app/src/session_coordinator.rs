@@ -1,5 +1,8 @@
+use std::collections::HashMap;
+
 use gpui::{App, Global};
-use macsftp_core::WindowSessionId;
+use macsftp_core::{AppCommand, TabId, WindowSessionId};
+use macsftp_sftp::RuntimeClient;
 use macsftp_storage::{SessionFile, SessionStore, SessionWindowSnapshot, StorageError};
 use tracing::warn;
 
@@ -12,6 +15,12 @@ pub struct SessionCoordinator {
     window_order: Vec<WindowSessionId>,
     next_window_id: u64,
     quitting: bool,
+    runtime_sessions: HashMap<WindowSessionId, WindowRuntimeSessions>,
+}
+
+struct WindowRuntimeSessions {
+    runtime_client: RuntimeClient,
+    tab_ids: Vec<TabId>,
 }
 
 impl Global for SessionCoordinator {}
@@ -35,6 +44,7 @@ impl SessionCoordinator {
             window_order: Vec::new(),
             next_window_id,
             quitting: false,
+            runtime_sessions: HashMap::new(),
         }
     }
 
@@ -56,6 +66,32 @@ impl SessionCoordinator {
         }
     }
 
+    pub fn register_runtime_tabs(
+        &mut self,
+        window_id: WindowSessionId,
+        runtime_client: RuntimeClient,
+        tab_ids: impl IntoIterator<Item = TabId>,
+    ) {
+        let sessions =
+            self.runtime_sessions
+                .entry(window_id)
+                .or_insert_with(|| WindowRuntimeSessions {
+                    runtime_client,
+                    tab_ids: Vec::new(),
+                });
+        for tab_id in tab_ids {
+            if !sessions.tab_ids.contains(&tab_id) {
+                sessions.tab_ids.push(tab_id);
+            }
+        }
+    }
+
+    pub fn mark_runtime_tab_released(&mut self, window_id: WindowSessionId, tab_id: TabId) {
+        if let Some(sessions) = self.runtime_sessions.get_mut(&window_id) {
+            sessions.tab_ids.retain(|candidate| *candidate != tab_id);
+        }
+    }
+
     fn save(&mut self, snapshot: SessionFile, quitting: bool) -> Result<(), StorageError> {
         if self.quitting {
             return Ok(());
@@ -63,7 +99,18 @@ impl SessionCoordinator {
         self.quitting = quitting;
         self.window_order = snapshot.windows.iter().map(|window| window.id).collect();
         self.store.replace(snapshot);
-        self.store.save()
+        if self.store.initial_error().is_some() {
+            let backup_path = self.store.recover_and_save()?;
+            if let Some(backup_path) = backup_path {
+                warn!(
+                    backup_path = backup_path.as_str(),
+                    "recovered session.json after preserving unreadable input"
+                );
+            }
+            Ok(())
+        } else {
+            self.store.save()
+        }
     }
 }
 
@@ -127,8 +174,49 @@ pub fn checkpoint_after_window_closed(cx: &mut App) {
         return;
     }
     let snapshot = collect_session(cx);
+    release_closed_window_sessions(cx, &snapshot);
     if let Err(error) = cx.global_mut::<SessionCoordinator>().save(snapshot, false) {
         warn!(error = %error, "could not save session.json after window closed");
+    }
+}
+
+fn release_closed_window_sessions(cx: &mut App, snapshot: &SessionFile) {
+    let live_window_ids = snapshot
+        .windows
+        .iter()
+        .map(|window| window.id)
+        .collect::<Vec<_>>();
+    let closed_window_ids = cx
+        .global::<SessionCoordinator>()
+        .runtime_sessions
+        .keys()
+        .filter(|window_id| !live_window_ids.contains(window_id))
+        .copied()
+        .collect::<Vec<_>>();
+    let closed_sessions = {
+        let coordinator = cx.global_mut::<SessionCoordinator>();
+        closed_window_ids
+            .into_iter()
+            .filter_map(|window_id| coordinator.runtime_sessions.remove(&window_id))
+            .collect::<Vec<_>>()
+    };
+
+    for sessions in closed_sessions {
+        if sessions.tab_ids.is_empty() {
+            continue;
+        }
+        cx.spawn(async move |_| {
+            if let Err(error) = sessions
+                .runtime_client
+                .send_async(AppCommand::CloseTabs {
+                    tab_ids: sessions.tab_ids,
+                })
+                .await
+            {
+                warn!(?error, "failed to release closed window browsing sessions");
+            }
+        })
+        .detach();
     }
 }
 
@@ -138,7 +226,7 @@ mod tests {
     use macsftp_core::{LocalPath, RemotePath, RuntimeBridgeConfig, WindowSessionId};
     use macsftp_platform::AppPaths;
     use macsftp_sftp::{BridgeChannels, RuntimeClient};
-    use macsftp_storage::{ConfigStore, SessionStore};
+    use macsftp_storage::{ConfigStore, SessionFile, SessionStore};
     use macsftp_ui::Theme;
 
     use super::{SessionCoordinator, checkpoint_after_window_closed, checkpoint_before_quit};
@@ -255,6 +343,27 @@ mod tests {
         let empty = SessionStore::open(app_paths.session_file)
             .expect("last close should save an empty session");
         assert!(empty.file().windows.is_empty());
+    }
+
+    #[test]
+    fn coordinator_recovers_corrupt_session_before_checkpointing() {
+        let app_paths = test_app_paths("recover-corrupt");
+        std::fs::write(app_paths.session_file.as_str(), "{not json")
+            .expect("write corrupt session fixture");
+        let mut coordinator =
+            SessionCoordinator::new(SessionStore::open_or_empty(app_paths.session_file.clone()));
+
+        coordinator
+            .save(SessionFile::empty(), false)
+            .expect("checkpoint should recover corrupt session");
+
+        SessionStore::open(app_paths.session_file.clone())
+            .expect("checkpoint should replace session.json with valid data");
+        assert_eq!(
+            std::fs::read_to_string(format!("{}.corrupt", app_paths.session_file.as_str()))
+                .expect("read preserved corrupt session"),
+            "{not json"
+        );
     }
 
     fn test_app_paths(label: &str) -> AppPaths {

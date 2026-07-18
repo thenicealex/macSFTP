@@ -1519,6 +1519,11 @@ pub enum AppCommand {
     CloseTab {
         tab_id: TabId,
     },
+    /// Release every browsing session owned by a window in one bounded
+    /// command. Transfers keep their independent runtime-owned leases.
+    CloseTabs {
+        tab_ids: Vec<TabId>,
+    },
     ConnectTab(ConnectCommand),
     DisconnectTab {
         tab_id: TabId,

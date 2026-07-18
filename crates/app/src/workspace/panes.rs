@@ -4,7 +4,7 @@ use gpui::{
 };
 use macsftp_core::{
     AppCommand, ConnectionState, DisconnectReason, EntryPath, FileKind, FileSortField, LocalPath,
-    RemotePath, SortDirection, TabId, TabState,
+    RemotePath, SortDirection, TabId,
 };
 use macsftp_platform::read_local_directory;
 use macsftp_ui::InputKeyResult;
@@ -359,37 +359,88 @@ impl crate::workspace::Workspace {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let message = if let Some(tab) = self.active_tab_mut() {
-            let message = Self::load_local_directory(&path, tab);
+        if let Some(tab) = self.active_tab_mut() {
+            let tab_id = tab.id;
+            tab.local.path = Some(path.clone());
+            tab.local.error = None;
             tab.selection.selected_paths.clear();
-            message
-        } else {
-            None
-        };
-        if let Some(message) = message {
-            self.status_message = Some(message.into());
+            self.request_local_directory(tab_id, path, cx);
         }
         self.local_scroll = UniformListScrollHandle::new();
         cx.notify();
     }
-    pub(crate) fn load_local_directory(path: &LocalPath, tab: &mut TabState) -> Option<String> {
-        match read_local_directory(path) {
-            Ok(mut entries) => {
-                macsftp_core::sort_entries(&mut entries, &tab.sort);
-                tab.local.entries = entries;
-                tab.local.path = Some(path.clone());
-                tab.local.error = None;
-                None
-            }
-            Err(error) => {
-                tab.local.entries = Vec::new();
-                tab.local.path = Some(path.clone());
-                warn!(error = %error, "could not read local directory {}", path.as_str());
-                Some(format!("Cannot open {}: {error}", path.as_str()))
-            }
-        }
-    }
 
+    pub(crate) fn request_local_directory(
+        &mut self,
+        tab_id: TabId,
+        path: LocalPath,
+        cx: &mut Context<Self>,
+    ) {
+        let request_epoch = self
+            .local_read_epochs
+            .entry(tab_id)
+            .and_modify(|epoch| *epoch = epoch.saturating_add(1))
+            .or_insert(1)
+            .to_owned();
+        if self.state.tabs.active_tab_id == Some(tab_id) {
+            self.status_message = Some("Loading local directory…".into());
+        }
+        let read_path = path.clone();
+        let read_task = cx
+            .background_executor()
+            .spawn(async move { read_local_directory(&read_path) });
+        cx.spawn(async move |workspace, cx| {
+            let result = read_task.await;
+            let _ = workspace.update(cx, |workspace, cx| {
+                let is_current = workspace.local_read_epochs.get(&tab_id) == Some(&request_epoch)
+                    && workspace
+                        .state
+                        .tabs
+                        .find_tab(tab_id)
+                        .and_then(|tab| tab.local.path.as_ref())
+                        == Some(&path);
+                if !is_current {
+                    return;
+                }
+                let is_active = workspace.state.tabs.active_tab_id == Some(tab_id);
+                let Some(tab) = workspace.state.tabs.find_tab_mut(tab_id) else {
+                    return;
+                };
+                match result {
+                    Ok(mut entries) => {
+                        macsftp_core::sort_entries(&mut entries, &tab.sort);
+                        tab.local.entries = entries;
+                        tab.local.error = None;
+                        if is_active {
+                            workspace.status_message = None;
+                        }
+                    }
+                    Err(error) => {
+                        tab.local.entries.clear();
+                        let failure = macsftp_platform::local_fs_error(
+                            "Could not read local directory",
+                            &error,
+                        );
+                        if is_active {
+                            workspace.status_message =
+                                Some(format!("Cannot open {}: {error}", path.as_str()).into());
+                        }
+                        tab.local.error = Some(failure);
+                        warn!(
+                            error = %error,
+                            "could not read local directory {}",
+                            path.as_str()
+                        );
+                    }
+                }
+                if is_active {
+                    workspace.local_scroll = UniformListScrollHandle::new();
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
     pub(crate) fn apply_sort_field(&mut self, field: FileSortField, cx: &mut Context<Self>) {
         let Some(tab) = self.active_tab_mut() else {
             return;
@@ -815,7 +866,9 @@ impl crate::workspace::Workspace {
             ConnectionState::Connecting { .. } | ConnectionState::Reconnecting { .. } => {}
             _ => return,
         }
-        self.send_command(AppCommand::DisconnectTab { tab_id }, cx);
+        if !self.send_command(AppCommand::DisconnectTab { tab_id }, cx) {
+            return;
+        }
         if let Some(tab) = self.state.tabs.find_tab_mut(tab_id) {
             tab.disconnect(DisconnectReason::UserRequested);
             tab.remote.entries.clear();

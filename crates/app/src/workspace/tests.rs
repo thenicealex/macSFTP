@@ -58,6 +58,8 @@ mod tests {
     };
     use macsftp_ui::{Appearance, Theme};
 
+    use std::cell::RefCell;
+
     use super::{
         AppPaths, PaneSide, RestoredTabTarget, STATUS_BUSY_TRY_AGAIN,
         STATUS_CONNECTION_SERVICE_UNAVAILABLE, Workspace, WorkspaceSurface,
@@ -77,10 +79,42 @@ mod tests {
 
     const TEST_REMOTE_ROOT: &str = "/home/tester";
 
+    thread_local! {
+        static REOPENED_EDIT_PATHS: RefCell<Vec<LocalPath>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn record_edit_reopen(temp: &LocalPath, _editor: Option<&str>) -> std::io::Result<()> {
+        REOPENED_EDIT_PATHS.with(|paths| paths.borrow_mut().push(temp.clone()));
+        Ok(())
+    }
+
     fn init_workspace(
         cx: &mut TestAppContext,
     ) -> (Entity<Workspace>, VisualTestContext, BridgeChannels) {
         init_workspace_with_paths(cx, temp_app_paths(), false)
+    }
+
+    fn fill_command_channel(channels: &BridgeChannels) {
+        while channels
+            .command_tx
+            .try_send(AppCommand::CloseTab { tab_id: TabId(999) })
+            .is_ok()
+        {}
+        assert!(
+            channels.command_tx.is_full(),
+            "command channel must be full"
+        );
+    }
+
+    fn set_local_path_and_wait(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+        path: LocalPath,
+    ) {
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.set_local_path(path, window, cx);
+        });
+        cx.run_until_parked();
     }
 
     fn init_workspace_with_paths(
@@ -278,9 +312,7 @@ mod tests {
         std::fs::write(dir.join("gamma.txt"), b"g").expect("write gamma.txt");
         let local_root = LocalPath::new(dir.to_string_lossy().into_owned());
 
-        workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.set_local_path(local_root.clone(), window, cx);
-        });
+        set_local_path_and_wait(&workspace, &mut cx, local_root.clone());
 
         cx.dispatch_action(SelectNextEntry);
         cx.dispatch_action(SelectNextEntry);
@@ -317,8 +349,8 @@ mod tests {
             std::fs::write(fixture.join(format!("f{i:02}.txt")), b"x").expect("write file");
         }
 
-        workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.set_local_path(base, window, cx);
+        set_local_path_and_wait(&workspace, &mut cx, base);
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
             assert_eq!(
                 workspace.entry_count(PaneSide::Local, cx),
                 15,
@@ -353,8 +385,8 @@ mod tests {
             std::fs::write(fixture.join(name), b"x").expect("write file");
         }
 
-        workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.set_local_path(base, window, cx);
+        set_local_path_and_wait(&workspace, &mut cx, base);
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
             assert_eq!(workspace.entry_count(PaneSide::Local, cx), 5);
             // Anchor at visible index 1, then extend to 3.
             workspace.select_index(PaneSide::Local, 1, cx);
@@ -390,8 +422,8 @@ mod tests {
             std::fs::write(fixture.join(name), b"x").expect("write visible");
         }
 
-        workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.set_local_path(base, window, cx);
+        set_local_path_and_wait(&workspace, &mut cx, base);
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
             assert_eq!(
                 workspace.entry_count(PaneSide::Local, cx),
                 3,
@@ -1063,6 +1095,33 @@ mod tests {
     }
 
     #[gpui::test]
+    fn full_command_channel_keeps_host_key_prompt_actionable(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        let prompt = connect_and_prompt(&workspace, &mut cx);
+        fill_command_channel(&channels);
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.accept_host_key(prompt.request_id, window, cx);
+        });
+
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(workspace.active_host_key_prompt().is_some());
+            assert!(matches!(
+                workspace.active_tab().expect("tab").connection,
+                ConnectionState::AwaitingHostKey { request_id, .. }
+                    if request_id == prompt.request_id
+            ));
+            assert_eq!(
+                workspace
+                    .status_message
+                    .as_ref()
+                    .map(|message| message.as_ref()),
+                Some(STATUS_BUSY_TRY_AGAIN)
+            );
+        });
+    }
+
+    #[gpui::test]
     fn reject_host_key_disconnects_tab(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
         let prompt = connect_and_prompt(&workspace, &mut cx);
@@ -1126,6 +1185,26 @@ mod tests {
     }
 
     #[gpui::test]
+    fn full_command_channel_does_not_fake_cancel_connect(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
+        });
+        fill_command_channel(&channels);
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.cancel_connect(window, cx);
+        });
+
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(matches!(
+                workspace.active_tab().expect("tab").connection,
+                ConnectionState::Connecting { .. }
+            ));
+        });
+    }
+
+    #[gpui::test]
     fn custom_conflict_rename_validates_and_sends_plan_scoped_decision(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
         let prompt = TransferConflictPrompt {
@@ -1180,6 +1259,47 @@ mod tests {
             assert!(workspace.state.modals.active.is_empty());
             assert!(workspace.conflict_rename_error.is_none());
         });
+    }
+
+    #[gpui::test]
+    fn full_command_channel_keeps_transfer_conflict_modal(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        let prompt = TransferConflictPrompt {
+            request_id: ConflictRequestId(7),
+            plan_id: TransferPlanId(3),
+            transfer_id: TransferId(9),
+            source: TransferEndpoint::Local(LocalPath::new("/tmp/source.txt")),
+            destination: TransferEndpoint::Remote(RemotePath::new("/srv/existing.txt")),
+            source_size: Some(11),
+            source_modified_at: None,
+        };
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_app_event(AppEvent::TransferConflict(prompt.clone()), window, cx);
+        });
+        fill_command_channel(&channels);
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.resolve_transfer_conflict(
+                &prompt,
+                ConflictDecision::Overwrite {
+                    apply_to_all: false,
+                },
+                window,
+                cx,
+            );
+        });
+
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(workspace.has_transfer_conflict_modal(prompt.request_id));
+        });
+        assert!(
+            cx.cx.read(|cx| cx
+                .transfers()
+                .pending_conflicts
+                .iter()
+                .any(|pending| { pending.id == prompt.request_id })),
+            "global conflict must remain retryable"
+        );
     }
 
     #[gpui::test]
@@ -1964,6 +2084,82 @@ mod tests {
         assert_eq!(
             command.destination,
             TransferEndpoint::Local(LocalPath::new(expected_temp))
+        );
+    }
+
+    #[gpui::test]
+    fn duplicate_edit_reopens_existing_temp_without_downloading(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        connect_and_drain(&workspace, &mut cx, &channels);
+        REOPENED_EDIT_PATHS.with(|paths| paths.borrow_mut().clear());
+        crate::event_coordinator::set_edit_opener(record_edit_reopen);
+
+        let remote_path = RemotePath::new("/home/tester/notes.txt");
+        let (session_id, temp_path) = workspace.update_in(&mut cx, |_workspace, _window, cx| {
+            let session_id = cx.resources_mut().edit_sessions.next_id();
+            let temp_path = LocalPath::new(format!(
+                "{}/{}/{}/notes.txt",
+                cx.resources().app_paths.edits_dir.as_str(),
+                cx.resources().edit_run_id,
+                session_id.0
+            ));
+            let parent = std::path::Path::new(temp_path.as_str())
+                .parent()
+                .expect("edit temp has a parent directory");
+            std::fs::create_dir_all(parent).expect("create edit temp directory");
+            std::fs::write(temp_path.as_str(), b"existing edit").expect("write existing edit temp");
+            cx.resources_mut().edit_sessions.register(EditSession {
+                id: session_id,
+                remote_path: remote_path.clone(),
+                tab_id: TabId(1),
+                session_epoch: 1,
+                profile_id: ProfileId(0),
+                local_temp_path: temp_path.clone(),
+                phase: EditPhase::Editing,
+                remote_snapshot: RemoteSnapshot {
+                    size: Some(13),
+                    modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+                },
+                local_mtime: None,
+                active_transfer: None,
+                missing_ticks: 0,
+            });
+            (session_id, temp_path)
+        });
+
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            workspace.begin_edit(
+                remote_path.clone(),
+                Some(13),
+                Some(Timestamp::from_secs_since_epoch(100)),
+                cx,
+            );
+        });
+
+        REOPENED_EDIT_PATHS.with(|paths| {
+            assert_eq!(
+                paths.borrow().as_slice(),
+                std::slice::from_ref(&temp_path),
+                "a second edit must reopen the existing temp file"
+            );
+        });
+        workspace.read_with(&cx, |workspace, cx| {
+            let session = cx
+                .resources()
+                .edit_sessions
+                .find_active(ProfileId(0), &remote_path)
+                .expect("the existing edit session remains active");
+            assert_eq!(session.id, session_id);
+            assert_eq!(session.phase, EditPhase::Editing);
+            assert_eq!(cx.resources().edit_sessions.editing_sessions().count(), 1);
+            assert_eq!(
+                workspace.status_message_for_test().as_deref(),
+                Some("Reopened file for editing")
+            );
+        });
+        assert!(
+            channels.command_rx.try_recv().is_err(),
+            "reopening an existing edit must not dispatch another download"
         );
     }
 
@@ -3277,8 +3473,8 @@ mod tests {
         std::fs::write(fixture.join("beta.txt"), b"b").expect("beta");
         let child = LocalPath::new(child_dir.to_string_lossy().into_owned());
 
+        set_local_path_and_wait(&workspace, &mut cx, parent);
         workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.set_local_path(parent, window, cx);
             workspace.focused_side = PaneSide::Local;
             workspace.local_filter.query = "alpha".into();
             workspace.local_filter.explicit_focus = true;
@@ -4153,6 +4349,55 @@ mod tests {
     }
 
     #[gpui::test]
+    fn full_command_channel_eventually_releases_closed_tab(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        fill_command_channel(&channels);
+
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.close_tab_by_id(TabId(1), window, cx);
+        });
+        channels
+            .command_rx
+            .try_recv()
+            .expect("free one command slot for lifecycle retry");
+        cx.run_until_parked();
+
+        assert!(
+            channels
+                .command_rx
+                .try_iter()
+                .any(|command| matches!(command, AppCommand::CloseTab { tab_id: TabId(1) })),
+            "the detached lifecycle retry must enqueue the real close command"
+        );
+    }
+
+    #[gpui::test]
+    fn window_release_notifies_runtime_for_all_remaining_tabs(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        cx.cx.update(|cx| {
+            cx.on_window_closed(crate::session_coordinator::checkpoint_after_window_closed)
+                .detach();
+        });
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.open_new_tab(window, cx);
+        });
+
+        workspace.update_in(&mut cx, |_workspace, window, _cx| window.remove_window());
+        cx.run_until_parked();
+
+        let command = channels
+            .command_rx
+            .try_recv()
+            .expect("window release command must be enqueued");
+        assert_eq!(
+            command,
+            AppCommand::CloseTabs {
+                tab_ids: vec![TabId(1), TabId(2)],
+            }
+        );
+    }
+
+    #[gpui::test]
     fn completed_child_jobs_finalize_root_plan(cx: &mut TestAppContext) {
         let (workspace, mut cx, _channels) = init_workspace(cx);
         let now = Timestamp(std::time::SystemTime::now());
@@ -4323,8 +4568,8 @@ mod tests {
         std::fs::write(fixture.join(".secret"), b"secret").expect("write hidden");
         std::fs::write(fixture.join("visible.txt"), b"ok").expect("write visible");
 
-        workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.set_local_path(base, window, cx);
+        set_local_path_and_wait(&workspace, &mut cx, base);
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
             let tab = workspace.active_tab().expect("tab");
             assert_eq!(
                 tab.local.entries.len(),
@@ -4381,8 +4626,8 @@ mod tests {
         std::fs::write(fixture.join("a.txt"), b"a").expect("write a");
         std::fs::write(fixture.join("b.txt"), b"b").expect("write b");
 
-        workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.set_local_path(base, window, cx);
+        set_local_path_and_wait(&workspace, &mut cx, base);
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
             assert_eq!(
                 workspace.entry_count(PaneSide::Local, cx),
                 2,
@@ -4471,12 +4716,14 @@ mod tests {
                 LocalPath::new(dir.to_string_lossy().into_owned()),
             )
         };
-        workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.update_in(&mut cx, |workspace, _window, _cx| {
             if let Some(tab) = workspace.active_tab_mut() {
                 tab.sort.field = FileSortField::Size;
                 tab.sort.direction = SortDirection::Ascending;
             }
-            workspace.set_local_path(base, window, cx);
+        });
+        set_local_path_and_wait(&workspace, &mut cx, base);
+        workspace.read_with(&cx, |workspace, _| {
             let names: Vec<_> = workspace
                 .active_tab()
                 .unwrap()
@@ -4517,8 +4764,8 @@ mod tests {
         std::fs::write(fixture.join("a.txt"), b"a").expect("file");
         std::fs::create_dir(fixture.join("subdir")).expect("dir");
 
+        set_local_path_and_wait(&workspace, &mut cx, base);
         workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.set_local_path(base, window, cx);
             let paths: Vec<EntryPath> = workspace
                 .active_tab()
                 .expect("tab")
@@ -4548,8 +4795,8 @@ mod tests {
         let (fixture, base) = temp_local_fixture("dont-ask");
         std::fs::write(fixture.join("gone.txt"), b"x").expect("file");
 
+        set_local_path_and_wait(&workspace, &mut cx, base.clone());
         workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.set_local_path(base.clone(), window, cx);
             let path = workspace
                 .active_tab()
                 .expect("tab")
@@ -4568,15 +4815,18 @@ mod tests {
                 state.dont_ask_again = true;
             }
             workspace.confirm_delete(window, cx);
-            assert!(!std::path::Path::new(fixture.join("gone.txt").as_path()).exists());
             assert!(
                 !cx.resources().config.config().confirm_delete,
                 "confirm_delete should persist false"
             );
+        });
+        cx.run_until_parked();
+        assert!(!fixture.join("gone.txt").exists());
 
-            // Create another file and delete without modal.
-            std::fs::write(fixture.join("second.txt"), b"y").expect("second");
-            workspace.set_local_path(base, window, cx);
+        // Create another file and delete without modal.
+        std::fs::write(fixture.join("second.txt"), b"y").expect("second");
+        set_local_path_and_wait(&workspace, &mut cx, base);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
             let path = workspace
                 .active_tab()
                 .expect("tab")
@@ -4591,8 +4841,9 @@ mod tests {
             }
             workspace.request_delete_selection(window, cx);
             assert!(workspace.delete_confirm.is_none());
-            assert!(!std::path::Path::new(fixture.join("second.txt").as_path()).exists());
         });
+        cx.run_until_parked();
+        assert!(!fixture.join("second.txt").exists());
         let _ = std::fs::remove_dir_all(&fixture);
     }
 
@@ -4601,18 +4852,21 @@ mod tests {
         let (workspace, mut cx, _channels) = init_workspace(cx);
         let (fixture, base) = temp_local_fixture("inline-edit");
 
+        set_local_path_and_wait(&workspace, &mut cx, base.clone());
         workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.set_local_path(base.clone(), window, cx);
             workspace.focused_side = PaneSide::Local;
             workspace.begin_new_folder(window, cx);
             if let Some(edit) = &mut workspace.inline_edit {
                 edit.input.set_value("Created Folder");
             }
             workspace.submit_inline_edit(window, cx);
-            assert!(fixture.join("Created Folder").is_dir());
+        });
+        cx.run_until_parked();
+        assert!(fixture.join("Created Folder").is_dir());
 
-            // Reload so listing includes the new folder, then rename it.
-            workspace.set_local_path(base, window, cx);
+        // Reload so listing includes the new folder, then rename it.
+        set_local_path_and_wait(&workspace, &mut cx, base);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
             let path = workspace
                 .active_tab()
                 .expect("tab")
@@ -4630,9 +4884,10 @@ mod tests {
                 edit.input.set_value("Renamed Folder");
             }
             workspace.submit_inline_edit(window, cx);
-            assert!(!fixture.join("Created Folder").exists());
-            assert!(fixture.join("Renamed Folder").is_dir());
         });
+        cx.run_until_parked();
+        assert!(!fixture.join("Created Folder").exists());
+        assert!(fixture.join("Renamed Folder").is_dir());
         let _ = std::fs::remove_dir_all(&fixture);
     }
 
@@ -4674,8 +4929,8 @@ mod tests {
         std::fs::write(fixture.join("b.txt"), b"b").expect("file b");
         std::fs::write(fixture.join("c.txt"), b"c").expect("file c");
 
-        workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.set_local_path(base, window, cx);
+        set_local_path_and_wait(&workspace, &mut cx, base);
+        workspace.update_in(&mut cx, |workspace, _window, _cx| {
             let local_paths: Vec<EntryPath> = workspace
                 .active_tab()
                 .expect("tab")

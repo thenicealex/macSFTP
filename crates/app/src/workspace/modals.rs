@@ -107,15 +107,17 @@ impl crate::workspace::Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.remove_conflict_modal(prompt.request_id, cx);
-        self.send_command(
+        if !self.send_command(
             AppCommand::ResolveTransferConflict(ConflictDecisionCommand {
                 plan_id: prompt.plan_id,
                 request_id: prompt.request_id,
                 decision,
             }),
             cx,
-        );
+        ) {
+            return;
+        }
+        self.remove_conflict_modal(prompt.request_id, cx);
         self.focus_pane(self.focused_side, window, cx);
         cx.notify();
     }
@@ -182,11 +184,13 @@ impl crate::workspace::Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.remove_modal(request_id);
-        self.send_command(
+        if !self.send_command(
             AppCommand::AcceptHostKey(HostKeyDecisionCommand { request_id }),
             cx,
-        );
+        ) {
+            return;
+        }
+        self.remove_modal(request_id);
         // Handshake continues; show Connecting until TabConnected lands.
         if let Some(tab) = self.active_tab_mut()
             && let ConnectionState::AwaitingHostKey {
@@ -210,8 +214,10 @@ impl crate::workspace::Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.send_command(AppCommand::RejectHostKey { request_id }, cx) {
+            return;
+        }
         self.remove_modal(request_id);
-        self.send_command(AppCommand::RejectHostKey { request_id }, cx);
         // The user declined — reflect it immediately. The actor's own
         // TabDisconnected for this session is dropped by the guard once
         // the state no longer matches, which is fine: same outcome.

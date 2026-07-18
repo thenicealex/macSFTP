@@ -65,27 +65,36 @@ impl KnownHostsStore {
     /// `NotFound`.
     pub fn check(&self, host: &str, port: u16, key: &PublicKey) -> HostKeyCheckResult {
         let pattern = host_pattern(host, port);
+        let mut found_host = false;
+        let mut found_matching_key = false;
 
         for entries in [&self.app_entries, &self.user_entries] {
             for entry in entries {
                 if entry_matches_host(entry, &pattern) {
-                    if entry.marker() == Some(&Marker::Revoked) {
-                        return HostKeyCheckResult::Mismatch;
-                    }
                     if entry.marker() == Some(&Marker::CertAuthority) {
                         continue;
                     }
+                    found_host = true;
                     // Compare key material only: stored entries may carry
                     // a comment, wire keys never do, and `PublicKey`'s
                     // `PartialEq` would treat that as a different key.
-                    if entry.public_key().key_data() == key.key_data() {
-                        return HostKeyCheckResult::Match;
+                    let key_matches = entry.public_key().key_data() == key.key_data();
+                    if entry.marker() == Some(&Marker::Revoked) && key_matches {
+                        return HostKeyCheckResult::Mismatch;
                     }
-                    return HostKeyCheckResult::Mismatch;
+                    if entry.marker().is_none() && key_matches {
+                        found_matching_key = true;
+                    }
                 }
             }
         }
-        HostKeyCheckResult::NotFound
+        if found_matching_key {
+            HostKeyCheckResult::Match
+        } else if found_host {
+            HostKeyCheckResult::Mismatch
+        } else {
+            HostKeyCheckResult::NotFound
+        }
     }
 
     /// Add a new trusted host key to the app-owned known_hosts file
@@ -183,16 +192,32 @@ fn entry_matches_host(entry: &Entry, pattern: &str) -> bool {
 /// Load a known_hosts file, skipping unparseable content with a WARN.
 /// A missing file is the normal first-launch state — no warning.
 fn load_file(path: &Path) -> Vec<Entry> {
-    if !path.exists() {
-        return Vec::new();
-    }
-    match KnownHosts::read_file(path) {
-        Ok(entries) => entries,
+    let input = match std::fs::read_to_string(path) {
+        Ok(input) => input,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
         Err(error) => {
             warn!(path = %path.display(), error = %error, "known_hosts: failed to read file");
-            Vec::new()
+            return Vec::new();
         }
-    }
+    };
+
+    input
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| match KnownHosts::new(line).next() {
+            None => None,
+            Some(Ok(entry)) => Some(entry),
+            Some(Err(error)) => {
+                warn!(
+                    path = %path.display(),
+                    line = index + 1,
+                    error = %error,
+                    "known_hosts: ignored unparseable line"
+                );
+                None
+            }
+        })
+        .collect()
 }
 
 /// Errors from known_hosts operations.
@@ -443,22 +468,80 @@ mod tests {
 
         let store = KnownHostsStore::load(&path, None);
 
-        // The ssh-key crate's read_file returns an error on the first
-        // unparseable line. Our load_file currently treats this as an
-        // all-or-nothing failure. This test verifies that at least the
-        // behavior is consistent — either all entries load or none do.
-        // In practice, the app-owned file is written by macSFTP and
-        // should always be valid.
-        //
-        // The user's ~/.ssh/known_hosts might have invalid lines, but
-        // ssh-key's read_file returns Err on the first bad line.
-        // This is a known limitation — a future fix would use
-        // KnownHosts::new(input).collect() for per-line parsing.
-        //
-        // For now, just verify the store doesn't panic.
-        let _ = store.entry_count();
+        assert_eq!(store.entry_count(), 2);
+        assert_eq!(
+            store.check("example.com", 22, &key),
+            HostKeyCheckResult::Match
+        );
+        assert_eq!(
+            store.check("another.example.com", 22, &key),
+            HostKeyCheckResult::Match
+        );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn check_scans_all_keys_for_the_same_host_before_mismatch() {
+        let stale_key = test_key(56);
+        let current_key = test_key(57);
+        let content = format!(
+            "example.com {}\nexample.com {}\n",
+            stale_key.to_string(),
+            current_key.to_string()
+        );
+        let path = write_temp_known_hosts("multiple_keys", &content);
+        let store = KnownHostsStore::load(&path, None);
+
+        assert_eq!(
+            store.check("example.com", 22, &current_key),
+            HostKeyCheckResult::Match
+        );
+
+        std::fs::remove_file(path).expect("remove multiple-key known_hosts fixture");
+    }
+
+    #[test]
+    fn revoked_entry_only_blocks_its_own_key() {
+        let revoked_key = test_key(58);
+        let current_key = test_key(59);
+        let content = format!(
+            "@revoked example.com {}\nexample.com {}\n",
+            revoked_key.to_string(),
+            current_key.to_string()
+        );
+        let path = write_temp_known_hosts("revoked_key_specific", &content);
+        let store = KnownHostsStore::load(&path, None);
+
+        assert_eq!(
+            store.check("example.com", 22, &current_key),
+            HostKeyCheckResult::Match
+        );
+        assert_eq!(
+            store.check("example.com", 22, &revoked_key),
+            HostKeyCheckResult::Mismatch
+        );
+
+        std::fs::remove_file(path).expect("remove revoked-key known_hosts fixture");
+    }
+
+    #[test]
+    fn revoked_key_wins_even_when_a_normal_entry_appears_first() {
+        let revoked_key = test_key(60);
+        let content = format!(
+            "example.com {}\n@revoked example.com {}\n",
+            revoked_key.to_string(),
+            revoked_key.to_string()
+        );
+        let path = write_temp_known_hosts("revoked_after_normal", &content);
+        let store = KnownHostsStore::load(&path, None);
+
+        assert_eq!(
+            store.check("example.com", 22, &revoked_key),
+            HostKeyCheckResult::Mismatch
+        );
+
+        std::fs::remove_file(path).expect("remove revoked-after-normal fixture");
     }
 
     #[test]

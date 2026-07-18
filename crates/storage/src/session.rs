@@ -171,6 +171,57 @@ impl SessionStore {
         }
         self.file.save(&self.path)
     }
+
+    /// Preserve an unreadable/unsupported session file, then atomically write
+    /// the current in-memory snapshot and reopen the normal save path.
+    pub fn recover_and_save(&mut self) -> Result<Option<LocalPath>, StorageError> {
+        if self.initial_error.is_none() {
+            self.save()?;
+            return Ok(None);
+        }
+
+        let original = match std::fs::read(self.path.as_str()) {
+            Ok(original) => Some(original),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(StorageError::Io {
+                    path: self.path.as_str().to_string(),
+                    message: error.to_string(),
+                });
+            }
+        };
+        let backup_path = original.as_ref().map(|original| {
+            let backup_path = next_recovery_backup_path(&self.path)?;
+            write_private_file_atomically(std::path::Path::new(backup_path.as_str()), original)
+                .map(|()| backup_path)
+                .map_err(|error| StorageError::Io {
+                    path: self.path.as_str().to_string(),
+                    message: error.to_string(),
+                })
+        });
+        let backup_path = backup_path.transpose()?;
+
+        self.file.save(&self.path)?;
+        self.initial_error = None;
+        Ok(backup_path)
+    }
+}
+
+fn next_recovery_backup_path(path: &LocalPath) -> Result<LocalPath, StorageError> {
+    let base = format!("{}.corrupt", path.as_str());
+    if !std::path::Path::new(&base).exists() {
+        return Ok(LocalPath::new(base));
+    }
+    for suffix in 1u64..=u64::MAX {
+        let candidate = format!("{base}.{suffix}");
+        if !std::path::Path::new(&candidate).exists() {
+            return Ok(LocalPath::new(candidate));
+        }
+    }
+    Err(StorageError::Io {
+        path: path.as_str().to_string(),
+        message: "no recovery backup name is available".to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -265,6 +316,39 @@ mod tests {
             std::fs::read_to_string(path.as_str()).expect("read preserved corrupt session"),
             "{not json"
         );
+    }
+
+    #[test]
+    fn recover_and_save_preserves_corrupt_input_then_reopens_writes() {
+        let path = temp_path("recover-corrupt");
+        std::fs::write(path.as_str(), "{not json").expect("write corrupt session");
+        let mut store = SessionStore::open_or_empty(path.clone());
+        let mut replacement = SessionFile::empty();
+        replacement.active_window_index = 2;
+        store.replace(replacement);
+
+        let backup = store
+            .recover_and_save()
+            .expect("recovery should preserve and replace corrupt input")
+            .expect("corrupt input should produce a backup");
+
+        assert_eq!(
+            std::fs::read_to_string(backup.as_str()).expect("read recovery backup"),
+            "{not json"
+        );
+        assert!(store.initial_error().is_none());
+        assert_eq!(
+            SessionFile::load(&path)
+                .expect("replacement session should be readable")
+                .active_window_index,
+            2
+        );
+        store
+            .save()
+            .expect("normal saves should resume after recovery");
+
+        std::fs::remove_file(path.as_str()).expect("remove recovered session");
+        std::fs::remove_file(backup.as_str()).expect("remove recovery backup");
     }
 
     #[test]

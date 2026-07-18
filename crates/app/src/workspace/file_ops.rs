@@ -318,8 +318,8 @@ impl crate::workspace::Workspace {
         }
     }
 
-    /// Execute a create/rename/delete. Local runs on the UI thread via
-    /// platform APIs; remote is forwarded to the Tokio runtime/actor.
+    /// Execute a create/rename/delete. Local filesystem work runs on GPUI's
+    /// background executor; remote work is forwarded to the Tokio actor.
     pub(crate) fn dispatch_fs(
         &mut self,
         command: FsCommand,
@@ -345,71 +345,30 @@ impl crate::workspace::Workspace {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let result = match &op {
-            FsOp::Delete { entries } => {
-                for entry in entries {
-                    let Some(path) = entry.path.as_local() else {
-                        continue;
-                    };
-                    if let Err(error) = delete_entry(path, entry.is_dir) {
-                        return self.report_local_fs_failure(
-                            tab_id,
-                            local_fs_error("Could not delete", &error),
-                            cx,
-                        );
-                    }
-                }
-                Ok(())
-            }
-            FsOp::Rename { from, to } => {
-                let (Some(from), Some(to)) = (from.as_local(), to.as_local()) else {
-                    return self.report_local_fs_failure(
-                        tab_id,
-                        UserFacingError::new(
-                            macsftp_core::ErrorCode::Unknown,
-                            "Invalid local path",
-                            "Rename paths must be local.",
-                        ),
-                        cx,
-                    );
-                };
-                rename_entry(from, to).map_err(|error| local_fs_error("Could not rename", &error))
-            }
-            FsOp::CreateDirectory { parent, name } => {
-                let Some(parent) = parent.as_local() else {
-                    return self.report_local_fs_failure(
-                        tab_id,
-                        UserFacingError::new(
-                            macsftp_core::ErrorCode::Unknown,
-                            "Invalid local path",
-                            "Create-folder parent must be local.",
-                        ),
-                        cx,
-                    );
-                };
-                create_directory(parent, name)
-                    .map(|_| ())
-                    .map_err(|error| local_fs_error("Could not create folder", &error))
-            }
+        let refresh_path = match op.refresh_path() {
+            Some(FsPath::Local(path)) => Some(path),
+            _ => None,
         };
-
-        match result {
-            Ok(()) => {
-                if let Some(FsPath::Local(path)) = op.refresh_path() {
-                    if let Some(tab) = self.state.tabs.find_tab_mut(tab_id) {
-                        if let Some(message) = Self::load_local_directory(&path, tab) {
-                            self.status_message = Some(message.into());
-                        } else {
-                            self.status_message = None;
-                        }
-                        tab.selection.selected_paths.clear();
+        self.status_message = Some("Working…".into());
+        cx.notify();
+        let operation_task = cx
+            .background_executor()
+            .spawn(async move { execute_local_fs_operation(&op) });
+        cx.spawn(async move |workspace, cx| {
+            let result = operation_task.await;
+            let _ = workspace.update(cx, |workspace, cx| match result {
+                Ok(()) => {
+                    if let Some(path) = refresh_path {
+                        workspace.request_local_directory(tab_id, path, cx);
+                    } else {
+                        workspace.status_message = None;
+                        cx.notify();
                     }
-                    self.local_scroll = gpui::UniformListScrollHandle::new();
                 }
-                cx.notify();
-            }
-            Err(failure) => self.report_local_fs_failure(tab_id, failure, cx),
-        }
+                Err(failure) => workspace.report_local_fs_failure(tab_id, failure, cx),
+            });
+        })
+        .detach();
     }
 
     fn report_local_fs_failure(
@@ -758,5 +717,46 @@ impl crate::workspace::Workspace {
                 )
                 .into_any_element(),
         )
+    }
+}
+
+fn execute_local_fs_operation(op: &FsOp) -> Result<(), UserFacingError> {
+    match op {
+        FsOp::Delete { entries } => {
+            for entry in entries {
+                let Some(path) = entry.path.as_local() else {
+                    return Err(UserFacingError::new(
+                        macsftp_core::ErrorCode::Unknown,
+                        "Invalid local path",
+                        "Delete paths must be local.",
+                    ));
+                };
+                delete_entry(path, entry.is_dir)
+                    .map_err(|error| local_fs_error("Could not delete", &error))?;
+            }
+            Ok(())
+        }
+        FsOp::Rename { from, to } => {
+            let (Some(from), Some(to)) = (from.as_local(), to.as_local()) else {
+                return Err(UserFacingError::new(
+                    macsftp_core::ErrorCode::Unknown,
+                    "Invalid local path",
+                    "Rename paths must be local.",
+                ));
+            };
+            rename_entry(from, to).map_err(|error| local_fs_error("Could not rename", &error))
+        }
+        FsOp::CreateDirectory { parent, name } => {
+            let Some(parent) = parent.as_local() else {
+                return Err(UserFacingError::new(
+                    macsftp_core::ErrorCode::Unknown,
+                    "Invalid local path",
+                    "Create-folder parent must be local.",
+                ));
+            };
+            create_directory(parent, name)
+                .map(|_| ())
+                .map_err(|error| local_fs_error("Could not create folder", &error))
+        }
     }
 }
