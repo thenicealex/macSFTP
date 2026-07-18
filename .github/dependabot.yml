@@ -8,11 +8,6 @@ updates:
       day: monday
       time: "03:00"
       timezone: Asia/Shanghai
-    groups:
-      cargo-dependencies:
-        patterns:
-          - "*"
-
   - package-ecosystem: github-actions
     directory: /
     schedule:
