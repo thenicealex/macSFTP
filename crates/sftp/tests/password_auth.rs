@@ -134,6 +134,8 @@ async fn password_authenticates_and_a_different_identity_cannot_reuse_it() {
         }
     }
 
-    controller.shutdown();
+    tokio::task::spawn_blocking(move || controller.shutdown())
+        .await
+        .expect("runtime shutdown task must complete");
     std::fs::remove_file(known_hosts_path).expect("remove password fixture known_hosts");
 }
