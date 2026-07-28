@@ -1,6 +1,7 @@
 use gpui::Context;
 use macsftp_core::{
     AppCommand, EntryPath, FileKind, LocalPath, RemotePath, TabId, TransferEndpoint,
+    TransferId, TransferState,
 };
 
 use crate::resources::{ActiveResources, ActiveTransfers};
@@ -181,6 +182,33 @@ impl crate::workspace::Workspace {
                 },
                 cx,
             );
+        }
+    }
+    pub(crate) fn cancel_all_transfers(&mut self, cx: &mut Context<Self>) {
+        let job_ids: Vec<TransferId> = crate::workspace::transfer_render::visible_transfer_jobs(
+            cx.transfers(),
+        )
+        .iter()
+        .filter(|job| {
+            matches!(
+                job.state,
+                TransferState::Queued
+                    | TransferState::Running { .. }
+                    | TransferState::Planning
+                    | TransferState::WaitingForConflictDecision { .. }
+            )
+        })
+        .map(|job| job.id)
+        .collect();
+        for id in job_ids {
+            self.cancel_transfer(id, cx);
+        }
+    }
+    pub(crate) fn clear_transfer_records(&mut self, cx: &mut Context<Self>) {
+        if cx.clear_terminal_transfers() {
+            self.completed_section_expanded = false;
+            self.failed_section_expanded = false;
+            cx.notify();
         }
     }
 }

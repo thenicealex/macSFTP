@@ -8,7 +8,7 @@ use macsftp_core::{
     EntryPath, TransferId, TransferJob, TransferPlanState, TransferState, TransferStore,
 };
 use macsftp_ui::{
-    ActiveTheme, IconName, connection_status, format_size, icon, section_header_static,
+    ActiveTheme, IconName, connection_status, format_size, icon, icon_button, section_header_static,
     text_tooltip, transfer_row, transfer_title,
 };
 
@@ -16,7 +16,7 @@ use crate::palette_commands::labeled_shortcut;
 use crate::resources::ActiveTransfers;
 use crate::workspace::PaneSide;
 
-fn visible_transfer_jobs(store: &TransferStore) -> Vec<&TransferJob> {
+pub(crate) fn visible_transfer_jobs(store: &TransferStore) -> Vec<&TransferJob> {
     let mut hidden_job_ids = HashSet::new();
 
     for plan in &store.plans {
@@ -219,6 +219,37 @@ impl crate::workspace::Workspace {
                 .text_color(theme.colors.text_muted)
                 .child(icon(IconName::Transfers, theme.colors.text_muted))
                 .child(div().flex_none().child("Transfers"))
+                .when(active_jobs.len() + queued_jobs.len() > 0, |header| {
+                    let workspace = workspace_entity.clone();
+                    header.child(
+                        icon_button(
+                            "cancel-all-transfers",
+                            IconName::Close,
+                            "Cancel All Transfers",
+                        )
+                        .icon_color(theme.colors.warning)
+                        .on_click(move |_event, _window, cx| {
+                            workspace.update(cx, |workspace, cx| {
+                                workspace.cancel_all_transfers(cx);
+                            });
+                        }),
+                    )
+                })
+                .when(completed_jobs.len() + failed_jobs.len() > 0, |header| {
+                    let workspace = workspace_entity.clone();
+                    header.child(
+                        icon_button(
+                            "clear-transfer-records",
+                            IconName::Trash,
+                            "Clear Transfer History",
+                        )
+                        .on_click(move |_event, _window, cx| {
+                            workspace.update(cx, |workspace, cx| {
+                                workspace.clear_transfer_records(cx);
+                            });
+                        }),
+                    )
+                })
                 .child(
                     div()
                         .flex_1()
