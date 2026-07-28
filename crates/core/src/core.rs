@@ -2429,12 +2429,12 @@ mod tests {
     use super::{
         AppState, AuthCredential, AuthFingerprint, AuthMethod, AuthMethodKind, ConflictPolicy,
         ConflictRequest, ConflictRequestId, ConnectionKey, ConnectionPoolIdentity,
-        ConnectionProfile, ConnectionSettings, ConnectionState, DisconnectReason, ErrorCode,
+        ConnectionProfile, ConnectionSettings, ConnectionState, DisconnectReason,
         HostKeyPrompt, LocalPath, MetadataPolicy, ModalRequest, ModalRequestId, ProfileId,
         RemoteEventScope, RemotePath, RemoteScoped, RuntimeBridgeConfig, SecretRef, SessionId,
         TabId, TabState, Timestamp, TransferDirection, TransferEndpoint, TransferId,
         TransferJob, TransferPlan, TransferPlanId, TransferPlanState, TransferState,
-        TransferStore, TrustRequest, TrustRequestId, UserFacingError,
+        TransferStore, TrustRequest, TrustRequestId,
     };
 
     #[test]
