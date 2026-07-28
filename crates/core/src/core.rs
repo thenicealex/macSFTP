@@ -1107,6 +1107,28 @@ impl TransferStore {
         }
         true
     }
+
+    pub fn clear_terminal(&mut self) -> bool {
+        let before = self.jobs.len();
+        self.jobs.retain(|job| {
+            !matches!(
+                job.state,
+                TransferState::Completed
+                    | TransferState::Skipped
+                    | TransferState::Failed { .. }
+            )
+        });
+        let remaining_ids: std::collections::HashSet<TransferId> =
+            self.jobs.iter().map(|job| job.id).collect();
+        self.plans.retain(|plan| {
+            remaining_ids.contains(&plan.root_job_id)
+                || plan
+                    .child_jobs
+                    .iter()
+                    .any(|id| remaining_ids.contains(id))
+        });
+        self.jobs.len() != before
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -2405,13 +2427,14 @@ impl fmt::Display for ErrorCode {
 mod tests {
     use super::AppEvent;
     use super::{
-        AppState, AuthCredential, AuthFingerprint, AuthMethod, AuthMethodKind, ConflictRequest,
-        ConflictRequestId, ConnectionKey, ConnectionPoolIdentity, ConnectionProfile,
-        ConnectionSettings, ConnectionState, DisconnectReason, HostKeyPrompt, LocalPath,
-        MetadataPolicy, ModalRequest, ModalRequestId, ProfileId, RemoteEventScope, RemotePath,
-        RemoteScoped, RuntimeBridgeConfig, SecretRef, SessionId, TabId, TabState, Timestamp,
-        TransferDirection, TransferEndpoint, TransferId, TransferPlanId, TrustRequest,
-        TrustRequestId,
+        AppState, AuthCredential, AuthFingerprint, AuthMethod, AuthMethodKind, ConflictPolicy,
+        ConflictRequest, ConflictRequestId, ConnectionKey, ConnectionPoolIdentity,
+        ConnectionProfile, ConnectionSettings, ConnectionState, DisconnectReason, ErrorCode,
+        HostKeyPrompt, LocalPath, MetadataPolicy, ModalRequest, ModalRequestId, ProfileId,
+        RemoteEventScope, RemotePath, RemoteScoped, RuntimeBridgeConfig, SecretRef, SessionId,
+        TabId, TabState, Timestamp, TransferDirection, TransferEndpoint, TransferId,
+        TransferJob, TransferPlan, TransferPlanId, TransferPlanState, TransferState,
+        TransferStore, TrustRequest, TrustRequestId, UserFacingError,
     };
 
     #[test]
@@ -3722,5 +3745,132 @@ mod tests {
             1,
             "tab-2 session epoch left untouched"
         );
+    }
+
+    #[test]
+    fn clear_terminal_removes_completed_jobs_and_orphaned_plans() {
+        let mut store = TransferStore {
+            jobs: vec![
+                TransferJob {
+                    id: TransferId(1),
+                    direction: TransferDirection::Upload,
+                    source: TransferEndpoint::Local(LocalPath::new("/tmp/a.txt")),
+                    destination: TransferEndpoint::Remote(RemotePath::new("/srv/a.txt")),
+                    state: TransferState::Completed,
+                    metadata_policy: MetadataPolicy::default(),
+                    conflict_policy: ConflictPolicy::Ask,
+                    warnings: Vec::new(),
+                    created_at: Timestamp::from_secs_since_epoch(0),
+                },
+                TransferJob {
+                    id: TransferId(2),
+                    direction: TransferDirection::Upload,
+                    source: TransferEndpoint::Local(LocalPath::new("/tmp/b.txt")),
+                    destination: TransferEndpoint::Remote(RemotePath::new("/srv/b.txt")),
+                    state: TransferState::Running {
+                        bytes_done: 512,
+                        bytes_total: Some(1024),
+                        started_at: Timestamp::from_secs_since_epoch(0),
+                    },
+                    metadata_policy: MetadataPolicy::default(),
+                    conflict_policy: ConflictPolicy::Ask,
+                    warnings: Vec::new(),
+                    created_at: Timestamp::from_secs_since_epoch(0),
+                },
+            ],
+            plans: vec![TransferPlan {
+                id: TransferPlanId(1),
+                root_job_id: TransferId(1),
+                source_root: TransferEndpoint::Local(LocalPath::new("/tmp")),
+                destination_root: TransferEndpoint::Remote(RemotePath::new("/srv")),
+                state: TransferPlanState::Completed,
+                planned_count: 1,
+                total_bytes: Some(10),
+                child_jobs: vec![TransferId(1)],
+                conflict_policy: ConflictPolicy::Ask,
+            }],
+            pending_conflicts: Vec::new(),
+        };
+
+        let changed = store.clear_terminal();
+        assert!(changed);
+        assert_eq!(store.jobs.len(), 1);
+        assert_eq!(store.jobs[0].id, TransferId(2));
+        assert_eq!(
+            store.plans.len(),
+            0,
+            "orphaned plan should be removed with its last job"
+        );
+    }
+
+    #[test]
+    fn clear_terminal_preserves_plan_with_remaining_jobs() {
+        let mut store = TransferStore {
+            jobs: vec![
+                TransferJob {
+                    id: TransferId(1),
+                    direction: TransferDirection::Upload,
+                    source: TransferEndpoint::Local(LocalPath::new("/tmp/a.txt")),
+                    destination: TransferEndpoint::Remote(RemotePath::new("/srv/a.txt")),
+                    state: TransferState::Completed,
+                    metadata_policy: MetadataPolicy::default(),
+                    conflict_policy: ConflictPolicy::Ask,
+                    warnings: Vec::new(),
+                    created_at: Timestamp::from_secs_since_epoch(0),
+                },
+                TransferJob {
+                    id: TransferId(2),
+                    direction: TransferDirection::Upload,
+                    source: TransferEndpoint::Local(LocalPath::new("/tmp/b.txt")),
+                    destination: TransferEndpoint::Remote(RemotePath::new("/srv/b.txt")),
+                    state: TransferState::Running {
+                        bytes_done: 0,
+                        bytes_total: Some(1024),
+                        started_at: Timestamp::from_secs_since_epoch(0),
+                    },
+                    metadata_policy: MetadataPolicy::default(),
+                    conflict_policy: ConflictPolicy::Ask,
+                    warnings: Vec::new(),
+                    created_at: Timestamp::from_secs_since_epoch(0),
+                },
+            ],
+            plans: vec![TransferPlan {
+                id: TransferPlanId(1),
+                root_job_id: TransferId(9),
+                source_root: TransferEndpoint::Local(LocalPath::new("/tmp")),
+                destination_root: TransferEndpoint::Remote(RemotePath::new("/srv")),
+                state: TransferPlanState::Queued,
+                planned_count: 2,
+                total_bytes: Some(20),
+                child_jobs: vec![TransferId(1), TransferId(2)],
+                conflict_policy: ConflictPolicy::Ask,
+            }],
+            pending_conflicts: Vec::new(),
+        };
+
+        store.clear_terminal();
+        assert_eq!(store.jobs.len(), 1);
+        assert_eq!(store.plans.len(), 1, "plan kept because job 2 still exists");
+    }
+
+    #[test]
+    fn clear_terminal_returns_false_when_nothing_to_clear() {
+        let mut store = TransferStore {
+            jobs: vec![TransferJob {
+                id: TransferId(1),
+                direction: TransferDirection::Upload,
+                source: TransferEndpoint::Local(LocalPath::new("/tmp/a.txt")),
+                destination: TransferEndpoint::Remote(RemotePath::new("/srv/a.txt")),
+                state: TransferState::Queued,
+                metadata_policy: MetadataPolicy::default(),
+                conflict_policy: ConflictPolicy::Ask,
+                warnings: Vec::new(),
+                created_at: Timestamp::from_secs_since_epoch(0),
+            }],
+            plans: Vec::new(),
+            pending_conflicts: Vec::new(),
+        };
+
+        assert!(!store.clear_terminal());
     }
 }
