@@ -13,7 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui::{App, Global};
 use macsftp_core::{
-    AppEvent, EditSessionStore, LocalPath, TabId, Timestamp, TransferId, TransferStore,
+    AppEvent, EditSessionStore, LocalPath, TabId, Timestamp, TransferId, TransferState,
+    TransferStore,
 };
 use macsftp_platform::AppPaths;
 use macsftp_storage::{ConfigStore, ProfileStore, RecentsStore, ResidualTempStore};
@@ -164,6 +165,7 @@ pub trait ActiveTransfers {
     fn apply_transfer_event(&mut self, event: &AppEvent, now: Timestamp) -> bool;
     fn mark_transfer_cancelling(&mut self, transfer_id: TransferId) -> bool;
     fn remove_transfer_conflict(&mut self, request_id: macsftp_core::ConflictRequestId) -> bool;
+    fn clear_terminal_transfers(&mut self) -> bool;
     #[cfg(test)]
     fn observe_transfer_rate(
         &mut self,
@@ -225,6 +227,34 @@ impl ActiveTransfers for App {
             self.refresh_windows();
         }
         changed
+    }
+
+    fn clear_terminal_transfers(&mut self) -> bool {
+        let terminal_ids: Vec<TransferId> = {
+            let store = &self.global::<SharedTransfers>().store;
+            store
+                .jobs
+                .iter()
+                .filter(|job| {
+                    matches!(
+                        job.state,
+                        TransferState::Completed
+                            | TransferState::Skipped
+                            | TransferState::Failed { .. }
+                    )
+                })
+                .map(|job| job.id)
+                .collect()
+        };
+        let removed = self.global_mut::<SharedTransfers>().store.clear_terminal();
+        if removed {
+            let transfers = self.global_mut::<SharedTransfers>();
+            for id in &terminal_ids {
+                transfers.rates.clear(*id);
+            }
+            self.refresh_windows();
+        }
+        removed
     }
 
     #[cfg(test)]
