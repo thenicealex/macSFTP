@@ -178,11 +178,11 @@ impl crate::workspace::Workspace {
                         start_height: self.drawer_height,
                         start_y: px(0.0),
                     },
-                    move |_value, _cursor_offset, window, cx| {
-                        let start_y = window.mouse_position().y;
-                        // Use live drawer_height so double-click reset is not
-                        // overwritten by a stale payload built at element time.
-                        workspace_entity.update(cx, |workspace, cx| {
+                    {
+                        let workspace_entity = workspace_entity.clone();
+                        move |_value, _cursor_offset, window, cx| {
+                            let start_y = window.mouse_position().y;
+                            workspace_entity.update(cx, |workspace, cx| {
                             workspace.drawer_resize = Some(TransferDrawerResize {
                                 start_height: workspace.drawer_height,
                                 start_y,
@@ -190,6 +190,7 @@ impl crate::workspace::Workspace {
                             cx.notify();
                         });
                         cx.new(|_| ResizeDragGhost)
+                        }
                     },
                 )
                 .on_drag_move(cx.listener(
