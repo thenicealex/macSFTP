@@ -11,12 +11,12 @@ use russh::client;
 use russh_sftp::client::SftpSession;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::known_hosts::KnownHostsStore;
 use crate::physical_connection::{
-    ClientHandler, ConnectFailure, establish_physical_connection, log_connect_failure,
-    sftp_connection_error,
+    ClientHandler, ConnectFailure, establish_physical_connection, host_key_mismatch_event,
+    log_connect_failure, sftp_connection_error,
 };
 use crate::session_actor::HostTrustConfig;
 use crate::trust::TrustRegistry;
@@ -319,7 +319,19 @@ impl ConnectionManager {
             if let Err(failure) = &result {
                 log_connect_failure(&settings.host, settings.port, &scope, failure);
                 match failure {
-                    ConnectFailure::HostKeyMismatch(_) => {}
+                    ConnectFailure::HostKeyMismatch(details) => {
+                        // Emit one scoped event for THIS logical attempt. The
+                        // pooled handshake is shared, but the mismatch event
+                        // is built per waiter so each gets its own scope. The
+                        // failure still propagates as Err — emitting the event
+                        // does not convert failure into success.
+                        if let Err(send_error) = event_tx_fail
+                            .send_async(host_key_mismatch_event(scope.clone(), details.clone()))
+                            .await
+                        {
+                            warn!(error = %send_error, "host key mismatch event dropped");
+                        }
+                    }
                     ConnectFailure::TrustRejected => {
                         let _ = event_tx_fail
                             .send_async(AppEvent::TabDisconnected(macsftp_core::RemoteScoped::new(

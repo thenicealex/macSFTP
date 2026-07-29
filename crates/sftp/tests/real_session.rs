@@ -1487,7 +1487,11 @@ async fn host_key_mismatch_blocks_connection() {
     let event = next_event(&fixture, "HostKeyMismatch").await;
     match event {
         AppEvent::HostKeyMismatch(mismatch) => {
-            assert_eq!(mismatch.scope.tab_id, TAB);
+            assert_eq!(
+                mismatch.scope,
+                RemoteEventScope::new(TAB, SESSION, EPOCH),
+                "mismatch must carry the logical scope of the failed connection"
+            );
             assert!(mismatch.expected_fingerprint_sha256.is_some());
             assert!(
                 mismatch.actual_fingerprint_sha256.starts_with("SHA256:"),
@@ -1512,6 +1516,126 @@ async fn host_key_mismatch_blocks_connection() {
     }
 
     fixture.cancel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pooled_host_key_mismatch_is_emitted_for_every_logical_session() {
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+
+    let (event_tx, event_rx) = flume::bounded(64);
+    let app_known_hosts_path = server.fixture_dir.join("app_known_hosts_pool");
+
+    // Prefill with a DIFFERENT (wrong) host key so the handshake mismatches.
+    let wrong_key = std::fs::read_to_string(server.client_key_path.with_extension("pub"))
+        .expect("read client public key");
+    let line = format!("[127.0.0.1]:{} {}\n", server.port, wrong_key.trim());
+    std::fs::write(&app_known_hosts_path, line).expect("prefill app known_hosts");
+
+    let known_hosts = Arc::new(Mutex::new(KnownHostsStore::load(
+        &app_known_hosts_path,
+        None,
+    )));
+    let trust_config = Arc::new(HostTrustConfig::new(app_known_hosts_path.clone(), None));
+    let trust_registry = Arc::new(TrustRegistry::new());
+
+    let settings = ConnectionSettings {
+        host: "127.0.0.1".to_string(),
+        port: server.port,
+        username: server.username.clone(),
+        auth: client_key_auth(&server),
+    };
+
+    let cm = Arc::new(ConnectionManager::new());
+    // Both calls share the SAME identity, so they resolve to the SAME
+    // ConnectionKey and therefore share one in-progress pooled handshake.
+    let identity = ConnectionPoolIdentity::Ephemeral(SESSION);
+    let scope_one = RemoteEventScope::new(TAB, SESSION, EPOCH);
+    let scope_two = RemoteEventScope::new(SECOND_TAB, SECOND_SESSION, EPOCH);
+
+    // Issue both calls synchronously before awaiting either result, so the
+    // second call observes the in-progress pool entry and resubscribes to
+    // the same broadcast (get_or_connect inserts PoolEntry::Connecting
+    // before any .await and returns rx without yielding).
+    let rx_one = cm.connect_session(
+        &settings,
+        &identity,
+        &scope_one,
+        TRUST_REQUEST,
+        known_hosts.clone(),
+        trust_config.clone(),
+        trust_registry.clone(),
+        event_tx.clone(),
+    );
+    let rx_two = cm.connect_session(
+        &settings,
+        &identity,
+        &scope_two,
+        TrustRequestId(2),
+        known_hosts.clone(),
+        trust_config.clone(),
+        trust_registry.clone(),
+        event_tx.clone(),
+    );
+
+    // Both connections must fail (the handshake mismatched).
+    let result_one = rx_one.recv_async().await;
+    let result_two = rx_two.recv_async().await;
+    assert!(matches!(result_one, Ok(Err(_))), "first connection must fail");
+    assert!(matches!(result_two, Ok(Err(_))), "second connection must fail");
+
+    let (requests_tx, _requests_rx) = flume::bounded::<RemoteSessionRequest>(1);
+    let fixture = ActorFixture {
+        events: event_rx,
+        requests: requests_tx,
+        trust_registry,
+        cancel: CancellationToken::new(),
+        app_known_hosts_path,
+    };
+
+    // Each logical waiter receives exactly one scoped mismatch event.
+    let mismatch_one = match next_event(&fixture, "HostKeyMismatch #1").await {
+        AppEvent::HostKeyMismatch(m) => m,
+        other => panic!("expected HostKeyMismatch, got {other:?}"),
+    };
+    let mismatch_two = match next_event(&fixture, "HostKeyMismatch #2").await {
+        AppEvent::HostKeyMismatch(m) => m,
+        other => panic!("expected HostKeyMismatch, got {other:?}"),
+    };
+
+    for m in [&mismatch_one, &mismatch_two] {
+        assert!(
+            m.actual_fingerprint_sha256.starts_with("SHA256:"),
+            "actual fingerprint must be present"
+        );
+        assert_ne!(
+            m.expected_fingerprint_sha256.as_deref(),
+            Some(m.actual_fingerprint_sha256.as_str()),
+        );
+        assert_eq!(
+            m.actual_fingerprint_sha256,
+            mismatch_one.actual_fingerprint_sha256,
+            "mismatch details must be identical across waiters"
+        );
+    }
+
+    let scopes_match = (mismatch_one.scope == scope_one && mismatch_two.scope == scope_two)
+        || (mismatch_one.scope == scope_two && mismatch_two.scope == scope_one);
+    assert!(
+        scopes_match,
+        "each waiter must receive exactly one mismatch with its own scope (got {:?} and {:?})",
+        mismatch_one.scope, mismatch_two.scope
+    );
+
+    // No third mismatch or success event may arrive.
+    let follow_up =
+        tokio::time::timeout(Duration::from_millis(500), fixture.events.recv_async()).await;
+    match follow_up {
+        Err(_timeout) => {}
+        Ok(Err(_channel_closed)) => {}
+        Ok(Ok(event)) => panic!("only two mismatch events expected, got {event:?}"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
