@@ -10,9 +10,10 @@ use std::time::Duration;
 
 use macsftp_core::{
     AppCommand, AppEvent, AuthCredential, ConflictDecision, ConnectCommand, ConnectionPoolIdentity,
-    ConnectionSettings, DisconnectReason, ErrorCode, FileKind, ProfileId, RemoteEventScope,
-    RemotePath, RuntimeBridgeConfig, SessionId, TabId, Timestamp, TransferDirection,
-    TransferEndpoint, TransferId, TransferJob, TransferState, TrustDecision, TrustRequestId,
+    ConnectionSettings, DisconnectReason, EditCheckId, EditSessionId, ErrorCode, FileKind,
+    ProfileId, RemoteEventScope, RemotePath, RuntimeBridgeConfig, SessionId, TabId, Timestamp,
+    TransferDirection, TransferEndpoint, TransferId, TransferJob, TransferState, TrustDecision,
+    TrustRequestId,
 };
 use macsftp_sftp::pool::ConnectionManager;
 use macsftp_sftp::{
@@ -1731,6 +1732,160 @@ async fn encrypted_key_with_wrong_passphrase_fails_cleanly() {
             );
         }
         other => panic!("expected AuthFailed, got {other:?}"),
+    }
+
+    fixture.cancel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_edit_snapshot_check_reports_live_metadata() {
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    let file = server.fixture_dir.join("edit-check-metadata.txt");
+    std::fs::write(&file, b"hello world").expect("write fixture file");
+
+    let fixture = spawn_actor(
+        &server,
+        client_key_auth(&server),
+        Some(&server.host_public_key),
+    );
+    let _ = next_event(&fixture, "TabConnected").await;
+
+    let path = RemotePath::new(file.display().to_string());
+    fixture
+        .requests
+        .send_async(RemoteSessionRequest::CheckRemoteEditSnapshot {
+            edit_session_id: EditSessionId(7),
+            check_id: EditCheckId(9),
+            path: path.clone(),
+        })
+        .await
+        .expect("check request should reach actor");
+
+    let event = next_event(&fixture, "RemoteEditSnapshotChecked").await;
+    match event {
+        AppEvent::RemoteEditSnapshotChecked(scoped) => {
+            assert_eq!(scoped.scope.tab_id, TAB);
+            assert_eq!(scoped.scope.session_id, SESSION);
+            assert_eq!(scoped.scope.session_epoch, EPOCH);
+            assert_eq!(scoped.payload.edit_session_id, EditSessionId(7));
+            assert_eq!(scoped.payload.check_id, EditCheckId(9));
+            assert_eq!(scoped.payload.path, path);
+            assert_eq!(scoped.payload.snapshot.size, Some(11));
+            assert!(
+                scoped.payload.snapshot.modified_at.is_some(),
+                "live metadata must include an mtime"
+            );
+        }
+        other => panic!("expected RemoteEditSnapshotChecked, got {other:?}"),
+    }
+
+    fixture.cancel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_edit_snapshot_check_sees_external_change_without_relisting() {
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    let file = server.fixture_dir.join("edit-check-external.txt");
+    std::fs::write(&file, b"baseline").expect("write baseline fixture file");
+
+    let fixture = spawn_actor(
+        &server,
+        client_key_auth(&server),
+        Some(&server.host_public_key),
+    );
+    let _ = next_event(&fixture, "TabConnected").await;
+
+    let path = RemotePath::new(file.display().to_string());
+
+    // Baseline check — no directory relist is performed between the two
+    // checks, so the result must come from a fresh authoritative stat.
+    fixture
+        .requests
+        .send_async(RemoteSessionRequest::CheckRemoteEditSnapshot {
+            edit_session_id: EditSessionId(7),
+            check_id: EditCheckId(9),
+            path: path.clone(),
+        })
+        .await
+        .expect("baseline check request should reach actor");
+    let baseline_snapshot = match next_event(&fixture, "baseline RemoteEditSnapshotChecked").await {
+        AppEvent::RemoteEditSnapshotChecked(scoped) => scoped.payload.snapshot,
+        other => panic!("expected RemoteEditSnapshotChecked, got {other:?}"),
+    };
+
+    // A second writer changes the file on the server without any client
+    // directory listing. Size differs to avoid the accepted
+    // same-second/same-size limitation.
+    std::fs::write(&file, b"changed-by-external-writer-now").expect("overwrite fixture file");
+
+    fixture
+        .requests
+        .send_async(RemoteSessionRequest::CheckRemoteEditSnapshot {
+            edit_session_id: EditSessionId(7),
+            check_id: EditCheckId(10),
+            path: path.clone(),
+        })
+        .await
+        .expect("second check request should reach actor");
+    let updated_snapshot = match next_event(&fixture, "updated RemoteEditSnapshotChecked").await {
+        AppEvent::RemoteEditSnapshotChecked(scoped) => scoped.payload.snapshot,
+        other => panic!("expected RemoteEditSnapshotChecked, got {other:?}"),
+    };
+
+    assert_ne!(
+        baseline_snapshot, updated_snapshot,
+        "authoritative check must reflect the external change without a relist"
+    );
+
+    fixture.cancel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_edit_snapshot_check_missing_file_returns_failure() {
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    let file = server.fixture_dir.join("edit-check-missing.txt");
+    std::fs::write(&file, b"to be removed").expect("write fixture file");
+    std::fs::remove_file(&file).expect("remove fixture file before check");
+
+    let fixture = spawn_actor(
+        &server,
+        client_key_auth(&server),
+        Some(&server.host_public_key),
+    );
+    let _ = next_event(&fixture, "TabConnected").await;
+
+    let path = RemotePath::new(file.display().to_string());
+    fixture
+        .requests
+        .send_async(RemoteSessionRequest::CheckRemoteEditSnapshot {
+            edit_session_id: EditSessionId(7),
+            check_id: EditCheckId(9),
+            path: path.clone(),
+        })
+        .await
+        .expect("check request should reach actor");
+
+    let event = next_event(&fixture, "RemoteEditSnapshotCheckFailed").await;
+    match event {
+        AppEvent::RemoteEditSnapshotCheckFailed(scoped) => {
+            assert_eq!(scoped.scope.tab_id, TAB);
+            assert_eq!(scoped.scope.session_id, SESSION);
+            assert_eq!(scoped.scope.session_epoch, EPOCH);
+            assert_eq!(scoped.payload.edit_session_id, EditSessionId(7));
+            assert_eq!(scoped.payload.check_id, EditCheckId(9));
+            assert_eq!(scoped.payload.path, path);
+            assert!(
+                scoped.payload.error.retryable,
+                "a stat failure must be retryable so the local edit is preserved"
+            );
+        }
+        other => panic!("expected RemoteEditSnapshotCheckFailed, got {other:?}"),
     }
 
     fixture.cancel.cancel();
