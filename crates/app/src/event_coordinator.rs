@@ -1,13 +1,15 @@
 use gpui::{App, Global, Task, WindowHandle};
 use macsftp_core::{
-    AppEvent, ConflictRequest, EditPhase, LocalPath, RemotePath, RemoteSnapshot, TabId, Timestamp,
-    TransferConflictPrompt, TransferDirection, TransferEndpoint,
+    AppEvent, ConflictRequest, EditPhase, EditSessionId, LocalPath, ProfileId, RemotePath,
+    RemoteSnapshot, TabId, Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint,
 };
 use macsftp_sftp::EventReceiver;
 use tracing::warn;
 
+use crate::edit_watcher::{dispatch_edit_command, revert_stranded_upload};
 use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::Workspace;
+use crate::workspace::build_edit_upload_command;
 
 /// Hook used to open the downloaded temp file in the user's editor. Production
 /// always uses [`macsftp_platform::open_in_editor`]; tests swap in a recording
@@ -85,6 +87,21 @@ fn dispatch_event(event: AppEvent, cx: &mut App) {
         advance_edit_sessions(&event, cx);
         cx.refresh_windows();
         return;
+    }
+
+    // The three authoritative edit-check results are owned process-wide, not by
+    // any window: edit sessions live in the process-global `AppResources`, and
+    // broadcasting one result to every window would let them race to apply a
+    // single outcome (Task 5). Apply it exactly once here, then return before
+    // the ordinary window-broadcast path below.
+    match &event {
+        AppEvent::RemoteEditSnapshotChecked(_)
+        | AppEvent::RemoteEditSnapshotCheckFailed(_)
+        | AppEvent::RemoteEditSnapshotDispatchFailed(_) => {
+            apply_remote_edit_check_event(&event, cx);
+            return;
+        }
+        _ => {}
     }
 
     match event {
@@ -318,6 +335,211 @@ fn advance_uploading_back(
     }
 }
 
+/// Apply one authoritative remote-edit check result exactly once. Edit
+/// sessions are process-global, so this runs here (not in any window) and
+/// returns without broadcasting. See the plan's Task 5 for the correlation
+/// contract: the watcher allocated the `EditCheckId`, parked the session in
+/// `CheckingRemote`, and recorded the local save's `checking_local_mtime`;
+/// every guard below must re-confirm all of that before an upload or conflict
+/// is authorized, or a delayed result from an earlier retry could clobber a
+/// concurrent remote change.
+fn apply_remote_edit_check_event(event: &AppEvent, cx: &mut App) {
+    // Decode the three event shapes into a uniform (scope, tab, epoch, id,
+    // check, path, outcome) tuple. The dispatch-failure event carries no
+    // scope: routing never reached a live actor, so it is correlated only by
+    // epoch/edit-session/check id rather than a remote session. Both scoped and
+    // dispatch-failure events still carry the tab/epoch that must match the
+    // stored session.
+    let (scope, event_tab_id, event_epoch, edit_session_id, check_id, path, outcome) = match event {
+        AppEvent::RemoteEditSnapshotChecked(scoped) => (
+            Some(scoped.scope.clone()),
+            scoped.scope.tab_id,
+            scoped.scope.session_epoch,
+            scoped.payload.edit_session_id,
+            scoped.payload.check_id,
+            scoped.payload.path.clone(),
+            CheckOutcome::Matched(scoped.payload.snapshot),
+        ),
+        AppEvent::RemoteEditSnapshotCheckFailed(scoped) => (
+            Some(scoped.scope.clone()),
+            scoped.scope.tab_id,
+            scoped.scope.session_epoch,
+            scoped.payload.edit_session_id,
+            scoped.payload.check_id,
+            scoped.payload.path.clone(),
+            CheckOutcome::Failure,
+        ),
+        AppEvent::RemoteEditSnapshotDispatchFailed(payload) => (
+            None,
+            payload.tab_id,
+            payload.session_epoch,
+            payload.edit_session_id,
+            payload.check_id,
+            payload.path.clone(),
+            CheckOutcome::Failure,
+        ),
+        _ => return,
+    };
+
+    // Owner resolution for scoped events: a live window must still own the
+    // tab at the scope's epoch. The dispatch-failure event has no scope, so it
+    // skips this and relies purely on the epoch/edit-session/check tuple below.
+    if let Some(scope) = &scope {
+        let owned = workspace_windows(cx).into_iter().any(|window| {
+            window
+                .read(cx)
+                .is_ok_and(|workspace| workspace.accepts_remote_scope(scope))
+        });
+        if !owned {
+            // No live window owns this tab/epoch: the result is stale.
+            return;
+        }
+    }
+
+    // Snapshot the guarded session state in one immutable read, then validate
+    // every correlation the watcher set up. Any mismatch means the result is
+    // stale, superseded, or for a different session, and must be ignored so it
+    // cannot authorize an upload.
+    let guard = match cx.resources().edit_sessions.get(edit_session_id) {
+        Some(session) => {
+            let applicable = session.phase == EditPhase::CheckingRemote
+                && session.pending_check_id == Some(check_id)
+                && session.checking_local_mtime.is_some()
+                && session.remote_path == path
+                && event_tab_id == session.tab_id
+                && event_epoch == session.session_epoch;
+            if !applicable {
+                return;
+            }
+            CheckGuard {
+                tab_id: session.tab_id,
+                session_epoch: session.session_epoch,
+                profile_id: session.profile_id,
+                temp_path: session.local_temp_path.clone(),
+                remote_path: session.remote_path.clone(),
+                baseline: session.remote_snapshot,
+                baseline_local_mtime: session.local_mtime,
+                checking_local_mtime: session.checking_local_mtime,
+            }
+        }
+        None => return,
+    };
+
+    // The local save that initiated this check must still be the file on disk.
+    // If the user re-saved (or the temp file vanished) while the remote check
+    // was in flight, this result must not authorize overwriting the remote:
+    // abandon it, clear the pending fields, return to `Editing`, and let the
+    // watcher re-check the newer save.
+    let current_temp_mtime = std::fs::metadata(guard.temp_path.as_str())
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .map(Timestamp::from_system_time);
+    if current_temp_mtime != guard.checking_local_mtime {
+        revert_stranded_upload(cx, edit_session_id, guard.baseline_local_mtime);
+        return;
+    }
+
+    match outcome {
+        CheckOutcome::Matched(snapshot) => {
+            apply_matched_remote_check(cx, edit_session_id, &guard, &snapshot);
+        }
+        CheckOutcome::Failure => {
+            // Actor stat failure or runtime dispatch failure: return to
+            // `Editing`, keep the pre-save baseline, and surface a retry
+            // status. Do NOT claim a conflict and do NOT upload.
+            revert_stranded_upload(cx, edit_session_id, guard.baseline_local_mtime);
+            show_edit_status(
+                cx,
+                guard.tab_id,
+                "Could not verify the remote file; save will retry",
+            );
+        }
+    }
+}
+
+/// Snapshot of the guarded edit session state captured before any transition.
+struct CheckGuard {
+    tab_id: TabId,
+    session_epoch: u64,
+    profile_id: ProfileId,
+    temp_path: LocalPath,
+    remote_path: RemotePath,
+    baseline: RemoteSnapshot,
+    baseline_local_mtime: Option<Timestamp>,
+    checking_local_mtime: Option<Timestamp>,
+}
+
+/// Decoded outcome of a check: either the actor read a live snapshot, or the
+/// check failed (actor stat error or runtime dispatch failure).
+#[derive(Clone, Copy)]
+enum CheckOutcome {
+    Matched(RemoteSnapshot),
+    Failure,
+}
+
+/// Apply a check whose remote snapshot matches the actor's live read. If the
+/// remote is still at the baseline, upload the edited file back; if it diverged,
+/// flag a conflict. Both branches clear the pending-check fields and advance
+/// `local_mtime` to the save that initiated the check.
+fn apply_matched_remote_check(
+    cx: &mut App,
+    edit_session_id: EditSessionId,
+    guard: &CheckGuard,
+    snapshot: &RemoteSnapshot,
+) {
+    if *snapshot == guard.baseline {
+        // Remote confirmed unchanged → upload the edited file back to its
+        // origin. Exactly one upload: the watcher will not redispatch because
+        // the phase leaves `CheckingRemote`.
+        let command = build_edit_upload_command(
+            &guard.temp_path,
+            &guard.remote_path,
+            guard.session_epoch,
+            guard.profile_id,
+            guard.tab_id,
+        );
+        if let Some(session) = cx.resources_mut().edit_sessions.get_mut(edit_session_id) {
+            session.phase = EditPhase::UploadingBack;
+            session.local_mtime = guard.checking_local_mtime;
+            session.pending_check_id = None;
+            session.checking_local_mtime = None;
+            session.active_transfer = None;
+        }
+        // On a failed channel hand-off, `dispatch_edit_command` reverts to
+        // `Editing` and restores the pre-save baseline.
+        dispatch_edit_command(
+            cx,
+            edit_session_id,
+            guard.tab_id,
+            guard.baseline_local_mtime,
+            command,
+        );
+        cx.refresh_windows();
+    } else {
+        // Remote diverged from the baseline → flag a conflict so the user
+        // decides. Record the save mtime so the same save does not re-flag.
+        if let Some(session) = cx.resources_mut().edit_sessions.get_mut(edit_session_id) {
+            session.phase = EditPhase::RemoteConflict;
+            session.local_mtime = guard.checking_local_mtime;
+            session.pending_check_id = None;
+            session.checking_local_mtime = None;
+        }
+        cx.refresh_windows();
+    }
+}
+
+/// Surface an edit status message in the window that owns `tab_id`.
+fn show_edit_status(cx: &mut App, tab_id: TabId, message: &str) {
+    for window in workspace_windows(cx) {
+        let shown = window.update(cx, |workspace, _window, cx| {
+            workspace.set_edit_status(tab_id, message.to_string(), cx)
+        });
+        if matches!(shown, Ok(true)) {
+            break;
+        }
+    }
+}
+
 ///
 /// Called after a conflict arrives, after a new window opens, and after a
 /// window closes. If the owning window disappears, the prompt moves to the
@@ -383,12 +605,14 @@ fn conflict_prompt(conflict: ConflictRequest) -> TransferConflictPrompt {
 mod tests {
     use gpui::{TestAppContext, WindowHandle};
     use macsftp_core::{
-        AppEvent, ConflictPolicy, ConflictRequestId, EditPhase, EditSession, FileKind, LocalPath,
-        MetadataPolicy, ProfileId, RemoteEntry, RemotePath, RemoteSnapshot, RuntimeBridgeConfig,
-        TabId, Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint,
-        TransferFailure, TransferId, TransferJob, TransferPlan, TransferPlanId,
-        TransferPlanProgress, TransferPlanSnapshot, TransferPlanState, TransferSnapshot,
-        TransferState, UserFacingError, WindowSessionId,
+        AppCommand, AppEvent, ConflictPolicy, ConflictRequestId, ConnectionState, EditCheckId,
+        EditPhase, EditSession, EditSessionId, ErrorCode, FileKind, LocalPath, MetadataPolicy,
+        ProfileId, RemoteEditSnapshotCheckFailed, RemoteEditSnapshotChecked,
+        RemoteEditSnapshotDispatchFailed, RemoteEntry, RemoteEventScope, RemotePath, RemoteScoped,
+        RemoteSnapshot, RuntimeBridgeConfig, SessionId, TabId, Timestamp, TransferConflictPrompt,
+        TransferDirection, TransferEndpoint, TransferFailure, TransferId, TransferJob,
+        TransferPlan, TransferPlanId, TransferPlanProgress, TransferPlanSnapshot,
+        TransferPlanState, TransferSnapshot, TransferState, UserFacingError, WindowSessionId,
     };
     use macsftp_platform::AppPaths;
     use macsftp_sftp::{BridgeChannels, RuntimeClient};
@@ -1017,5 +1241,613 @@ mod tests {
             std::process::id()
         ));
         AppPaths::from_home_dir(home.to_string_lossy().as_ref())
+    }
+
+    /// Register a `CheckingRemote` edit session whose temp file is a real file
+    /// on disk stamped at `checking_mtime`, with `pending_check_id =
+    /// Some(check_id)` and `checking_local_mtime = Some(checking_mtime)`. The
+    /// session's `remote_snapshot` baseline is `baseline` and its pre-save
+    /// `local_mtime` is `baseline_mtime`. Returns the session id and temp path.
+    fn seed_checking_remote_edit(
+        cx: &mut TestAppContext,
+        label: &str,
+        baseline: RemoteSnapshot,
+        baseline_mtime: Timestamp,
+        checking_mtime: Timestamp,
+        check_id: EditCheckId,
+    ) -> (EditSessionId, LocalPath) {
+        let session_dir = std::env::temp_dir().join(format!(
+            "macsftp-check-{label}-{}-{}",
+            std::process::id(),
+            label
+        ));
+        std::fs::create_dir_all(&session_dir).expect("create edit session dir");
+        let temp_file = session_dir.join("a.txt");
+        std::fs::write(&temp_file, b"locally edited contents").expect("write edit temp file");
+        set_file_mtime(&temp_file, checking_mtime);
+        let temp_path = LocalPath::new(temp_file.to_string_lossy().as_ref());
+
+        let session_id = cx.update(|cx| {
+            let id = cx.resources_mut().edit_sessions.next_id();
+            let session = EditSession {
+                id,
+                remote_path: RemotePath::new("/srv/a.txt"),
+                tab_id: TabId(1),
+                session_epoch: 1,
+                profile_id: ProfileId(1),
+                local_temp_path: temp_path.clone(),
+                phase: EditPhase::CheckingRemote,
+                remote_snapshot: baseline,
+                local_mtime: Some(baseline_mtime),
+                active_transfer: None,
+                pending_check_id: Some(check_id),
+                checking_local_mtime: Some(checking_mtime),
+                missing_ticks: 0,
+            };
+            cx.resources_mut().edit_sessions.register(session);
+            id
+        });
+        (session_id, temp_path)
+    }
+
+    /// Open a window whose first tab (`TabId(1)`) owns the session and is
+    /// `Connected` at `epoch`, so the coordinator's owner-resolution accepts a
+    /// check result scoped to that tab/epoch. Returns the window and its bridge
+    /// channels so a test can read commands the coordinator dispatches.
+    fn open_owning_window(
+        cx: &mut TestAppContext,
+        epoch: u64,
+    ) -> (WindowHandle<Workspace>, BridgeChannels) {
+        let channels = BridgeChannels::new(&RuntimeBridgeConfig::default());
+        let client = RuntimeClient::new(channels.command_tx.clone());
+        let window = cx
+            .add_window(|window, cx| Workspace::new(client, WindowSessionId(1), None, window, cx));
+        window
+            .update(cx, |workspace, _window, _cx| {
+                let tab = workspace.active_tab_mut().expect("window opens with a tab");
+                tab.session_epoch = epoch;
+                tab.connection = ConnectionState::Connected {
+                    session_id: SessionId(1),
+                    session_epoch: epoch,
+                    connected_at: Timestamp::from_secs_since_epoch(1),
+                };
+            })
+            .expect("mark tab owning and connected");
+        (window, channels)
+    }
+
+    /// Stamp `path`'s modified time to `mtime` so the coordinator's re-stat
+    /// guard reads the exact `(size, mtime)` the save recorded.
+    fn set_file_mtime(path: &std::path::Path, mtime: Timestamp) {
+        std::fs::File::open(path)
+            .expect("temp file exists")
+            .set_times(std::fs::FileTimes::new().set_modified(mtime.0))
+            .expect("stamp temp file mtime");
+    }
+
+    fn session_phase(cx: &mut TestAppContext, id: EditSessionId) -> EditPhase {
+        cx.update(|cx| {
+            cx.resources()
+                .edit_sessions
+                .get(id)
+                .expect("session survives")
+                .phase
+                .clone()
+        })
+    }
+
+    /// The authoritative check result for a `CheckingRemote` session, scoped to
+    /// `tab_id`/`session_id`/`epoch` with `check_id` and the live `snapshot`.
+    fn checked_event(
+        tab_id: TabId,
+        session_id: SessionId,
+        epoch: u64,
+        edit_session_id: EditSessionId,
+        check_id: EditCheckId,
+        snapshot: RemoteSnapshot,
+    ) -> AppEvent {
+        AppEvent::RemoteEditSnapshotChecked(RemoteScoped::new(
+            RemoteEventScope::new(tab_id, session_id, epoch),
+            RemoteEditSnapshotChecked {
+                edit_session_id,
+                check_id,
+                path: RemotePath::new("/srv/a.txt"),
+                snapshot,
+            },
+        ))
+    }
+
+    /// The authoritative check-failure result for a `CheckingRemote` session.
+    fn check_failed_event(
+        tab_id: TabId,
+        session_id: SessionId,
+        epoch: u64,
+        edit_session_id: EditSessionId,
+        check_id: EditCheckId,
+    ) -> AppEvent {
+        AppEvent::RemoteEditSnapshotCheckFailed(RemoteScoped::new(
+            RemoteEventScope::new(tab_id, session_id, epoch),
+            RemoteEditSnapshotCheckFailed {
+                edit_session_id,
+                check_id,
+                path: RemotePath::new("/srv/a.txt"),
+                error: UserFacingError::new(
+                    ErrorCode::Unknown,
+                    "Could not check remote file",
+                    "The remote file could not be checked",
+                )
+                .with_retryable(false),
+            },
+        ))
+    }
+
+    /// The runtime dispatch-failure result for a `CheckingRemote` session: no
+    /// scope, only the epoch/edit-session/check tuple.
+    fn dispatch_failed_event(
+        tab_id: TabId,
+        epoch: u64,
+        edit_session_id: EditSessionId,
+        check_id: EditCheckId,
+    ) -> AppEvent {
+        AppEvent::RemoteEditSnapshotDispatchFailed(RemoteEditSnapshotDispatchFailed {
+            tab_id,
+            session_epoch: epoch,
+            edit_session_id,
+            check_id,
+            path: RemotePath::new("/srv/a.txt"),
+            error: UserFacingError::new(
+                ErrorCode::Unknown,
+                "Could not check remote file",
+                "The edit check could not be dispatched",
+            )
+            .with_retryable(true),
+        })
+    }
+
+    #[gpui::test]
+    fn matching_remote_check_dispatches_one_upload(cx: &mut TestAppContext) {
+        install_test_globals(cx, "matched-upload");
+        let baseline = RemoteSnapshot {
+            size: Some(11),
+            modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+        };
+        let baseline_mtime = Timestamp::from_secs_since_epoch(100);
+        let checking_mtime = Timestamp::from_secs_since_epoch(200);
+        let (id, _temp) = seed_checking_remote_edit(
+            cx,
+            "matched-upload",
+            baseline,
+            baseline_mtime,
+            checking_mtime,
+            EditCheckId(1),
+        );
+        let (_window, channels) = open_owning_window(cx, 1);
+        while channels.command_rx.try_recv().is_ok() {}
+
+        cx.update(|cx| {
+            dispatch_event(
+                checked_event(TabId(1), SessionId(1), 1, id, EditCheckId(1), baseline),
+                cx,
+            );
+        });
+
+        assert_eq!(
+            session_phase(cx, id),
+            EditPhase::UploadingBack,
+            "a matching remote check must move the session to UploadingBack"
+        );
+        let command = channels
+            .command_rx
+            .try_recv()
+            .expect("exactly one upload must be dispatched");
+        let AppCommand::StartTransfer(command) = command else {
+            panic!("expected StartTransfer, got {command:?}");
+        };
+        assert_eq!(command.direction, TransferDirection::Upload);
+        assert_eq!(
+            command.destination,
+            TransferEndpoint::Remote(RemotePath::new("/srv/a.txt"))
+        );
+        assert!(
+            channels.command_rx.try_recv().is_err(),
+            "no second command may be dispatched"
+        );
+    }
+
+    #[gpui::test]
+    fn diverged_remote_check_enters_conflict_without_upload(cx: &mut TestAppContext) {
+        install_test_globals(cx, "diverged-conflict");
+        let baseline = RemoteSnapshot {
+            size: Some(11),
+            modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+        };
+        let baseline_mtime = Timestamp::from_secs_since_epoch(100);
+        let checking_mtime = Timestamp::from_secs_since_epoch(200);
+        let (id, _temp) = seed_checking_remote_edit(
+            cx,
+            "diverged-conflict",
+            baseline,
+            baseline_mtime,
+            checking_mtime,
+            EditCheckId(1),
+        );
+        let (_window, channels) = open_owning_window(cx, 1);
+        while channels.command_rx.try_recv().is_ok() {}
+
+        // The actor reports a DIFFERENT size than the baseline: the remote was
+        // changed by someone else during the edit.
+        let diverged = RemoteSnapshot {
+            size: Some(999),
+            modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+        };
+        cx.update(|cx| {
+            dispatch_event(
+                checked_event(TabId(1), SessionId(1), 1, id, EditCheckId(1), diverged),
+                cx,
+            );
+        });
+
+        assert_eq!(
+            session_phase(cx, id),
+            EditPhase::RemoteConflict,
+            "a diverged remote must flag a conflict, not blind-overwrite"
+        );
+        assert!(
+            channels.command_rx.try_recv().is_err(),
+            "no upload may be dispatched when the remote diverged"
+        );
+    }
+
+    #[gpui::test]
+    fn failed_remote_check_returns_to_editing_without_advancing_mtime(cx: &mut TestAppContext) {
+        install_test_globals(cx, "failed-editing");
+        let baseline = RemoteSnapshot {
+            size: Some(11),
+            modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+        };
+        let baseline_mtime = Timestamp::from_secs_since_epoch(100);
+        let checking_mtime = Timestamp::from_secs_since_epoch(200);
+        let (id, _temp) = seed_checking_remote_edit(
+            cx,
+            "failed-editing",
+            baseline,
+            baseline_mtime,
+            checking_mtime,
+            EditCheckId(1),
+        );
+        let (_window, channels) = open_owning_window(cx, 1);
+        while channels.command_rx.try_recv().is_ok() {}
+
+        cx.update(|cx| {
+            dispatch_event(
+                check_failed_event(TabId(1), SessionId(1), 1, id, EditCheckId(1)),
+                cx,
+            );
+        });
+
+        // Returned to Editing, and the pre-save baseline mtime is preserved so
+        // the watcher's next tick re-detects the save and retries.
+        assert_eq!(
+            session_phase(cx, id),
+            EditPhase::Editing,
+            "a failed check must return the session to Editing"
+        );
+        let restored = cx.update(|cx| {
+            cx.resources()
+                .edit_sessions
+                .get(id)
+                .expect("session survives")
+                .local_mtime
+        });
+        assert_eq!(
+            restored,
+            Some(baseline_mtime),
+            "the pre-save baseline mtime must be preserved, not advanced"
+        );
+        assert!(
+            channels.command_rx.try_recv().is_err(),
+            "no upload may be dispatched on a failed check"
+        );
+    }
+
+    #[gpui::test]
+    fn stale_remote_check_after_reconnect_is_ignored_and_session_retries(cx: &mut TestAppContext) {
+        install_test_globals(cx, "stale-reconnect");
+        let baseline = RemoteSnapshot {
+            size: Some(11),
+            modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+        };
+        let baseline_mtime = Timestamp::from_secs_since_epoch(100);
+        let checking_mtime = Timestamp::from_secs_since_epoch(200);
+        let (id, _temp) = seed_checking_remote_edit(
+            cx,
+            "stale-reconnect",
+            baseline,
+            baseline_mtime,
+            checking_mtime,
+            EditCheckId(1),
+        );
+        // Simulate reconnect: the tab's epoch advances and the edit session is
+        // reset out of CheckingRemote (as `update_epoch_for_tab` does).
+        let (_window, channels) = open_owning_window(cx, 2);
+        cx.update(|cx| {
+            if let Some(session) = cx.resources_mut().edit_sessions.get_mut(id) {
+                session.phase = EditPhase::Editing;
+                session.pending_check_id = None;
+                session.checking_local_mtime = None;
+                session.session_epoch = 2;
+            }
+        });
+        while channels.command_rx.try_recv().is_ok() {}
+
+        // The OLD check result (epoch 1, the stale connection) arrives late.
+        cx.update(|cx| {
+            dispatch_event(
+                checked_event(TabId(1), SessionId(1), 1, id, EditCheckId(1), baseline),
+                cx,
+            );
+        });
+
+        // It must NOT apply: the session stays Editing (ready to retry) and no
+        // upload is dispatched for the stale result.
+        assert_eq!(
+            session_phase(cx, id),
+            EditPhase::Editing,
+            "a stale post-reconnect check result must be ignored"
+        );
+        assert!(
+            channels.command_rx.try_recv().is_err(),
+            "no upload may follow a stale check result"
+        );
+    }
+
+    #[gpui::test]
+    fn stale_dispatch_failure_after_reconnect_does_not_reset_replacement_check(
+        cx: &mut TestAppContext,
+    ) {
+        install_test_globals(cx, "stale-dispatch");
+        let baseline = RemoteSnapshot {
+            size: Some(11),
+            modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+        };
+        let baseline_mtime = Timestamp::from_secs_since_epoch(100);
+        let checking_mtime = Timestamp::from_secs_since_epoch(200);
+        let (id, _temp) = seed_checking_remote_edit(
+            cx,
+            "stale-dispatch",
+            baseline,
+            baseline_mtime,
+            checking_mtime,
+            EditCheckId(2),
+        );
+        // Simulate reconnect: a NEW check (epoch 2, check_id 2) is now in
+        // flight. The session is CheckingRemote again with the new epoch/id.
+        let (_window, channels) = open_owning_window(cx, 2);
+        cx.update(|cx| {
+            if let Some(session) = cx.resources_mut().edit_sessions.get_mut(id) {
+                session.session_epoch = 2;
+                session.pending_check_id = Some(EditCheckId(2));
+            }
+        });
+        while channels.command_rx.try_recv().is_ok() {}
+
+        // A dispatch failure for the OLD check (epoch 1, check_id 1) arrives.
+        cx.update(|cx| {
+            dispatch_event(dispatch_failed_event(TabId(1), 1, id, EditCheckId(1)), cx);
+        });
+
+        // It must NOT reset/revert the replacement check.
+        assert_eq!(
+            session_phase(cx, id),
+            EditPhase::CheckingRemote,
+            "a stale dispatch failure must not revert the replacement check"
+        );
+        let pending = cx.update(|cx| {
+            cx.resources()
+                .edit_sessions
+                .get(id)
+                .expect("session survives")
+                .pending_check_id
+        });
+        assert_eq!(
+            pending,
+            Some(EditCheckId(2)),
+            "the live replacement check id must be preserved"
+        );
+    }
+
+    #[gpui::test]
+    fn remote_check_event_is_applied_once_with_multiple_windows(cx: &mut TestAppContext) {
+        install_test_globals(cx, "multi-window");
+        let baseline = RemoteSnapshot {
+            size: Some(11),
+            modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+        };
+        let baseline_mtime = Timestamp::from_secs_since_epoch(100);
+        let checking_mtime = Timestamp::from_secs_since_epoch(200);
+        let (id, _temp) = seed_checking_remote_edit(
+            cx,
+            "multi-window",
+            baseline,
+            baseline_mtime,
+            checking_mtime,
+            EditCheckId(1),
+        );
+        // Two windows, only the first owns the tab at epoch 1.
+        let (_owning, channels) = open_owning_window(cx, 1);
+        let other = cx.add_window(|window, cx| {
+            Workspace::new(
+                RuntimeClient::new(BridgeChannels::new(&RuntimeBridgeConfig::default()).command_tx),
+                WindowSessionId(2),
+                None,
+                window,
+                cx,
+            )
+        });
+        other
+            .update(cx, |workspace, _window, _cx| {
+                let tab = workspace.active_tab_mut().expect("window opens with a tab");
+                tab.session_epoch = 1;
+                tab.connection = ConnectionState::Connected {
+                    session_id: SessionId(1),
+                    session_epoch: 1,
+                    connected_at: Timestamp::from_secs_since_epoch(1),
+                };
+            })
+            .expect("second window owns a different tab id");
+        while channels.command_rx.try_recv().is_ok() {}
+
+        cx.update(|cx| {
+            dispatch_event(
+                checked_event(TabId(1), SessionId(1), 1, id, EditCheckId(1), baseline),
+                cx,
+            );
+        });
+
+        // Exactly one upload, applied by the coordinator (not broadcast).
+        assert_eq!(session_phase(cx, id), EditPhase::UploadingBack);
+        let command = channels
+            .command_rx
+            .try_recv()
+            .expect("the single owning window receives the upload command");
+        assert!(matches!(command, AppCommand::StartTransfer(_)));
+        assert!(
+            channels.command_rx.try_recv().is_err(),
+            "the result is applied exactly once"
+        );
+    }
+
+    #[gpui::test]
+    fn duplicate_remote_check_result_does_not_dispatch_second_upload(cx: &mut TestAppContext) {
+        install_test_globals(cx, "duplicate");
+        let baseline = RemoteSnapshot {
+            size: Some(11),
+            modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+        };
+        let baseline_mtime = Timestamp::from_secs_since_epoch(100);
+        let checking_mtime = Timestamp::from_secs_since_epoch(200);
+        let (id, _temp) = seed_checking_remote_edit(
+            cx,
+            "duplicate",
+            baseline,
+            baseline_mtime,
+            checking_mtime,
+            EditCheckId(1),
+        );
+        let (_window, channels) = open_owning_window(cx, 1);
+        while channels.command_rx.try_recv().is_ok() {}
+
+        cx.update(|cx| {
+            dispatch_event(
+                checked_event(TabId(1), SessionId(1), 1, id, EditCheckId(1), baseline),
+                cx,
+            );
+            // A duplicate of the same result arrives (e.g. at-least-once
+            // delivery). The session is no longer CheckingRemote, so it is
+            // ignored.
+            dispatch_event(
+                checked_event(TabId(1), SessionId(1), 1, id, EditCheckId(1), baseline),
+                cx,
+            );
+        });
+
+        assert!(
+            matches!(
+                channels.command_rx.try_recv(),
+                Ok(AppCommand::StartTransfer(_))
+            ),
+            "exactly one upload is dispatched for the first result"
+        );
+        assert!(
+            channels.command_rx.try_recv().is_err(),
+            "the duplicate result must not dispatch a second upload"
+        );
+    }
+
+    #[gpui::test]
+    fn late_result_from_prior_check_id_does_not_authorize_retry(cx: &mut TestAppContext) {
+        install_test_globals(cx, "prior-check-id");
+        let baseline = RemoteSnapshot {
+            size: Some(11),
+            modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+        };
+        let baseline_mtime = Timestamp::from_secs_since_epoch(100);
+        let checking_mtime = Timestamp::from_secs_since_epoch(200);
+        let (id, _temp) = seed_checking_remote_edit(
+            cx,
+            "prior-check-id",
+            baseline,
+            baseline_mtime,
+            checking_mtime,
+            EditCheckId(2),
+        );
+        let (_window, channels) = open_owning_window(cx, 1);
+        while channels.command_rx.try_recv().is_ok() {}
+
+        // A late result for the PREVIOUS check id (1) arrives; the live session
+        // is on check id 2. It must be ignored.
+        cx.update(|cx| {
+            dispatch_event(
+                checked_event(TabId(1), SessionId(1), 1, id, EditCheckId(1), baseline),
+                cx,
+            );
+        });
+
+        assert_eq!(
+            session_phase(cx, id),
+            EditPhase::CheckingRemote,
+            "a result for a superseded check id must not transition the session"
+        );
+        assert!(
+            channels.command_rx.try_recv().is_err(),
+            "no upload may follow a superseded check result"
+        );
+    }
+
+    #[gpui::test]
+    fn local_save_changed_during_remote_check_requires_a_new_check(cx: &mut TestAppContext) {
+        install_test_globals(cx, "changed-during");
+        let baseline = RemoteSnapshot {
+            size: Some(11),
+            modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+        };
+        let baseline_mtime = Timestamp::from_secs_since_epoch(100);
+        let checking_mtime = Timestamp::from_secs_since_epoch(200);
+        let (id, temp_path) = seed_checking_remote_edit(
+            cx,
+            "changed-during",
+            baseline,
+            baseline_mtime,
+            checking_mtime,
+            EditCheckId(1),
+        );
+        let (_window, channels) = open_owning_window(cx, 1);
+        while channels.command_rx.try_recv().is_ok() {}
+
+        // The user re-saves while the remote check is in flight, so the temp
+        // file's mtime no longer matches `checking_local_mtime`.
+        set_file_mtime(
+            std::path::Path::new(temp_path.as_str()),
+            Timestamp::from_secs_since_epoch(300),
+        );
+
+        cx.update(|cx| {
+            dispatch_event(
+                checked_event(TabId(1), SessionId(1), 1, id, EditCheckId(1), baseline),
+                cx,
+            );
+        });
+
+        // The result does not authorize an upload: the session returns to
+        // Editing and the watcher will re-check the newer save.
+        assert_eq!(
+            session_phase(cx, id),
+            EditPhase::Editing,
+            "a result whose temp mtime no longer matches must not upload"
+        );
+        assert!(
+            channels.command_rx.try_recv().is_err(),
+            "no upload may be dispatched for a changed local save"
+        );
     }
 }

@@ -7,8 +7,8 @@ use gpui::{
 };
 use macsftp_core::{
     AppCommand, AppState, CommandDispatchError, ConnectCommand, ConnectionPoolIdentity,
-    ConnectionSettings, ConnectionState, EntryPath, LocalPath, ProfileId, RemotePath,
-    RemoteSnapshot, TabId, TabState, WindowSessionId,
+    ConnectionSettings, ConnectionState, EntryPath, LocalPath, ProfileId, RemoteEventScope,
+    RemotePath, RemoteSnapshot, TabId, TabState, WindowSessionId,
 };
 use macsftp_sftp::RuntimeClient;
 use macsftp_storage::{
@@ -707,6 +707,13 @@ impl Workspace {
                 && !tab.remote.is_refreshing
         })
     }
+    /// Whether this window owns the tab referenced by `scope` and that tab's
+    /// session is still live at `scope`'s epoch. Used by the process-wide
+    /// coordinator (Task 5) to resolve which window owns an authoritative
+    /// edit-check result before applying it exactly once.
+    pub(crate) fn accepts_remote_scope(&self, scope: &RemoteEventScope) -> bool {
+        self.state.tabs.accepts_remote_event(scope)
+    }
     /// The ids of every tab this window currently holds. Used after a window
     /// closes to garbage-collect edit sessions whose owning tab no longer
     /// exists in any window.
@@ -1319,5 +1326,6 @@ mod visible_entries;
 use connect_form::ConnectForm;
 #[cfg(test)]
 pub(crate) use remote_edit::ConflictChoice;
+pub(crate) use remote_edit::build_edit_upload_command;
 pub(crate) use remote_edit::cleanup_edit_sessions_for_tab;
 pub(crate) use remote_edit::cleanup_orphaned_edit_sessions;

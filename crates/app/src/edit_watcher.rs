@@ -205,7 +205,7 @@ fn tab_remote_is_ready(cx: &App, tab_id: TabId) -> bool {
 /// kept either way.
 ///
 /// [`find_active`]: macsftp_core::EditSessionStore::find_active
-fn dispatch_edit_command(
+pub(crate) fn dispatch_edit_command(
     cx: &mut App,
     session_id: EditSessionId,
     tab_id: TabId,
@@ -249,7 +249,7 @@ fn dispatch_edit_command(
 /// - the authoritative-check handoff (`CheckingRemote` → `Editing`), where the
 ///   pending `EditCheckId` and `checking_local_mtime` must be cleared so a
 ///   stale check id never correlates with a later result.
-fn revert_stranded_upload(
+pub(crate) fn revert_stranded_upload(
     cx: &mut App,
     session_id: EditSessionId,
     restore_mtime: Option<Timestamp>,
