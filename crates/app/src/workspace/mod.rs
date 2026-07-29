@@ -715,8 +715,11 @@ impl Workspace {
     }
     /// The most recent remote `(size, mtime)` for `remote_path` from the tab's
     /// existing directory listing, or `None` when the tab or entry is absent.
-    /// This is the zero-round-trip "current remote snapshot" the watcher uses
-    /// to detect that someone else changed the file since it was opened.
+    /// Read-side counterpart to [`Self::sync_remote_entry_snapshot`]: the
+    /// authoritative edit-check (PR 3) no longer consults the cached listing,
+    /// so this helper now exists mainly so the upload-back rebase round-trip
+    /// can be asserted in tests.
+    #[allow(dead_code)]
     pub(crate) fn remote_entry_snapshot(
         &self,
         tab_id: TabId,
@@ -1316,6 +1319,5 @@ mod visible_entries;
 use connect_form::ConnectForm;
 #[cfg(test)]
 pub(crate) use remote_edit::ConflictChoice;
-pub(crate) use remote_edit::build_edit_upload_command;
 pub(crate) use remote_edit::cleanup_edit_sessions_for_tab;
 pub(crate) use remote_edit::cleanup_orphaned_edit_sessions;

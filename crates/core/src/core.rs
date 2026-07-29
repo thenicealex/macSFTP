@@ -2334,6 +2334,18 @@ impl EditSessionStore {
             .filter(|s| s.phase == EditPhase::RemoteConflict)
     }
 
+    /// `CheckingRemote`-phase sessions. Used by the edit watcher's lifecycle
+    /// pass so a session whose temp file is deleted while an authoritative
+    /// remote check is in flight is still reaped. These sessions never
+    /// initiate a new check through the polling loop (duplicate dispatch is
+    /// prevented by construction: `poll_edit_sessions` only dispatches for
+    /// `Editing` sessions), so this iterator is purely for cleanup.
+    pub fn checking_sessions(&self) -> impl Iterator<Item = &EditSession> {
+        self.sessions
+            .iter()
+            .filter(|s| s.phase == EditPhase::CheckingRemote)
+    }
+
     /// The distinct `tab_id`s across all registered sessions. Used after a
     /// window closes to find sessions whose owning tab no longer exists in any
     /// surviving window so they can be torn down.
