@@ -547,30 +547,13 @@ async fn command_dispatch_loop(
                                                 &scope,
                                                 &failure,
                                             );
-                                            let event = match failure {
-                                                crate::physical_connection::ConnectFailure::HostKeyMismatch(_) => None,
-                                                crate::physical_connection::ConnectFailure::TrustRejected => {
-                                                    Some(AppEvent::TabDisconnected(RemoteScoped::new(
-                                                        scope.clone(),
-                                                        macsftp_core::TabDisconnected { reason: macsftp_core::DisconnectReason::UserRequested },
-                                                    )))
-                                                }
-                                                crate::physical_connection::ConnectFailure::TrustTimeout => {
-                                                    Some(AppEvent::TabDisconnected(RemoteScoped::new(
-                                                        scope.clone(),
-                                                        macsftp_core::TabDisconnected { reason: macsftp_core::DisconnectReason::Error(macsftp_core::UserFacingError::new(ErrorCode::Unknown, "Trust prompt timed out", "You did not respond to the host key prompt in time.")) },
-                                                    )))
-                                                }
-                                                crate::physical_connection::ConnectFailure::AuthFailed(_) => None,
-                                                crate::physical_connection::ConnectFailure::Connection(error) => {
-                                                    Some(AppEvent::TabDisconnected(RemoteScoped::new(
-                                                        scope.clone(),
-                                                        macsftp_core::TabDisconnected { reason: macsftp_core::DisconnectReason::Error(error) },
-                                                    )))
-                                                }
-                                            };
+                                            let event = connection_failure_event(&scope, &failure);
                                             if let Some(event) = event {
-                                                let _ = event_tx_clone.send_async(event).await;
+                                                if let Err(send_error) =
+                                                    event_tx_clone.send_async(event).await
+                                                {
+                                                    warn!(error = %send_error, "connection lifecycle event dropped");
+                                                }
                                             }
                                         }
                                     }
@@ -582,30 +565,13 @@ async fn command_dispatch_loop(
                                         &scope,
                                         &failure,
                                     );
-                                    let event = match failure {
-                                        crate::physical_connection::ConnectFailure::HostKeyMismatch(_) => None,
-                                        crate::physical_connection::ConnectFailure::TrustRejected => {
-                                            Some(AppEvent::TabDisconnected(RemoteScoped::new(
-                                                scope.clone(),
-                                                macsftp_core::TabDisconnected { reason: macsftp_core::DisconnectReason::UserRequested },
-                                            )))
-                                        }
-                                        crate::physical_connection::ConnectFailure::TrustTimeout => {
-                                            Some(AppEvent::TabDisconnected(RemoteScoped::new(
-                                                scope.clone(),
-                                                macsftp_core::TabDisconnected { reason: macsftp_core::DisconnectReason::Error(macsftp_core::UserFacingError::new(ErrorCode::Unknown, "Trust prompt timed out", "You did not respond to the host key prompt in time.")) },
-                                            )))
-                                        }
-                                        crate::physical_connection::ConnectFailure::AuthFailed(_) => None,
-                                        crate::physical_connection::ConnectFailure::Connection(error) => {
-                                            Some(AppEvent::TabDisconnected(RemoteScoped::new(
-                                                scope.clone(),
-                                                macsftp_core::TabDisconnected { reason: macsftp_core::DisconnectReason::Error(error) },
-                                            )))
-                                        }
-                                    };
+                                    let event = connection_failure_event(&scope, &failure);
                                     if let Some(event) = event {
-                                        let _ = event_tx_clone.send_async(event).await;
+                                        if let Err(send_error) =
+                                            event_tx_clone.send_async(event).await
+                                        {
+                                            warn!(error = %send_error, "connection lifecycle event dropped");
+                                        }
                                     }
                                 }
                                 Err(_) => {
@@ -1078,6 +1044,53 @@ async fn fail_planned_jobs(
             warn!(error = %send_error, "transfer handoff failure event dropped");
             return;
         }
+    }
+}
+
+/// Translate a physical connection failure into the lifecycle event the
+/// runtime would publish for this logical connection attempt.
+///
+/// The logical `scope` is supplied by the caller — it is never read from the
+/// failure, so a pooled handshake shared by several waiters gives each waiter
+/// its own scoped event. `HostKeyMismatch` now emits one non-retryable,
+/// session-scoped `AppEvent::HostKeyMismatch` instead of being dropped.
+fn connection_failure_event(
+    scope: &RemoteEventScope,
+    failure: &crate::physical_connection::ConnectFailure,
+) -> Option<AppEvent> {
+    match failure {
+        crate::physical_connection::ConnectFailure::HostKeyMismatch(details) => Some(
+            crate::physical_connection::host_key_mismatch_event(scope.clone(), details.clone()),
+        ),
+        crate::physical_connection::ConnectFailure::TrustRejected => Some(AppEvent::TabDisconnected(
+            RemoteScoped::new(
+                scope.clone(),
+                macsftp_core::TabDisconnected {
+                    reason: macsftp_core::DisconnectReason::UserRequested,
+                },
+            ),
+        )),
+        crate::physical_connection::ConnectFailure::TrustTimeout => Some(AppEvent::TabDisconnected(
+            RemoteScoped::new(
+                scope.clone(),
+                macsftp_core::TabDisconnected {
+                    reason: macsftp_core::DisconnectReason::Error(macsftp_core::UserFacingError::new(
+                        ErrorCode::Unknown,
+                        "Trust prompt timed out",
+                        "You did not respond to the host key prompt in time.",
+                    )),
+                },
+            ),
+        )),
+        crate::physical_connection::ConnectFailure::AuthFailed(_) => None,
+        crate::physical_connection::ConnectFailure::Connection(error) => Some(
+            AppEvent::TabDisconnected(RemoteScoped::new(
+                scope.clone(),
+                macsftp_core::TabDisconnected {
+                    reason: macsftp_core::DisconnectReason::Error(error.clone()),
+                },
+            )),
+        ),
     }
 }
 
@@ -1719,6 +1732,54 @@ mod tests {
         });
 
         helper.shutdown_timeout(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn pooled_mismatch_failure_uses_first_logical_scope() {
+        let details = crate::physical_connection::HostKeyMismatchDetails {
+            host: "example.com".to_string(),
+            port: 22,
+            expected_fingerprint_sha256: Some("SHA256:expected".to_string()),
+            actual_fingerprint_sha256: "SHA256:actual".to_string(),
+        };
+        let scope = RemoteEventScope::new(TabId(1), SessionId(10), 1);
+        let event = connection_failure_event(&scope, &crate::physical_connection::ConnectFailure::HostKeyMismatch(details));
+
+        match event {
+            Some(AppEvent::HostKeyMismatch(mismatch)) => {
+                assert_eq!(mismatch.scope, scope, "mismatch must carry the logical scope");
+                assert_eq!(mismatch.actual_fingerprint_sha256, "SHA256:actual");
+                assert_eq!(
+                    mismatch.expected_fingerprint_sha256,
+                    Some("SHA256:expected".to_string())
+                );
+            }
+            other => panic!("expected exactly one scoped HostKeyMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pooled_mismatch_failure_uses_second_logical_scope() {
+        let details = crate::physical_connection::HostKeyMismatchDetails {
+            host: "example.com".to_string(),
+            port: 22,
+            expected_fingerprint_sha256: Some("SHA256:expected".to_string()),
+            actual_fingerprint_sha256: "SHA256:actual".to_string(),
+        };
+        let scope = RemoteEventScope::new(TabId(2), SessionId(20), 3);
+        let event = connection_failure_event(&scope, &crate::physical_connection::ConnectFailure::HostKeyMismatch(details));
+
+        match event {
+            Some(AppEvent::HostKeyMismatch(mismatch)) => {
+                assert_eq!(mismatch.scope, scope, "mismatch must carry the logical scope");
+                assert_eq!(mismatch.actual_fingerprint_sha256, "SHA256:actual");
+                assert_eq!(
+                    mismatch.expected_fingerprint_sha256,
+                    Some("SHA256:expected".to_string())
+                );
+            }
+            other => panic!("expected exactly one scoped HostKeyMismatch, got {other:?}"),
+        }
     }
 
     // ── M2c: Mock actor full loop integration tests ───────────────
