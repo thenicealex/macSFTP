@@ -1,7 +1,7 @@
 use gpui::Context;
 use macsftp_core::{
-    AppCommand, EntryPath, FileKind, LocalPath, RemotePath, TabId, TransferEndpoint,
-    TransferId, TransferState,
+    AppCommand, EntryPath, FileKind, LocalPath, RemotePath, TabId, TransferEndpoint, TransferId,
+    TransferState,
 };
 
 use crate::resources::{ActiveResources, ActiveTransfers};
@@ -185,21 +185,20 @@ impl crate::workspace::Workspace {
         }
     }
     pub(crate) fn cancel_all_transfers(&mut self, cx: &mut Context<Self>) {
-        let job_ids: Vec<TransferId> = crate::workspace::transfer_render::visible_transfer_jobs(
-            cx.transfers(),
-        )
-        .iter()
-        .filter(|job| {
-            matches!(
-                job.state,
-                TransferState::Queued
-                    | TransferState::Running { .. }
-                    | TransferState::Planning
-                    | TransferState::WaitingForConflictDecision { .. }
-            )
-        })
-        .map(|job| job.id)
-        .collect();
+        let job_ids: Vec<TransferId> =
+            crate::workspace::transfer_render::visible_transfer_jobs(cx.transfers())
+                .iter()
+                .filter(|job| {
+                    matches!(
+                        job.state,
+                        TransferState::Queued
+                            | TransferState::Running { .. }
+                            | TransferState::Planning
+                            | TransferState::WaitingForConflictDecision { .. }
+                    )
+                })
+                .map(|job| job.id)
+                .collect();
         for id in job_ids {
             self.cancel_transfer(id, cx);
         }
