@@ -1487,7 +1487,7 @@ async fn host_key_mismatch_blocks_connection() {
     let event = next_event(&fixture, "HostKeyMismatch").await;
     match event {
         AppEvent::HostKeyMismatch(mismatch) => {
-            assert_eq!(mismatch.tab_id, TAB);
+            assert_eq!(mismatch.scope.tab_id, TAB);
             assert!(mismatch.expected_fingerprint_sha256.is_some());
             assert!(
                 mismatch.actual_fingerprint_sha256.starts_with("SHA256:"),

@@ -59,7 +59,7 @@ impl crate::workspace::Workspace {
             AppEvent::HostKeyMismatch(mismatch) => {
                 // Security block, no override (plan §10): the tab fails
                 // with an explanation and the known_hosts file location.
-                if let Some(tab) = self.state.tabs.find_tab_mut(mismatch.tab_id) {
+                if let Some(tab) = self.state.tabs.find_tab_mut(mismatch.scope.tab_id) {
                     let mut error = UserFacingError::new(
                         ErrorCode::HostKeyMismatch,
                         "Host key mismatch",

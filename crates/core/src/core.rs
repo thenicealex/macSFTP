@@ -1719,6 +1719,9 @@ impl AppEvent {
     /// `HostKeyUnknown` is included because the prompt carries the
     /// same `(tab_id, session_id, session_epoch)` triple — a stale
     /// host key prompt must not activate a modal for a new session.
+    /// `HostKeyMismatch` is included for the same reason: a stale
+    /// mismatch from a superseded session must not fail a replacement
+    /// session, while a current mismatch must still hard-block.
     pub fn remote_scope(&self) -> Option<RemoteEventScope> {
         match self {
             Self::TabConnected(scoped) => Some(scoped.scope.clone()),
@@ -1732,6 +1735,7 @@ impl AppEvent {
                 prompt.session_id,
                 prompt.session_epoch,
             )),
+            Self::HostKeyMismatch(mismatch) => Some(mismatch.scope.clone()),
             // FsOperationFailed is filtered in the app by tab_id + epoch
             // (FsScope has no session_id, so it cannot use the full remote
             // guard without a false SessionId).
@@ -1848,7 +1852,7 @@ pub enum TrustDecision {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostKeyMismatch {
-    pub tab_id: TabId,
+    pub scope: RemoteEventScope,
     pub host: String,
     pub port: u16,
     pub expected_fingerprint_sha256: Option<String>,
@@ -2436,7 +2440,8 @@ mod tests {
     use super::{
         AppState, AuthCredential, AuthFingerprint, AuthMethod, AuthMethodKind, ConflictPolicy,
         ConflictRequest, ConflictRequestId, ConnectionKey, ConnectionPoolIdentity,
-        ConnectionProfile, ConnectionSettings, ConnectionState, DisconnectReason, HostKeyPrompt,
+        ConnectionProfile, ConnectionSettings, ConnectionState, DisconnectReason, HostKeyMismatch,
+        HostKeyPrompt,
         LocalPath, MetadataPolicy, ModalRequest, ModalRequestId, ProfileId, RemoteEventScope,
         RemotePath, RemoteScoped, RuntimeBridgeConfig, SecretRef, SessionId, TabId, TabState,
         Timestamp, TransferDirection, TransferEndpoint, TransferId, TransferJob, TransferPlan,
@@ -3275,6 +3280,22 @@ mod tests {
     }
 
     #[test]
+    fn remote_scope_extracts_from_host_key_mismatch() {
+        let scope = RemoteEventScope::new(TabId(4), SessionId(6), 3);
+        let event = AppEvent::HostKeyMismatch(HostKeyMismatch {
+            scope: scope.clone(),
+            host: "example.com".to_string(),
+            port: 22,
+            expected_fingerprint_sha256: Some("SHA256:expected".to_string()),
+            actual_fingerprint_sha256: "SHA256:actual".to_string(),
+        });
+
+        assert_eq!(event.remote_scope(), Some(scope));
+        assert!(event.is_remote_scoped());
+        assert!(!event.is_transfer_event());
+    }
+
+    #[test]
     fn transfer_events_have_no_remote_scope() {
         let events = [
             AppEvent::TransferQueued(super::TransferSnapshot {
@@ -3422,6 +3443,44 @@ mod tests {
         assert!(
             state.should_accept_event(&live_prompt),
             "current host key prompt should be accepted"
+        );
+    }
+
+    #[test]
+    fn app_state_rejects_host_key_mismatch_from_old_session() {
+        let mut state = AppState::new();
+        state.tabs.open_tab(connected_tab(1, 11, 2));
+
+        let event = AppEvent::HostKeyMismatch(HostKeyMismatch {
+            scope: RemoteEventScope::new(TabId(1), SessionId(10), 1),
+            host: "example.com".to_string(),
+            port: 22,
+            expected_fingerprint_sha256: Some("SHA256:expected".to_string()),
+            actual_fingerprint_sha256: "SHA256:actual".to_string(),
+        });
+
+        assert!(
+            !state.should_accept_event(&event),
+            "stale host key mismatch must be rejected"
+        );
+    }
+
+    #[test]
+    fn app_state_accepts_host_key_mismatch_from_current_session() {
+        let mut state = AppState::new();
+        state.tabs.open_tab(connected_tab(1, 11, 2));
+
+        let event = AppEvent::HostKeyMismatch(HostKeyMismatch {
+            scope: RemoteEventScope::new(TabId(1), SessionId(11), 2),
+            host: "example.com".to_string(),
+            port: 22,
+            expected_fingerprint_sha256: Some("SHA256:expected".to_string()),
+            actual_fingerprint_sha256: "SHA256:actual".to_string(),
+        });
+
+        assert!(
+            state.should_accept_event(&event),
+            "current host key mismatch must be accepted"
         );
     }
 

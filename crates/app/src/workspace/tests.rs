@@ -4302,7 +4302,11 @@ mod tests {
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.handle_app_event(
                 AppEvent::HostKeyMismatch(macsftp_core::HostKeyMismatch {
-                    tab_id: TabId(1),
+                    scope: macsftp_core::RemoteEventScope::new(
+                        macsftp_core::TabId(1),
+                        macsftp_core::SessionId(1),
+                        1,
+                    ),
                     host: "mock.example.com".to_string(),
                     port: 22,
                     expected_fingerprint_sha256: Some("SHA256:expected".to_string()),

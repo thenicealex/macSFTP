@@ -117,7 +117,7 @@ impl client::Handler for ClientHandler {
                 let _ = self
                     .event_tx
                     .send_async(AppEvent::HostKeyMismatch(HostKeyMismatch {
-                        tab_id: self.scope.tab_id,
+                        scope: self.scope.clone(),
                         host: self.host.clone(),
                         port: self.port,
                         expected_fingerprint_sha256: expected,
