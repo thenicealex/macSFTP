@@ -43,6 +43,14 @@ pub struct ThemeColors {
     pub warning: Hsla,
     pub success: Hsla,
     pub info: Hsla,
+    /// Custom scrollbar thumb (resting).
+    pub scrollbar_thumb: Hsla,
+    /// Custom scrollbar thumb on hover.
+    pub scrollbar_thumb_hover: Hsla,
+    /// Custom scrollbar thumb while being dragged.
+    pub scrollbar_thumb_active: Hsla,
+    /// Custom scrollbar track background (transparent by default).
+    pub scrollbar_track: Hsla,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +68,8 @@ pub struct ThemeSizes {
     pub file_row_height: Pixels,
     pub transfer_row_height: Pixels,
     pub status_bar_height: Pixels,
+    /// Width of the custom scrollbar (track + thumb).
+    pub scrollbar_width: Pixels,
 }
 
 impl Theme {
@@ -84,6 +94,10 @@ impl Theme {
                 warning: rgb(0xe5c07b).into(),
                 success: rgb(0x98c379).into(),
                 info: rgb(0x56b6c2).into(),
+                scrollbar_thumb: hsla(0.0, 0.0, 1.0, 0.22),
+                scrollbar_thumb_hover: hsla(0.0, 0.0, 1.0, 0.36),
+                scrollbar_thumb_active: hsla(0.0, 0.0, 1.0, 0.50),
+                scrollbar_track: hsla(0.0, 0.0, 0.0, 0.0),
             },
             fonts: default_fonts(),
             sizes: default_sizes(),
@@ -111,6 +125,10 @@ impl Theme {
                 warning: rgb(0xc18401).into(),
                 success: rgb(0x50a14f).into(),
                 info: rgb(0x0184bc).into(),
+                scrollbar_thumb: hsla(0.0, 0.0, 0.0, 0.30),
+                scrollbar_thumb_hover: hsla(0.0, 0.0, 0.0, 0.45),
+                scrollbar_thumb_active: hsla(0.0, 0.0, 0.0, 0.55),
+                scrollbar_track: hsla(0.0, 0.0, 0.0, 0.0),
             },
             fonts: default_fonts(),
             sizes: default_sizes(),
@@ -149,6 +167,7 @@ fn default_sizes() -> ThemeSizes {
         file_row_height: px(26.0),
         transfer_row_height: px(44.0),
         status_bar_height: px(26.0),
+        scrollbar_width: px(10.0),
     }
 }
 
@@ -165,7 +184,7 @@ impl ActiveTheme for App {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{WindowAppearance, rgb};
+    use gpui::{WindowAppearance, px, rgb};
 
     use super::{Appearance, Theme};
 
@@ -217,5 +236,28 @@ mod tests {
         let theme = Theme::dark();
 
         assert_ne!(theme.fonts.ui_family, theme.fonts.mono_family);
+    }
+
+    #[test]
+    fn scrollbar_tokens_are_defined_and_distinct_per_appearance() {
+        let dark = Theme::one_dark();
+        let light = Theme::one_light();
+
+        // Both appearances define all four scrollbar color tokens.
+        assert_ne!(dark.colors.scrollbar_thumb, light.colors.scrollbar_thumb);
+        assert_ne!(
+            dark.colors.scrollbar_thumb_hover,
+            light.colors.scrollbar_thumb_hover
+        );
+        assert_ne!(
+            dark.colors.scrollbar_thumb_active,
+            light.colors.scrollbar_thumb_active
+        );
+        // Track is transparent in both, but the field must exist.
+        assert_eq!(dark.colors.scrollbar_track, light.colors.scrollbar_track);
+
+        // A scrollbar width token exists and is positive.
+        assert!(dark.sizes.scrollbar_width > px(0.0));
+        assert_eq!(dark.sizes.scrollbar_width, light.sizes.scrollbar_width);
     }
 }
