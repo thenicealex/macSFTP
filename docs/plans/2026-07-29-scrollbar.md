@@ -1,5 +1,7 @@
 # Custom Themed Scrollbar Implementation Plan
 
+**Completion:** Implemented on `feat/custom-scrollbar`. The final integration also covers the MRU tab switcher and adds retained `ScrollbarState` synchronization, outside-track drag capture, immediate repaint tests, and a tab-switcher overflow regression test.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Replace GPUI's thin auto-hiding native scrollbars with a unified, always-visible, light/dark-themed custom scrollbar across all scrollable areas (file panes, transfer drawer, command palette, profile-picker modal).

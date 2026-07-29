@@ -198,6 +198,7 @@ impl Workspace {
 
     pub(crate) fn render_command_palette(
         &self,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         if !self.palette_open {
@@ -339,6 +340,8 @@ impl Workspace {
                                 "command-palette-results",
                                 list,
                                 self.command_palette_scroll(),
+                                self.command_palette_scrollbar(),
+                                window,
                                 cx,
                             )
                         })

@@ -71,7 +71,11 @@ impl crate::workspace::Workspace {
     }
 
     /// Elevated MRU list for ctrl-tab. Confirm with Enter; Esc cancels (no key-up required).
-    pub(crate) fn render_tab_switcher(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_tab_switcher(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
         if !self.tab_switcher_open || self.tab_mru.is_empty() {
             return None;
         }
@@ -137,7 +141,8 @@ impl crate::workspace::Workspace {
                                 .child(status_label),
                         ),
                 )
-            });
+            })
+            .collect::<Vec<_>>();
 
         Some(
             div()
@@ -170,16 +175,33 @@ impl crate::workspace::Workspace {
                                 .text_color(theme.colors.text_muted)
                                 .child("Switch Tab · Enter confirm · Esc cancel"),
                         )
-                        .child(
+                        .child({
+                            let scrollbar = macsftp_ui::Scrollbar::vertical(
+                                "tab-switcher-scrollbar",
+                                self.tab_switcher_scroll().clone(),
+                                self.tab_switcher_scrollbar(),
+                                window,
+                                cx,
+                            );
                             div()
-                                .id("tab-switcher-list")
-                                .flex()
-                                .flex_col()
-                                .gap_1()
+                                .relative()
                                 .min_h_0()
-                                .overflow_y_scroll()
-                                .children(rows),
-                        ),
+                                .max_h(px(300.0))
+                                .child(
+                                    div()
+                                        .id("tab-switcher-list")
+                                        .flex()
+                                        .flex_col()
+                                        .gap_1()
+                                        .min_h_0()
+                                        .max_h(px(300.0))
+                                        .overflow_y_scroll()
+                                        .scrollbar_width(px(0.0))
+                                        .track_scroll(self.tab_switcher_scroll())
+                                        .children(rows),
+                                )
+                                .child(scrollbar)
+                        }),
                 )
                 .into_any_element(),
         )
@@ -188,7 +210,7 @@ impl crate::workspace::Workspace {
     pub(crate) fn render_pane(
         &self,
         side: PaneSide,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
@@ -1084,7 +1106,17 @@ impl crate::workspace::Workspace {
                 pane.child(banner)
             })
             .child(div().flex_1().min_h_0().relative().child(list).child(
-                macsftp_ui::Scrollbar::vertical_uniform(self.scroll_handle(side), cx),
+                macsftp_ui::Scrollbar::vertical_uniform(
+                    if side == PaneSide::Local {
+                        "local-file-scrollbar"
+                    } else {
+                        "remote-file-scrollbar"
+                    },
+                    self.scroll_handle(side),
+                    self.pane_scrollbar(side),
+                    window,
+                    cx,
+                ),
             ))
     }
     pub(crate) fn render_about(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {

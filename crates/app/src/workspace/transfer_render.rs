@@ -246,6 +246,8 @@ impl crate::workspace::Workspace {
                 "transfer-drawer-body",
                 content,
                 self.transfer_scroll(),
+                self.transfer_scrollbar(),
+                window,
                 cx,
             );
             return drawer.child(body);
@@ -321,8 +323,14 @@ impl crate::workspace::Workspace {
             }
         }
 
-        let body =
-            macsftp_ui::scroll_area("transfer-drawer-body", content, self.transfer_scroll(), cx);
+        let body = macsftp_ui::scroll_area(
+            "transfer-drawer-body",
+            content,
+            self.transfer_scroll(),
+            self.transfer_scrollbar(),
+            window,
+            cx,
+        );
         drawer.child(body)
     }
     pub(crate) fn render_transfer_job(

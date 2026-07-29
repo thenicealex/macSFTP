@@ -1,7 +1,8 @@
+use std::{cell::Cell, rc::Rc};
+
 use gpui::{
-    App, Context, ElementId, Hsla, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, Pixels, Point, ScrollHandle, Styled, UniformListScrollHandle, Window, div,
-    prelude::*, px,
+    Context, DragMoveEvent, ElementId, IntoElement, MouseButton, MouseDownEvent, Pixels, Point,
+    Render, ScrollHandle, Styled, UniformListScrollHandle, Window, div, prelude::*, px,
 };
 
 use crate::theme::ActiveTheme;
@@ -69,139 +70,208 @@ fn classify_click(click_y: Pixels, thumb_top: Pixels, thumb_height: Pixels) -> C
     }
 }
 
+#[derive(Clone)]
+struct ScrollbarDrag {
+    handle: ScrollHandle,
+    start_y: Rc<Cell<Pixels>>,
+    start_offset: Rc<Cell<Pixels>>,
+}
+
+struct ScrollbarDragGhost;
+
+impl Render for ScrollbarDragGhost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div().w(px(1.0)).h(px(1.0))
+    }
+}
+
 /// A vertical, always-visible, theme-aware scrollbar overlaid on a scroll
 /// container. Bind it to the same `ScrollHandle` the container tracks.
-pub struct Scrollbar {
-    handle: ScrollHandle,
-    dragging: bool,
-    drag_start_y: Pixels,
-    drag_start_offset: Pixels,
+pub struct Scrollbar;
+
+/// Per-scroll-area render synchronization. Keep one instance alongside each
+/// scroll handle so a zero-sized or deferred layout schedules at most one
+/// follow-up render until valid geometry is observed.
+#[derive(Clone, Default)]
+pub struct ScrollbarState {
+    layout_sync_scheduled: Rc<Cell<bool>>,
+}
+
+impl ScrollbarState {
+    pub fn new() -> Self {
+        Self::default()
+    }
 }
 
 impl Scrollbar {
-    pub fn new(handle: ScrollHandle) -> Self {
-        Self {
-            handle,
-            dragging: false,
-            drag_start_y: px(0.0),
-            drag_start_offset: px(0.0),
-        }
+    pub fn vertical<V: 'static>(
+        id: impl Into<ElementId>,
+        handle: ScrollHandle,
+        state: &ScrollbarState,
+        window: &mut Window,
+        cx: &mut Context<V>,
+    ) -> impl IntoElement {
+        render_scrollbar(id.into(), handle, state, false, window, cx)
     }
 
-    pub fn vertical(handle: ScrollHandle, cx: &mut App) -> impl IntoElement {
-        cx.new(|_| Scrollbar::new(handle))
-    }
-
-    pub fn vertical_uniform(handle: &UniformListScrollHandle, cx: &mut App) -> impl IntoElement {
-        let base = handle.0.borrow().base_handle.clone();
-        cx.new(|_| Scrollbar::new(base))
-    }
-
-    fn thumb_color(&self, cx: &App) -> Hsla {
-        let c = cx.theme().colors;
-        if self.dragging {
-            c.scrollbar_thumb_active
-        } else {
-            c.scrollbar_thumb
-        }
+    pub fn vertical_uniform<V: 'static>(
+        id: impl Into<ElementId>,
+        handle: &UniformListScrollHandle,
+        state: &ScrollbarState,
+        window: &mut Window,
+        cx: &mut Context<V>,
+    ) -> impl IntoElement {
+        let list_state = handle.0.borrow();
+        let base = list_state.base_handle.clone();
+        let has_deferred_scroll = list_state.deferred_scroll_to_item.is_some();
+        drop(list_state);
+        render_scrollbar(id.into(), base, state, has_deferred_scroll, window, cx)
     }
 }
 
-impl gpui::Render for Scrollbar {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let viewport_h = self.handle.bounds().size.height;
-        let scrollable = self.handle.max_offset().height;
-        let scrolled = (-self.handle.offset().y).max(px(0.0));
-        let Some(geom) = thumb_geometry(viewport_h, scrollable, scrolled) else {
-            return div().into_any_element();
-        };
-        let width = theme.sizes.scrollbar_width;
-        let thumb_color = self.thumb_color(cx);
-        let track_color = cx.theme().colors.scrollbar_track;
-        let thumb_hover = cx.theme().colors.scrollbar_thumb_hover;
-
-        div()
-            .id("custom-scrollbar")
-            .absolute()
-            .top_0()
-            .right_0()
-            .h(geom.track_height)
-            .w(width)
-            .bg(track_color)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, ev: &MouseDownEvent, _w, _cx| {
-                    let viewport = this.handle.bounds().size.height;
-                    let scrollable = this.handle.max_offset().height;
-                    let scrolled = (-this.handle.offset().y).max(px(0.0));
-                    let Some(g) = thumb_geometry(viewport, scrollable, scrolled) else {
-                        return;
-                    };
-                    // `ev.position.y` is window-relative, but `g.thumb_top` /
-                    // `g.thumb_height` are track-relative (0 at top of track).
-                    // The scrollbar is `absolute().top_0()` inside the
-                    // `relative()` scroll_area, so its top == the scroll
-                    // container's window origin.y.
-                    let origin_y = this.handle.bounds().origin.y;
-                    let click_y = ev.position.y - origin_y;
-                    match classify_click(click_y, g.thumb_top, g.thumb_height) {
-                        ClickAction::PageUp => page(&this.handle, viewport, false),
-                        ClickAction::PageDown => page(&this.handle, viewport, true),
-                        ClickAction::Drag => {
-                            this.dragging = true;
-                            this.drag_start_y = ev.position.y;
-                            this.drag_start_offset = (-this.handle.offset().y).max(px(0.0));
-                        }
-                    }
-                }),
-            )
-            .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _w, _cx| {
-                if !this.dragging {
-                    return;
-                }
-                // `on_mouse_up` only fires while the cursor is over the
-                // scrollbar hitbox. If the user releases outside it, the
-                // up event never fires and `dragging` would stay `true`,
-                // causing a wild jump on the next no-button hover. Guard
-                // with the pressed-button state from the move event.
-                if ev.pressed_button != Some(MouseButton::Left) {
-                    this.dragging = false;
-                    return;
-                }
-                let delta = ev.position.y - this.drag_start_y;
-                let viewport = this.handle.bounds().size.height;
-                let scrollable = this.handle.max_offset().height;
-                let content = viewport + scrollable;
-                let thumb_h = (viewport * (viewport / content)).max(MIN_THUMB);
-                let travel = (viewport - thumb_h).max(px(0.0));
-                let new_scrolled = if travel > px(0.0) {
-                    this.drag_start_offset + (delta / travel) * scrollable
-                } else {
-                    px(0.0)
-                };
-                let clamped = new_scrolled.max(px(0.0)).min(scrollable);
-                this.handle.set_offset(Point::new(px(0.0), -clamped));
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(move |this, _ev: &MouseUpEvent, _w, _cx| {
-                    this.dragging = false;
-                }),
-            )
-            .child(
-                div()
-                    .absolute()
-                    .top(geom.thumb_top)
-                    .left_0()
-                    .w(width)
-                    .h(geom.thumb_height)
-                    .rounded(geom.thumb_height / 2.0)
-                    .bg(thumb_color)
-                    .hover(|t| t.bg(thumb_hover)),
-            )
-            .into_any_element()
+fn schedule_next_render<V: 'static>(
+    state: &ScrollbarState,
+    window: &mut Window,
+    cx: &mut Context<V>,
+) {
+    if state.layout_sync_scheduled.replace(true) {
+        return;
     }
+    let view = cx.entity();
+    window.defer(cx, move |_window, cx| {
+        view.update(cx, |_view, cx| cx.notify());
+    });
+}
+
+fn render_scrollbar<V: 'static>(
+    id: ElementId,
+    handle: ScrollHandle,
+    state: &ScrollbarState,
+    has_deferred_layout: bool,
+    window: &mut Window,
+    cx: &mut Context<V>,
+) -> gpui::AnyElement {
+    let viewport_h = handle.bounds().size.height;
+    if viewport_h <= px(0.0) || has_deferred_layout {
+        // ScrollHandle geometry is populated during layout, after this parent
+        // render. One follow-up render makes an overflowing scrollbar visible
+        // on its first presented frame without maintaining a parallel model.
+        schedule_next_render(state, window, cx);
+    } else {
+        state.layout_sync_scheduled.set(false);
+    }
+
+    let scrollable = handle.max_offset().height;
+    let scrolled = (-handle.offset().y).max(px(0.0));
+    let Some(geometry) = thumb_geometry(viewport_h, scrollable, scrolled) else {
+        return div().into_any_element();
+    };
+
+    let theme = cx.theme();
+    let width = theme.sizes.scrollbar_width;
+    let thumb_color = theme.colors.scrollbar_thumb;
+    let thumb_hover = theme.colors.scrollbar_thumb_hover;
+    let thumb_active = theme.colors.scrollbar_thumb_active;
+    let track_color = theme.colors.scrollbar_track;
+    let thumb_id = ElementId::NamedChild(Box::new(id.clone()), "thumb".into());
+    let track_debug_selector = id.to_string();
+    let thumb_debug_selector = thumb_id.to_string();
+    let click_handle = handle.clone();
+    let drag = ScrollbarDrag {
+        handle: handle.clone(),
+        start_y: Rc::new(Cell::new(px(0.0))),
+        start_offset: Rc::new(Cell::new(px(0.0))),
+    };
+
+    div()
+        .id(id)
+        .debug_selector(move || track_debug_selector)
+        .absolute()
+        .top_0()
+        .right_0()
+        .h(geometry.track_height)
+        .w(width)
+        .bg(track_color)
+        .occlude()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |_view, event: &MouseDownEvent, _window, cx| {
+                let viewport = click_handle.bounds().size.height;
+                let scrollable = click_handle.max_offset().height;
+                let scrolled = (-click_handle.offset().y).max(px(0.0));
+                let Some(geometry) = thumb_geometry(viewport, scrollable, scrolled) else {
+                    return;
+                };
+                let click_y = event.position.y - click_handle.bounds().origin.y;
+                match classify_click(click_y, geometry.thumb_top, geometry.thumb_height) {
+                    ClickAction::PageUp => page(&click_handle, viewport, false),
+                    ClickAction::PageDown => page(&click_handle, viewport, true),
+                    ClickAction::Drag => return,
+                }
+                cx.notify();
+            }),
+        )
+        .on_drag_move(cx.listener(
+            move |_view, event: &DragMoveEvent<ScrollbarDrag>, _window, cx| {
+                let (handle, start_y, start_offset) = {
+                    let drag = event.drag(cx);
+                    (
+                        drag.handle.clone(),
+                        drag.start_y.get(),
+                        drag.start_offset.get(),
+                    )
+                };
+                let viewport = handle.bounds().size.height;
+                let scrollable = handle.max_offset().height;
+                let scrolled = dragged_scroll_position(
+                    viewport,
+                    scrollable,
+                    start_offset,
+                    event.event.position.y - start_y,
+                );
+                handle.set_offset(Point::new(px(0.0), -scrolled));
+                cx.notify();
+            },
+        ))
+        .child(
+            div()
+                .id(thumb_id)
+                .debug_selector(move || thumb_debug_selector)
+                .absolute()
+                .top(geometry.thumb_top)
+                .left_0()
+                .w(width)
+                .h(geometry.thumb_height)
+                .rounded(geometry.thumb_height / 2.0)
+                .bg(thumb_color)
+                .hover(|thumb| thumb.bg(thumb_hover))
+                .active(|thumb| thumb.bg(thumb_active))
+                .on_drag(drag, |drag, _offset, window, cx| {
+                    drag.start_y.set(window.mouse_position().y);
+                    drag.start_offset
+                        .set((-drag.handle.offset().y).max(px(0.0)));
+                    cx.new(|_| ScrollbarDragGhost)
+                }),
+        )
+        .into_any_element()
+}
+
+fn dragged_scroll_position(
+    viewport: Pixels,
+    scrollable: Pixels,
+    drag_start_offset: Pixels,
+    delta: Pixels,
+) -> Pixels {
+    let Some(geometry) = thumb_geometry(viewport, scrollable, drag_start_offset) else {
+        return px(0.0);
+    };
+    let travel = (viewport - geometry.thumb_height).max(px(0.0));
+    if travel <= px(0.0) {
+        return px(0.0);
+    }
+    (drag_start_offset + (delta / travel) * scrollable)
+        .max(px(0.0))
+        .min(scrollable)
 }
 
 /// Page the scroll handle by ~90% of the viewport in the given direction.
@@ -216,28 +286,132 @@ fn page(handle: &ScrollHandle, viewport: Pixels, down: bool) {
 
 /// A relative scroll container that suppresses the native scrollbar (via
 /// `scrollbar_width(0)`) and overlays a `Scrollbar` bound to the same handle.
-pub fn scroll_area(
+pub fn scroll_area<V: 'static>(
     id: impl Into<ElementId>,
     content: impl IntoElement,
     handle: &ScrollHandle,
-    cx: &mut App,
+    state: &ScrollbarState,
+    window: &mut Window,
+    cx: &mut Context<V>,
 ) -> impl IntoElement {
-    let scrollbar = Scrollbar::vertical(handle.clone(), cx);
+    let content_id = id.into();
+    let scrollbar_id = ElementId::NamedChild(Box::new(content_id.clone()), "scrollbar".into());
+    let scrollbar = Scrollbar::vertical(scrollbar_id, handle.clone(), state, window, cx);
     div()
-        .id(id)
+        .flex()
+        .flex_col()
         .relative()
         .flex_1()
         .min_h_0()
-        .overflow_y_scroll()
-        .scrollbar_width(px(0.0))
-        .track_scroll(handle)
-        .child(content)
+        .child(
+            div()
+                .id(content_id)
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .scrollbar_width(px(0.0))
+                .track_scroll(handle)
+                .child(content),
+        )
         .child(scrollbar)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ops::Range;
+
+    use gpui::{
+        Modifiers, ParentElement, Render, ScrollDelta, ScrollWheelEvent, Styled, TestAppContext,
+        Window, div, point, size, uniform_list,
+    };
+
+    use crate::theme::Theme;
+
+    struct ScrollAreaTestView {
+        handle: ScrollHandle,
+        scrollbar: ScrollbarState,
+    }
+
+    impl Render for ScrollAreaTestView {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            div().flex().w(px(200.0)).h(px(200.0)).child(scroll_area(
+                "test-scroll-area",
+                div().flex_none().w_full().h(px(1_000.0)),
+                &self.handle,
+                &self.scrollbar,
+                window,
+                cx,
+            ))
+        }
+    }
+
+    struct UniformListTestView {
+        handle: UniformListScrollHandle,
+        scrollbar: ScrollbarState,
+    }
+
+    struct ZeroHeightScrollTestView {
+        handle: ScrollHandle,
+        scrollbar: ScrollbarState,
+        render_count: Rc<Cell<usize>>,
+    }
+
+    impl Render for ZeroHeightScrollTestView {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.render_count.set(self.render_count.get() + 1);
+            div().h(px(0.0)).child(scroll_area(
+                "zero-height-scroll-area",
+                div().h(px(1_000.0)),
+                &self.handle,
+                &self.scrollbar,
+                window,
+                cx,
+            ))
+        }
+    }
+
+    impl Render for UniformListTestView {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let mut list = uniform_list(
+                "test-uniform-list",
+                100,
+                cx.processor(|_this, range: Range<usize>, _window, _cx| {
+                    range
+                        .map(|index| {
+                            div()
+                                .id(("test-row", index))
+                                .flex_none()
+                                .h(px(20.0))
+                                .child(index.to_string())
+                        })
+                        .collect()
+                }),
+            )
+            .track_scroll(self.handle.clone())
+            .h_full()
+            .w_full();
+            list.style().scrollbar_width = Some(px(0.0).into());
+
+            div()
+                .flex()
+                .relative()
+                .w(px(200.0))
+                .h(px(200.0))
+                .child(list)
+                .child(Scrollbar::vertical_uniform(
+                    "test-uniform-scrollbar",
+                    &self.handle,
+                    &self.scrollbar,
+                    window,
+                    cx,
+                ))
+        }
+    }
+
+    fn install_test_theme(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(Theme::one_dark()));
+    }
 
     #[test]
     fn no_thumb_when_content_fits_viewport() {
@@ -325,6 +499,165 @@ mod tests {
         assert_eq!(
             classify_click(px(74.0), px(50.0), px(24.0)),
             ClickAction::Drag
+        );
+    }
+
+    #[gpui::test]
+    fn track_click_repaints_thumb_immediately(cx: &mut TestAppContext) {
+        install_test_theme(cx);
+        let handle = ScrollHandle::new();
+        let test_handle = handle.clone();
+        let (_view, cx) = cx.add_window_view(move |_window, _cx| ScrollAreaTestView {
+            handle,
+            scrollbar: ScrollbarState::new(),
+        });
+        cx.simulate_resize(size(px(240.0), px(240.0)));
+        cx.run_until_parked();
+
+        let track = cx
+            .debug_bounds("test-scroll-area-scrollbar")
+            .expect("overflowing content must render a scrollbar track");
+        let thumb_before = cx
+            .debug_bounds("test-scroll-area-scrollbar-thumb")
+            .expect("overflowing content must render a scrollbar thumb");
+        cx.simulate_click(
+            point(track.center().x, track.bottom() - px(2.0)),
+            Modifiers::default(),
+        );
+
+        assert!(test_handle.offset().y < px(0.0));
+        let thumb_after = cx
+            .debug_bounds("test-scroll-area-scrollbar-thumb")
+            .expect("track click must keep the scrollbar thumb rendered");
+        assert!(
+            thumb_after.top() > thumb_before.top(),
+            "thumb must move after paging: before={thumb_before:?}, after={thumb_after:?}, offset={:?}",
+            test_handle.offset()
+        );
+    }
+
+    #[gpui::test]
+    fn thumb_drag_continues_outside_track_and_stops_on_release(cx: &mut TestAppContext) {
+        install_test_theme(cx);
+        let handle = ScrollHandle::new();
+        let test_handle = handle.clone();
+        let (_view, cx) = cx.add_window_view(move |_window, _cx| ScrollAreaTestView {
+            handle,
+            scrollbar: ScrollbarState::new(),
+        });
+        cx.simulate_resize(size(px(240.0), px(240.0)));
+        cx.run_until_parked();
+
+        let track = cx
+            .debug_bounds("test-scroll-area-scrollbar")
+            .expect("overflowing content must render a scrollbar track");
+        let thumb = cx
+            .debug_bounds("test-scroll-area-scrollbar-thumb")
+            .expect("overflowing content must render a scrollbar thumb");
+        let start = thumb.center();
+        let outside = point(track.left() - px(40.0), start.y + px(80.0));
+
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            point(track.left() - px(20.0), start.y + px(20.0)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_move(outside, MouseButton::Left, Modifiers::default());
+        assert!(test_handle.offset().y < px(0.0));
+
+        cx.simulate_mouse_up(outside, MouseButton::Left, Modifiers::default());
+        let released_offset = test_handle.offset();
+        cx.simulate_mouse_move(
+            point(outside.x, outside.y + px(60.0)),
+            None,
+            Modifiers::default(),
+        );
+        assert_eq!(test_handle.offset(), released_offset);
+    }
+
+    #[gpui::test]
+    fn hidden_native_scrollbar_keeps_wheel_scrolling_and_repaints_thumb(cx: &mut TestAppContext) {
+        install_test_theme(cx);
+        let handle = ScrollHandle::new();
+        let test_handle = handle.clone();
+        let (_view, cx) = cx.add_window_view(move |_window, _cx| ScrollAreaTestView {
+            handle,
+            scrollbar: ScrollbarState::new(),
+        });
+        cx.simulate_resize(size(px(240.0), px(240.0)));
+        cx.run_until_parked();
+
+        let thumb_before = cx
+            .debug_bounds("test-scroll-area-scrollbar-thumb")
+            .expect("overflowing content must render a scrollbar thumb");
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(100.0), px(100.0)),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-80.0))),
+            ..Default::default()
+        });
+
+        assert!(test_handle.offset().y < px(0.0));
+        let thumb_after = cx
+            .debug_bounds("test-scroll-area-scrollbar-thumb")
+            .expect("wheel scrolling must keep the custom thumb rendered");
+        assert!(thumb_after.top() > thumb_before.top());
+    }
+
+    #[gpui::test]
+    fn uniform_list_and_scrollbar_share_one_scroll_position(cx: &mut TestAppContext) {
+        install_test_theme(cx);
+        let handle = UniformListScrollHandle::new();
+        let test_handle = handle.clone();
+        let (view, cx) = cx.add_window_view(move |_window, _cx| UniformListTestView {
+            handle,
+            scrollbar: ScrollbarState::new(),
+        });
+        cx.simulate_resize(size(px(240.0), px(240.0)));
+        cx.run_until_parked();
+
+        let thumb_before = cx
+            .debug_bounds("test-uniform-scrollbar-thumb")
+            .expect("overflowing uniform list must render a scrollbar thumb");
+        test_handle.scroll_to_item_strict(80, gpui::ScrollStrategy::Center);
+        cx.update(|_window, cx| {
+            view.update(cx, |_view, cx| cx.notify());
+        });
+        cx.run_until_parked();
+        cx.run_until_parked();
+
+        let base_handle = test_handle.0.borrow().base_handle.clone();
+        assert!(base_handle.offset().y < px(0.0));
+        let thumb_after = cx
+            .debug_bounds("test-uniform-scrollbar-thumb")
+            .expect("uniform-list scrolling must keep the thumb rendered");
+        assert!(
+            thumb_after.top() > thumb_before.top(),
+            "uniform-list thumb must follow its base handle: before={thumb_before:?}, after={thumb_after:?}, offset={:?}",
+            base_handle.offset()
+        );
+    }
+
+    #[gpui::test]
+    fn zero_height_scroll_area_does_not_schedule_an_infinite_render_loop(cx: &mut TestAppContext) {
+        install_test_theme(cx);
+        let render_count = Rc::new(Cell::new(0));
+        let observed_count = render_count.clone();
+        let (_view, cx) = cx.add_window_view(move |_window, _cx| ZeroHeightScrollTestView {
+            handle: ScrollHandle::new(),
+            scrollbar: ScrollbarState::new(),
+            render_count,
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            observed_count.get(),
+            2,
+            "zero geometry should receive exactly one bounded follow-up render"
+        );
+        assert!(
+            cx.debug_bounds("zero-height-scroll-area-scrollbar")
+                .is_none()
         );
     }
 }
