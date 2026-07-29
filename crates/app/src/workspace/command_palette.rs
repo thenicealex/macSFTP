@@ -319,14 +319,11 @@ impl Workspace {
                             },
                             cx,
                         ))
-                        .child(
-                            div()
-                                .id("command-palette-results")
+                        .child({
+                            let list = div()
                                 .flex()
                                 .flex_col()
                                 .gap_1()
-                                .min_h_0()
-                                .overflow_y_scroll()
                                 .when(has_results, |list| list.children(rows))
                                 .when(!has_results, |list| {
                                     list.child(
@@ -337,8 +334,14 @@ impl Workspace {
                                             .text_color(theme.colors.text_muted)
                                             .child("No matching commands"),
                                     )
-                                }),
-                        )
+                                });
+                            macsftp_ui::scroll_area(
+                                "command-palette-results",
+                                list,
+                                self.command_palette_scroll(),
+                                cx,
+                            )
+                        })
                         .child(
                             div()
                                 .text_size(px(11.0))

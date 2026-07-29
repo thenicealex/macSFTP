@@ -661,7 +661,10 @@ impl crate::workspace::Workspace {
                 .gap_0()
                 .ml(px(104.0))
                 .max_h(px(200.0))
+                .relative()
                 .overflow_y_scroll()
+                .scrollbar_width(px(0.0))
+                .track_scroll(self.profile_picker_scroll())
                 .border_1()
                 .border_color(theme.colors.border)
                 .rounded_md()
@@ -738,6 +741,10 @@ impl crate::workspace::Workspace {
                     }))
                     .child("Manual entry"),
             );
+            picker_panel = picker_panel.child(macsftp_ui::Scrollbar::vertical(
+                self.profile_picker_scroll().clone(),
+                cx,
+            ));
             card = card.child(picker_panel);
         }
 

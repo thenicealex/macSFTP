@@ -276,16 +276,10 @@ impl crate::workspace::Workspace {
                 ),
         );
 
-        let mut body = div()
-            .id("transfer-drawer-body")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll();
+        let mut content = div().flex().flex_col();
 
         if jobs.is_empty() {
-            body = body.child(
+            content = content.child(
                 div()
                     .flex()
                     .flex_1()
@@ -295,12 +289,18 @@ impl crate::workspace::Workspace {
                     .text_color(theme.colors.text_muted)
                     .child("No transfers"),
             );
+            let body = macsftp_ui::scroll_area(
+                "transfer-drawer-body",
+                content,
+                self.transfer_scroll(),
+                cx,
+            );
             return drawer.child(body);
         }
 
         for (label, section_jobs) in [("Active", active_jobs), ("Queued", queued_jobs)] {
             if !section_jobs.is_empty() {
-                body = body
+                content = content
                     .child(section_header_static(label, section_jobs.len(), &theme))
                     .children(
                         section_jobs
@@ -328,7 +328,7 @@ impl crate::workspace::Workspace {
                 continue;
             }
             let is_completed_section = label == "Completed";
-            body = body.child(
+            content = content.child(
                 div()
                     .id(toggle_id)
                     .flex()
@@ -360,7 +360,7 @@ impl crate::workspace::Workspace {
                     .child(format!("{label} ({})", section_jobs.len())),
             );
             if expanded {
-                body = body.children(
+                content = content.children(
                     section_jobs
                         .into_iter()
                         .map(|job| self.render_transfer_job(job, cx)),
@@ -368,6 +368,8 @@ impl crate::workspace::Workspace {
             }
         }
 
+        let body =
+            macsftp_ui::scroll_area("transfer-drawer-body", content, self.transfer_scroll(), cx);
         drawer.child(body)
     }
     pub(crate) fn render_transfer_job(

@@ -122,6 +122,9 @@ pub struct Workspace {
     failed_section_expanded: bool,
     local_scroll: UniformListScrollHandle,
     remote_scroll: UniformListScrollHandle,
+    transfer_scroll: gpui::ScrollHandle,
+    command_palette_scroll: gpui::ScrollHandle,
+    profile_picker_scroll: gpui::ScrollHandle,
     default_local_path: LocalPath,
     status_message: Option<SharedString>,
     config_error: Option<SharedString>,
@@ -237,6 +240,9 @@ impl Workspace {
             failed_section_expanded: false,
             local_scroll: UniformListScrollHandle::new(),
             remote_scroll: UniformListScrollHandle::new(),
+            transfer_scroll: gpui::ScrollHandle::new(),
+            command_palette_scroll: gpui::ScrollHandle::new(),
+            profile_picker_scroll: gpui::ScrollHandle::new(),
             default_local_path,
             status_message: None,
             config_error,
@@ -435,6 +441,15 @@ impl Workspace {
             PaneSide::Local => &self.local_scroll,
             PaneSide::Remote => &self.remote_scroll,
         }
+    }
+    pub(crate) fn transfer_scroll(&self) -> &gpui::ScrollHandle {
+        &self.transfer_scroll
+    }
+    pub(crate) fn command_palette_scroll(&self) -> &gpui::ScrollHandle {
+        &self.command_palette_scroll
+    }
+    pub(crate) fn profile_picker_scroll(&self) -> &gpui::ScrollHandle {
+        &self.profile_picker_scroll
     }
     pub(crate) fn open_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let tab_id = cx.resources().next_tab_id();
