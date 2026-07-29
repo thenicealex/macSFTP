@@ -548,7 +548,7 @@ async fn command_dispatch_loop(
                                                 &failure,
                                             );
                                             let event = match failure {
-                                                crate::physical_connection::ConnectFailure::HostKeyMismatch => None,
+                                                crate::physical_connection::ConnectFailure::HostKeyMismatch(_) => None,
                                                 crate::physical_connection::ConnectFailure::TrustRejected => {
                                                     Some(AppEvent::TabDisconnected(RemoteScoped::new(
                                                         scope.clone(),
@@ -583,7 +583,7 @@ async fn command_dispatch_loop(
                                         &failure,
                                     );
                                     let event = match failure {
-                                        crate::physical_connection::ConnectFailure::HostKeyMismatch => None,
+                                        crate::physical_connection::ConnectFailure::HostKeyMismatch(_) => None,
                                         crate::physical_connection::ConnectFailure::TrustRejected => {
                                             Some(AppEvent::TabDisconnected(RemoteScoped::new(
                                                 scope.clone(),

@@ -319,7 +319,7 @@ impl ConnectionManager {
             if let Err(failure) = &result {
                 log_connect_failure(&settings.host, settings.port, &scope, failure);
                 match failure {
-                    ConnectFailure::HostKeyMismatch => {}
+                    ConnectFailure::HostKeyMismatch(_) => {}
                     ConnectFailure::TrustRejected => {
                         let _ = event_tx_fail
                             .send_async(AppEvent::TabDisconnected(macsftp_core::RemoteScoped::new(
