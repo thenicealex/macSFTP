@@ -772,6 +772,17 @@ impl TransferStore {
                     .iter_mut()
                     .find(|plan| plan.id == progress.plan_id)
                 {
+                    // A terminal plan can no longer be extended. A late progress
+                    // (e.g. a child streamed before an async planning failure)
+                    // must not resurrect or grow a finished plan.
+                    if matches!(
+                        plan.state,
+                        TransferPlanState::Completed
+                            | TransferPlanState::Cancelled
+                            | TransferPlanState::Failed { .. }
+                    ) {
+                        return false;
+                    }
                     if progress.planned_count > plan.planned_count {
                         plan.planned_count = progress.planned_count;
                         plan.total_bytes = progress.total_bytes;
@@ -1019,22 +1030,23 @@ impl TransferStore {
         &mut self,
         plan_id: TransferPlanId,
         plan_state: TransferPlanState,
-        root_state: TransferState,
+        job_state: TransferState,
     ) -> bool {
-        let Some(plan) = self.plans.iter_mut().find(|plan| plan.id == plan_id) else {
+        let Some(plan_index) = self.plans.iter().position(|plan| plan.id == plan_id) else {
             return false;
         };
-        let root_job_id = plan.root_job_id;
+        let root_job_id = self.plans[plan_index].root_job_id;
+        // Clone the child ids first so the borrow checker lets us mutate jobs
+        // while the plan stays borrowed by index below.
+        let child_job_ids = self.plans[plan_index].child_jobs.clone();
         let mut changed = false;
-        if plan.state != plan_state {
-            plan.state = plan_state;
+        if self.plans[plan_index].state != plan_state {
+            self.plans[plan_index].state = plan_state;
             changed = true;
         }
-        if let Some(root_job) = self.jobs.iter_mut().find(|job| job.id == root_job_id)
-            && root_job.state != root_state
-        {
-            root_job.state = root_state;
-            changed = true;
+        changed |= self.set_job_state(root_job_id, job_state.clone());
+        for child_job_id in child_job_ids {
+            changed |= self.set_job_state(child_job_id, job_state.clone());
         }
         changed
     }
@@ -1113,19 +1125,14 @@ impl TransferStore {
         self.jobs.retain(|job| {
             !matches!(
                 job.state,
-                TransferState::Completed
-                    | TransferState::Skipped
-                    | TransferState::Failed { .. }
+                TransferState::Completed | TransferState::Skipped | TransferState::Failed { .. }
             )
         });
         let remaining_ids: std::collections::HashSet<TransferId> =
             self.jobs.iter().map(|job| job.id).collect();
         self.plans.retain(|plan| {
             remaining_ids.contains(&plan.root_job_id)
-                || plan
-                    .child_jobs
-                    .iter()
-                    .any(|id| remaining_ids.contains(id))
+                || plan.child_jobs.iter().any(|id| remaining_ids.contains(id))
         });
         self.jobs.len() != before
     }
@@ -2429,12 +2436,12 @@ mod tests {
     use super::{
         AppState, AuthCredential, AuthFingerprint, AuthMethod, AuthMethodKind, ConflictPolicy,
         ConflictRequest, ConflictRequestId, ConnectionKey, ConnectionPoolIdentity,
-        ConnectionProfile, ConnectionSettings, ConnectionState, DisconnectReason,
-        HostKeyPrompt, LocalPath, MetadataPolicy, ModalRequest, ModalRequestId, ProfileId,
-        RemoteEventScope, RemotePath, RemoteScoped, RuntimeBridgeConfig, SecretRef, SessionId,
-        TabId, TabState, Timestamp, TransferDirection, TransferEndpoint, TransferId,
-        TransferJob, TransferPlan, TransferPlanId, TransferPlanState, TransferState,
-        TransferStore, TrustRequest, TrustRequestId,
+        ConnectionProfile, ConnectionSettings, ConnectionState, DisconnectReason, HostKeyPrompt,
+        LocalPath, MetadataPolicy, ModalRequest, ModalRequestId, ProfileId, RemoteEventScope,
+        RemotePath, RemoteScoped, RuntimeBridgeConfig, SecretRef, SessionId, TabId, TabState,
+        Timestamp, TransferDirection, TransferEndpoint, TransferId, TransferJob, TransferPlan,
+        TransferPlanId, TransferPlanState, TransferState, TransferStore, TrustRequest,
+        TrustRequestId,
     };
 
     #[test]
@@ -2967,6 +2974,256 @@ mod tests {
         assert_eq!(store.plans[0].state, super::TransferPlanState::Completed);
         assert_eq!(store.jobs[0].state, super::TransferState::Completed);
         assert_eq!(store.jobs[1].state, super::TransferState::Completed);
+    }
+
+    #[test]
+    fn transfer_plan_failure_terminalizes_every_published_child() {
+        let now = Timestamp::from_secs_since_epoch(10);
+        let plan_id = TransferPlanId(1);
+        let root_job = super::TransferJob {
+            id: TransferId(1),
+            direction: TransferDirection::Upload,
+            source: TransferEndpoint::Local(LocalPath::new("/tmp/source")),
+            destination: TransferEndpoint::Remote(RemotePath::new("/srv/source")),
+            state: super::TransferState::Planning,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        let plan = super::TransferPlan {
+            id: plan_id,
+            root_job_id: root_job.id,
+            source_root: root_job.source.clone(),
+            destination_root: root_job.destination.clone(),
+            state: super::TransferPlanState::Planning,
+            planned_count: 0,
+            total_bytes: Some(0),
+            child_jobs: Vec::new(),
+            conflict_policy: super::ConflictPolicy::default(),
+        };
+        let child_a = super::TransferJob {
+            id: TransferId(2),
+            state: super::TransferState::Queued,
+            ..root_job.clone()
+        };
+        let child_b = super::TransferJob {
+            id: TransferId(3),
+            state: super::TransferState::Queued,
+            ..root_job.clone()
+        };
+        let error = super::UserFacingError::new(
+            super::ErrorCode::Unknown,
+            "Planning failed",
+            "Could not read the directory.",
+        )
+        .with_retryable(true);
+
+        let mut store = TransferStore::default();
+        store.apply_event(
+            &AppEvent::TransferPlanStarted(super::TransferPlanSnapshot {
+                plan: plan.clone(),
+                root_job: root_job.clone(),
+            }),
+            now,
+        );
+        store.apply_event(
+            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+                plan_id,
+                child_jobs: vec![child_a.clone(), child_b.clone()],
+                planned_count: 2,
+                total_bytes: Some(8),
+            }),
+            now,
+        );
+
+        let applied = store.apply_event(
+            &AppEvent::TransferPlanFailed {
+                plan_id,
+                error: error.clone(),
+            },
+            now,
+        );
+        assert!(applied, "a terminal planning event must change state");
+
+        assert_eq!(
+            store.plans[0].state,
+            super::TransferPlanState::Failed {
+                error: error.clone()
+            }
+        );
+        let expected_job = super::TransferState::Failed {
+            retryable: error.retryable,
+            error: error.clone(),
+        };
+        assert_eq!(store.jobs[0].state, expected_job, "root must be failed");
+        assert_eq!(store.jobs[1].state, expected_job, "child A must be failed");
+        assert_eq!(store.jobs[2].state, expected_job, "child B must be failed");
+
+        assert!(
+            !store.apply_event(
+                &AppEvent::TransferPlanFailed {
+                    plan_id,
+                    error: error.clone()
+                },
+                now
+            ),
+            "replaying a terminal event must be a no-op"
+        );
+    }
+
+    #[test]
+    fn transfer_plan_cancellation_skips_every_published_child() {
+        let now = Timestamp::from_secs_since_epoch(10);
+        let plan_id = TransferPlanId(1);
+        let root_job = super::TransferJob {
+            id: TransferId(1),
+            direction: TransferDirection::Upload,
+            source: TransferEndpoint::Local(LocalPath::new("/tmp/source")),
+            destination: TransferEndpoint::Remote(RemotePath::new("/srv/source")),
+            state: super::TransferState::Planning,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        let plan = super::TransferPlan {
+            id: plan_id,
+            root_job_id: root_job.id,
+            source_root: root_job.source.clone(),
+            destination_root: root_job.destination.clone(),
+            state: super::TransferPlanState::Planning,
+            planned_count: 0,
+            total_bytes: Some(0),
+            child_jobs: Vec::new(),
+            conflict_policy: super::ConflictPolicy::default(),
+        };
+        let child_a = super::TransferJob {
+            id: TransferId(2),
+            state: super::TransferState::Queued,
+            ..root_job.clone()
+        };
+        let child_b = super::TransferJob {
+            id: TransferId(3),
+            state: super::TransferState::Queued,
+            ..root_job.clone()
+        };
+
+        let mut store = TransferStore::default();
+        store.apply_event(
+            &AppEvent::TransferPlanStarted(super::TransferPlanSnapshot {
+                plan: plan.clone(),
+                root_job: root_job.clone(),
+            }),
+            now,
+        );
+        store.apply_event(
+            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+                plan_id,
+                child_jobs: vec![child_a, child_b],
+                planned_count: 2,
+                total_bytes: Some(8),
+            }),
+            now,
+        );
+
+        let applied = store.apply_event(&AppEvent::TransferPlanCancelled { plan_id }, now);
+        assert!(applied, "a terminal planning event must change state");
+
+        assert_eq!(store.plans[0].state, super::TransferPlanState::Cancelled);
+        let skipped = super::TransferState::Skipped;
+        assert_eq!(store.jobs[0].state, skipped, "root must be skipped");
+        assert_eq!(store.jobs[1].state, skipped, "child A must be skipped");
+        assert_eq!(store.jobs[2].state, skipped, "child B must be skipped");
+
+        assert!(
+            !store.apply_event(&AppEvent::TransferPlanCancelled { plan_id }, now),
+            "replaying a terminal event must be a no-op"
+        );
+    }
+
+    #[test]
+    fn transfer_plan_progress_after_terminal_event_is_ignored() {
+        let now = Timestamp::from_secs_since_epoch(10);
+        let plan_id = TransferPlanId(1);
+        let root_job = super::TransferJob {
+            id: TransferId(1),
+            direction: TransferDirection::Upload,
+            source: TransferEndpoint::Local(LocalPath::new("/tmp/source")),
+            destination: TransferEndpoint::Remote(RemotePath::new("/srv/source")),
+            state: super::TransferState::Planning,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        let plan = super::TransferPlan {
+            id: plan_id,
+            root_job_id: root_job.id,
+            source_root: root_job.source.clone(),
+            destination_root: root_job.destination.clone(),
+            state: super::TransferPlanState::Planning,
+            planned_count: 0,
+            total_bytes: Some(0),
+            child_jobs: Vec::new(),
+            conflict_policy: super::ConflictPolicy::default(),
+        };
+        let child_a = super::TransferJob {
+            id: TransferId(2),
+            state: super::TransferState::Queued,
+            ..root_job.clone()
+        };
+        let late_child = super::TransferJob {
+            id: TransferId(99),
+            state: super::TransferState::Queued,
+            ..root_job.clone()
+        };
+
+        let mut store = TransferStore::default();
+        store.apply_event(
+            &AppEvent::TransferPlanStarted(super::TransferPlanSnapshot {
+                plan: plan.clone(),
+                root_job: root_job.clone(),
+            }),
+            now,
+        );
+        store.apply_event(
+            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+                plan_id,
+                child_jobs: vec![child_a],
+                planned_count: 1,
+                total_bytes: Some(4),
+            }),
+            now,
+        );
+        store.apply_event(
+            &AppEvent::TransferPlanFailed {
+                plan_id,
+                error: super::UserFacingError::new(
+                    super::ErrorCode::Unknown,
+                    "Planning failed",
+                    "stop",
+                ),
+            },
+            now,
+        );
+
+        let late_changed = store.apply_event(
+            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+                plan_id,
+                child_jobs: vec![late_child],
+                planned_count: 2,
+                total_bytes: Some(8),
+            }),
+            now,
+        );
+        assert!(
+            !late_changed,
+            "late progress on a terminal plan must be ignored"
+        );
+        assert_eq!(store.plans[0].child_jobs, vec![TransferId(2)]);
+        assert_eq!(store.jobs.len(), 2, "late child must not be inserted");
+        assert_eq!(store.plans[0].planned_count, 1);
     }
 
     #[test]

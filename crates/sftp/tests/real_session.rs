@@ -1137,6 +1137,111 @@ async fn runtime_streams_and_executes_directory_download() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn remote_download_failure_after_progress_emits_plan_failure() {
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    use std::os::unix::fs::PermissionsExt;
+
+    let source_root = server.fixture_dir.join("download-fail-source");
+    let nested_no_read = source_root.join("no-read-sub");
+    std::fs::create_dir(&source_root).expect("create download source");
+    std::fs::write(source_root.join("ok.txt"), b"ok").expect("write readable file");
+    std::fs::create_dir(&nested_no_read).expect("create unreadable subdirectory");
+    // Remove read/execute so the SFTP server cannot list the subdirectory's
+    // contents — the planner must surface this as a plan failure.
+    std::fs::set_permissions(&nested_no_read, std::fs::Permissions::from_mode(0o000))
+        .expect("make subdirectory unreadable");
+
+    let known_hosts_path = server.fixture_dir.join("download_fail_known_hosts");
+    std::fs::write(
+        &known_hosts_path,
+        format!("[127.0.0.1]:{} {}\n", server.port, server.host_public_key),
+    )
+    .expect("prefill known_hosts");
+    let mut controller = RuntimeController::start(
+        RuntimeBridgeConfig::default(),
+        SessionBackend::Real(HostTrustConfig::new(known_hosts_path, None)),
+    );
+    let client = controller.client();
+    let mut events = controller
+        .take_event_receiver()
+        .expect("event receiver should be available once");
+
+    client
+        .try_send(AppCommand::ConnectTab(ConnectCommand {
+            tab_id: TAB,
+            session_id: SESSION,
+            session_epoch: EPOCH,
+            profile_id: ProfileId(1),
+            pool_identity: ConnectionPoolIdentity::Ephemeral(SESSION),
+            settings: ConnectionSettings {
+                host: "127.0.0.1".to_string(),
+                port: server.port,
+                username: server.username.clone(),
+                auth: client_key_auth(&server),
+            },
+        }))
+        .expect("connect command should send");
+    let _ = next_runtime_event(&mut events, "TabConnecting").await;
+    let _ = next_runtime_event(&mut events, "TabConnected").await;
+
+    client
+        .try_send(AppCommand::StartTransfer(
+            macsftp_core::StartTransferCommand {
+                tab_id: TAB,
+                session_epoch: EPOCH,
+                profile_id: ProfileId(1),
+                direction: TransferDirection::Download,
+                sources: vec![TransferEndpoint::Remote(RemotePath::new(
+                    source_root.display().to_string(),
+                ))],
+                destination: TransferEndpoint::Local(macsftp_core::LocalPath::new(
+                    server
+                        .fixture_dir
+                        .join("download-fail-dest")
+                        .display()
+                        .to_string(),
+                )),
+                metadata_policy: macsftp_core::MetadataPolicy::default(),
+                conflict_policy: macsftp_core::ConflictPolicy::default(),
+            },
+        ))
+        .expect("directory download command should send");
+
+    let mut saw_progress = false;
+    loop {
+        match next_runtime_event(&mut events, "download failure event").await {
+            AppEvent::TransferPlanStarted(_) => {}
+            AppEvent::TransferPlanProgress(_) => saw_progress = true,
+            AppEvent::TransferPlanFailed { .. } => {
+                assert!(
+                    saw_progress,
+                    "TransferPlanFailed must follow a published TransferPlanProgress"
+                );
+                break;
+            }
+            AppEvent::TransferPlanCompleted { .. } => {
+                panic!("plan unexpectedly completed despite an unreadable subdirectory");
+            }
+            AppEvent::TransferFailed(failure) => {
+                panic!("unexpected child transfer failure: {:?}", failure.error);
+            }
+            AppEvent::TransferRunning(_) | AppEvent::TransferProgress(_) => {}
+            AppEvent::ResidualTempCreated(_) | AppEvent::ResidualTempCleared { .. } => {}
+            other => panic!("unexpected download failure event: {other:?}"),
+        }
+    }
+
+    // Restore permissions so the sshd fixture directory can be cleaned up.
+    let _ = std::fs::set_permissions(&nested_no_read, std::fs::Permissions::from_mode(0o755));
+
+    std::thread::spawn(move || controller.shutdown())
+        .join()
+        .expect("runtime shutdown thread should finish");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn missing_directory_reports_not_found_error() {
     let Some(server) = SshTestServer::spawn() else {
         return;

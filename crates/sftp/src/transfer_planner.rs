@@ -618,4 +618,176 @@ mod tests {
         ));
         std::fs::remove_dir_all(&fixture_root).expect("remove fixture directory");
     }
+
+    #[test]
+    fn local_upload_failure_after_progress_emits_plan_failure() {
+        let ok_file =
+            std::env::temp_dir().join(format!("macsftp-plan-ok-{}.txt", std::process::id()));
+        std::fs::write(&ok_file, b"abc").expect("write ok fixture");
+        let missing = LocalPath::new("/nonexistent/macsftp/missing-source-xxxx.txt");
+
+        let command = StartTransferCommand {
+            tab_id: macsftp_core::TabId(1),
+            session_epoch: 1,
+            profile_id: ProfileId(1),
+            direction: TransferDirection::Upload,
+            sources: vec![
+                TransferEndpoint::Local(LocalPath::new(ok_file.display().to_string())),
+                TransferEndpoint::Local(missing),
+            ],
+            destination: TransferEndpoint::Remote(macsftp_core::RemotePath::new("/uploads")),
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: ConflictPolicy::default(),
+        };
+        let (plan, root_job) = new_plan(
+            &command,
+            TransferPlanId(1),
+            TransferId(1),
+            macsftp_core::Timestamp::from_secs_since_epoch(1),
+        );
+        let (event_tx, event_rx) = flume::bounded(8);
+
+        let planned = plan_local_upload(
+            command,
+            plan.id,
+            root_job,
+            std::sync::Arc::new(AtomicU64::new(2)),
+            event_tx,
+            CancellationToken::new(),
+        );
+        assert!(planned.is_none(), "planning must fail after a source error");
+
+        let mut seen_progress = false;
+        let mut seen_failed = false;
+        let mut order = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                AppEvent::TransferPlanProgress(progress) => {
+                    seen_progress = true;
+                    assert!(
+                        !progress.child_jobs.is_empty(),
+                        "progress must carry a published child"
+                    );
+                    order.push("progress");
+                }
+                AppEvent::TransferPlanFailed { plan_id, .. } => {
+                    seen_failed = true;
+                    assert_eq!(plan_id, TransferPlanId(1));
+                    order.push("failed");
+                }
+                other => panic!("unexpected planning event: {other:?}"),
+            }
+        }
+        assert!(
+            seen_progress,
+            "a child must be published before the failure"
+        );
+        assert!(seen_failed, "the planning failure must be published");
+        assert_eq!(
+            order,
+            vec!["progress", "failed"],
+            "the failure must follow the published progress"
+        );
+
+        let _ = std::fs::remove_file(&ok_file);
+    }
+
+    #[test]
+    fn local_upload_cancellation_after_progress_emits_plan_cancelled() {
+        let fixture_root =
+            std::env::temp_dir().join(format!("macsftp-plan-cancel-after-{}", std::process::id()));
+        std::fs::create_dir_all(&fixture_root).expect("create fixture directory");
+        for index in 0..500 {
+            std::fs::write(fixture_root.join(format!("file-{index:03}.txt")), b"x")
+                .expect("write fixture file");
+        }
+
+        let command = StartTransferCommand {
+            tab_id: macsftp_core::TabId(1),
+            session_epoch: 1,
+            profile_id: ProfileId(1),
+            direction: TransferDirection::Upload,
+            sources: vec![TransferEndpoint::Local(LocalPath::new(
+                fixture_root.display().to_string(),
+            ))],
+            destination: TransferEndpoint::Remote(macsftp_core::RemotePath::new("/uploads")),
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: ConflictPolicy::default(),
+        };
+        let (plan, root_job) = new_plan(
+            &command,
+            TransferPlanId(1),
+            TransferId(1),
+            macsftp_core::Timestamp::from_secs_since_epoch(1),
+        );
+        let (event_tx, event_rx) = flume::bounded(64);
+        let cancel = CancellationToken::new();
+
+        let handle = std::thread::spawn({
+            let command = command.clone();
+            let plan_id = plan.id;
+            let root_job = root_job.clone();
+            let cancel = cancel.clone();
+            let event_tx = event_tx.clone();
+            move || {
+                plan_local_upload(
+                    command,
+                    plan_id,
+                    root_job,
+                    std::sync::Arc::new(AtomicU64::new(2)),
+                    event_tx,
+                    cancel,
+                )
+            }
+        });
+
+        // Wait until the planner has published at least one child (flushed a
+        // progress event) before cancelling. This deterministically exercises
+        // the cancel-after-progress path instead of cancelling before any work
+        // starts. The planner cannot reach `finish()` before we cancel because
+        // the directory is large enough that traversal is still in flight.
+        let mut progress_seen = false;
+        while !progress_seen {
+            if let Ok(AppEvent::TransferPlanProgress(progress)) = event_rx.try_recv() {
+                progress_seen = true;
+                assert!(
+                    !progress.child_jobs.is_empty(),
+                    "first progress must carry a published child"
+                );
+            } else {
+                std::thread::yield_now();
+            }
+        }
+        cancel.cancel();
+
+        let planned = handle.join().expect("planner thread panicked");
+        assert!(
+            planned.is_none(),
+            "cancelled planning must not produce jobs"
+        );
+
+        let mut seen_cancelled = false;
+        let mut seen_completed = false;
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                AppEvent::TransferPlanProgress(_) => {}
+                AppEvent::TransferPlanCancelled { plan_id } => {
+                    seen_cancelled = true;
+                    assert_eq!(plan_id, TransferPlanId(1));
+                }
+                AppEvent::TransferPlanCompleted { .. } => seen_completed = true,
+                other => panic!("unexpected planning event: {other:?}"),
+            }
+        }
+        assert!(
+            seen_cancelled,
+            "cancellation must be published after progress"
+        );
+        assert!(
+            !seen_completed,
+            "a cancelled plan must not be marked completed"
+        );
+
+        std::fs::remove_dir_all(&fixture_root).expect("remove fixture directory");
+    }
 }

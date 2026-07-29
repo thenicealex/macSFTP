@@ -890,26 +890,25 @@ async fn command_dispatch_loop(
                         retries.remove(&root_job_id);
                     }
                     let Some(connection_rx) = transfer_connection_rx else {
+                        fail_planned_jobs(
+                            &terminal_event_tx,
+                            jobs,
+                            transfer_handoff_error(
+                                "The connected session has no transfer channel.",
+                            ),
+                        )
+                        .await;
                         return;
                     };
                     let Ok(connection) = connection_rx.await else {
-                        for job in jobs {
-                            if terminal_event_tx
-                                .send_async(AppEvent::TransferFailed(macsftp_core::TransferFailure {
-                                    transfer_id: job.id,
-                                    error: UserFacingError::new(
-                                        ErrorCode::ChannelClosed,
-                                        "Could not start transfer",
-                                        "The connected session closed before the transfer acquired its connection.",
-                                    )
-                                    .with_retryable(true),
-                                }))
-                                .await
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
+                        fail_planned_jobs(
+                            &terminal_event_tx,
+                            jobs,
+                            transfer_handoff_error(
+                                "The connected session closed before the transfer acquired its connection.",
+                            ),
+                        )
+                        .await;
                         return;
                     };
                     if let Err(error) = manager_tx
@@ -921,6 +920,16 @@ async fn command_dispatch_loop(
                         .await
                     {
                         warn!(error = %error, "planned transfer could not reach transfer manager");
+                        if let TransferManagerRequest::Enqueue { jobs, .. } = error.0 {
+                            fail_planned_jobs(
+                                &terminal_event_tx,
+                                jobs,
+                                transfer_handoff_error(
+                                    "The transfer manager is no longer running.",
+                                ),
+                            )
+                            .await;
+                        }
                     }
                 }));
             }
@@ -1035,6 +1044,40 @@ impl ProgressThrottle {
     /// to a terminal state and the final progress must be emitted.
     pub fn reset(&mut self) {
         self.last_sent = None;
+    }
+}
+
+/// Build a non-retryable handoff error for a planned transfer that could not
+/// reach the transfer manager or acquire a connection. These jobs have no
+/// `RetryRoute` (they never entered the manager), so surfacing them as
+/// retryable would present a dead Retry control in the UI.
+fn transfer_handoff_error(detail: &'static str) -> UserFacingError {
+    UserFacingError::new(ErrorCode::ChannelClosed, "Could not start transfer", detail)
+}
+
+/// Emit one `TransferFailed` per planned job after a post-planning handoff
+/// failure (no connection available, connection lost, or manager gone).
+///
+/// Planned jobs never entered the transfer manager, so they carry no
+/// `RetryRoute`; the caller passes a non-retryable error. Stops on the first
+/// send error (the event channel is disconnected) rather than silently
+/// dropping the remaining failures.
+async fn fail_planned_jobs(
+    event_tx: &flume::Sender<AppEvent>,
+    jobs: Vec<TransferJob>,
+    error: UserFacingError,
+) {
+    for job in jobs {
+        if let Err(send_error) = event_tx
+            .send_async(AppEvent::TransferFailed(macsftp_core::TransferFailure {
+                transfer_id: job.id,
+                error: error.clone(),
+            }))
+            .await
+        {
+            warn!(error = %send_error, "transfer handoff failure event dropped");
+            return;
+        }
     }
 }
 
@@ -1500,6 +1543,182 @@ mod tests {
 
         controller.shutdown();
         std::fs::remove_file(&fixture_path).expect("remove retry planning fixture");
+    }
+
+    // ── T1.4: post-planning handoff compensation ───────────────
+    //
+    // All three handoff-failure branches (no connection receiver,
+    // dropped connection responder, closed transfer manager) route
+    // through `fail_planned_jobs`, which emits one non-retryable
+    // `TransferFailed` per planned child job. The core reducer then
+    // cascades the plan + root job to a terminal state via
+    // `finalize_plan_for_job`.
+
+    #[test]
+    fn handoff_without_connection_receiver_fails_all_jobs() {
+        let fixture_path =
+            std::env::temp_dir().join(format!("macsftp-runtime-handoff-{}", std::process::id()));
+        std::fs::write(&fixture_path, b"handoff").expect("write planning fixture");
+
+        let mut controller = RuntimeController::start(
+            RuntimeBridgeConfig::default(),
+            SessionBackend::Mock(MockSessionConfig::default()),
+        );
+        let client = controller.client();
+        let mut events = controller
+            .take_event_receiver()
+            .expect("event receiver should be available once");
+
+        controller.runtime().block_on(async {
+            client
+                .try_send(AppCommand::StartTransfer(StartTransferCommand {
+                    tab_id: TabId(1),
+                    session_epoch: 1,
+                    profile_id: ProfileId(1),
+                    direction: TransferDirection::Upload,
+                    sources: vec![TransferEndpoint::Local(LocalPath::new(
+                        fixture_path.display().to_string(),
+                    ))],
+                    destination: TransferEndpoint::Remote(RemotePath::new("/uploads/handoff.txt")),
+                    metadata_policy: MetadataPolicy::default(),
+                    conflict_policy: ConflictPolicy::default(),
+                }))
+                .expect("start transfer should send");
+
+            let started = recv_timeout(&mut events, "TransferPlanStarted").await;
+            let plan_id = match started {
+                AppEvent::TransferPlanStarted(snapshot) => snapshot.plan.id,
+                other => panic!("expected TransferPlanStarted, got {other:?}"),
+            };
+            let progress = recv_timeout(&mut events, "TransferPlanProgress").await;
+            let child_ids = match progress {
+                AppEvent::TransferPlanProgress(progress) if progress.plan_id == plan_id => progress
+                    .child_jobs
+                    .iter()
+                    .map(|job| job.id)
+                    .collect::<Vec<_>>(),
+                other => panic!("expected TransferPlanProgress, got {other:?}"),
+            };
+            assert!(
+                !child_ids.is_empty(),
+                "planner must publish at least one child job"
+            );
+
+            let _completed = recv_timeout(&mut events, "TransferPlanCompleted").await;
+
+            // No session exists for TabId(1), so the handoff has no transfer
+            // channel. Every published child must be failed exactly once with
+            // a non-retryable error — never left queued forever.
+            let mut failed_ids = Vec::new();
+            for _ in &child_ids {
+                match recv_timeout(&mut events, "TransferFailed").await {
+                    AppEvent::TransferFailed(failure) => {
+                        assert!(
+                            !failure.error.retryable,
+                            "handoff failure must be non-retryable (no dead Retry control)"
+                        );
+                        failed_ids.push(failure.transfer_id);
+                    }
+                    other => panic!("expected TransferFailed, got {other:?}"),
+                }
+            }
+            assert_eq!(
+                failed_ids.len(),
+                child_ids.len(),
+                "every published child must be failed exactly once"
+            );
+            for id in &child_ids {
+                assert!(
+                    failed_ids.contains(id),
+                    "missing failure event for child {id:?}"
+                );
+            }
+        });
+
+        controller.shutdown();
+        std::fs::remove_file(&fixture_path).expect("remove planning fixture");
+    }
+
+    #[test]
+    fn fail_planned_jobs_emits_non_retryable_failure_per_job() {
+        let helper = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("helper runtime");
+
+        helper.block_on(async {
+            let (event_tx, event_rx) = flume::bounded::<AppEvent>(16);
+            let jobs = vec![
+                TransferJob {
+                    id: TransferId(10),
+                    direction: TransferDirection::Upload,
+                    source: TransferEndpoint::Local(LocalPath::new("/a")),
+                    destination: TransferEndpoint::Remote(RemotePath::new("/b")),
+                    state: TransferState::Queued,
+                    metadata_policy: MetadataPolicy::default(),
+                    conflict_policy: ConflictPolicy::default(),
+                    warnings: Vec::new(),
+                    created_at: macsftp_core::Timestamp(std::time::UNIX_EPOCH),
+                },
+                TransferJob {
+                    id: TransferId(11),
+                    direction: TransferDirection::Upload,
+                    source: TransferEndpoint::Local(LocalPath::new("/c")),
+                    destination: TransferEndpoint::Remote(RemotePath::new("/d")),
+                    state: TransferState::Queued,
+                    metadata_policy: MetadataPolicy::default(),
+                    conflict_policy: ConflictPolicy::default(),
+                    warnings: Vec::new(),
+                    created_at: macsftp_core::Timestamp(std::time::UNIX_EPOCH),
+                },
+            ];
+            super::fail_planned_jobs(&event_tx, jobs, super::transfer_handoff_error("test")).await;
+
+            let mut seen = Vec::new();
+            while let Ok(event) = event_rx.try_recv() {
+                match event {
+                    AppEvent::TransferFailed(failure) => {
+                        assert!(
+                            !failure.error.retryable,
+                            "handoff failure must be non-retryable"
+                        );
+                        seen.push(failure.transfer_id);
+                    }
+                    other => panic!("unexpected event: {other:?}"),
+                }
+            }
+            assert_eq!(seen, vec![TransferId(10), TransferId(11)]);
+        });
+
+        helper.shutdown_timeout(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn fail_planned_jobs_stops_when_receiver_disconnected() {
+        let helper = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("helper runtime");
+
+        helper.block_on(async {
+            let (event_tx, event_rx) = flume::bounded::<AppEvent>(16);
+            drop(event_rx); // simulate a disconnected event channel
+            let jobs = vec![TransferJob {
+                id: TransferId(20),
+                direction: TransferDirection::Upload,
+                source: TransferEndpoint::Local(LocalPath::new("/x")),
+                destination: TransferEndpoint::Remote(RemotePath::new("/y")),
+                state: TransferState::Queued,
+                metadata_policy: MetadataPolicy::default(),
+                conflict_policy: ConflictPolicy::default(),
+                warnings: Vec::new(),
+                created_at: macsftp_core::Timestamp(std::time::UNIX_EPOCH),
+            }];
+            // Must return without panicking even though the first send fails.
+            super::fail_planned_jobs(&event_tx, jobs, super::transfer_handoff_error("test")).await;
+        });
+
+        helper.shutdown_timeout(Duration::from_secs(1));
     }
 
     // ── M2c: Mock actor full loop integration tests ───────────────
