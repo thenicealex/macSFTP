@@ -779,7 +779,7 @@ impl crate::workspace::Workspace {
             empty_state("Empty directory", vec![], cx).into_any_element()
         } else {
             let workspace = cx.entity();
-            uniform_list(
+            let mut list = uniform_list(
                 list_container_id,
                 entry_count,
                 move |visible_range, _window, cx| {
@@ -868,8 +868,9 @@ impl crate::workspace::Workspace {
             )
             .track_scroll(self.scroll_handle(side).clone())
             .h_full()
-            .w_full()
-            .into_any_element()
+            .w_full();
+            list.style().scrollbar_width = Some(px(0.0).into());
+            list.into_any_element()
         };
 
         div()
@@ -1082,7 +1083,9 @@ impl crate::workspace::Workspace {
                 }
                 pane.child(banner)
             })
-            .child(div().flex_1().min_h_0().child(list))
+            .child(div().flex_1().min_h_0().relative().child(list).child(
+                macsftp_ui::Scrollbar::vertical_uniform(self.scroll_handle(side), cx),
+            ))
     }
     pub(crate) fn render_about(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         if !self.about_open {
