@@ -15,5 +15,8 @@ gpui = "=0.2.2"
 macsftp-core = { path = "../core" }
 zeroize = "1"
 
+[dev-dependencies]
+gpui = { version = "=0.2.2", features = ["test-support"] }
+
 [lints]
 workspace = true

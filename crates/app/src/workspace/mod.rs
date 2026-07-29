@@ -14,7 +14,7 @@ use macsftp_sftp::RuntimeClient;
 use macsftp_storage::{
     AppearancePreference, RecentEntryInput, SessionTabSnapshot, SessionWindowSnapshot,
 };
-use macsftp_ui::{ActiveTheme, InputState, Theme, empty_state, text_button};
+use macsftp_ui::{ActiveTheme, InputState, ScrollbarState, Theme, empty_state, text_button};
 use tracing::warn;
 
 use crate::app_actions::{
@@ -122,9 +122,16 @@ pub struct Workspace {
     failed_section_expanded: bool,
     local_scroll: UniformListScrollHandle,
     remote_scroll: UniformListScrollHandle,
+    local_scrollbar: ScrollbarState,
+    remote_scrollbar: ScrollbarState,
     transfer_scroll: gpui::ScrollHandle,
+    transfer_scrollbar: ScrollbarState,
     command_palette_scroll: gpui::ScrollHandle,
+    command_palette_scrollbar: ScrollbarState,
     profile_picker_scroll: gpui::ScrollHandle,
+    profile_picker_scrollbar: ScrollbarState,
+    tab_switcher_scroll: gpui::ScrollHandle,
+    tab_switcher_scrollbar: ScrollbarState,
     default_local_path: LocalPath,
     status_message: Option<SharedString>,
     config_error: Option<SharedString>,
@@ -240,9 +247,16 @@ impl Workspace {
             failed_section_expanded: false,
             local_scroll: UniformListScrollHandle::new(),
             remote_scroll: UniformListScrollHandle::new(),
+            local_scrollbar: ScrollbarState::new(),
+            remote_scrollbar: ScrollbarState::new(),
             transfer_scroll: gpui::ScrollHandle::new(),
+            transfer_scrollbar: ScrollbarState::new(),
             command_palette_scroll: gpui::ScrollHandle::new(),
+            command_palette_scrollbar: ScrollbarState::new(),
             profile_picker_scroll: gpui::ScrollHandle::new(),
+            profile_picker_scrollbar: ScrollbarState::new(),
+            tab_switcher_scroll: gpui::ScrollHandle::new(),
+            tab_switcher_scrollbar: ScrollbarState::new(),
             default_local_path,
             status_message: None,
             config_error,
@@ -445,11 +459,32 @@ impl Workspace {
     pub(crate) fn transfer_scroll(&self) -> &gpui::ScrollHandle {
         &self.transfer_scroll
     }
+    pub(crate) fn transfer_scrollbar(&self) -> &ScrollbarState {
+        &self.transfer_scrollbar
+    }
     pub(crate) fn command_palette_scroll(&self) -> &gpui::ScrollHandle {
         &self.command_palette_scroll
     }
+    pub(crate) fn command_palette_scrollbar(&self) -> &ScrollbarState {
+        &self.command_palette_scrollbar
+    }
     pub(crate) fn profile_picker_scroll(&self) -> &gpui::ScrollHandle {
         &self.profile_picker_scroll
+    }
+    pub(crate) fn profile_picker_scrollbar(&self) -> &ScrollbarState {
+        &self.profile_picker_scrollbar
+    }
+    pub(crate) fn tab_switcher_scroll(&self) -> &gpui::ScrollHandle {
+        &self.tab_switcher_scroll
+    }
+    pub(crate) fn tab_switcher_scrollbar(&self) -> &ScrollbarState {
+        &self.tab_switcher_scrollbar
+    }
+    pub(crate) fn pane_scrollbar(&self, side: PaneSide) -> &ScrollbarState {
+        match side {
+            PaneSide::Local => &self.local_scrollbar,
+            PaneSide::Remote => &self.remote_scrollbar,
+        }
     }
     pub(crate) fn open_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let tab_id = cx.resources().next_tab_id();
@@ -1304,7 +1339,7 @@ impl Render for Workspace {
             .text_color(theme.colors.text)
             .font_family(theme.fonts.ui_family.clone())
             .child(workspace_content)
-            .children(self.render_connect_form_modal(cx))
+            .children(self.render_connect_form_modal(window, cx))
             .children(self.render_host_key_modal(cx))
             .children(self.render_transfer_conflict_modal(cx))
             .children(self.render_delete_confirm_modal(cx))
@@ -1314,8 +1349,8 @@ impl Render for Workspace {
             .children(self.render_go_to_path_modal(cx))
             .children(self.render_context_menu(cx))
             .children(self.render_about(cx))
-            .children(self.render_tab_switcher(cx))
-            .children(self.render_command_palette(cx))
+            .children(self.render_tab_switcher(window, cx))
+            .children(self.render_command_palette(window, cx))
     }
 }
 

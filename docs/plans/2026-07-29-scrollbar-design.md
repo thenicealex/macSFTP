@@ -1,7 +1,7 @@
 # 自定义主题滚动条设计
 
 - 日期：2026-07-29
-- 状态：已确认（设计阶段，待实现）
+- 状态：已实现并通过交互回归测试
 - 分支：`feat/custom-scrollbar`
 
 ## 1. 背景与目标
@@ -27,18 +27,23 @@ macSFTP 的可滚动区域（本地/远端文件列表、传输抽屉、命令�
 
 新文件 `crates/ui/src/scrollbar.rs`，导出：
 
-- **`Scrollbar`**：垂直滚动条元素。
-  - 构造：`Scrollbar::vertical(scroll_handle)` 接收 `&ScrollHandle`；`Scrollbar::vertical_uniform(&UniformListScrollHandle)` 内部取 `base_handle`。
+- **`Scrollbar`**：由宿主 view 的 `Context` 构造的无状态垂直滚动条元素。
+  - 构造：`Scrollbar::vertical(area_id, scroll_handle, state, window, cx)`；`Scrollbar::vertical_uniform(...)` 内部取 `base_handle`。轨道和滑块 id 从 `area_id` 派生，多个区域的 hover / active / drag 状态不会碰撞。
   - 渲染：绝对定位的**轨道 `div`**（贴右缘，宽度 = 滑块宽 + 内边距）+ **圆角滑块 `div`**。
   - 滑块几何见 §4。
   - 颜色取自 `cx.theme().colors` 的滚动条 token（§5）。常驻可见；hover / active 加深。
+  - 事件通过宿主 view 的 `Context` 回调并触发宿主重绘，避免临时创建的 Entity 在绘制后释放、导致回调失效。
+
+- **`ScrollbarState`**：每个滚动区域持有一个轻量补绘门闩。handle 尚未完成布局或 uniform-list 存在 deferred scroll 时，只调度一次后续渲染；有效几何出现后复位，避免零高区域形成重绘循环。
 
 - **`ScrollArea`** 辅助：封装「内容容器 `overflow_y_scroll().scrollbar_width(px(0))` + 叠加 `Scrollbar`」，避免每个接入点重复样板。签名形如：
   ```rust
   pub fn scroll_area(
       content: impl FnOnce(&mut Window, &mut Context<...>) -> impl IntoElement,
       handle: &ScrollHandle,
-      cx: &App,
+      state: &ScrollbarState,
+      window: &mut Window,
+      cx: &mut Context<HostView>,
   ) -> impl IntoElement
   ```
 
@@ -78,7 +83,7 @@ macSFTP 的可滚动区域（本地/远端文件列表、传输抽屉、命令�
 
 - 容器**保留** `overflow_y_scroll()`（GPUI 继续处理滚轮 / 触控板 / 键盘并维护 `ScrollHandle`），用 `.scrollbar_width(px(0))` **抑制 GPUI 自带滚动条的视觉**，由我们的 `Scrollbar` 覆盖绘制。
 - `Scrollbar` 自身只实现两件事：
-  1. **滑块拖拽**：`on_mouse_down` 记录起点 → `on_mouse_move` 计算 delta → 按 `(delta / (track_h − thumb_h)) * scrollable` 换算 → `handle.set_offset(...)`；`on_mouse_up` 结束。拖拽中用 `scrollbar_thumb_active`。
+  1. **滑块拖拽**：使用 GPUI active-drag 捕获；拖拽 payload 保存 handle、起点和初始 offset，`on_drag_move` 按 `(delta / (track_h − thumb_h)) * scrollable` 换算并更新 handle。鼠标移出 10px 轨道后仍可继续拖动，释放后由 GPUI 结束 active drag。拖拽中用 `scrollbar_thumb_active`。
   2. **轨道点击翻页**：在滑块上方 / 下方点击 → `set_offset(当前 ± viewport_h * 0.9)`。
 - 滚轮 / 触控 / 键盘沿用原生。
 - **风险点**：`scrollbar_width(0)` 是否仍允许原生滚轮滚动。实现时先验证；退路是在容器上挂 `on_scroll_wheel` → `handle.set_offset(offset + delta)`（很简单）。
@@ -91,12 +96,15 @@ macSFTP 的可滚动区域（本地/远端文件列表、传输抽屉、命令�
 - 传输抽屉：`crates/app/src/workspace/transfer_render.rs:285` `.overflow_y_scroll()`。
 - 命令面板：`crates/app/src/workspace/command_palette.rs:329` `.overflow_y_scroll()`。
 - 弹窗：`crates/app/src/workspace/modals.rs:664` `.overflow_y_scroll()`。
+- 标签切换器：`crates/app/src/workspace/render.rs` 的 MRU 列表。
+
+轨道必须作为滚动内容容器的**同级覆盖层**，不能放在 `overflow_y_scroll()` 的内容内部，否则轨道会随内容一起移出视口。
 
 ## 8. 测试
 
 - **单元**（`crates/ui`）：给定 `ScrollHandle` 的 offset / bounds / max_offset，断言 thumb 几何（比例、min 钳制、无溢出不渲染）。
-- **交互**（GPUI `test-support`）：模拟滑块拖拽 → 断言 `handle.offset` 改变；轨道点击 → 断言翻页。
-- **回归**：`uniform_list` 的 `scroll_to_item` 与 `Scrollbar` 共用同一 handle，断言拖拽后 `scroll_to_item` 仍同步正确（`panes.rs` 现有调用不受影响）。
+- **交互**（GPUI `test-support`）：轨道点击后断言 offset 与滑块位置立即更新；模拟滑块拖出轨道后继续移动并释放，断言拖拽连续且释放后不再改变 offset。
+- **回归**：`uniform_list` 的 deferred `scroll_to_item` 与 `Scrollbar` 共用同一 base handle，断言下一帧滑块同步；标签切换器构造 20 个以上 tab，断言溢出时渲染自定义轨道和滑块。
 - **门禁**：`cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings`、`bash scripts/check_architecture.sh`、`bash scripts/check_sensitive_logs.sh`。app / GPUI 渲染测试在本机可能受 Xcode metal 限制，CI 跑。
 
 ## 9. 提交 / 任务拆分（AGENTS.md §11，一改动一提交，TDD）
@@ -107,8 +115,9 @@ macSFTP 的可滚动区域（本地/远端文件列表、传输抽屉、命令�
 - **T4**：接入传输抽屉 / 命令面板 / 弹窗。
 - **T5**：全部门禁 + 回归测试。
 
-## 10. 开放风险
+## 10. 已验证的风险结论
 
-- `scrollbar_width(0)` 与原生滚轮的兼容（§6 已列退路）。
-- 首帧 handle 状态为零（content / bounds 未布局完成）→ 滑块可能短暂不显示，下一帧自愈；与内置滚动条行为一致，可接受。
-- 同一帧读取 handle 与布局的先后：内置滚动条同样依赖 layout 后状态，行为一致，无需特殊处理。
+- `scrollbar_width(0)` 只隐藏原生视觉；容器仍保留 GPUI 原生滚轮、触控板与键盘滚动行为。
+- 首帧零几何和 uniform-list deferred scroll 由 `ScrollbarState` 的单次后续渲染处理；零高区域不会无限重绘。
+- 自定义轨道会 occlude 下方文件行，点击窄轨道不会误触列表项。
+- 轨道是滚动容器的同级覆盖层，不会随内容滚出视口。

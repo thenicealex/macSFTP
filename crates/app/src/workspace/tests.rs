@@ -5290,6 +5290,27 @@ mod tests {
     }
 
     #[gpui::test]
+    fn overflowing_tab_switcher_renders_custom_scrollbar(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _) = init_workspace(cx);
+        for _ in 0..20 {
+            cx.dispatch_action(NewTab);
+        }
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.tab_switcher_next(window, cx);
+        });
+        cx.run_until_parked();
+        cx.run_until_parked();
+
+        let track = cx
+            .debug_bounds("tab-switcher-scrollbar")
+            .expect("an overflowing tab switcher must render the custom scrollbar track");
+        let thumb = cx
+            .debug_bounds("tab-switcher-scrollbar-thumb")
+            .expect("an overflowing tab switcher must render the custom scrollbar thumb");
+        assert!(track.contains(&thumb.center()));
+    }
+
+    #[gpui::test]
     fn cancel_modal_closes_palette_before_switcher(cx: &mut TestAppContext) {
         let (workspace, mut cx, _) = init_workspace(cx);
         cx.dispatch_action(NewTab);
