@@ -8,15 +8,15 @@ use macsftp_core::{
     EntryPath, TransferId, TransferJob, TransferPlanState, TransferState, TransferStore,
 };
 use macsftp_ui::{
-    ActiveTheme, IconName, connection_status, format_size, icon, section_header_static,
-    text_tooltip, transfer_row, transfer_title,
+    ActiveTheme, IconName, connection_status, format_size, icon, icon_button,
+    section_header_static, text_tooltip, transfer_row, transfer_title,
 };
 
 use crate::palette_commands::labeled_shortcut;
 use crate::resources::ActiveTransfers;
 use crate::workspace::PaneSide;
 
-fn visible_transfer_jobs(store: &TransferStore) -> Vec<&TransferJob> {
+pub(crate) fn visible_transfer_jobs(store: &TransferStore) -> Vec<&TransferJob> {
     let mut hidden_job_ids = HashSet::new();
 
     for plan in &store.plans {
@@ -48,6 +48,21 @@ fn visible_transfer_jobs(store: &TransferStore) -> Vec<&TransferJob> {
         .iter()
         .filter(|job| !hidden_job_ids.contains(&job.id))
         .collect()
+}
+
+/// A failed transfer offers a Retry control only when it is genuinely
+/// retryable. Handoff failures (no connection available, connection lost,
+/// transfer manager gone) mark their planned children `retryable: false`
+/// because those jobs never entered the transfer manager and therefore have
+/// no retry route — surfacing a Retry button there would be a dead control.
+fn can_retry_transfer(job: &TransferJob) -> bool {
+    matches!(
+        job.state,
+        TransferState::Failed {
+            retryable: true,
+            ..
+        }
+    )
 }
 
 impl crate::workspace::Workspace {
@@ -178,18 +193,19 @@ impl crate::workspace::Workspace {
                         start_height: self.drawer_height,
                         start_y: px(0.0),
                     },
-                    move |_value, _cursor_offset, window, cx| {
-                        let start_y = window.mouse_position().y;
-                        // Use live drawer_height so double-click reset is not
-                        // overwritten by a stale payload built at element time.
-                        workspace_entity.update(cx, |workspace, cx| {
-                            workspace.drawer_resize = Some(TransferDrawerResize {
-                                start_height: workspace.drawer_height,
-                                start_y,
+                    {
+                        let workspace_entity = workspace_entity.clone();
+                        move |_value, _cursor_offset, window, cx| {
+                            let start_y = window.mouse_position().y;
+                            workspace_entity.update(cx, |workspace, cx| {
+                                workspace.drawer_resize = Some(TransferDrawerResize {
+                                    start_height: workspace.drawer_height,
+                                    start_y,
+                                });
+                                cx.notify();
                             });
-                            cx.notify();
-                        });
-                        cx.new(|_| ResizeDragGhost)
+                            cx.new(|_| ResizeDragGhost)
+                        }
                     },
                 )
                 .on_drag_move(cx.listener(
@@ -219,6 +235,37 @@ impl crate::workspace::Workspace {
                 .text_color(theme.colors.text_muted)
                 .child(icon(IconName::Transfers, theme.colors.text_muted))
                 .child(div().flex_none().child("Transfers"))
+                .when(active_jobs.len() + queued_jobs.len() > 0, |header| {
+                    let workspace = workspace_entity.clone();
+                    header.child(
+                        icon_button(
+                            "cancel-all-transfers",
+                            IconName::Close,
+                            "Cancel All Transfers",
+                        )
+                        .icon_color(theme.colors.warning)
+                        .on_click(move |_event, _window, cx| {
+                            workspace.update(cx, |workspace, cx| {
+                                workspace.cancel_all_transfers(cx);
+                            });
+                        }),
+                    )
+                })
+                .when(completed_jobs.len() + failed_jobs.len() > 0, |header| {
+                    let workspace = workspace_entity.clone();
+                    header.child(
+                        icon_button(
+                            "clear-transfer-records",
+                            IconName::Trash,
+                            "Clear Transfer History",
+                        )
+                        .on_click(move |_event, _window, cx| {
+                            workspace.update(cx, |workspace, cx| {
+                                workspace.clear_transfer_records(cx);
+                            });
+                        }),
+                    )
+                })
                 .child(
                     div()
                         .flex_1()
@@ -447,7 +494,7 @@ impl crate::workspace::Workspace {
                 });
             });
         }
-        if matches!(job.state, TransferState::Failed { .. }) {
+        if can_retry_transfer(job) {
             row = row.on_retry(move |_event, _window, cx| {
                 workspace.update(cx, |workspace, cx| {
                     workspace.retry_transfer(job_id, cx);
@@ -594,6 +641,7 @@ mod tests {
         TransferPlanState, TransferState, TransferStore, UserFacingError,
     };
 
+    use super::can_retry_transfer;
     use super::visible_transfer_jobs;
 
     fn job(id: u64, state: TransferState) -> TransferJob {
@@ -704,5 +752,50 @@ mod tests {
         );
 
         assert_eq!(visible_ids(&store), vec![TransferId(2)]);
+    }
+
+    #[test]
+    fn retry_action_is_shown_for_retryable_failure() {
+        let error = UserFacingError::new(
+            ErrorCode::Unknown,
+            "Transfer failed",
+            "Try the transfer again.",
+        );
+        let failed = job(
+            1,
+            TransferState::Failed {
+                error,
+                retryable: true,
+            },
+        );
+
+        assert!(
+            can_retry_transfer(&failed),
+            "a retryable failure must offer the Retry control"
+        );
+    }
+
+    #[test]
+    fn retry_action_is_hidden_for_non_retryable_failure() {
+        // Handoff failures (no connection, dropped connection, manager gone)
+        // mark planned children non-retryable: they never entered the
+        // transfer manager, so a Retry button would be a dead control.
+        let error = UserFacingError::new(
+            ErrorCode::ChannelClosed,
+            "Could not start transfer",
+            "The connected session closed before the transfer acquired its connection.",
+        );
+        let failed = job(
+            2,
+            TransferState::Failed {
+                error,
+                retryable: false,
+            },
+        );
+
+        assert!(
+            !can_retry_transfer(&failed),
+            "a non-retryable handoff failure must not offer the Retry control"
+        );
     }
 }

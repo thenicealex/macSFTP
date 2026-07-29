@@ -119,6 +119,7 @@ impl Workspace {
                         }
                     }
                     EditPhase::Downloading => "File is still downloading for editing".into(),
+                    EditPhase::CheckingRemote => "Checking the remote file before saving".into(),
                     EditPhase::RemoteConflict => {
                         "Resolve the remote edit conflict before reopening".into()
                     }
@@ -177,6 +178,8 @@ impl Workspace {
             },
             local_mtime: None,
             active_transfer: None,
+            pending_check_id: None,
+            checking_local_mtime: None,
             missing_ticks: 0,
         };
         cx.resources_mut().edit_sessions.register(session);

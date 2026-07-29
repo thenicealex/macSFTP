@@ -10,9 +10,10 @@ use std::time::Duration;
 
 use macsftp_core::{
     AppCommand, AppEvent, AuthCredential, ConflictDecision, ConnectCommand, ConnectionPoolIdentity,
-    ConnectionSettings, DisconnectReason, ErrorCode, FileKind, ProfileId, RemoteEventScope,
-    RemotePath, RuntimeBridgeConfig, SessionId, TabId, Timestamp, TransferDirection,
-    TransferEndpoint, TransferId, TransferJob, TransferState, TrustDecision, TrustRequestId,
+    ConnectionSettings, DisconnectReason, EditCheckId, EditSessionId, ErrorCode, FileKind,
+    ProfileId, RemoteEventScope, RemotePath, RuntimeBridgeConfig, SessionId, TabId, Timestamp,
+    TransferDirection, TransferEndpoint, TransferId, TransferJob, TransferState, TrustDecision,
+    TrustRequestId,
 };
 use macsftp_sftp::pool::ConnectionManager;
 use macsftp_sftp::{
@@ -1137,6 +1138,111 @@ async fn runtime_streams_and_executes_directory_download() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn remote_download_failure_after_progress_emits_plan_failure() {
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    use std::os::unix::fs::PermissionsExt;
+
+    let source_root = server.fixture_dir.join("download-fail-source");
+    let nested_no_read = source_root.join("no-read-sub");
+    std::fs::create_dir(&source_root).expect("create download source");
+    std::fs::write(source_root.join("ok.txt"), b"ok").expect("write readable file");
+    std::fs::create_dir(&nested_no_read).expect("create unreadable subdirectory");
+    // Remove read/execute so the SFTP server cannot list the subdirectory's
+    // contents — the planner must surface this as a plan failure.
+    std::fs::set_permissions(&nested_no_read, std::fs::Permissions::from_mode(0o000))
+        .expect("make subdirectory unreadable");
+
+    let known_hosts_path = server.fixture_dir.join("download_fail_known_hosts");
+    std::fs::write(
+        &known_hosts_path,
+        format!("[127.0.0.1]:{} {}\n", server.port, server.host_public_key),
+    )
+    .expect("prefill known_hosts");
+    let mut controller = RuntimeController::start(
+        RuntimeBridgeConfig::default(),
+        SessionBackend::Real(HostTrustConfig::new(known_hosts_path, None)),
+    );
+    let client = controller.client();
+    let mut events = controller
+        .take_event_receiver()
+        .expect("event receiver should be available once");
+
+    client
+        .try_send(AppCommand::ConnectTab(ConnectCommand {
+            tab_id: TAB,
+            session_id: SESSION,
+            session_epoch: EPOCH,
+            profile_id: ProfileId(1),
+            pool_identity: ConnectionPoolIdentity::Ephemeral(SESSION),
+            settings: ConnectionSettings {
+                host: "127.0.0.1".to_string(),
+                port: server.port,
+                username: server.username.clone(),
+                auth: client_key_auth(&server),
+            },
+        }))
+        .expect("connect command should send");
+    let _ = next_runtime_event(&mut events, "TabConnecting").await;
+    let _ = next_runtime_event(&mut events, "TabConnected").await;
+
+    client
+        .try_send(AppCommand::StartTransfer(
+            macsftp_core::StartTransferCommand {
+                tab_id: TAB,
+                session_epoch: EPOCH,
+                profile_id: ProfileId(1),
+                direction: TransferDirection::Download,
+                sources: vec![TransferEndpoint::Remote(RemotePath::new(
+                    source_root.display().to_string(),
+                ))],
+                destination: TransferEndpoint::Local(macsftp_core::LocalPath::new(
+                    server
+                        .fixture_dir
+                        .join("download-fail-dest")
+                        .display()
+                        .to_string(),
+                )),
+                metadata_policy: macsftp_core::MetadataPolicy::default(),
+                conflict_policy: macsftp_core::ConflictPolicy::default(),
+            },
+        ))
+        .expect("directory download command should send");
+
+    let mut saw_progress = false;
+    loop {
+        match next_runtime_event(&mut events, "download failure event").await {
+            AppEvent::TransferPlanStarted(_) => {}
+            AppEvent::TransferPlanProgress(_) => saw_progress = true,
+            AppEvent::TransferPlanFailed { .. } => {
+                assert!(
+                    saw_progress,
+                    "TransferPlanFailed must follow a published TransferPlanProgress"
+                );
+                break;
+            }
+            AppEvent::TransferPlanCompleted { .. } => {
+                panic!("plan unexpectedly completed despite an unreadable subdirectory");
+            }
+            AppEvent::TransferFailed(failure) => {
+                panic!("unexpected child transfer failure: {:?}", failure.error);
+            }
+            AppEvent::TransferRunning(_) | AppEvent::TransferProgress(_) => {}
+            AppEvent::ResidualTempCreated(_) | AppEvent::ResidualTempCleared { .. } => {}
+            other => panic!("unexpected download failure event: {other:?}"),
+        }
+    }
+
+    // Restore permissions so the sshd fixture directory can be cleaned up.
+    let _ = std::fs::set_permissions(&nested_no_read, std::fs::Permissions::from_mode(0o755));
+
+    std::thread::spawn(move || controller.shutdown())
+        .join()
+        .expect("runtime shutdown thread should finish");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn missing_directory_reports_not_found_error() {
     let Some(server) = SshTestServer::spawn() else {
         return;
@@ -1382,7 +1488,11 @@ async fn host_key_mismatch_blocks_connection() {
     let event = next_event(&fixture, "HostKeyMismatch").await;
     match event {
         AppEvent::HostKeyMismatch(mismatch) => {
-            assert_eq!(mismatch.tab_id, TAB);
+            assert_eq!(
+                mismatch.scope,
+                RemoteEventScope::new(TAB, SESSION, EPOCH),
+                "mismatch must carry the logical scope of the failed connection"
+            );
             assert!(mismatch.expected_fingerprint_sha256.is_some());
             assert!(
                 mismatch.actual_fingerprint_sha256.starts_with("SHA256:"),
@@ -1407,6 +1517,131 @@ async fn host_key_mismatch_blocks_connection() {
     }
 
     fixture.cancel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pooled_host_key_mismatch_is_emitted_for_every_logical_session() {
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+
+    let (event_tx, event_rx) = flume::bounded(64);
+    let app_known_hosts_path = server.fixture_dir.join("app_known_hosts_pool");
+
+    // Prefill with a DIFFERENT (wrong) host key so the handshake mismatches.
+    let wrong_key = std::fs::read_to_string(server.client_key_path.with_extension("pub"))
+        .expect("read client public key");
+    let line = format!("[127.0.0.1]:{} {}\n", server.port, wrong_key.trim());
+    std::fs::write(&app_known_hosts_path, line).expect("prefill app known_hosts");
+
+    let known_hosts = Arc::new(Mutex::new(KnownHostsStore::load(
+        &app_known_hosts_path,
+        None,
+    )));
+    let trust_config = Arc::new(HostTrustConfig::new(app_known_hosts_path.clone(), None));
+    let trust_registry = Arc::new(TrustRegistry::new());
+
+    let settings = ConnectionSettings {
+        host: "127.0.0.1".to_string(),
+        port: server.port,
+        username: server.username.clone(),
+        auth: client_key_auth(&server),
+    };
+
+    let cm = Arc::new(ConnectionManager::new());
+    // Both calls share the SAME identity, so they resolve to the SAME
+    // ConnectionKey and therefore share one in-progress pooled handshake.
+    let identity = ConnectionPoolIdentity::Ephemeral(SESSION);
+    let scope_one = RemoteEventScope::new(TAB, SESSION, EPOCH);
+    let scope_two = RemoteEventScope::new(SECOND_TAB, SECOND_SESSION, EPOCH);
+
+    // Issue both calls synchronously before awaiting either result, so the
+    // second call observes the in-progress pool entry and resubscribes to
+    // the same broadcast (get_or_connect inserts PoolEntry::Connecting
+    // before any .await and returns rx without yielding).
+    let rx_one = cm.connect_session(
+        &settings,
+        &identity,
+        &scope_one,
+        TRUST_REQUEST,
+        known_hosts.clone(),
+        trust_config.clone(),
+        trust_registry.clone(),
+        event_tx.clone(),
+    );
+    let rx_two = cm.connect_session(
+        &settings,
+        &identity,
+        &scope_two,
+        TrustRequestId(2),
+        known_hosts.clone(),
+        trust_config.clone(),
+        trust_registry.clone(),
+        event_tx.clone(),
+    );
+
+    // Both connections must fail (the handshake mismatched).
+    let result_one = rx_one.recv_async().await;
+    let result_two = rx_two.recv_async().await;
+    assert!(
+        matches!(result_one, Ok(Err(_))),
+        "first connection must fail"
+    );
+    assert!(
+        matches!(result_two, Ok(Err(_))),
+        "second connection must fail"
+    );
+
+    let (requests_tx, _requests_rx) = flume::bounded::<RemoteSessionRequest>(1);
+    let fixture = ActorFixture {
+        events: event_rx,
+        requests: requests_tx,
+        trust_registry,
+        cancel: CancellationToken::new(),
+        app_known_hosts_path,
+    };
+
+    // Each logical waiter receives exactly one scoped mismatch event.
+    let mismatch_one = match next_event(&fixture, "HostKeyMismatch #1").await {
+        AppEvent::HostKeyMismatch(m) => m,
+        other => panic!("expected HostKeyMismatch, got {other:?}"),
+    };
+    let mismatch_two = match next_event(&fixture, "HostKeyMismatch #2").await {
+        AppEvent::HostKeyMismatch(m) => m,
+        other => panic!("expected HostKeyMismatch, got {other:?}"),
+    };
+
+    for m in [&mismatch_one, &mismatch_two] {
+        assert!(
+            m.actual_fingerprint_sha256.starts_with("SHA256:"),
+            "actual fingerprint must be present"
+        );
+        assert_ne!(
+            m.expected_fingerprint_sha256.as_deref(),
+            Some(m.actual_fingerprint_sha256.as_str()),
+        );
+        assert_eq!(
+            m.actual_fingerprint_sha256, mismatch_one.actual_fingerprint_sha256,
+            "mismatch details must be identical across waiters"
+        );
+    }
+
+    let scopes_match = (mismatch_one.scope == scope_one && mismatch_two.scope == scope_two)
+        || (mismatch_one.scope == scope_two && mismatch_two.scope == scope_one);
+    assert!(
+        scopes_match,
+        "each waiter must receive exactly one mismatch with its own scope (got {:?} and {:?})",
+        mismatch_one.scope, mismatch_two.scope
+    );
+
+    // No third mismatch or success event may arrive.
+    let follow_up =
+        tokio::time::timeout(Duration::from_millis(500), fixture.events.recv_async()).await;
+    match follow_up {
+        Err(_timeout) => {}
+        Ok(Err(_channel_closed)) => {}
+        Ok(Ok(event)) => panic!("only two mismatch events expected, got {event:?}"),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1497,6 +1732,160 @@ async fn encrypted_key_with_wrong_passphrase_fails_cleanly() {
             );
         }
         other => panic!("expected AuthFailed, got {other:?}"),
+    }
+
+    fixture.cancel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_edit_snapshot_check_reports_live_metadata() {
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    let file = server.fixture_dir.join("edit-check-metadata.txt");
+    std::fs::write(&file, b"hello world").expect("write fixture file");
+
+    let fixture = spawn_actor(
+        &server,
+        client_key_auth(&server),
+        Some(&server.host_public_key),
+    );
+    let _ = next_event(&fixture, "TabConnected").await;
+
+    let path = RemotePath::new(file.display().to_string());
+    fixture
+        .requests
+        .send_async(RemoteSessionRequest::CheckRemoteEditSnapshot {
+            edit_session_id: EditSessionId(7),
+            check_id: EditCheckId(9),
+            path: path.clone(),
+        })
+        .await
+        .expect("check request should reach actor");
+
+    let event = next_event(&fixture, "RemoteEditSnapshotChecked").await;
+    match event {
+        AppEvent::RemoteEditSnapshotChecked(scoped) => {
+            assert_eq!(scoped.scope.tab_id, TAB);
+            assert_eq!(scoped.scope.session_id, SESSION);
+            assert_eq!(scoped.scope.session_epoch, EPOCH);
+            assert_eq!(scoped.payload.edit_session_id, EditSessionId(7));
+            assert_eq!(scoped.payload.check_id, EditCheckId(9));
+            assert_eq!(scoped.payload.path, path);
+            assert_eq!(scoped.payload.snapshot.size, Some(11));
+            assert!(
+                scoped.payload.snapshot.modified_at.is_some(),
+                "live metadata must include an mtime"
+            );
+        }
+        other => panic!("expected RemoteEditSnapshotChecked, got {other:?}"),
+    }
+
+    fixture.cancel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_edit_snapshot_check_sees_external_change_without_relisting() {
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    let file = server.fixture_dir.join("edit-check-external.txt");
+    std::fs::write(&file, b"baseline").expect("write baseline fixture file");
+
+    let fixture = spawn_actor(
+        &server,
+        client_key_auth(&server),
+        Some(&server.host_public_key),
+    );
+    let _ = next_event(&fixture, "TabConnected").await;
+
+    let path = RemotePath::new(file.display().to_string());
+
+    // Baseline check — no directory relist is performed between the two
+    // checks, so the result must come from a fresh authoritative stat.
+    fixture
+        .requests
+        .send_async(RemoteSessionRequest::CheckRemoteEditSnapshot {
+            edit_session_id: EditSessionId(7),
+            check_id: EditCheckId(9),
+            path: path.clone(),
+        })
+        .await
+        .expect("baseline check request should reach actor");
+    let baseline_snapshot = match next_event(&fixture, "baseline RemoteEditSnapshotChecked").await {
+        AppEvent::RemoteEditSnapshotChecked(scoped) => scoped.payload.snapshot,
+        other => panic!("expected RemoteEditSnapshotChecked, got {other:?}"),
+    };
+
+    // A second writer changes the file on the server without any client
+    // directory listing. Size differs to avoid the accepted
+    // same-second/same-size limitation.
+    std::fs::write(&file, b"changed-by-external-writer-now").expect("overwrite fixture file");
+
+    fixture
+        .requests
+        .send_async(RemoteSessionRequest::CheckRemoteEditSnapshot {
+            edit_session_id: EditSessionId(7),
+            check_id: EditCheckId(10),
+            path: path.clone(),
+        })
+        .await
+        .expect("second check request should reach actor");
+    let updated_snapshot = match next_event(&fixture, "updated RemoteEditSnapshotChecked").await {
+        AppEvent::RemoteEditSnapshotChecked(scoped) => scoped.payload.snapshot,
+        other => panic!("expected RemoteEditSnapshotChecked, got {other:?}"),
+    };
+
+    assert_ne!(
+        baseline_snapshot, updated_snapshot,
+        "authoritative check must reflect the external change without a relist"
+    );
+
+    fixture.cancel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_edit_snapshot_check_missing_file_returns_failure() {
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    let file = server.fixture_dir.join("edit-check-missing.txt");
+    std::fs::write(&file, b"to be removed").expect("write fixture file");
+    std::fs::remove_file(&file).expect("remove fixture file before check");
+
+    let fixture = spawn_actor(
+        &server,
+        client_key_auth(&server),
+        Some(&server.host_public_key),
+    );
+    let _ = next_event(&fixture, "TabConnected").await;
+
+    let path = RemotePath::new(file.display().to_string());
+    fixture
+        .requests
+        .send_async(RemoteSessionRequest::CheckRemoteEditSnapshot {
+            edit_session_id: EditSessionId(7),
+            check_id: EditCheckId(9),
+            path: path.clone(),
+        })
+        .await
+        .expect("check request should reach actor");
+
+    let event = next_event(&fixture, "RemoteEditSnapshotCheckFailed").await;
+    match event {
+        AppEvent::RemoteEditSnapshotCheckFailed(scoped) => {
+            assert_eq!(scoped.scope.tab_id, TAB);
+            assert_eq!(scoped.scope.session_id, SESSION);
+            assert_eq!(scoped.scope.session_epoch, EPOCH);
+            assert_eq!(scoped.payload.edit_session_id, EditSessionId(7));
+            assert_eq!(scoped.payload.check_id, EditCheckId(9));
+            assert_eq!(scoped.payload.path, path);
+            assert!(
+                scoped.payload.error.retryable,
+                "a stat failure must be retryable so the local edit is preserved"
+            );
+        }
+        other => panic!("expected RemoteEditSnapshotCheckFailed, got {other:?}"),
     }
 
     fixture.cancel.cancel();

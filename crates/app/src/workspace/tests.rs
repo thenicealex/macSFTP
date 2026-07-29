@@ -2122,6 +2122,8 @@ mod tests {
                 },
                 local_mtime: None,
                 active_transfer: None,
+                pending_check_id: None,
+                checking_local_mtime: None,
                 missing_ticks: 0,
             });
             (session_id, temp_path)
@@ -2195,6 +2197,8 @@ mod tests {
                 },
                 local_mtime: None,
                 active_transfer: None,
+                pending_check_id: None,
+                checking_local_mtime: None,
                 missing_ticks: 0,
             });
             id
@@ -2636,6 +2640,8 @@ mod tests {
                 },
                 local_mtime: None,
                 active_transfer: None,
+                pending_check_id: None,
+                checking_local_mtime: None,
                 missing_ticks: 0,
             });
             id
@@ -3049,6 +3055,8 @@ mod tests {
                 remote_snapshot: snapshot,
                 local_mtime: None,
                 active_transfer: None,
+                pending_check_id: None,
+                checking_local_mtime: None,
                 missing_ticks: 0,
             });
             id
@@ -4302,7 +4310,11 @@ mod tests {
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.handle_app_event(
                 AppEvent::HostKeyMismatch(macsftp_core::HostKeyMismatch {
-                    tab_id: TabId(1),
+                    scope: macsftp_core::RemoteEventScope::new(
+                        macsftp_core::TabId(1),
+                        macsftp_core::SessionId(1),
+                        1,
+                    ),
                     host: "mock.example.com".to_string(),
                     port: 22,
                     expected_fingerprint_sha256: Some("SHA256:expected".to_string()),
@@ -4328,6 +4340,71 @@ mod tests {
             assert!(
                 workspace.state.modals.active.is_empty(),
                 "mismatch must not open a trust modal"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn stale_host_key_mismatch_does_not_fail_replacement_session(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
+        });
+        let _ = channels.command_rx.try_recv();
+
+        // Reconnect: bump the tab to epoch 2 / session 2.
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                AppEvent::TabDisconnected(RemoteScoped::new(
+                    RemoteEventScope::new(TabId(1), SessionId(1), 1),
+                    TabDisconnected {
+                        reason: DisconnectReason::UserRequested,
+                    },
+                )),
+                window,
+                cx,
+            );
+            workspace.connect_with(test_settings(), None, window, cx);
+        });
+        let _ = channels.command_rx.try_recv();
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                AppEvent::TabConnected(RemoteScoped::new(
+                    RemoteEventScope::new(TabId(1), SessionId(2), 2),
+                    TabConnected {
+                        remote_root: RemotePath::new(TEST_REMOTE_ROOT),
+                    },
+                )),
+                window,
+                cx,
+            );
+        });
+
+        // A stale mismatch from the OLD session (epoch 1) must be dropped by
+        // the central stale-event guard and must NOT fail the replacement.
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                AppEvent::HostKeyMismatch(macsftp_core::HostKeyMismatch {
+                    scope: RemoteEventScope::new(TabId(1), SessionId(1), 1),
+                    host: "mock.example.com".to_string(),
+                    port: 22,
+                    expected_fingerprint_sha256: Some("SHA256:expected".to_string()),
+                    actual_fingerprint_sha256: "SHA256:actual".to_string(),
+                }),
+                window,
+                cx,
+            );
+        });
+
+        workspace.read_with(&cx, |workspace, _| {
+            let tab = workspace.state.tabs.active_tab().expect("tab must exist");
+            assert!(
+                !matches!(tab.connection, ConnectionState::Failed { .. }),
+                "stale mismatch must not fail the replacement session"
+            );
+            assert!(
+                workspace.state.modals.active.is_empty(),
+                "stale mismatch must not open a trust modal"
             );
         });
     }
@@ -5087,6 +5164,8 @@ mod tests {
                 },
                 local_mtime: None,
                 active_transfer: None,
+                pending_check_id: None,
+                checking_local_mtime: None,
                 missing_ticks: 0,
             });
             id
@@ -5139,6 +5218,8 @@ mod tests {
                 },
                 local_mtime: None,
                 active_transfer: None,
+                pending_check_id: None,
+                checking_local_mtime: None,
                 missing_ticks: 0,
             });
             id

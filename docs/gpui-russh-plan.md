@@ -2173,7 +2173,51 @@ M7 ≈ 100%；MVP ≈ 100%。
 
 当前没有阻塞 M0 的待确认问题。剩余风险通过第 19 节的实现期 spike 验证。
 
-## 24. 参考资料
+## 24. 远程编辑的权威快照校验
+
+远程自动回传（edit-and-upload-back）在 M0 阶段落地，但本地保存绝不能再依赖任何**缓存的 UI 目录列表**来授权对远端文件的覆盖写。本节记录权威快照校验协议及其已知边界。历史 bug 分析见 `docs/remote-editing-bug-analysis-2026-07-16.md`。
+
+### 24.1 协议概要
+
+1. **本地保存进入 `CheckingRemote` 阶段。** 编辑监听器（watcher）在本地临时文件落盘后，将编辑会话（edit session）推进到 `EditPhase::CheckingRemote`，并写入两个仅在该阶段为 `Some` 的字段：`pending_check_id: Option<EditCheckId>` 与 `checking_local_mtime: Option<Timestamp>`。这两个字段在每次离开该阶段时都被清空，用于阻止监听器对同一保存重复派发校验命令。
+2. **UI/core 是 `EditCheckId` 的唯一分配方。** 只能通过 `EditSessionStore::next_check_id()` 分配；runtime 与 actor 只回显该 ID，绝不自行生成。
+3. **runtime 将受限命令路由到 live actor。** watcher 派发一个 `AppCommand`，请求对 `remote_path` 执行一次实时的 `symlink_metadata` 读取，并携带 `EditCheckId` 与本地保存时刻的 mtime。该命令是有界的（bounded），无法路由到 live actor 时不会无限挂起。
+4. **actor 使用 `symlink_metadata` 并发出带作用域的结果。** `RemoteSessionActor` 针对目标文件（而非目录列表）调用 `symlink_metadata`，回显 `EditSessionId` + `RemoteEventScope` + `EditCheckId` + path + 远端快照，经 `RemoteEditSnapshotChecked` / `RemoteEditSnapshotCheckFailed` 回传。
+5. **路由失败走 epoch 关联事件。** 当受限命令无法投递到 live actor（如会话已断开）时，发出 `RemoteEditSnapshotDispatchFailed`；该事件是**按 epoch 关联**的（非 remote-scoped），携带 `tab_id` / `session_epoch` / `path`，以便只有确切的待处理元组（tab/epoch/session/check/path）可以被重置，而不会误伤重连后的替换校验。
+
+### 24.2 结果只被应用一次（相关性守卫）
+
+三个校验事件由**进程级** `AppEventCoordinator` 独占处理，**不广播到 workspace**（广播会竞争）。协调器通过 `TabStore::accepts_remote_event` + `workspace_windows(cx)` 迭代定位拥有该事件的 `Workspace`。
+
+应用前必须满足**完整相关性守卫**（apply exactly once）：
+
+- `phase == CheckingRemote`；
+- `pending_check_id == Some(check_id)`；
+- `checking_local_mtime.is_some()`；
+- `remote_path == path`；
+- `tab_id == session.tab_id`；
+- `session_epoch == session.session_epoch`。
+
+`DispatchFailed` 额外要求 `tab_id` / `session_epoch` / `path` 三者都与待处理元组一致（不仅仅是 `check_id` 匹配）。**过期的会话作用域、过期的 epoch、以及作废的 check ID 一律被忽略**，因此重连后的会话不会被旧结果篡改。
+
+### 24.3 重新 stat 守卫（TOCTOU 残余闭环）
+
+相关性通过后，协调器**再次 stat 临时文件**：若其当前 mtime ≠ `checking_local_mtime`，则放弃本次上传并回退到 `Editing`（保留 baseline）。这保证「校验在途期间又发生了一次本地保存」不能授权覆盖远端——必须重新发起一次校验。
+
+### 24.4 成功 / 冲突 / 失败分支
+
+- **快照相等**（live 远端 metadata 与校验时一致）：构造 `build_edit_upload_command` → 进入 `UploadingBack`，`local_mtime = checking_local_mtime`，清空 pending，调用 `dispatch_edit_command` 并刷新窗口。精确一次上传。
+- **快照分歧**（远端 size 或整秒 mtime 不同）：进入 `RemoteConflict`，`local_mtime = checking_local_mtime`，清空 pending，刷新窗口。**不发起任何上传**，远端内容不会被覆盖。
+- **校验失败 / 路由失败**：`revert_stranded_upload` 保留本地编辑与 baseline，回到可重试的 `Editing`，清空 pending。本地临时文件仍在，监听器会在下一次保存时重新派发校验，即「失败保留本地编辑并稍后重试」。
+
+### 24.5 已知边界（未解决的问题）
+
+比较维度仍然是 `(size, whole-second mtime)`。因此：
+
+- **相同 size + 相同整秒 mtime 的并发远端写入无法被检测**，除非引入哈希或版本号（当前未实现，接受为已知限制，必须保留文档说明，不得谎称已修复）。
+- 该限制与第 19 节的实现期 spike 一致：不追加哈希/版本协商前，无法区分「远端被另一写者以相同 size/整秒 改写」与「远端未变」。
+
+## 25. 参考资料
 
 - GPUI: <https://gpui.rs/>
 - GPUI docs: <https://docs.rs/gpui/latest/gpui/>

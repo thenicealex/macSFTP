@@ -772,6 +772,17 @@ impl TransferStore {
                     .iter_mut()
                     .find(|plan| plan.id == progress.plan_id)
                 {
+                    // A terminal plan can no longer be extended. A late progress
+                    // (e.g. a child streamed before an async planning failure)
+                    // must not resurrect or grow a finished plan.
+                    if matches!(
+                        plan.state,
+                        TransferPlanState::Completed
+                            | TransferPlanState::Cancelled
+                            | TransferPlanState::Failed { .. }
+                    ) {
+                        return false;
+                    }
                     if progress.planned_count > plan.planned_count {
                         plan.planned_count = progress.planned_count;
                         plan.total_bytes = progress.total_bytes;
@@ -1019,22 +1030,23 @@ impl TransferStore {
         &mut self,
         plan_id: TransferPlanId,
         plan_state: TransferPlanState,
-        root_state: TransferState,
+        job_state: TransferState,
     ) -> bool {
-        let Some(plan) = self.plans.iter_mut().find(|plan| plan.id == plan_id) else {
+        let Some(plan_index) = self.plans.iter().position(|plan| plan.id == plan_id) else {
             return false;
         };
-        let root_job_id = plan.root_job_id;
+        let root_job_id = self.plans[plan_index].root_job_id;
+        // Clone the child ids first so the borrow checker lets us mutate jobs
+        // while the plan stays borrowed by index below.
+        let child_job_ids = self.plans[plan_index].child_jobs.clone();
         let mut changed = false;
-        if plan.state != plan_state {
-            plan.state = plan_state;
+        if self.plans[plan_index].state != plan_state {
+            self.plans[plan_index].state = plan_state;
             changed = true;
         }
-        if let Some(root_job) = self.jobs.iter_mut().find(|job| job.id == root_job_id)
-            && root_job.state != root_state
-        {
-            root_job.state = root_state;
-            changed = true;
+        changed |= self.set_job_state(root_job_id, job_state.clone());
+        for child_job_id in child_job_ids {
+            changed |= self.set_job_state(child_job_id, job_state.clone());
         }
         changed
     }
@@ -1106,6 +1118,23 @@ impl TransferStore {
             root_job.state = root_state;
         }
         true
+    }
+
+    pub fn clear_terminal(&mut self) -> bool {
+        let before = self.jobs.len();
+        self.jobs.retain(|job| {
+            !matches!(
+                job.state,
+                TransferState::Completed | TransferState::Skipped | TransferState::Failed { .. }
+            )
+        });
+        let remaining_ids: std::collections::HashSet<TransferId> =
+            self.jobs.iter().map(|job| job.id).collect();
+        self.plans.retain(|plan| {
+            remaining_ids.contains(&plan.root_job_id)
+                || plan.child_jobs.iter().any(|id| remaining_ids.contains(id))
+        });
+        self.jobs.len() != before
     }
 }
 
@@ -1546,6 +1575,11 @@ pub enum AppCommand {
     /// Create / rename / delete for local or remote (phase 1).
     Fs(FsCommand),
     StartTransfer(StartTransferCommand),
+    /// Check live remote metadata immediately before an edit upload so a stale
+    /// UI directory listing cannot authorize overwriting a concurrent remote
+    /// change. Routed to the connected browsing actor for `tab_id`; the actor
+    /// echoes back `edit_session_id` + `check_id` with its live scope.
+    CheckRemoteEditSnapshot(CheckRemoteEditSnapshotCommand),
     CancelTransfer {
         transfer_id: TransferId,
     },
@@ -1590,6 +1624,15 @@ pub struct StartTransferCommand {
     pub destination: TransferEndpoint,
     pub metadata_policy: MetadataPolicy,
     pub conflict_policy: ConflictPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckRemoteEditSnapshotCommand {
+    pub tab_id: TabId,
+    pub session_epoch: u64,
+    pub edit_session_id: EditSessionId,
+    pub check_id: EditCheckId,
+    pub path: RemotePath,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1664,6 +1707,21 @@ pub enum AppEvent {
         transfer_id: TransferId,
         path: String,
     },
+    /// Live remote metadata for an edit session's path, read by the browsing
+    /// actor immediately before upload. Carries the actor's live
+    /// `(tab_id, session_id, session_epoch)` scope so the coordinator's stale
+    /// guard applies.
+    RemoteEditSnapshotChecked(RemoteScoped<RemoteEditSnapshotChecked>),
+    /// The actor could not read the remote metadata (missing file, permission,
+    /// transport). Also scoped: a stale scope must not surface a conflict for a
+    /// replacement session.
+    RemoteEditSnapshotCheckFailed(RemoteScoped<RemoteEditSnapshotCheckFailed>),
+    /// The runtime could not even route the check command to a live actor
+    /// (missing/stale session, full/disconnected queue). No legitimate
+    /// `SessionId` exists here, so this is epoch-correlated rather than
+    /// remote-session-scoped: the coordinator matches it only by the exact
+    /// `tab_id`/`session_epoch`/`edit_session_id`/`check_id`/`path` tuple.
+    RemoteEditSnapshotDispatchFailed(RemoteEditSnapshotDispatchFailed),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1690,6 +1748,9 @@ impl AppEvent {
     /// `HostKeyUnknown` is included because the prompt carries the
     /// same `(tab_id, session_id, session_epoch)` triple — a stale
     /// host key prompt must not activate a modal for a new session.
+    /// `HostKeyMismatch` is included for the same reason: a stale
+    /// mismatch from a superseded session must not fail a replacement
+    /// session, while a current mismatch must still hard-block.
     pub fn remote_scope(&self) -> Option<RemoteEventScope> {
         match self {
             Self::TabConnected(scoped) => Some(scoped.scope.clone()),
@@ -1703,6 +1764,14 @@ impl AppEvent {
                 prompt.session_id,
                 prompt.session_epoch,
             )),
+            Self::HostKeyMismatch(mismatch) => Some(mismatch.scope.clone()),
+            // Both authoritative edit-check outcomes carry the actor's live
+            // scope, so a stale scope must not advance or conflict a
+            // replacement session. `RemoteEditSnapshotDispatchFailed` is
+            // intentionally excluded: no SessionId exists when routing never
+            // reached a live actor, so it is epoch-correlated instead.
+            Self::RemoteEditSnapshotChecked(scoped) => Some(scoped.scope.clone()),
+            Self::RemoteEditSnapshotCheckFailed(scoped) => Some(scoped.scope.clone()),
             // FsOperationFailed is filtered in the app by tab_id + epoch
             // (FsScope has no session_id, so it cannot use the full remote
             // guard without a false SessionId).
@@ -1819,7 +1888,7 @@ pub enum TrustDecision {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostKeyMismatch {
-    pub tab_id: TabId,
+    pub scope: RemoteEventScope,
     pub host: String,
     pub port: u16,
     pub expected_fingerprint_sha256: Option<String>,
@@ -1972,6 +2041,13 @@ impl ConflictRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EditSessionId(pub u64);
 
+/// Stable identity for a single authoritative remote-metadata check issued
+/// before an edit upload. UI/core is the sole allocator (`EditSessionStore::
+/// next_check_id`); the runtime and the browsing actor only echo it back so a
+/// delayed result from an earlier retry of the same local save can be rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EditCheckId(pub u64);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RemoteSnapshot {
     pub size: Option<u64>,
@@ -2000,6 +2076,39 @@ impl RemoteSnapshot {
     }
 }
 
+/// Live remote metadata the browsing actor read for an in-flight edit check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteEditSnapshotChecked {
+    pub edit_session_id: EditSessionId,
+    pub check_id: EditCheckId,
+    pub path: RemotePath,
+    pub snapshot: RemoteSnapshot,
+}
+
+/// The browsing actor could not read the remote metadata for an in-flight edit
+/// check. Deletion is treated as indeterminate/unsafe for overwrite, not
+/// "unchanged": the local edit is preserved and retried.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteEditSnapshotCheckFailed {
+    pub edit_session_id: EditSessionId,
+    pub check_id: EditCheckId,
+    pub path: RemotePath,
+    pub error: UserFacingError,
+}
+
+/// The runtime could not route an edit check command to a live actor. Carries
+/// no `SessionId`: it reports that routing never reached a session, so it is
+/// epoch-correlated rather than remote-session-scoped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteEditSnapshotDispatchFailed {
+    pub tab_id: TabId,
+    pub session_epoch: u64,
+    pub edit_session_id: EditSessionId,
+    pub check_id: EditCheckId,
+    pub path: RemotePath,
+    pub error: UserFacingError,
+}
+
 /// The lifecycle phase of a remote-edit session. Every variant is a *live*
 /// (non-terminal) phase: a session is only stored while it is actively being
 /// downloaded, edited, uploaded back, or resolving a remote conflict. A
@@ -2012,6 +2121,11 @@ impl RemoteSnapshot {
 pub enum EditPhase {
     Downloading,
     Editing,
+    /// A live, authoritative remote-metadata check is in flight before upload.
+    /// Treated as a live phase (blocks duplicate dispatch and re-edit) so the
+    /// watcher cannot redispatch a check while one is pending. Both
+    /// `pending_check_id` and `checking_local_mtime` are `Some` only here.
+    CheckingRemote,
     UploadingBack,
     RemoteConflict,
 }
@@ -2036,6 +2150,17 @@ pub struct EditSession {
     pub remote_snapshot: RemoteSnapshot,
     pub local_mtime: Option<Timestamp>,
     pub active_transfer: Option<TransferId>,
+    /// The `EditCheckId` of an in-flight authoritative remote-metadata check,
+    /// set when the phase enters `CheckingRemote` and cleared on every
+    /// transition out of it. Binds a returned result to the exact check that
+    /// initiated it, so a delayed result from an earlier retry of the same
+    /// local save is rejected.
+    pub pending_check_id: Option<EditCheckId>,
+    /// The local-save mtime captured when the check was dispatched. The result
+    /// is only honored if the temp file still carries this exact mtime at
+    /// result time; if the user saved again mid-flight the session reverts and
+    /// rechecks the newer save rather than authorizing a stale result.
+    pub checking_local_mtime: Option<Timestamp>,
     /// Consecutive watcher ticks on which the temp file's metadata could not be
     /// read. A single miss is treated as transient (an editor's atomic save
     /// briefly unlinks the file, `EINTR`, a mount hiccup) and does not tear the
@@ -2066,6 +2191,7 @@ impl EditSession {
 pub struct EditSessionStore {
     sessions: Vec<EditSession>,
     next_id: u64,
+    next_check_id: u64,
 }
 
 impl EditSessionStore {
@@ -2073,12 +2199,23 @@ impl EditSessionStore {
         Self {
             sessions: Vec::new(),
             next_id: 1,
+            next_check_id: 1,
         }
     }
 
     pub fn next_id(&mut self) -> EditSessionId {
         let id = EditSessionId(self.next_id);
         self.next_id += 1;
+        id
+    }
+
+    /// Allocate the next unique edit-check id. UI/core is the sole check-ID
+    /// allocator; the runtime and browsing actor only echo the id back. A
+    /// separate counter from `next_id` keeps the two id spaces distinct even
+    /// though they are different types.
+    pub fn next_check_id(&mut self) -> EditCheckId {
+        let id = EditCheckId(self.next_check_id);
+        self.next_check_id += 1;
         id
     }
 
@@ -2156,6 +2293,18 @@ impl EditSessionStore {
     /// tab's epoch is bumped, so a preserved edit survives a reconnect.
     pub fn update_epoch_for_tab(&mut self, tab_id: TabId, session_epoch: u64) {
         for session in self.sessions.iter_mut().filter(|s| s.tab_id == tab_id) {
+            // A check in flight at reconnect time can never complete: the actor
+            // that owned it is gone. Reset to `Editing` and clear the pending
+            // check so the watcher rediscovers the save and issues a fresh
+            // authoritative check against the new session. `local_mtime` is
+            // preserved as the pre-save baseline so the unchanged save is
+            // detected again. `UploadingBack` is left untouched: that phase is
+            // owned by the transfer lifecycle, which handles its own reconnect.
+            if session.phase == EditPhase::CheckingRemote {
+                session.phase = EditPhase::Editing;
+                session.pending_check_id = None;
+                session.checking_local_mtime = None;
+            }
             session.session_epoch = session_epoch;
         }
     }
@@ -2183,6 +2332,18 @@ impl EditSessionStore {
         self.sessions
             .iter()
             .filter(|s| s.phase == EditPhase::RemoteConflict)
+    }
+
+    /// `CheckingRemote`-phase sessions. Used by the edit watcher's lifecycle
+    /// pass so a session whose temp file is deleted while an authoritative
+    /// remote check is in flight is still reaped. These sessions never
+    /// initiate a new check through the polling loop (duplicate dispatch is
+    /// prevented by construction: `poll_edit_sessions` only dispatches for
+    /// `Editing` sessions), so this iterator is purely for cleanup.
+    pub fn checking_sessions(&self) -> impl Iterator<Item = &EditSession> {
+        self.sessions
+            .iter()
+            .filter(|s| s.phase == EditPhase::CheckingRemote)
     }
 
     /// The distinct `tab_id`s across all registered sessions. Used after a
@@ -2405,13 +2566,15 @@ impl fmt::Display for ErrorCode {
 mod tests {
     use super::AppEvent;
     use super::{
-        AppState, AuthCredential, AuthFingerprint, AuthMethod, AuthMethodKind, ConflictRequest,
-        ConflictRequestId, ConnectionKey, ConnectionPoolIdentity, ConnectionProfile,
-        ConnectionSettings, ConnectionState, DisconnectReason, HostKeyPrompt, LocalPath,
-        MetadataPolicy, ModalRequest, ModalRequestId, ProfileId, RemoteEventScope, RemotePath,
+        AppState, AuthCredential, AuthFingerprint, AuthMethod, AuthMethodKind, ConflictPolicy,
+        ConflictRequest, ConflictRequestId, ConnectionKey, ConnectionPoolIdentity,
+        ConnectionProfile, ConnectionSettings, ConnectionState, DisconnectReason, EditCheckId,
+        EditPhase, EditSessionId, EditSessionStore, HostKeyMismatch, HostKeyPrompt, LocalPath,
+        MetadataPolicy, ModalRequest, ModalRequestId, ProfileId, RemoteEditSnapshotCheckFailed,
+        RemoteEditSnapshotChecked, RemoteEditSnapshotDispatchFailed, RemoteEventScope, RemotePath,
         RemoteScoped, RuntimeBridgeConfig, SecretRef, SessionId, TabId, TabState, Timestamp,
-        TransferDirection, TransferEndpoint, TransferId, TransferPlanId, TrustRequest,
-        TrustRequestId,
+        TransferDirection, TransferEndpoint, TransferId, TransferJob, TransferPlan, TransferPlanId,
+        TransferPlanState, TransferState, TransferStore, TrustRequest, TrustRequestId,
     };
 
     #[test]
@@ -2947,6 +3110,256 @@ mod tests {
     }
 
     #[test]
+    fn transfer_plan_failure_terminalizes_every_published_child() {
+        let now = Timestamp::from_secs_since_epoch(10);
+        let plan_id = TransferPlanId(1);
+        let root_job = super::TransferJob {
+            id: TransferId(1),
+            direction: TransferDirection::Upload,
+            source: TransferEndpoint::Local(LocalPath::new("/tmp/source")),
+            destination: TransferEndpoint::Remote(RemotePath::new("/srv/source")),
+            state: super::TransferState::Planning,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        let plan = super::TransferPlan {
+            id: plan_id,
+            root_job_id: root_job.id,
+            source_root: root_job.source.clone(),
+            destination_root: root_job.destination.clone(),
+            state: super::TransferPlanState::Planning,
+            planned_count: 0,
+            total_bytes: Some(0),
+            child_jobs: Vec::new(),
+            conflict_policy: super::ConflictPolicy::default(),
+        };
+        let child_a = super::TransferJob {
+            id: TransferId(2),
+            state: super::TransferState::Queued,
+            ..root_job.clone()
+        };
+        let child_b = super::TransferJob {
+            id: TransferId(3),
+            state: super::TransferState::Queued,
+            ..root_job.clone()
+        };
+        let error = super::UserFacingError::new(
+            super::ErrorCode::Unknown,
+            "Planning failed",
+            "Could not read the directory.",
+        )
+        .with_retryable(true);
+
+        let mut store = TransferStore::default();
+        store.apply_event(
+            &AppEvent::TransferPlanStarted(super::TransferPlanSnapshot {
+                plan: plan.clone(),
+                root_job: root_job.clone(),
+            }),
+            now,
+        );
+        store.apply_event(
+            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+                plan_id,
+                child_jobs: vec![child_a.clone(), child_b.clone()],
+                planned_count: 2,
+                total_bytes: Some(8),
+            }),
+            now,
+        );
+
+        let applied = store.apply_event(
+            &AppEvent::TransferPlanFailed {
+                plan_id,
+                error: error.clone(),
+            },
+            now,
+        );
+        assert!(applied, "a terminal planning event must change state");
+
+        assert_eq!(
+            store.plans[0].state,
+            super::TransferPlanState::Failed {
+                error: error.clone()
+            }
+        );
+        let expected_job = super::TransferState::Failed {
+            retryable: error.retryable,
+            error: error.clone(),
+        };
+        assert_eq!(store.jobs[0].state, expected_job, "root must be failed");
+        assert_eq!(store.jobs[1].state, expected_job, "child A must be failed");
+        assert_eq!(store.jobs[2].state, expected_job, "child B must be failed");
+
+        assert!(
+            !store.apply_event(
+                &AppEvent::TransferPlanFailed {
+                    plan_id,
+                    error: error.clone()
+                },
+                now
+            ),
+            "replaying a terminal event must be a no-op"
+        );
+    }
+
+    #[test]
+    fn transfer_plan_cancellation_skips_every_published_child() {
+        let now = Timestamp::from_secs_since_epoch(10);
+        let plan_id = TransferPlanId(1);
+        let root_job = super::TransferJob {
+            id: TransferId(1),
+            direction: TransferDirection::Upload,
+            source: TransferEndpoint::Local(LocalPath::new("/tmp/source")),
+            destination: TransferEndpoint::Remote(RemotePath::new("/srv/source")),
+            state: super::TransferState::Planning,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        let plan = super::TransferPlan {
+            id: plan_id,
+            root_job_id: root_job.id,
+            source_root: root_job.source.clone(),
+            destination_root: root_job.destination.clone(),
+            state: super::TransferPlanState::Planning,
+            planned_count: 0,
+            total_bytes: Some(0),
+            child_jobs: Vec::new(),
+            conflict_policy: super::ConflictPolicy::default(),
+        };
+        let child_a = super::TransferJob {
+            id: TransferId(2),
+            state: super::TransferState::Queued,
+            ..root_job.clone()
+        };
+        let child_b = super::TransferJob {
+            id: TransferId(3),
+            state: super::TransferState::Queued,
+            ..root_job.clone()
+        };
+
+        let mut store = TransferStore::default();
+        store.apply_event(
+            &AppEvent::TransferPlanStarted(super::TransferPlanSnapshot {
+                plan: plan.clone(),
+                root_job: root_job.clone(),
+            }),
+            now,
+        );
+        store.apply_event(
+            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+                plan_id,
+                child_jobs: vec![child_a, child_b],
+                planned_count: 2,
+                total_bytes: Some(8),
+            }),
+            now,
+        );
+
+        let applied = store.apply_event(&AppEvent::TransferPlanCancelled { plan_id }, now);
+        assert!(applied, "a terminal planning event must change state");
+
+        assert_eq!(store.plans[0].state, super::TransferPlanState::Cancelled);
+        let skipped = super::TransferState::Skipped;
+        assert_eq!(store.jobs[0].state, skipped, "root must be skipped");
+        assert_eq!(store.jobs[1].state, skipped, "child A must be skipped");
+        assert_eq!(store.jobs[2].state, skipped, "child B must be skipped");
+
+        assert!(
+            !store.apply_event(&AppEvent::TransferPlanCancelled { plan_id }, now),
+            "replaying a terminal event must be a no-op"
+        );
+    }
+
+    #[test]
+    fn transfer_plan_progress_after_terminal_event_is_ignored() {
+        let now = Timestamp::from_secs_since_epoch(10);
+        let plan_id = TransferPlanId(1);
+        let root_job = super::TransferJob {
+            id: TransferId(1),
+            direction: TransferDirection::Upload,
+            source: TransferEndpoint::Local(LocalPath::new("/tmp/source")),
+            destination: TransferEndpoint::Remote(RemotePath::new("/srv/source")),
+            state: super::TransferState::Planning,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        let plan = super::TransferPlan {
+            id: plan_id,
+            root_job_id: root_job.id,
+            source_root: root_job.source.clone(),
+            destination_root: root_job.destination.clone(),
+            state: super::TransferPlanState::Planning,
+            planned_count: 0,
+            total_bytes: Some(0),
+            child_jobs: Vec::new(),
+            conflict_policy: super::ConflictPolicy::default(),
+        };
+        let child_a = super::TransferJob {
+            id: TransferId(2),
+            state: super::TransferState::Queued,
+            ..root_job.clone()
+        };
+        let late_child = super::TransferJob {
+            id: TransferId(99),
+            state: super::TransferState::Queued,
+            ..root_job.clone()
+        };
+
+        let mut store = TransferStore::default();
+        store.apply_event(
+            &AppEvent::TransferPlanStarted(super::TransferPlanSnapshot {
+                plan: plan.clone(),
+                root_job: root_job.clone(),
+            }),
+            now,
+        );
+        store.apply_event(
+            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+                plan_id,
+                child_jobs: vec![child_a],
+                planned_count: 1,
+                total_bytes: Some(4),
+            }),
+            now,
+        );
+        store.apply_event(
+            &AppEvent::TransferPlanFailed {
+                plan_id,
+                error: super::UserFacingError::new(
+                    super::ErrorCode::Unknown,
+                    "Planning failed",
+                    "stop",
+                ),
+            },
+            now,
+        );
+
+        let late_changed = store.apply_event(
+            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+                plan_id,
+                child_jobs: vec![late_child],
+                planned_count: 2,
+                total_bytes: Some(8),
+            }),
+            now,
+        );
+        assert!(
+            !late_changed,
+            "late progress on a terminal plan must be ignored"
+        );
+        assert_eq!(store.plans[0].child_jobs, vec![TransferId(2)]);
+        assert_eq!(store.jobs.len(), 2, "late child must not be inserted");
+        assert_eq!(store.plans[0].planned_count, 1);
+    }
+
+    #[test]
     fn remote_scope_extracts_from_remote_scoped_events() {
         let scope = RemoteEventScope::new(TabId(3), SessionId(7), 2);
 
@@ -2992,6 +3405,22 @@ mod tests {
         assert_eq!(scope.session_id, SessionId(4));
         assert_eq!(scope.session_epoch, 3);
         assert!(event.is_remote_scoped());
+    }
+
+    #[test]
+    fn remote_scope_extracts_from_host_key_mismatch() {
+        let scope = RemoteEventScope::new(TabId(4), SessionId(6), 3);
+        let event = AppEvent::HostKeyMismatch(HostKeyMismatch {
+            scope: scope.clone(),
+            host: "example.com".to_string(),
+            port: 22,
+            expected_fingerprint_sha256: Some("SHA256:expected".to_string()),
+            actual_fingerprint_sha256: "SHA256:actual".to_string(),
+        });
+
+        assert_eq!(event.remote_scope(), Some(scope));
+        assert!(event.is_remote_scoped());
+        assert!(!event.is_transfer_event());
     }
 
     #[test]
@@ -3142,6 +3571,44 @@ mod tests {
         assert!(
             state.should_accept_event(&live_prompt),
             "current host key prompt should be accepted"
+        );
+    }
+
+    #[test]
+    fn app_state_rejects_host_key_mismatch_from_old_session() {
+        let mut state = AppState::new();
+        state.tabs.open_tab(connected_tab(1, 11, 2));
+
+        let event = AppEvent::HostKeyMismatch(HostKeyMismatch {
+            scope: RemoteEventScope::new(TabId(1), SessionId(10), 1),
+            host: "example.com".to_string(),
+            port: 22,
+            expected_fingerprint_sha256: Some("SHA256:expected".to_string()),
+            actual_fingerprint_sha256: "SHA256:actual".to_string(),
+        });
+
+        assert!(
+            !state.should_accept_event(&event),
+            "stale host key mismatch must be rejected"
+        );
+    }
+
+    #[test]
+    fn app_state_accepts_host_key_mismatch_from_current_session() {
+        let mut state = AppState::new();
+        state.tabs.open_tab(connected_tab(1, 11, 2));
+
+        let event = AppEvent::HostKeyMismatch(HostKeyMismatch {
+            scope: RemoteEventScope::new(TabId(1), SessionId(11), 2),
+            host: "example.com".to_string(),
+            port: 22,
+            expected_fingerprint_sha256: Some("SHA256:expected".to_string()),
+            actual_fingerprint_sha256: "SHA256:actual".to_string(),
+        });
+
+        assert!(
+            state.should_accept_event(&event),
+            "current host key mismatch must be accepted"
         );
     }
 
@@ -3425,6 +3892,8 @@ mod tests {
             },
             local_mtime: Some(crate::Timestamp::from_secs_since_epoch(200)),
             active_transfer: None,
+            pending_check_id: None,
+            checking_local_mtime: None,
             missing_ticks: 0,
         }
     }
@@ -3530,6 +3999,116 @@ mod tests {
         );
     }
 
+    #[test]
+    fn remote_edit_snapshot_events_are_remote_scoped() {
+        let scope = RemoteEventScope::new(TabId(1), SessionId(2), 3);
+        let checked = AppEvent::RemoteEditSnapshotChecked(RemoteScoped::new(
+            scope.clone(),
+            RemoteEditSnapshotChecked {
+                edit_session_id: EditSessionId(4),
+                check_id: EditCheckId(5),
+                path: RemotePath::new("/srv/a.txt"),
+                snapshot: crate::RemoteSnapshot {
+                    size: Some(10),
+                    modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+                },
+            },
+        ));
+        let failed = AppEvent::RemoteEditSnapshotCheckFailed(RemoteScoped::new(
+            scope.clone(),
+            RemoteEditSnapshotCheckFailed {
+                edit_session_id: EditSessionId(4),
+                check_id: EditCheckId(5),
+                path: RemotePath::new("/srv/a.txt"),
+                error: crate::UserFacingError::new(
+                    crate::ErrorCode::Unknown,
+                    "Could not check remote file",
+                    "detail",
+                ),
+            },
+        ));
+        let dispatch_failed =
+            AppEvent::RemoteEditSnapshotDispatchFailed(RemoteEditSnapshotDispatchFailed {
+                tab_id: TabId(1),
+                session_epoch: 3,
+                edit_session_id: EditSessionId(4),
+                check_id: EditCheckId(5),
+                path: RemotePath::new("/srv/a.txt"),
+                error: crate::UserFacingError::new(
+                    crate::ErrorCode::Unknown,
+                    "Could not check remote file",
+                    "detail",
+                ),
+            });
+
+        // The two actor outcomes carry the live scope and pass the stale guard.
+        assert_eq!(checked.remote_scope(), Some(scope.clone()));
+        assert!(checked.is_remote_scoped());
+        assert_eq!(failed.remote_scope(), Some(scope.clone()));
+        assert!(failed.is_remote_scoped());
+        // The dispatch failure has no SessionId; it must not be treated as
+        // remote-scoped (it is epoch-correlated instead).
+        assert_eq!(dispatch_failed.remote_scope(), None);
+        assert!(!dispatch_failed.is_remote_scoped());
+        // None of the three are transfer events.
+        assert!(!checked.is_transfer_event());
+        assert!(!failed.is_transfer_event());
+        assert!(!dispatch_failed.is_transfer_event());
+    }
+
+    #[test]
+    fn store_find_active_treats_checking_remote_as_live() {
+        let mut store = EditSessionStore::new();
+        let mut session = sample_edit_session(EditPhase::CheckingRemote);
+        session.id = store.next_id();
+        store.register(session);
+        // find_active matches on (profile_id, remote_path) alone and every
+        // stored session is a live phase, so CheckingRemote must be returned
+        // and block a re-edit of the same file.
+        assert!(
+            store
+                .find_active(crate::ProfileId(1), &crate::RemotePath::new("/srv/a.txt"))
+                .is_some(),
+            "a CheckingRemote session is still an active edit"
+        );
+    }
+
+    #[test]
+    fn store_reconnect_resets_checking_remote_for_retry() {
+        let mut store = EditSessionStore::new();
+        let mut session = sample_edit_session(EditPhase::CheckingRemote);
+        session.id = store.next_id();
+        session.pending_check_id = Some(EditCheckId(9));
+        session.checking_local_mtime = Some(Timestamp::from_secs_since_epoch(200));
+        store.register(session.clone());
+
+        store.update_epoch_for_tab(crate::TabId(1), 2);
+
+        let stored = store
+            .find_active(crate::ProfileId(1), &crate::RemotePath::new("/srv/a.txt"))
+            .expect("session survives reconnect");
+        assert_eq!(
+            stored.phase,
+            EditPhase::Editing,
+            "a CheckingRemote session reverts to Editing on reconnect"
+        );
+        assert_eq!(
+            stored.pending_check_id, None,
+            "pending check id is cleared on reconnect"
+        );
+        assert_eq!(
+            stored.checking_local_mtime, None,
+            "checking local mtime is cleared on reconnect"
+        );
+        assert_eq!(stored.session_epoch, 2, "epoch is bumped on reconnect");
+        // local_mtime baseline is preserved so the unchanged save is re-flagged.
+        assert_eq!(
+            stored.local_mtime,
+            Some(Timestamp::from_secs_since_epoch(200)),
+            "pre-save baseline is preserved"
+        );
+    }
+
     fn store_session(
         id_hint: u64,
         profile: u64,
@@ -3551,6 +4130,8 @@ mod tests {
             },
             local_mtime: None,
             active_transfer: transfer,
+            pending_check_id: None,
+            checking_local_mtime: None,
             missing_ticks: 0,
         }
     }
@@ -3722,5 +4303,132 @@ mod tests {
             1,
             "tab-2 session epoch left untouched"
         );
+    }
+
+    #[test]
+    fn clear_terminal_removes_completed_jobs_and_orphaned_plans() {
+        let mut store = TransferStore {
+            jobs: vec![
+                TransferJob {
+                    id: TransferId(1),
+                    direction: TransferDirection::Upload,
+                    source: TransferEndpoint::Local(LocalPath::new("/tmp/a.txt")),
+                    destination: TransferEndpoint::Remote(RemotePath::new("/srv/a.txt")),
+                    state: TransferState::Completed,
+                    metadata_policy: MetadataPolicy::default(),
+                    conflict_policy: ConflictPolicy::Ask,
+                    warnings: Vec::new(),
+                    created_at: Timestamp::from_secs_since_epoch(0),
+                },
+                TransferJob {
+                    id: TransferId(2),
+                    direction: TransferDirection::Upload,
+                    source: TransferEndpoint::Local(LocalPath::new("/tmp/b.txt")),
+                    destination: TransferEndpoint::Remote(RemotePath::new("/srv/b.txt")),
+                    state: TransferState::Running {
+                        bytes_done: 512,
+                        bytes_total: Some(1024),
+                        started_at: Timestamp::from_secs_since_epoch(0),
+                    },
+                    metadata_policy: MetadataPolicy::default(),
+                    conflict_policy: ConflictPolicy::Ask,
+                    warnings: Vec::new(),
+                    created_at: Timestamp::from_secs_since_epoch(0),
+                },
+            ],
+            plans: vec![TransferPlan {
+                id: TransferPlanId(1),
+                root_job_id: TransferId(1),
+                source_root: TransferEndpoint::Local(LocalPath::new("/tmp")),
+                destination_root: TransferEndpoint::Remote(RemotePath::new("/srv")),
+                state: TransferPlanState::Completed,
+                planned_count: 1,
+                total_bytes: Some(10),
+                child_jobs: vec![TransferId(1)],
+                conflict_policy: ConflictPolicy::Ask,
+            }],
+            pending_conflicts: Vec::new(),
+        };
+
+        let changed = store.clear_terminal();
+        assert!(changed);
+        assert_eq!(store.jobs.len(), 1);
+        assert_eq!(store.jobs[0].id, TransferId(2));
+        assert_eq!(
+            store.plans.len(),
+            0,
+            "orphaned plan should be removed with its last job"
+        );
+    }
+
+    #[test]
+    fn clear_terminal_preserves_plan_with_remaining_jobs() {
+        let mut store = TransferStore {
+            jobs: vec![
+                TransferJob {
+                    id: TransferId(1),
+                    direction: TransferDirection::Upload,
+                    source: TransferEndpoint::Local(LocalPath::new("/tmp/a.txt")),
+                    destination: TransferEndpoint::Remote(RemotePath::new("/srv/a.txt")),
+                    state: TransferState::Completed,
+                    metadata_policy: MetadataPolicy::default(),
+                    conflict_policy: ConflictPolicy::Ask,
+                    warnings: Vec::new(),
+                    created_at: Timestamp::from_secs_since_epoch(0),
+                },
+                TransferJob {
+                    id: TransferId(2),
+                    direction: TransferDirection::Upload,
+                    source: TransferEndpoint::Local(LocalPath::new("/tmp/b.txt")),
+                    destination: TransferEndpoint::Remote(RemotePath::new("/srv/b.txt")),
+                    state: TransferState::Running {
+                        bytes_done: 0,
+                        bytes_total: Some(1024),
+                        started_at: Timestamp::from_secs_since_epoch(0),
+                    },
+                    metadata_policy: MetadataPolicy::default(),
+                    conflict_policy: ConflictPolicy::Ask,
+                    warnings: Vec::new(),
+                    created_at: Timestamp::from_secs_since_epoch(0),
+                },
+            ],
+            plans: vec![TransferPlan {
+                id: TransferPlanId(1),
+                root_job_id: TransferId(9),
+                source_root: TransferEndpoint::Local(LocalPath::new("/tmp")),
+                destination_root: TransferEndpoint::Remote(RemotePath::new("/srv")),
+                state: TransferPlanState::Queued,
+                planned_count: 2,
+                total_bytes: Some(20),
+                child_jobs: vec![TransferId(1), TransferId(2)],
+                conflict_policy: ConflictPolicy::Ask,
+            }],
+            pending_conflicts: Vec::new(),
+        };
+
+        store.clear_terminal();
+        assert_eq!(store.jobs.len(), 1);
+        assert_eq!(store.plans.len(), 1, "plan kept because job 2 still exists");
+    }
+
+    #[test]
+    fn clear_terminal_returns_false_when_nothing_to_clear() {
+        let mut store = TransferStore {
+            jobs: vec![TransferJob {
+                id: TransferId(1),
+                direction: TransferDirection::Upload,
+                source: TransferEndpoint::Local(LocalPath::new("/tmp/a.txt")),
+                destination: TransferEndpoint::Remote(RemotePath::new("/srv/a.txt")),
+                state: TransferState::Queued,
+                metadata_policy: MetadataPolicy::default(),
+                conflict_policy: ConflictPolicy::Ask,
+                warnings: Vec::new(),
+                created_at: Timestamp::from_secs_since_epoch(0),
+            }],
+            plans: Vec::new(),
+            pending_conflicts: Vec::new(),
+        };
+
+        assert!(!store.clear_terminal());
     }
 }

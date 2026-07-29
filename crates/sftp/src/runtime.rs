@@ -4,10 +4,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use macsftp_core::{
-    AppCommand, AppEvent, CommandDispatchError, ErrorCode, FsCommand, FsScope, RemoteEventScope,
-    RemoteOperationFailure, RemoteScoped, RuntimeBridgeConfig, SessionId, TabId, Timestamp,
-    TransferDirection, TransferId, TransferJob, TransferPlanId, TransferPlanSnapshot,
-    TrustDecision, TrustRequestId, UserFacingError,
+    AppCommand, AppEvent, CheckRemoteEditSnapshotCommand, CommandDispatchError, ErrorCode,
+    FsCommand, FsScope, RemoteEditSnapshotDispatchFailed, RemoteEventScope, RemoteOperationFailure,
+    RemoteScoped, RuntimeBridgeConfig, SessionId, TabId, Timestamp, TransferDirection, TransferId,
+    TransferJob, TransferPlanId, TransferPlanSnapshot, TrustDecision, TrustRequestId,
+    UserFacingError,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
@@ -547,30 +548,12 @@ async fn command_dispatch_loop(
                                                 &scope,
                                                 &failure,
                                             );
-                                            let event = match failure {
-                                                crate::physical_connection::ConnectFailure::HostKeyMismatch => None,
-                                                crate::physical_connection::ConnectFailure::TrustRejected => {
-                                                    Some(AppEvent::TabDisconnected(RemoteScoped::new(
-                                                        scope.clone(),
-                                                        macsftp_core::TabDisconnected { reason: macsftp_core::DisconnectReason::UserRequested },
-                                                    )))
-                                                }
-                                                crate::physical_connection::ConnectFailure::TrustTimeout => {
-                                                    Some(AppEvent::TabDisconnected(RemoteScoped::new(
-                                                        scope.clone(),
-                                                        macsftp_core::TabDisconnected { reason: macsftp_core::DisconnectReason::Error(macsftp_core::UserFacingError::new(ErrorCode::Unknown, "Trust prompt timed out", "You did not respond to the host key prompt in time.")) },
-                                                    )))
-                                                }
-                                                crate::physical_connection::ConnectFailure::AuthFailed(_) => None,
-                                                crate::physical_connection::ConnectFailure::Connection(error) => {
-                                                    Some(AppEvent::TabDisconnected(RemoteScoped::new(
-                                                        scope.clone(),
-                                                        macsftp_core::TabDisconnected { reason: macsftp_core::DisconnectReason::Error(error) },
-                                                    )))
-                                                }
-                                            };
-                                            if let Some(event) = event {
-                                                let _ = event_tx_clone.send_async(event).await;
+                                            let event = connection_failure_event(&scope, &failure);
+                                            if let Some(event) = event
+                                                && let Err(send_error) =
+                                                    event_tx_clone.send_async(event).await
+                                            {
+                                                warn!(error = %send_error, "connection lifecycle event dropped");
                                             }
                                         }
                                     }
@@ -582,30 +565,12 @@ async fn command_dispatch_loop(
                                         &scope,
                                         &failure,
                                     );
-                                    let event = match failure {
-                                        crate::physical_connection::ConnectFailure::HostKeyMismatch => None,
-                                        crate::physical_connection::ConnectFailure::TrustRejected => {
-                                            Some(AppEvent::TabDisconnected(RemoteScoped::new(
-                                                scope.clone(),
-                                                macsftp_core::TabDisconnected { reason: macsftp_core::DisconnectReason::UserRequested },
-                                            )))
-                                        }
-                                        crate::physical_connection::ConnectFailure::TrustTimeout => {
-                                            Some(AppEvent::TabDisconnected(RemoteScoped::new(
-                                                scope.clone(),
-                                                macsftp_core::TabDisconnected { reason: macsftp_core::DisconnectReason::Error(macsftp_core::UserFacingError::new(ErrorCode::Unknown, "Trust prompt timed out", "You did not respond to the host key prompt in time.")) },
-                                            )))
-                                        }
-                                        crate::physical_connection::ConnectFailure::AuthFailed(_) => None,
-                                        crate::physical_connection::ConnectFailure::Connection(error) => {
-                                            Some(AppEvent::TabDisconnected(RemoteScoped::new(
-                                                scope.clone(),
-                                                macsftp_core::TabDisconnected { reason: macsftp_core::DisconnectReason::Error(error) },
-                                            )))
-                                        }
-                                    };
-                                    if let Some(event) = event {
-                                        let _ = event_tx_clone.send_async(event).await;
+                                    let event = connection_failure_event(&scope, &failure);
+                                    if let Some(event) = event
+                                        && let Err(send_error) =
+                                            event_tx_clone.send_async(event).await
+                                    {
+                                        warn!(error = %send_error, "connection lifecycle event dropped");
                                     }
                                 }
                                 Err(_) => {
@@ -743,6 +708,15 @@ async fn command_dispatch_loop(
                         )))
                         .await;
                 }
+            }
+
+            Ok(AppCommand::CheckRemoteEditSnapshot(command)) => {
+                // Route the check to the live browsing actor without blocking
+                // GPUI: GPUI only delivered the command into the bounded
+                // runtime bridge. Any failure to reach a live actor is reported
+                // as a dispatch failure so the coordinator can reset the exact
+                // pending check tuple and retry the save.
+                route_check_remote_edit_snapshot(command, &sessions, &event_tx).await;
             }
 
             Ok(AppCommand::StartTransfer(command)) => {
@@ -890,26 +864,25 @@ async fn command_dispatch_loop(
                         retries.remove(&root_job_id);
                     }
                     let Some(connection_rx) = transfer_connection_rx else {
+                        fail_planned_jobs(
+                            &terminal_event_tx,
+                            jobs,
+                            transfer_handoff_error(
+                                "The connected session has no transfer channel.",
+                            ),
+                        )
+                        .await;
                         return;
                     };
                     let Ok(connection) = connection_rx.await else {
-                        for job in jobs {
-                            if terminal_event_tx
-                                .send_async(AppEvent::TransferFailed(macsftp_core::TransferFailure {
-                                    transfer_id: job.id,
-                                    error: UserFacingError::new(
-                                        ErrorCode::ChannelClosed,
-                                        "Could not start transfer",
-                                        "The connected session closed before the transfer acquired its connection.",
-                                    )
-                                    .with_retryable(true),
-                                }))
-                                .await
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
+                        fail_planned_jobs(
+                            &terminal_event_tx,
+                            jobs,
+                            transfer_handoff_error(
+                                "The connected session closed before the transfer acquired its connection.",
+                            ),
+                        )
+                        .await;
                         return;
                     };
                     if let Err(error) = manager_tx
@@ -921,6 +894,16 @@ async fn command_dispatch_loop(
                         .await
                     {
                         warn!(error = %error, "planned transfer could not reach transfer manager");
+                        if let TransferManagerRequest::Enqueue { jobs, .. } = error.0 {
+                            fail_planned_jobs(
+                                &terminal_event_tx,
+                                jobs,
+                                transfer_handoff_error(
+                                    "The transfer manager is no longer running.",
+                                ),
+                            )
+                            .await;
+                        }
                     }
                 }));
             }
@@ -1038,14 +1021,204 @@ impl ProgressThrottle {
     }
 }
 
+/// Build a non-retryable handoff error for a planned transfer that could not
+/// reach the transfer manager or acquire a connection. These jobs have no
+/// `RetryRoute` (they never entered the manager), so surfacing them as
+/// retryable would present a dead Retry control in the UI.
+fn transfer_handoff_error(detail: &'static str) -> UserFacingError {
+    UserFacingError::new(ErrorCode::ChannelClosed, "Could not start transfer", detail)
+}
+
+/// Emit one `TransferFailed` per planned job after a post-planning handoff
+/// failure (no connection available, connection lost, or manager gone).
+///
+/// Planned jobs never entered the transfer manager, so they carry no
+/// `RetryRoute`; the caller passes a non-retryable error. Stops on the first
+/// send error (the event channel is disconnected) rather than silently
+/// dropping the remaining failures.
+async fn fail_planned_jobs(
+    event_tx: &flume::Sender<AppEvent>,
+    jobs: Vec<TransferJob>,
+    error: UserFacingError,
+) {
+    for job in jobs {
+        if let Err(send_error) = event_tx
+            .send_async(AppEvent::TransferFailed(macsftp_core::TransferFailure {
+                transfer_id: job.id,
+                error: error.clone(),
+            }))
+            .await
+        {
+            warn!(error = %send_error, "transfer handoff failure event dropped");
+            return;
+        }
+    }
+}
+
+/// Translate a physical connection failure into the lifecycle event the
+/// runtime would publish for this logical connection attempt.
+///
+/// The logical `scope` is supplied by the caller — it is never read from the
+/// failure, so a pooled handshake shared by several waiters gives each waiter
+/// its own scoped event. `HostKeyMismatch` now emits one non-retryable,
+/// session-scoped `AppEvent::HostKeyMismatch` instead of being dropped.
+fn connection_failure_event(
+    scope: &RemoteEventScope,
+    failure: &crate::physical_connection::ConnectFailure,
+) -> Option<AppEvent> {
+    match failure {
+        crate::physical_connection::ConnectFailure::HostKeyMismatch(details) => Some(
+            crate::physical_connection::host_key_mismatch_event(scope.clone(), details.clone()),
+        ),
+        crate::physical_connection::ConnectFailure::TrustRejected => {
+            Some(AppEvent::TabDisconnected(RemoteScoped::new(
+                scope.clone(),
+                macsftp_core::TabDisconnected {
+                    reason: macsftp_core::DisconnectReason::UserRequested,
+                },
+            )))
+        }
+        crate::physical_connection::ConnectFailure::TrustTimeout => {
+            Some(AppEvent::TabDisconnected(RemoteScoped::new(
+                scope.clone(),
+                macsftp_core::TabDisconnected {
+                    reason: macsftp_core::DisconnectReason::Error(
+                        macsftp_core::UserFacingError::new(
+                            ErrorCode::Unknown,
+                            "Trust prompt timed out",
+                            "You did not respond to the host key prompt in time.",
+                        ),
+                    ),
+                },
+            )))
+        }
+        crate::physical_connection::ConnectFailure::AuthFailed(_) => None,
+        crate::physical_connection::ConnectFailure::Connection(error) => {
+            Some(AppEvent::TabDisconnected(RemoteScoped::new(
+                scope.clone(),
+                macsftp_core::TabDisconnected {
+                    reason: macsftp_core::DisconnectReason::Error(error.clone()),
+                },
+            )))
+        }
+    }
+}
+
+/// Emit a `RemoteEditSnapshotDispatchFailed` when a check command cannot reach
+/// a live actor (missing/stale session, no actor sender, or a full/disconnected
+/// actor queue). The event carries no `SessionId`: routing never reached a
+/// session, so it is epoch-correlated rather than remote-session-scoped. The
+/// coordinator matches it only by the exact `(tab_id, session_epoch,
+/// edit_session_id, check_id, path)` tuple, so an old dispatch failure cannot
+/// reset a replacement check. The `detail` is structural and path-free; the
+/// command path is never logged.
+async fn emit_remote_edit_dispatch_failure(
+    event_tx: &flume::Sender<AppEvent>,
+    command: CheckRemoteEditSnapshotCommand,
+    detail: &'static str,
+) {
+    let error = UserFacingError::new(
+        ErrorCode::ChannelClosed,
+        "Could not check remote file",
+        detail,
+    )
+    .with_retryable(true);
+    if let Err(send_error) = event_tx
+        .send_async(AppEvent::RemoteEditSnapshotDispatchFailed(
+            RemoteEditSnapshotDispatchFailed {
+                tab_id: command.tab_id,
+                session_epoch: command.session_epoch,
+                edit_session_id: command.edit_session_id,
+                check_id: command.check_id,
+                path: command.path,
+                error,
+            },
+        ))
+        .await
+    {
+        warn!(error = %send_error, "remote edit dispatch failure event dropped");
+    }
+}
+
+/// Route `AppCommand::CheckRemoteEditSnapshot` to the live browsing actor.
+///
+/// This is the unit-testable core of the `CheckRemoteEditSnapshot` dispatch
+/// arm: GPUI already delivered the command into the bounded runtime bridge, so
+/// this must not block. Every failure to reach a live actor is reported as a
+/// `RemoteEditSnapshotDispatchFailed` so the coordinator can reset the exact
+/// pending `(tab_id, session_epoch, edit_session_id, check_id, path)` tuple and
+/// retry the save. No fabricated `SessionId`/`RemoteEventScope` is used because
+/// routing never reached a live actor — the event is epoch-correlated, not
+/// remote-session-scoped (see `AppEvent::remote_scope`).
+async fn route_check_remote_edit_snapshot(
+    command: CheckRemoteEditSnapshotCommand,
+    sessions: &HashMap<TabId, RemoteSessionHandle>,
+    event_tx: &flume::Sender<AppEvent>,
+) {
+    let Some(session) = sessions.get(&command.tab_id) else {
+        emit_remote_edit_dispatch_failure(
+            event_tx,
+            command,
+            "Connect to the server before editing remote files.",
+        )
+        .await;
+        return;
+    };
+    if session.session_epoch != command.session_epoch {
+        // Stale command after reconnect: the tab's edit sessions were already
+        // reset to Editing by update_epoch_for_tab, so report the dispatch
+        // failure. The coordinator will no-op it against the new session
+        // (different epoch/check_id) and the watcher re-checks the save.
+        emit_remote_edit_dispatch_failure(
+            event_tx,
+            command,
+            "This edit session's connection changed. Save again to retry.",
+        )
+        .await;
+        return;
+    }
+    let Some(request_tx) = &session.request_tx else {
+        emit_remote_edit_dispatch_failure(
+            event_tx,
+            command,
+            "This session does not support file operations.",
+        )
+        .await;
+        return;
+    };
+    match request_tx.try_send(RemoteSessionRequest::CheckRemoteEditSnapshot {
+        edit_session_id: command.edit_session_id,
+        check_id: command.check_id,
+        path: command.path.clone(),
+    }) {
+        Ok(()) => {}
+        Err(flume::TrySendError::Full(_)) => {
+            emit_remote_edit_dispatch_failure(
+                event_tx,
+                command,
+                "The remote session is busy. Try again.",
+            )
+            .await;
+        }
+        Err(flume::TrySendError::Disconnected(_)) => {
+            emit_remote_edit_dispatch_failure(
+                event_tx,
+                command,
+                "The remote session is no longer available. Reconnect and try again.",
+            )
+            .await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use macsftp_core::{
         AuthCredential, ConflictPolicy, ConnectCommand, ConnectionPoolIdentity, ConnectionSettings,
-        HostKeyDecisionCommand, LocalPath, MetadataPolicy, ProfileId, RemotePath, SessionId,
-        StartTransferCommand, TabId, TransferDirection, TransferEndpoint, TransferId,
-        TransferPlanState, TransferState,
+        EditCheckId, EditSessionId, HostKeyDecisionCommand, LocalPath, MetadataPolicy, ProfileId,
+        RemotePath, SessionId, StartTransferCommand, TabId, TransferDirection, TransferEndpoint,
+        TransferId, TransferPlanState, TransferState,
     };
 
     /// Placeholder settings — the mock backend never dials them.
@@ -1502,6 +1675,242 @@ mod tests {
         std::fs::remove_file(&fixture_path).expect("remove retry planning fixture");
     }
 
+    // ── T1.4: post-planning handoff compensation ───────────────
+    //
+    // All three handoff-failure branches (no connection receiver,
+    // dropped connection responder, closed transfer manager) route
+    // through `fail_planned_jobs`, which emits one non-retryable
+    // `TransferFailed` per planned child job. The core reducer then
+    // cascades the plan + root job to a terminal state via
+    // `finalize_plan_for_job`.
+
+    #[test]
+    fn handoff_without_connection_receiver_fails_all_jobs() {
+        let fixture_path =
+            std::env::temp_dir().join(format!("macsftp-runtime-handoff-{}", std::process::id()));
+        std::fs::write(&fixture_path, b"handoff").expect("write planning fixture");
+
+        let mut controller = RuntimeController::start(
+            RuntimeBridgeConfig::default(),
+            SessionBackend::Mock(MockSessionConfig::default()),
+        );
+        let client = controller.client();
+        let mut events = controller
+            .take_event_receiver()
+            .expect("event receiver should be available once");
+
+        controller.runtime().block_on(async {
+            client
+                .try_send(AppCommand::StartTransfer(StartTransferCommand {
+                    tab_id: TabId(1),
+                    session_epoch: 1,
+                    profile_id: ProfileId(1),
+                    direction: TransferDirection::Upload,
+                    sources: vec![TransferEndpoint::Local(LocalPath::new(
+                        fixture_path.display().to_string(),
+                    ))],
+                    destination: TransferEndpoint::Remote(RemotePath::new("/uploads/handoff.txt")),
+                    metadata_policy: MetadataPolicy::default(),
+                    conflict_policy: ConflictPolicy::default(),
+                }))
+                .expect("start transfer should send");
+
+            let started = recv_timeout(&mut events, "TransferPlanStarted").await;
+            let plan_id = match started {
+                AppEvent::TransferPlanStarted(snapshot) => snapshot.plan.id,
+                other => panic!("expected TransferPlanStarted, got {other:?}"),
+            };
+            let progress = recv_timeout(&mut events, "TransferPlanProgress").await;
+            let child_ids = match progress {
+                AppEvent::TransferPlanProgress(progress) if progress.plan_id == plan_id => progress
+                    .child_jobs
+                    .iter()
+                    .map(|job| job.id)
+                    .collect::<Vec<_>>(),
+                other => panic!("expected TransferPlanProgress, got {other:?}"),
+            };
+            assert!(
+                !child_ids.is_empty(),
+                "planner must publish at least one child job"
+            );
+
+            let _completed = recv_timeout(&mut events, "TransferPlanCompleted").await;
+
+            // No session exists for TabId(1), so the handoff has no transfer
+            // channel. Every published child must be failed exactly once with
+            // a non-retryable error — never left queued forever.
+            let mut failed_ids = Vec::new();
+            for _ in &child_ids {
+                match recv_timeout(&mut events, "TransferFailed").await {
+                    AppEvent::TransferFailed(failure) => {
+                        assert!(
+                            !failure.error.retryable,
+                            "handoff failure must be non-retryable (no dead Retry control)"
+                        );
+                        failed_ids.push(failure.transfer_id);
+                    }
+                    other => panic!("expected TransferFailed, got {other:?}"),
+                }
+            }
+            assert_eq!(
+                failed_ids.len(),
+                child_ids.len(),
+                "every published child must be failed exactly once"
+            );
+            for id in &child_ids {
+                assert!(
+                    failed_ids.contains(id),
+                    "missing failure event for child {id:?}"
+                );
+            }
+        });
+
+        controller.shutdown();
+        std::fs::remove_file(&fixture_path).expect("remove planning fixture");
+    }
+
+    #[test]
+    fn fail_planned_jobs_emits_non_retryable_failure_per_job() {
+        let helper = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("helper runtime");
+
+        helper.block_on(async {
+            let (event_tx, event_rx) = flume::bounded::<AppEvent>(16);
+            let jobs = vec![
+                TransferJob {
+                    id: TransferId(10),
+                    direction: TransferDirection::Upload,
+                    source: TransferEndpoint::Local(LocalPath::new("/a")),
+                    destination: TransferEndpoint::Remote(RemotePath::new("/b")),
+                    state: TransferState::Queued,
+                    metadata_policy: MetadataPolicy::default(),
+                    conflict_policy: ConflictPolicy::default(),
+                    warnings: Vec::new(),
+                    created_at: macsftp_core::Timestamp(std::time::UNIX_EPOCH),
+                },
+                TransferJob {
+                    id: TransferId(11),
+                    direction: TransferDirection::Upload,
+                    source: TransferEndpoint::Local(LocalPath::new("/c")),
+                    destination: TransferEndpoint::Remote(RemotePath::new("/d")),
+                    state: TransferState::Queued,
+                    metadata_policy: MetadataPolicy::default(),
+                    conflict_policy: ConflictPolicy::default(),
+                    warnings: Vec::new(),
+                    created_at: macsftp_core::Timestamp(std::time::UNIX_EPOCH),
+                },
+            ];
+            super::fail_planned_jobs(&event_tx, jobs, super::transfer_handoff_error("test")).await;
+
+            let mut seen = Vec::new();
+            while let Ok(event) = event_rx.try_recv() {
+                match event {
+                    AppEvent::TransferFailed(failure) => {
+                        assert!(
+                            !failure.error.retryable,
+                            "handoff failure must be non-retryable"
+                        );
+                        seen.push(failure.transfer_id);
+                    }
+                    other => panic!("unexpected event: {other:?}"),
+                }
+            }
+            assert_eq!(seen, vec![TransferId(10), TransferId(11)]);
+        });
+
+        helper.shutdown_timeout(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn fail_planned_jobs_stops_when_receiver_disconnected() {
+        let helper = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("helper runtime");
+
+        helper.block_on(async {
+            let (event_tx, event_rx) = flume::bounded::<AppEvent>(16);
+            drop(event_rx); // simulate a disconnected event channel
+            let jobs = vec![TransferJob {
+                id: TransferId(20),
+                direction: TransferDirection::Upload,
+                source: TransferEndpoint::Local(LocalPath::new("/x")),
+                destination: TransferEndpoint::Remote(RemotePath::new("/y")),
+                state: TransferState::Queued,
+                metadata_policy: MetadataPolicy::default(),
+                conflict_policy: ConflictPolicy::default(),
+                warnings: Vec::new(),
+                created_at: macsftp_core::Timestamp(std::time::UNIX_EPOCH),
+            }];
+            // Must return without panicking even though the first send fails.
+            super::fail_planned_jobs(&event_tx, jobs, super::transfer_handoff_error("test")).await;
+        });
+
+        helper.shutdown_timeout(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn pooled_mismatch_failure_uses_first_logical_scope() {
+        let details = crate::physical_connection::HostKeyMismatchDetails {
+            host: "example.com".to_string(),
+            port: 22,
+            expected_fingerprint_sha256: Some("SHA256:expected".to_string()),
+            actual_fingerprint_sha256: "SHA256:actual".to_string(),
+        };
+        let scope = RemoteEventScope::new(TabId(1), SessionId(10), 1);
+        let event = connection_failure_event(
+            &scope,
+            &crate::physical_connection::ConnectFailure::HostKeyMismatch(details),
+        );
+
+        match event {
+            Some(AppEvent::HostKeyMismatch(mismatch)) => {
+                assert_eq!(
+                    mismatch.scope, scope,
+                    "mismatch must carry the logical scope"
+                );
+                assert_eq!(mismatch.actual_fingerprint_sha256, "SHA256:actual");
+                assert_eq!(
+                    mismatch.expected_fingerprint_sha256,
+                    Some("SHA256:expected".to_string())
+                );
+            }
+            other => panic!("expected exactly one scoped HostKeyMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pooled_mismatch_failure_uses_second_logical_scope() {
+        let details = crate::physical_connection::HostKeyMismatchDetails {
+            host: "example.com".to_string(),
+            port: 22,
+            expected_fingerprint_sha256: Some("SHA256:expected".to_string()),
+            actual_fingerprint_sha256: "SHA256:actual".to_string(),
+        };
+        let scope = RemoteEventScope::new(TabId(2), SessionId(20), 3);
+        let event = connection_failure_event(
+            &scope,
+            &crate::physical_connection::ConnectFailure::HostKeyMismatch(details),
+        );
+
+        match event {
+            Some(AppEvent::HostKeyMismatch(mismatch)) => {
+                assert_eq!(
+                    mismatch.scope, scope,
+                    "mismatch must carry the logical scope"
+                );
+                assert_eq!(mismatch.actual_fingerprint_sha256, "SHA256:actual");
+                assert_eq!(
+                    mismatch.expected_fingerprint_sha256,
+                    Some("SHA256:expected".to_string())
+                );
+            }
+            other => panic!("expected exactly one scoped HostKeyMismatch, got {other:?}"),
+        }
+    }
+
     // ── M2c: Mock actor full loop integration tests ───────────────
 
     /// Helper: receive an event within a timeout, panicking if it
@@ -1905,5 +2314,161 @@ mod tests {
         });
 
         controller.shutdown();
+    }
+
+    /// Build a `RemoteSessionHandle` with the given epoch and actor request
+    /// sender. `join` is a no-op spawned task (required by the handle type);
+    /// `session_id` is a dummy because the dispatch-failure path never echoes
+    /// it.
+    fn make_handle(
+        epoch: u64,
+        request_tx: Option<flume::Sender<RemoteSessionRequest>>,
+    ) -> RemoteSessionHandle {
+        RemoteSessionHandle {
+            session_id: SessionId(1),
+            session_epoch: epoch,
+            request_tx,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            join: tokio::spawn(async {}),
+        }
+    }
+
+    /// Asserts a `RemoteEditSnapshotDispatchFailed` matches the command exactly,
+    /// is retryable, and is not remote-session-scoped.
+    fn assert_dispatch_failure(event: AppEvent, command: &CheckRemoteEditSnapshotCommand) {
+        match event {
+            AppEvent::RemoteEditSnapshotDispatchFailed(ref payload) => {
+                assert_eq!(payload.tab_id, command.tab_id);
+                assert_eq!(payload.session_epoch, command.session_epoch);
+                assert_eq!(payload.edit_session_id, command.edit_session_id);
+                assert_eq!(payload.check_id, command.check_id);
+                assert_eq!(payload.path, command.path);
+                assert!(
+                    payload.error.retryable,
+                    "remote edit dispatch failure must be retryable"
+                );
+            }
+            other => panic!("expected RemoteEditSnapshotDispatchFailed, got {other:?}"),
+        }
+        assert_eq!(
+            event.remote_scope(),
+            None,
+            "dispatch failure is epoch-correlated, not remote-session-scoped"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_edit_check_missing_session_emits_failure() {
+        // No session exists for the tab — routing never reached an actor.
+        let (event_tx, event_rx) = flume::bounded(8);
+        let sessions: HashMap<TabId, RemoteSessionHandle> = HashMap::new();
+
+        let command = CheckRemoteEditSnapshotCommand {
+            tab_id: TabId(1),
+            session_epoch: 5,
+            edit_session_id: EditSessionId(7),
+            check_id: EditCheckId(9),
+            path: RemotePath::new("/srv/file.txt"),
+        };
+
+        route_check_remote_edit_snapshot(command.clone(), &sessions, &event_tx).await;
+
+        let event = event_rx
+            .recv_async()
+            .await
+            .expect("a dispatch failure event should be emitted for a missing session");
+        assert_dispatch_failure(event, &command);
+    }
+
+    #[tokio::test]
+    async fn remote_edit_check_stale_epoch_emits_failure() {
+        // The session exists but with a newer epoch than the command — the
+        // command is stale after a reconnect and must not reach the actor.
+        let (event_tx, event_rx) = flume::bounded(8);
+        let (request_tx, request_rx) = flume::bounded(16);
+        let mut sessions: HashMap<TabId, RemoteSessionHandle> = HashMap::new();
+        sessions.insert(TabId(1), make_handle(5, Some(request_tx)));
+        // Keep the receiver alive so the session still looks connected.
+        let _rx = request_rx;
+
+        let command = CheckRemoteEditSnapshotCommand {
+            tab_id: TabId(1),
+            session_epoch: 4,
+            edit_session_id: EditSessionId(7),
+            check_id: EditCheckId(9),
+            path: RemotePath::new("/srv/file.txt"),
+        };
+
+        route_check_remote_edit_snapshot(command.clone(), &sessions, &event_tx).await;
+
+        let event = event_rx
+            .recv_async()
+            .await
+            .expect("a dispatch failure event should be emitted for a stale epoch");
+        assert_dispatch_failure(event, &command);
+    }
+
+    #[tokio::test]
+    async fn remote_edit_check_full_actor_queue_emits_failure() {
+        // The actor mailbox is full (bounded capacity 1, one item buffered and
+        // never consumed), so the non-blocking try_send must report Full.
+        let (event_tx, event_rx) = flume::bounded(8);
+        let (request_tx, request_rx) = flume::bounded(1);
+        request_tx
+            .try_send(RemoteSessionRequest::CheckRemoteEditSnapshot {
+                edit_session_id: EditSessionId(7),
+                check_id: EditCheckId(9),
+                path: RemotePath::new("/srv/file.txt"),
+            })
+            .expect("fill the single-slot actor queue");
+        // Receiver stays alive so the channel is full but still connected.
+        let _rx = request_rx;
+
+        let mut sessions: HashMap<TabId, RemoteSessionHandle> = HashMap::new();
+        sessions.insert(TabId(1), make_handle(5, Some(request_tx)));
+
+        let command = CheckRemoteEditSnapshotCommand {
+            tab_id: TabId(1),
+            session_epoch: 5,
+            edit_session_id: EditSessionId(7),
+            check_id: EditCheckId(9),
+            path: RemotePath::new("/srv/file.txt"),
+        };
+
+        route_check_remote_edit_snapshot(command.clone(), &sessions, &event_tx).await;
+
+        let event = event_rx
+            .recv_async()
+            .await
+            .expect("a dispatch failure event should be emitted for a full actor queue");
+        assert_dispatch_failure(event, &command);
+    }
+
+    #[tokio::test]
+    async fn remote_edit_check_disconnected_actor_queue_emits_failure() {
+        // The actor mailbox sender is disconnected (receiver dropped), so the
+        // non-blocking try_send must report Disconnected.
+        let (event_tx, event_rx) = flume::bounded(8);
+        let (request_tx, request_rx) = flume::bounded(1);
+        drop(request_rx);
+
+        let mut sessions: HashMap<TabId, RemoteSessionHandle> = HashMap::new();
+        sessions.insert(TabId(1), make_handle(5, Some(request_tx)));
+
+        let command = CheckRemoteEditSnapshotCommand {
+            tab_id: TabId(1),
+            session_epoch: 5,
+            edit_session_id: EditSessionId(7),
+            check_id: EditCheckId(9),
+            path: RemotePath::new("/srv/file.txt"),
+        };
+
+        route_check_remote_edit_snapshot(command.clone(), &sessions, &event_tx).await;
+
+        let event = event_rx
+            .recv_async()
+            .await
+            .expect("a dispatch failure event should be emitted for a disconnected actor queue");
+        assert_dispatch_failure(event, &command);
     }
 }

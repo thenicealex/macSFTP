@@ -7,8 +7,8 @@ use gpui::{
 };
 use macsftp_core::{
     AppCommand, AppState, CommandDispatchError, ConnectCommand, ConnectionPoolIdentity,
-    ConnectionSettings, ConnectionState, EntryPath, LocalPath, ProfileId, RemotePath,
-    RemoteSnapshot, TabId, TabState, WindowSessionId,
+    ConnectionSettings, ConnectionState, EntryPath, LocalPath, ProfileId, RemoteEventScope,
+    RemotePath, RemoteSnapshot, TabId, TabState, WindowSessionId,
 };
 use macsftp_sftp::RuntimeClient;
 use macsftp_storage::{
@@ -707,6 +707,13 @@ impl Workspace {
                 && !tab.remote.is_refreshing
         })
     }
+    /// Whether this window owns the tab referenced by `scope` and that tab's
+    /// session is still live at `scope`'s epoch. Used by the process-wide
+    /// coordinator (Task 5) to resolve which window owns an authoritative
+    /// edit-check result before applying it exactly once.
+    pub(crate) fn accepts_remote_scope(&self, scope: &RemoteEventScope) -> bool {
+        self.state.tabs.accepts_remote_event(scope)
+    }
     /// The ids of every tab this window currently holds. Used after a window
     /// closes to garbage-collect edit sessions whose owning tab no longer
     /// exists in any window.
@@ -715,8 +722,11 @@ impl Workspace {
     }
     /// The most recent remote `(size, mtime)` for `remote_path` from the tab's
     /// existing directory listing, or `None` when the tab or entry is absent.
-    /// This is the zero-round-trip "current remote snapshot" the watcher uses
-    /// to detect that someone else changed the file since it was opened.
+    /// Read-side counterpart to [`Self::sync_remote_entry_snapshot`]: the
+    /// authoritative edit-check (PR 3) no longer consults the cached listing,
+    /// so this helper now exists mainly so the upload-back rebase round-trip
+    /// can be asserted in tests.
+    #[allow(dead_code)]
     pub(crate) fn remote_entry_snapshot(
         &self,
         tab_id: TabId,

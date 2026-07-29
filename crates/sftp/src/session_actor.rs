@@ -5,11 +5,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use macsftp_core::{
-    AppEvent, ConflictDecision, ConflictPolicy, ConflictRequestId, ErrorCode, FileKind, FsOp,
-    FsPath, FsScope, LocalPath, RemoteDirLoading, RemoteDirSnapshot, RemoteEntry, RemoteEventScope,
-    RemoteOperationFailure, RemotePath, RemoteScoped, RenameStrategy, ResidualTempRecord,
-    SessionId, StartTransferCommand, TabId, Timestamp, TransferConflictPrompt, TransferDirection,
-    TransferEndpoint, TransferFailure, TransferId, TransferJob, TransferPlanId,
+    AppEvent, ConflictDecision, ConflictPolicy, ConflictRequestId, EditCheckId, EditSessionId,
+    ErrorCode, FileKind, FsOp, FsPath, FsScope, LocalPath, RemoteDirLoading, RemoteDirSnapshot,
+    RemoteEditSnapshotCheckFailed, RemoteEditSnapshotChecked, RemoteEntry, RemoteEventScope,
+    RemoteOperationFailure, RemotePath, RemoteScoped, RemoteSnapshot, RenameStrategy,
+    ResidualTempRecord, SessionId, StartTransferCommand, TabId, Timestamp, TransferConflictPrompt,
+    TransferDirection, TransferEndpoint, TransferFailure, TransferId, TransferJob, TransferPlanId,
     TransferPlanProgress, TransferProgress, TransferSnapshot, TransferState, TransferWarning,
     UserFacingError,
 };
@@ -124,6 +125,15 @@ pub enum RemoteSessionRequest {
         scope: FsScope,
         op: FsOp,
         refresh_path: RemotePath,
+    },
+    /// Authoritative remote-metadata check for an in-flight edit upload. The
+    /// actor reads `symlink_metadata(path)` and emits a scoped
+    /// `RemoteEditSnapshotChecked`/`CheckFailed`; no responder is needed
+    /// because the actor owns `event_tx` and attaches its own live scope.
+    CheckRemoteEditSnapshot {
+        edit_session_id: EditSessionId,
+        check_id: EditCheckId,
+        path: RemotePath,
     },
 }
 
@@ -640,6 +650,59 @@ impl RemoteSessionActor {
                                 scope: fs_scope,
                                 failure,
                             })
+                            .await;
+                    }
+                }
+            }
+            RemoteSessionRequest::CheckRemoteEditSnapshot {
+                edit_session_id,
+                check_id,
+                path,
+            } => {
+                // Authoritative live read: a stale UI directory listing must
+                // never authorize overwriting a concurrent remote change, so
+                // the actor stats the exact path immediately before the save
+                // upload. The actor owns the live scope, so the result is
+                // remote-session-scoped for the coordinator's stale guard.
+                match self.sftp.symlink_metadata(path.as_str()).await {
+                    Ok(metadata) => {
+                        let snapshot = remote_snapshot_from_metadata(&metadata);
+                        let _ = self
+                            .event_tx
+                            .send_async(AppEvent::RemoteEditSnapshotChecked(RemoteScoped::new(
+                                scope.clone(),
+                                RemoteEditSnapshotChecked {
+                                    edit_session_id,
+                                    check_id,
+                                    path,
+                                    snapshot,
+                                },
+                            )))
+                            .await;
+                    }
+                    Err(error) => {
+                        // A stat failure (NoSuchFile included) is
+                        // indeterminate: the remote file may have been deleted
+                        // or changed, so overwriting it is unsafe. Report a
+                        // retryable failure so the coordinator keeps the local
+                        // edit instead of authorizing an upload.
+                        warn!(error = %error, "remote edit snapshot check failed");
+                        let _ = self
+                            .event_tx
+                            .send_async(AppEvent::RemoteEditSnapshotCheckFailed(RemoteScoped::new(
+                                scope.clone(),
+                                RemoteEditSnapshotCheckFailed {
+                                    edit_session_id,
+                                    check_id,
+                                    path,
+                                    error: UserFacingError::new(
+                                        ErrorCode::Unknown,
+                                        "Could not check remote file",
+                                        "The remote server returned an error while reading the file metadata.",
+                                    )
+                                    .with_retryable(true),
+                                },
+                            )))
                             .await;
                     }
                 }
@@ -2624,6 +2687,20 @@ fn remote_entry_from_dir_entry(entry: DirEntry) -> RemoteEntry {
         // Resolving symlink targets is deliberately a separate operation;
         // listing must not add one network round trip per entry.
         link_target: None,
+    }
+}
+
+/// Convert a live SFTP `Metadata` into a core `RemoteSnapshot` for the
+/// authoritative edit-check comparison. `symlink_metadata` (not `metadata`)
+/// is used by the caller so a symlink is reported as a link rather than
+/// silently dereferenced. `mtime` is whole-second, matching what a later
+/// directory listing would report.
+fn remote_snapshot_from_metadata(metadata: &russh_sftp::client::fs::Metadata) -> RemoteSnapshot {
+    RemoteSnapshot {
+        size: metadata.size,
+        modified_at: metadata
+            .mtime
+            .map(|seconds| Timestamp::from_secs_since_epoch(seconds.into())),
     }
 }
 

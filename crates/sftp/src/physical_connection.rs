@@ -23,15 +23,23 @@ pub fn lock_store(store: &Mutex<KnownHostsStore>) -> MutexGuard<'_, KnownHostsSt
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostKeyMismatchDetails {
+    pub host: String,
+    pub port: u16,
+    pub expected_fingerprint_sha256: Option<String>,
+    pub actual_fingerprint_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostKeyRejection {
-    Mismatch,
+    Mismatch(HostKeyMismatchDetails),
     UserRejected,
     PromptTimeout,
 }
 
 #[derive(Debug, Clone)]
 pub enum ConnectFailure {
-    HostKeyMismatch,
+    HostKeyMismatch(HostKeyMismatchDetails),
     TrustRejected,
     TrustTimeout,
     AuthFailed(AuthFailure),
@@ -114,17 +122,14 @@ impl client::Handler for ClientHandler {
                 );
                 let expected =
                     lock_store(&self.known_hosts).expected_fingerprint(&self.host, self.port);
-                let _ = self
-                    .event_tx
-                    .send_async(AppEvent::HostKeyMismatch(HostKeyMismatch {
-                        tab_id: self.scope.tab_id,
-                        host: self.host.clone(),
-                        port: self.port,
-                        expected_fingerprint_sha256: expected,
-                        actual_fingerprint_sha256: fingerprint_sha256(server_key),
-                    }))
-                    .await;
-                self.record_rejection(HostKeyRejection::Mismatch);
+                let actual = fingerprint_sha256(server_key);
+                let details = HostKeyMismatchDetails {
+                    host: self.host.clone(),
+                    port: self.port,
+                    expected_fingerprint_sha256: expected,
+                    actual_fingerprint_sha256: actual,
+                };
+                self.record_rejection(HostKeyRejection::Mismatch(details));
                 Ok::<bool, russh::Error>(false)
             }
             HostKeyCheckResult::NotFound => {
@@ -569,7 +574,9 @@ pub async fn establish_physical_connection(
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .take();
             return Err(match recorded {
-                Some(HostKeyRejection::Mismatch) => ConnectFailure::HostKeyMismatch,
+                Some(HostKeyRejection::Mismatch(details)) => {
+                    ConnectFailure::HostKeyMismatch(details)
+                }
                 Some(HostKeyRejection::UserRejected) => ConnectFailure::TrustRejected,
                 Some(HostKeyRejection::PromptTimeout) => ConnectFailure::TrustTimeout,
                 None => ConnectFailure::Connection(connection_error(
@@ -586,6 +593,24 @@ pub async fn establish_physical_connection(
     Ok(handle)
 }
 
+/// Translate physical handshake mismatch details into a logical,
+/// session-scoped `AppEvent`. Each logical caller supplies its own
+/// authoritative `RemoteEventScope`; the physical `HostKeyMismatchDetails`
+/// are scope-free so they can be cloned for every waiter on a pooled
+/// handshake without collapsing their identities to the first caller.
+pub fn host_key_mismatch_event(
+    scope: RemoteEventScope,
+    details: HostKeyMismatchDetails,
+) -> AppEvent {
+    AppEvent::HostKeyMismatch(HostKeyMismatch {
+        scope,
+        host: details.host,
+        port: details.port,
+        expected_fingerprint_sha256: details.expected_fingerprint_sha256,
+        actual_fingerprint_sha256: details.actual_fingerprint_sha256,
+    })
+}
+
 pub fn log_connect_failure(
     host: &str,
     port: u16,
@@ -593,7 +618,7 @@ pub fn log_connect_failure(
     failure: &ConnectFailure,
 ) {
     match failure {
-        ConnectFailure::HostKeyMismatch => {
+        ConnectFailure::HostKeyMismatch(_) => {
             warn!(
                 target: "macsftp_sftp::connection",
                 host,
@@ -675,9 +700,11 @@ mod tests {
     use ssh_key::{Algorithm, HashAlg};
 
     use super::{
-        TransportFailureKind, client_config, connection_error, legacy_rsa_host_key_bits,
-        private_key_file_name, sftp_connection_error, validate_private_key_algorithm,
+        AppEvent, HostKeyMismatchDetails, TransportFailureKind, client_config, connection_error,
+        host_key_mismatch_event, legacy_rsa_host_key_bits, private_key_file_name,
+        sftp_connection_error, validate_private_key_algorithm,
     };
+    use macsftp_core::{RemoteEventScope, SessionId, TabId};
 
     #[test]
     fn connection_error_does_not_copy_untrusted_technical_detail() {
@@ -776,6 +803,35 @@ mod tests {
         .expect("static RSA host-key diagnostic vector must parse");
 
         assert_eq!(legacy_rsa_host_key_bits(&public_key), Some(1024));
+    }
+
+    #[test]
+    fn host_key_mismatch_event_uses_logical_scope() {
+        let scope = RemoteEventScope::new(TabId(7), SessionId(3), 2);
+        let details = HostKeyMismatchDetails {
+            host: "example.com".to_string(),
+            port: 22,
+            expected_fingerprint_sha256: Some("SHA256:expected".to_string()),
+            actual_fingerprint_sha256: "SHA256:actual".to_string(),
+        };
+        let event = host_key_mismatch_event(scope.clone(), details.clone());
+
+        match event {
+            AppEvent::HostKeyMismatch(mismatch) => {
+                assert_eq!(mismatch.scope, scope, "event must carry the logical scope");
+                assert_eq!(mismatch.host, details.host);
+                assert_eq!(mismatch.port, details.port);
+                assert_eq!(
+                    mismatch.expected_fingerprint_sha256,
+                    details.expected_fingerprint_sha256
+                );
+                assert_eq!(
+                    mismatch.actual_fingerprint_sha256,
+                    details.actual_fingerprint_sha256
+                );
+            }
+            other => panic!("expected HostKeyMismatch, got {other:?}"),
+        }
     }
 
     #[test]
