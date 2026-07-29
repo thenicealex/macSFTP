@@ -448,6 +448,8 @@ mod tests {
                 },
                 local_mtime: None,
                 active_transfer: Some(transfer_id),
+                pending_check_id: None,
+                checking_local_mtime: None,
                 missing_ticks: 0,
             };
             cx.resources_mut().edit_sessions.register(session);
@@ -505,6 +507,8 @@ mod tests {
                 remote_snapshot: baseline,
                 local_mtime: Some(now),
                 active_transfer: Some(transfer_id),
+                pending_check_id: None,
+                checking_local_mtime: None,
                 missing_ticks: 0,
             };
             cx.resources_mut().edit_sessions.register(session);

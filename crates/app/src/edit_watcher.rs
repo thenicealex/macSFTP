@@ -376,6 +376,8 @@ mod tests {
                 remote_snapshot: snapshot,
                 local_mtime,
                 active_transfer: None,
+                pending_check_id: None,
+                checking_local_mtime: None,
                 missing_ticks: 0,
             });
             id

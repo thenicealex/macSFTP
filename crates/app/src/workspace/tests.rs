@@ -2122,6 +2122,8 @@ mod tests {
                 },
                 local_mtime: None,
                 active_transfer: None,
+                pending_check_id: None,
+                checking_local_mtime: None,
                 missing_ticks: 0,
             });
             (session_id, temp_path)
@@ -2195,6 +2197,8 @@ mod tests {
                 },
                 local_mtime: None,
                 active_transfer: None,
+                pending_check_id: None,
+                checking_local_mtime: None,
                 missing_ticks: 0,
             });
             id
@@ -2636,6 +2640,8 @@ mod tests {
                 },
                 local_mtime: None,
                 active_transfer: None,
+                pending_check_id: None,
+                checking_local_mtime: None,
                 missing_ticks: 0,
             });
             id
@@ -3049,6 +3055,8 @@ mod tests {
                 remote_snapshot: snapshot,
                 local_mtime: None,
                 active_transfer: None,
+                pending_check_id: None,
+                checking_local_mtime: None,
                 missing_ticks: 0,
             });
             id
@@ -5156,6 +5164,8 @@ mod tests {
                 },
                 local_mtime: None,
                 active_transfer: None,
+                pending_check_id: None,
+                checking_local_mtime: None,
                 missing_ticks: 0,
             });
             id
@@ -5208,6 +5218,8 @@ mod tests {
                 },
                 local_mtime: None,
                 active_transfer: None,
+                pending_check_id: None,
+                checking_local_mtime: None,
                 missing_ticks: 0,
             });
             id

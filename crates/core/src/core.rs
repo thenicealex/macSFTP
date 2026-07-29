@@ -1575,6 +1575,11 @@ pub enum AppCommand {
     /// Create / rename / delete for local or remote (phase 1).
     Fs(FsCommand),
     StartTransfer(StartTransferCommand),
+    /// Check live remote metadata immediately before an edit upload so a stale
+    /// UI directory listing cannot authorize overwriting a concurrent remote
+    /// change. Routed to the connected browsing actor for `tab_id`; the actor
+    /// echoes back `edit_session_id` + `check_id` with its live scope.
+    CheckRemoteEditSnapshot(CheckRemoteEditSnapshotCommand),
     CancelTransfer {
         transfer_id: TransferId,
     },
@@ -1619,6 +1624,15 @@ pub struct StartTransferCommand {
     pub destination: TransferEndpoint,
     pub metadata_policy: MetadataPolicy,
     pub conflict_policy: ConflictPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckRemoteEditSnapshotCommand {
+    pub tab_id: TabId,
+    pub session_epoch: u64,
+    pub edit_session_id: EditSessionId,
+    pub check_id: EditCheckId,
+    pub path: RemotePath,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1693,6 +1707,21 @@ pub enum AppEvent {
         transfer_id: TransferId,
         path: String,
     },
+    /// Live remote metadata for an edit session's path, read by the browsing
+    /// actor immediately before upload. Carries the actor's live
+    /// `(tab_id, session_id, session_epoch)` scope so the coordinator's stale
+    /// guard applies.
+    RemoteEditSnapshotChecked(RemoteScoped<RemoteEditSnapshotChecked>),
+    /// The actor could not read the remote metadata (missing file, permission,
+    /// transport). Also scoped: a stale scope must not surface a conflict for a
+    /// replacement session.
+    RemoteEditSnapshotCheckFailed(RemoteScoped<RemoteEditSnapshotCheckFailed>),
+    /// The runtime could not even route the check command to a live actor
+    /// (missing/stale session, full/disconnected queue). No legitimate
+    /// `SessionId` exists here, so this is epoch-correlated rather than
+    /// remote-session-scoped: the coordinator matches it only by the exact
+    /// `tab_id`/`session_epoch`/`edit_session_id`/`check_id`/`path` tuple.
+    RemoteEditSnapshotDispatchFailed(RemoteEditSnapshotDispatchFailed),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1736,6 +1765,13 @@ impl AppEvent {
                 prompt.session_epoch,
             )),
             Self::HostKeyMismatch(mismatch) => Some(mismatch.scope.clone()),
+            // Both authoritative edit-check outcomes carry the actor's live
+            // scope, so a stale scope must not advance or conflict a
+            // replacement session. `RemoteEditSnapshotDispatchFailed` is
+            // intentionally excluded: no SessionId exists when routing never
+            // reached a live actor, so it is epoch-correlated instead.
+            Self::RemoteEditSnapshotChecked(scoped) => Some(scoped.scope.clone()),
+            Self::RemoteEditSnapshotCheckFailed(scoped) => Some(scoped.scope.clone()),
             // FsOperationFailed is filtered in the app by tab_id + epoch
             // (FsScope has no session_id, so it cannot use the full remote
             // guard without a false SessionId).
@@ -2005,6 +2041,13 @@ impl ConflictRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EditSessionId(pub u64);
 
+/// Stable identity for a single authoritative remote-metadata check issued
+/// before an edit upload. UI/core is the sole allocator (`EditSessionStore::
+/// next_check_id`); the runtime and the browsing actor only echo it back so a
+/// delayed result from an earlier retry of the same local save can be rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EditCheckId(pub u64);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RemoteSnapshot {
     pub size: Option<u64>,
@@ -2033,6 +2076,39 @@ impl RemoteSnapshot {
     }
 }
 
+/// Live remote metadata the browsing actor read for an in-flight edit check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteEditSnapshotChecked {
+    pub edit_session_id: EditSessionId,
+    pub check_id: EditCheckId,
+    pub path: RemotePath,
+    pub snapshot: RemoteSnapshot,
+}
+
+/// The browsing actor could not read the remote metadata for an in-flight edit
+/// check. Deletion is treated as indeterminate/unsafe for overwrite, not
+/// "unchanged": the local edit is preserved and retried.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteEditSnapshotCheckFailed {
+    pub edit_session_id: EditSessionId,
+    pub check_id: EditCheckId,
+    pub path: RemotePath,
+    pub error: UserFacingError,
+}
+
+/// The runtime could not route an edit check command to a live actor. Carries
+/// no `SessionId`: it reports that routing never reached a session, so it is
+/// epoch-correlated rather than remote-session-scoped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteEditSnapshotDispatchFailed {
+    pub tab_id: TabId,
+    pub session_epoch: u64,
+    pub edit_session_id: EditSessionId,
+    pub check_id: EditCheckId,
+    pub path: RemotePath,
+    pub error: UserFacingError,
+}
+
 /// The lifecycle phase of a remote-edit session. Every variant is a *live*
 /// (non-terminal) phase: a session is only stored while it is actively being
 /// downloaded, edited, uploaded back, or resolving a remote conflict. A
@@ -2045,6 +2121,11 @@ impl RemoteSnapshot {
 pub enum EditPhase {
     Downloading,
     Editing,
+    /// A live, authoritative remote-metadata check is in flight before upload.
+    /// Treated as a live phase (blocks duplicate dispatch and re-edit) so the
+    /// watcher cannot redispatch a check while one is pending. Both
+    /// `pending_check_id` and `checking_local_mtime` are `Some` only here.
+    CheckingRemote,
     UploadingBack,
     RemoteConflict,
 }
@@ -2069,6 +2150,17 @@ pub struct EditSession {
     pub remote_snapshot: RemoteSnapshot,
     pub local_mtime: Option<Timestamp>,
     pub active_transfer: Option<TransferId>,
+    /// The `EditCheckId` of an in-flight authoritative remote-metadata check,
+    /// set when the phase enters `CheckingRemote` and cleared on every
+    /// transition out of it. Binds a returned result to the exact check that
+    /// initiated it, so a delayed result from an earlier retry of the same
+    /// local save is rejected.
+    pub pending_check_id: Option<EditCheckId>,
+    /// The local-save mtime captured when the check was dispatched. The result
+    /// is only honored if the temp file still carries this exact mtime at
+    /// result time; if the user saved again mid-flight the session reverts and
+    /// rechecks the newer save rather than authorizing a stale result.
+    pub checking_local_mtime: Option<Timestamp>,
     /// Consecutive watcher ticks on which the temp file's metadata could not be
     /// read. A single miss is treated as transient (an editor's atomic save
     /// briefly unlinks the file, `EINTR`, a mount hiccup) and does not tear the
@@ -2099,6 +2191,7 @@ impl EditSession {
 pub struct EditSessionStore {
     sessions: Vec<EditSession>,
     next_id: u64,
+    next_check_id: u64,
 }
 
 impl EditSessionStore {
@@ -2106,12 +2199,23 @@ impl EditSessionStore {
         Self {
             sessions: Vec::new(),
             next_id: 1,
+            next_check_id: 1,
         }
     }
 
     pub fn next_id(&mut self) -> EditSessionId {
         let id = EditSessionId(self.next_id);
         self.next_id += 1;
+        id
+    }
+
+    /// Allocate the next unique edit-check id. UI/core is the sole check-ID
+    /// allocator; the runtime and browsing actor only echo the id back. A
+    /// separate counter from `next_id` keeps the two id spaces distinct even
+    /// though they are different types.
+    pub fn next_check_id(&mut self) -> EditCheckId {
+        let id = EditCheckId(self.next_check_id);
+        self.next_check_id += 1;
         id
     }
 
@@ -2189,6 +2293,18 @@ impl EditSessionStore {
     /// tab's epoch is bumped, so a preserved edit survives a reconnect.
     pub fn update_epoch_for_tab(&mut self, tab_id: TabId, session_epoch: u64) {
         for session in self.sessions.iter_mut().filter(|s| s.tab_id == tab_id) {
+            // A check in flight at reconnect time can never complete: the actor
+            // that owned it is gone. Reset to `Editing` and clear the pending
+            // check so the watcher rediscovers the save and issues a fresh
+            // authoritative check against the new session. `local_mtime` is
+            // preserved as the pre-save baseline so the unchanged save is
+            // detected again. `UploadingBack` is left untouched: that phase is
+            // owned by the transfer lifecycle, which handles its own reconnect.
+            if session.phase == EditPhase::CheckingRemote {
+                session.phase = EditPhase::Editing;
+                session.pending_check_id = None;
+                session.checking_local_mtime = None;
+            }
             session.session_epoch = session_epoch;
         }
     }
@@ -2440,12 +2556,13 @@ mod tests {
     use super::{
         AppState, AuthCredential, AuthFingerprint, AuthMethod, AuthMethodKind, ConflictPolicy,
         ConflictRequest, ConflictRequestId, ConnectionKey, ConnectionPoolIdentity,
-        ConnectionProfile, ConnectionSettings, ConnectionState, DisconnectReason, HostKeyMismatch,
-        HostKeyPrompt, LocalPath, MetadataPolicy, ModalRequest, ModalRequestId, ProfileId,
-        RemoteEventScope, RemotePath, RemoteScoped, RuntimeBridgeConfig, SecretRef, SessionId,
-        TabId, TabState, Timestamp, TransferDirection, TransferEndpoint, TransferId, TransferJob,
-        TransferPlan, TransferPlanId, TransferPlanState, TransferState, TransferStore,
-        TrustRequest, TrustRequestId,
+        ConnectionProfile, ConnectionSettings, ConnectionState, DisconnectReason, EditCheckId,
+        EditPhase, EditSessionId, EditSessionStore, HostKeyMismatch, HostKeyPrompt, LocalPath,
+        MetadataPolicy, ModalRequest, ModalRequestId, ProfileId, RemoteEditSnapshotCheckFailed,
+        RemoteEditSnapshotChecked, RemoteEditSnapshotDispatchFailed, RemoteEventScope, RemotePath,
+        RemoteScoped, RuntimeBridgeConfig, SecretRef, SessionId, TabId, TabState, Timestamp,
+        TransferDirection, TransferEndpoint, TransferId, TransferJob, TransferPlan, TransferPlanId,
+        TransferPlanState, TransferState, TransferStore, TrustRequest, TrustRequestId,
     };
 
     #[test]
@@ -3763,6 +3880,8 @@ mod tests {
             },
             local_mtime: Some(crate::Timestamp::from_secs_since_epoch(200)),
             active_transfer: None,
+            pending_check_id: None,
+            checking_local_mtime: None,
             missing_ticks: 0,
         }
     }
@@ -3868,6 +3987,116 @@ mod tests {
         );
     }
 
+    #[test]
+    fn remote_edit_snapshot_events_are_remote_scoped() {
+        let scope = RemoteEventScope::new(TabId(1), SessionId(2), 3);
+        let checked = AppEvent::RemoteEditSnapshotChecked(RemoteScoped::new(
+            scope.clone(),
+            RemoteEditSnapshotChecked {
+                edit_session_id: EditSessionId(4),
+                check_id: EditCheckId(5),
+                path: RemotePath::new("/srv/a.txt"),
+                snapshot: crate::RemoteSnapshot {
+                    size: Some(10),
+                    modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+                },
+            },
+        ));
+        let failed = AppEvent::RemoteEditSnapshotCheckFailed(RemoteScoped::new(
+            scope.clone(),
+            RemoteEditSnapshotCheckFailed {
+                edit_session_id: EditSessionId(4),
+                check_id: EditCheckId(5),
+                path: RemotePath::new("/srv/a.txt"),
+                error: crate::UserFacingError::new(
+                    crate::ErrorCode::Unknown,
+                    "Could not check remote file",
+                    "detail",
+                ),
+            },
+        ));
+        let dispatch_failed =
+            AppEvent::RemoteEditSnapshotDispatchFailed(RemoteEditSnapshotDispatchFailed {
+                tab_id: TabId(1),
+                session_epoch: 3,
+                edit_session_id: EditSessionId(4),
+                check_id: EditCheckId(5),
+                path: RemotePath::new("/srv/a.txt"),
+                error: crate::UserFacingError::new(
+                    crate::ErrorCode::Unknown,
+                    "Could not check remote file",
+                    "detail",
+                ),
+            });
+
+        // The two actor outcomes carry the live scope and pass the stale guard.
+        assert_eq!(checked.remote_scope(), Some(scope.clone()));
+        assert!(checked.is_remote_scoped());
+        assert_eq!(failed.remote_scope(), Some(scope.clone()));
+        assert!(failed.is_remote_scoped());
+        // The dispatch failure has no SessionId; it must not be treated as
+        // remote-scoped (it is epoch-correlated instead).
+        assert_eq!(dispatch_failed.remote_scope(), None);
+        assert!(!dispatch_failed.is_remote_scoped());
+        // None of the three are transfer events.
+        assert!(!checked.is_transfer_event());
+        assert!(!failed.is_transfer_event());
+        assert!(!dispatch_failed.is_transfer_event());
+    }
+
+    #[test]
+    fn store_find_active_treats_checking_remote_as_live() {
+        let mut store = EditSessionStore::new();
+        let mut session = sample_edit_session(EditPhase::CheckingRemote);
+        session.id = store.next_id();
+        store.register(session);
+        // find_active matches on (profile_id, remote_path) alone and every
+        // stored session is a live phase, so CheckingRemote must be returned
+        // and block a re-edit of the same file.
+        assert!(
+            store
+                .find_active(crate::ProfileId(1), &crate::RemotePath::new("/srv/a.txt"))
+                .is_some(),
+            "a CheckingRemote session is still an active edit"
+        );
+    }
+
+    #[test]
+    fn store_reconnect_resets_checking_remote_for_retry() {
+        let mut store = EditSessionStore::new();
+        let mut session = sample_edit_session(EditPhase::CheckingRemote);
+        session.id = store.next_id();
+        session.pending_check_id = Some(EditCheckId(9));
+        session.checking_local_mtime = Some(Timestamp::from_secs_since_epoch(200));
+        store.register(session.clone());
+
+        store.update_epoch_for_tab(crate::TabId(1), 2);
+
+        let stored = store
+            .find_active(crate::ProfileId(1), &crate::RemotePath::new("/srv/a.txt"))
+            .expect("session survives reconnect");
+        assert_eq!(
+            stored.phase,
+            EditPhase::Editing,
+            "a CheckingRemote session reverts to Editing on reconnect"
+        );
+        assert_eq!(
+            stored.pending_check_id, None,
+            "pending check id is cleared on reconnect"
+        );
+        assert_eq!(
+            stored.checking_local_mtime, None,
+            "checking local mtime is cleared on reconnect"
+        );
+        assert_eq!(stored.session_epoch, 2, "epoch is bumped on reconnect");
+        // local_mtime baseline is preserved so the unchanged save is re-flagged.
+        assert_eq!(
+            stored.local_mtime,
+            Some(Timestamp::from_secs_since_epoch(200)),
+            "pre-save baseline is preserved"
+        );
+    }
+
     fn store_session(
         id_hint: u64,
         profile: u64,
@@ -3889,6 +4118,8 @@ mod tests {
             },
             local_mtime: None,
             active_transfer: transfer,
+            pending_check_id: None,
+            checking_local_mtime: None,
             missing_ticks: 0,
         }
     }
