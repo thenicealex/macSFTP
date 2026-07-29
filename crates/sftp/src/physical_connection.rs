@@ -574,7 +574,9 @@ pub async fn establish_physical_connection(
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .take();
             return Err(match recorded {
-                Some(HostKeyRejection::Mismatch(details)) => ConnectFailure::HostKeyMismatch(details),
+                Some(HostKeyRejection::Mismatch(details)) => {
+                    ConnectFailure::HostKeyMismatch(details)
+                }
                 Some(HostKeyRejection::UserRejected) => ConnectFailure::TrustRejected,
                 Some(HostKeyRejection::PromptTimeout) => ConnectFailure::TrustTimeout,
                 None => ConnectFailure::Connection(connection_error(
@@ -824,7 +826,8 @@ mod tests {
                     details.expected_fingerprint_sha256
                 );
                 assert_eq!(
-                    mismatch.actual_fingerprint_sha256, details.actual_fingerprint_sha256
+                    mismatch.actual_fingerprint_sha256,
+                    details.actual_fingerprint_sha256
                 );
             }
             other => panic!("expected HostKeyMismatch, got {other:?}"),

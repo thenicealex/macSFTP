@@ -1582,8 +1582,14 @@ async fn pooled_host_key_mismatch_is_emitted_for_every_logical_session() {
     // Both connections must fail (the handshake mismatched).
     let result_one = rx_one.recv_async().await;
     let result_two = rx_two.recv_async().await;
-    assert!(matches!(result_one, Ok(Err(_))), "first connection must fail");
-    assert!(matches!(result_two, Ok(Err(_))), "second connection must fail");
+    assert!(
+        matches!(result_one, Ok(Err(_))),
+        "first connection must fail"
+    );
+    assert!(
+        matches!(result_two, Ok(Err(_))),
+        "second connection must fail"
+    );
 
     let (requests_tx, _requests_rx) = flume::bounded::<RemoteSessionRequest>(1);
     let fixture = ActorFixture {
@@ -1614,8 +1620,7 @@ async fn pooled_host_key_mismatch_is_emitted_for_every_logical_session() {
             Some(m.actual_fingerprint_sha256.as_str()),
         );
         assert_eq!(
-            m.actual_fingerprint_sha256,
-            mismatch_one.actual_fingerprint_sha256,
+            m.actual_fingerprint_sha256, mismatch_one.actual_fingerprint_sha256,
             "mismatch details must be identical across waiters"
         );
     }

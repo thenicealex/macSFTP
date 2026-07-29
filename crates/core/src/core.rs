@@ -2441,12 +2441,11 @@ mod tests {
         AppState, AuthCredential, AuthFingerprint, AuthMethod, AuthMethodKind, ConflictPolicy,
         ConflictRequest, ConflictRequestId, ConnectionKey, ConnectionPoolIdentity,
         ConnectionProfile, ConnectionSettings, ConnectionState, DisconnectReason, HostKeyMismatch,
-        HostKeyPrompt,
-        LocalPath, MetadataPolicy, ModalRequest, ModalRequestId, ProfileId, RemoteEventScope,
-        RemotePath, RemoteScoped, RuntimeBridgeConfig, SecretRef, SessionId, TabId, TabState,
-        Timestamp, TransferDirection, TransferEndpoint, TransferId, TransferJob, TransferPlan,
-        TransferPlanId, TransferPlanState, TransferState, TransferStore, TrustRequest,
-        TrustRequestId,
+        HostKeyPrompt, LocalPath, MetadataPolicy, ModalRequest, ModalRequestId, ProfileId,
+        RemoteEventScope, RemotePath, RemoteScoped, RuntimeBridgeConfig, SecretRef, SessionId,
+        TabId, TabState, Timestamp, TransferDirection, TransferEndpoint, TransferId, TransferJob,
+        TransferPlan, TransferPlanId, TransferPlanState, TransferState, TransferStore,
+        TrustRequest, TrustRequestId,
     };
 
     #[test]
