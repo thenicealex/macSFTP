@@ -5,13 +5,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use macsftp_core::{
-    AppEvent, ConflictDecision, ConflictPolicy, ConflictRequestId, ErrorCode, FileKind, FsOp,
-    FsPath, FsScope, LocalPath, RemoteDirLoading, RemoteDirSnapshot, RemoteEntry, RemoteEventScope,
-    RemoteOperationFailure, RemotePath, RemoteScoped, RenameStrategy, ResidualTempRecord,
-    SessionId, StartTransferCommand, TabId, Timestamp, TransferConflictPrompt, TransferDirection,
-    TransferEndpoint, TransferFailure, TransferId, TransferJob, TransferPlanId,
-    TransferPlanProgress, TransferProgress, TransferSnapshot, TransferState, TransferWarning,
-    UserFacingError,
+    AppEvent, ConflictDecision, ConflictPolicy, ConflictRequestId, EditCheckId, EditSessionId,
+    ErrorCode, FileKind, FsOp, FsPath, FsScope, LocalPath, RemoteDirLoading, RemoteDirSnapshot,
+    RemoteEntry, RemoteEventScope, RemoteOperationFailure, RemotePath, RemoteScoped,
+    RenameStrategy, ResidualTempRecord, SessionId, StartTransferCommand, TabId, Timestamp,
+    TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferFailure, TransferId,
+    TransferJob, TransferPlanId, TransferPlanProgress, TransferProgress, TransferSnapshot,
+    TransferState, TransferWarning, UserFacingError,
 };
 use russh::client;
 use russh_sftp::client::SftpSession;
@@ -124,6 +124,15 @@ pub enum RemoteSessionRequest {
         scope: FsScope,
         op: FsOp,
         refresh_path: RemotePath,
+    },
+    /// Authoritative remote-metadata check for an in-flight edit upload. The
+    /// actor reads `symlink_metadata(path)` and emits a scoped
+    /// `RemoteEditSnapshotChecked`/`CheckFailed`; no responder is needed
+    /// because the actor owns `event_tx` and attaches its own live scope.
+    CheckRemoteEditSnapshot {
+        edit_session_id: EditSessionId,
+        check_id: EditCheckId,
+        path: RemotePath,
     },
 }
 
@@ -643,6 +652,14 @@ impl RemoteSessionActor {
                             .await;
                     }
                 }
+            }
+            RemoteSessionRequest::CheckRemoteEditSnapshot { .. } => {
+                // Authoritative metadata read is implemented in Task 3
+                // (Read live metadata for remote edits). The runtime dispatch
+                // arm already converts missing/full/disconnected actor
+                // mailboxes into `RemoteEditSnapshotDispatchFailed`; reaching
+                // this arm requires a live actor, which the Task 2 routing
+                // tests never spawn.
             }
         }
     }

@@ -4,10 +4,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use macsftp_core::{
-    AppCommand, AppEvent, CommandDispatchError, ErrorCode, FsCommand, FsScope, RemoteEventScope,
-    RemoteOperationFailure, RemoteScoped, RuntimeBridgeConfig, SessionId, TabId, Timestamp,
-    TransferDirection, TransferId, TransferJob, TransferPlanId, TransferPlanSnapshot,
-    TrustDecision, TrustRequestId, UserFacingError,
+    AppCommand, AppEvent, CheckRemoteEditSnapshotCommand, CommandDispatchError, ErrorCode,
+    FsCommand, FsScope, RemoteEditSnapshotDispatchFailed, RemoteEventScope, RemoteOperationFailure,
+    RemoteScoped, RuntimeBridgeConfig, SessionId, TabId, Timestamp, TransferDirection, TransferId,
+    TransferJob, TransferPlanId, TransferPlanSnapshot, TrustDecision, TrustRequestId,
+    UserFacingError,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
@@ -709,6 +710,15 @@ async fn command_dispatch_loop(
                 }
             }
 
+            Ok(AppCommand::CheckRemoteEditSnapshot(command)) => {
+                // Route the check to the live browsing actor without blocking
+                // GPUI: GPUI only delivered the command into the bounded
+                // runtime bridge. Any failure to reach a live actor is reported
+                // as a dispatch failure so the coordinator can reset the exact
+                // pending check tuple and retry the save.
+                route_check_remote_edit_snapshot(command, &sessions, &event_tx).await;
+            }
+
             Ok(AppCommand::StartTransfer(command)) => {
                 let transfer_request_tx = sessions
                     .get(&command.tab_id)
@@ -1094,14 +1104,121 @@ fn connection_failure_event(
     }
 }
 
+/// Emit a `RemoteEditSnapshotDispatchFailed` when a check command cannot reach
+/// a live actor (missing/stale session, no actor sender, or a full/disconnected
+/// actor queue). The event carries no `SessionId`: routing never reached a
+/// session, so it is epoch-correlated rather than remote-session-scoped. The
+/// coordinator matches it only by the exact `(tab_id, session_epoch,
+/// edit_session_id, check_id, path)` tuple, so an old dispatch failure cannot
+/// reset a replacement check. The `detail` is structural and path-free; the
+/// command path is never logged.
+async fn emit_remote_edit_dispatch_failure(
+    event_tx: &flume::Sender<AppEvent>,
+    command: CheckRemoteEditSnapshotCommand,
+    detail: &'static str,
+) {
+    let error = UserFacingError::new(
+        ErrorCode::ChannelClosed,
+        "Could not check remote file",
+        detail,
+    )
+    .with_retryable(true);
+    if let Err(send_error) = event_tx
+        .send_async(AppEvent::RemoteEditSnapshotDispatchFailed(
+            RemoteEditSnapshotDispatchFailed {
+                tab_id: command.tab_id,
+                session_epoch: command.session_epoch,
+                edit_session_id: command.edit_session_id,
+                check_id: command.check_id,
+                path: command.path,
+                error,
+            },
+        ))
+        .await
+    {
+        warn!(error = %send_error, "remote edit dispatch failure event dropped");
+    }
+}
+
+/// Route `AppCommand::CheckRemoteEditSnapshot` to the live browsing actor.
+///
+/// This is the unit-testable core of the `CheckRemoteEditSnapshot` dispatch
+/// arm: GPUI already delivered the command into the bounded runtime bridge, so
+/// this must not block. Every failure to reach a live actor is reported as a
+/// `RemoteEditSnapshotDispatchFailed` so the coordinator can reset the exact
+/// pending `(tab_id, session_epoch, edit_session_id, check_id, path)` tuple and
+/// retry the save. No fabricated `SessionId`/`RemoteEventScope` is used because
+/// routing never reached a live actor — the event is epoch-correlated, not
+/// remote-session-scoped (see `AppEvent::remote_scope`).
+async fn route_check_remote_edit_snapshot(
+    command: CheckRemoteEditSnapshotCommand,
+    sessions: &HashMap<TabId, RemoteSessionHandle>,
+    event_tx: &flume::Sender<AppEvent>,
+) {
+    let Some(session) = sessions.get(&command.tab_id) else {
+        emit_remote_edit_dispatch_failure(
+            event_tx,
+            command,
+            "Connect to the server before editing remote files.",
+        )
+        .await;
+        return;
+    };
+    if session.session_epoch != command.session_epoch {
+        // Stale command after reconnect: the tab's edit sessions were already
+        // reset to Editing by update_epoch_for_tab, so report the dispatch
+        // failure. The coordinator will no-op it against the new session
+        // (different epoch/check_id) and the watcher re-checks the save.
+        emit_remote_edit_dispatch_failure(
+            event_tx,
+            command,
+            "This edit session's connection changed. Save again to retry.",
+        )
+        .await;
+        return;
+    }
+    let Some(request_tx) = &session.request_tx else {
+        emit_remote_edit_dispatch_failure(
+            event_tx,
+            command,
+            "This session does not support file operations.",
+        )
+        .await;
+        return;
+    };
+    match request_tx.try_send(RemoteSessionRequest::CheckRemoteEditSnapshot {
+        edit_session_id: command.edit_session_id,
+        check_id: command.check_id,
+        path: command.path.clone(),
+    }) {
+        Ok(()) => {}
+        Err(flume::TrySendError::Full(_)) => {
+            emit_remote_edit_dispatch_failure(
+                event_tx,
+                command,
+                "The remote session is busy. Try again.",
+            )
+            .await;
+        }
+        Err(flume::TrySendError::Disconnected(_)) => {
+            emit_remote_edit_dispatch_failure(
+                event_tx,
+                command,
+                "The remote session is no longer available. Reconnect and try again.",
+            )
+            .await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use macsftp_core::{
         AuthCredential, ConflictPolicy, ConnectCommand, ConnectionPoolIdentity, ConnectionSettings,
-        HostKeyDecisionCommand, LocalPath, MetadataPolicy, ProfileId, RemotePath, SessionId,
-        StartTransferCommand, TabId, TransferDirection, TransferEndpoint, TransferId,
-        TransferPlanState, TransferState,
+        EditCheckId, EditSessionId, HostKeyDecisionCommand, LocalPath, MetadataPolicy, ProfileId,
+        RemotePath, SessionId, StartTransferCommand, TabId, TransferDirection, TransferEndpoint,
+        TransferId, TransferPlanState, TransferState,
     };
 
     /// Placeholder settings — the mock backend never dials them.
@@ -2197,5 +2314,161 @@ mod tests {
         });
 
         controller.shutdown();
+    }
+
+    /// Build a `RemoteSessionHandle` with the given epoch and actor request
+    /// sender. `join` is a no-op spawned task (required by the handle type);
+    /// `session_id` is a dummy because the dispatch-failure path never echoes
+    /// it.
+    fn make_handle(
+        epoch: u64,
+        request_tx: Option<flume::Sender<RemoteSessionRequest>>,
+    ) -> RemoteSessionHandle {
+        RemoteSessionHandle {
+            session_id: SessionId(1),
+            session_epoch: epoch,
+            request_tx,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            join: tokio::spawn(async {}),
+        }
+    }
+
+    /// Asserts a `RemoteEditSnapshotDispatchFailed` matches the command exactly,
+    /// is retryable, and is not remote-session-scoped.
+    fn assert_dispatch_failure(event: AppEvent, command: &CheckRemoteEditSnapshotCommand) {
+        match event {
+            AppEvent::RemoteEditSnapshotDispatchFailed(ref payload) => {
+                assert_eq!(payload.tab_id, command.tab_id);
+                assert_eq!(payload.session_epoch, command.session_epoch);
+                assert_eq!(payload.edit_session_id, command.edit_session_id);
+                assert_eq!(payload.check_id, command.check_id);
+                assert_eq!(payload.path, command.path);
+                assert!(
+                    payload.error.retryable,
+                    "remote edit dispatch failure must be retryable"
+                );
+            }
+            other => panic!("expected RemoteEditSnapshotDispatchFailed, got {other:?}"),
+        }
+        assert_eq!(
+            event.remote_scope(),
+            None,
+            "dispatch failure is epoch-correlated, not remote-session-scoped"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_edit_check_missing_session_emits_failure() {
+        // No session exists for the tab — routing never reached an actor.
+        let (event_tx, event_rx) = flume::bounded(8);
+        let sessions: HashMap<TabId, RemoteSessionHandle> = HashMap::new();
+
+        let command = CheckRemoteEditSnapshotCommand {
+            tab_id: TabId(1),
+            session_epoch: 5,
+            edit_session_id: EditSessionId(7),
+            check_id: EditCheckId(9),
+            path: RemotePath::new("/srv/file.txt"),
+        };
+
+        route_check_remote_edit_snapshot(command.clone(), &sessions, &event_tx).await;
+
+        let event = event_rx
+            .recv_async()
+            .await
+            .expect("a dispatch failure event should be emitted for a missing session");
+        assert_dispatch_failure(event, &command);
+    }
+
+    #[tokio::test]
+    async fn remote_edit_check_stale_epoch_emits_failure() {
+        // The session exists but with a newer epoch than the command — the
+        // command is stale after a reconnect and must not reach the actor.
+        let (event_tx, event_rx) = flume::bounded(8);
+        let (request_tx, request_rx) = flume::bounded(16);
+        let mut sessions: HashMap<TabId, RemoteSessionHandle> = HashMap::new();
+        sessions.insert(TabId(1), make_handle(5, Some(request_tx)));
+        // Keep the receiver alive so the session still looks connected.
+        let _rx = request_rx;
+
+        let command = CheckRemoteEditSnapshotCommand {
+            tab_id: TabId(1),
+            session_epoch: 4,
+            edit_session_id: EditSessionId(7),
+            check_id: EditCheckId(9),
+            path: RemotePath::new("/srv/file.txt"),
+        };
+
+        route_check_remote_edit_snapshot(command.clone(), &sessions, &event_tx).await;
+
+        let event = event_rx
+            .recv_async()
+            .await
+            .expect("a dispatch failure event should be emitted for a stale epoch");
+        assert_dispatch_failure(event, &command);
+    }
+
+    #[tokio::test]
+    async fn remote_edit_check_full_actor_queue_emits_failure() {
+        // The actor mailbox is full (bounded capacity 1, one item buffered and
+        // never consumed), so the non-blocking try_send must report Full.
+        let (event_tx, event_rx) = flume::bounded(8);
+        let (request_tx, request_rx) = flume::bounded(1);
+        request_tx
+            .try_send(RemoteSessionRequest::CheckRemoteEditSnapshot {
+                edit_session_id: EditSessionId(7),
+                check_id: EditCheckId(9),
+                path: RemotePath::new("/srv/file.txt"),
+            })
+            .expect("fill the single-slot actor queue");
+        // Receiver stays alive so the channel is full but still connected.
+        let _rx = request_rx;
+
+        let mut sessions: HashMap<TabId, RemoteSessionHandle> = HashMap::new();
+        sessions.insert(TabId(1), make_handle(5, Some(request_tx)));
+
+        let command = CheckRemoteEditSnapshotCommand {
+            tab_id: TabId(1),
+            session_epoch: 5,
+            edit_session_id: EditSessionId(7),
+            check_id: EditCheckId(9),
+            path: RemotePath::new("/srv/file.txt"),
+        };
+
+        route_check_remote_edit_snapshot(command.clone(), &sessions, &event_tx).await;
+
+        let event = event_rx
+            .recv_async()
+            .await
+            .expect("a dispatch failure event should be emitted for a full actor queue");
+        assert_dispatch_failure(event, &command);
+    }
+
+    #[tokio::test]
+    async fn remote_edit_check_disconnected_actor_queue_emits_failure() {
+        // The actor mailbox sender is disconnected (receiver dropped), so the
+        // non-blocking try_send must report Disconnected.
+        let (event_tx, event_rx) = flume::bounded(8);
+        let (request_tx, request_rx) = flume::bounded(1);
+        drop(request_rx);
+
+        let mut sessions: HashMap<TabId, RemoteSessionHandle> = HashMap::new();
+        sessions.insert(TabId(1), make_handle(5, Some(request_tx)));
+
+        let command = CheckRemoteEditSnapshotCommand {
+            tab_id: TabId(1),
+            session_epoch: 5,
+            edit_session_id: EditSessionId(7),
+            check_id: EditCheckId(9),
+            path: RemotePath::new("/srv/file.txt"),
+        };
+
+        route_check_remote_edit_snapshot(command.clone(), &sessions, &event_tx).await;
+
+        let event = event_rx
+            .recv_async()
+            .await
+            .expect("a dispatch failure event should be emitted for a disconnected actor queue");
+        assert_dispatch_failure(event, &command);
     }
 }
