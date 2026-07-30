@@ -494,6 +494,7 @@ impl crate::workspace::Workspace {
     }
     pub(crate) fn render_connect_form_modal(
         &self,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let form = self.connect_form.as_ref()?;
@@ -654,38 +655,26 @@ impl crate::workspace::Workspace {
         if profile_picker_open {
             let filtered = self.filtered_connect_profiles(cx);
 
-            let mut picker_panel = div()
-                .id("profile-picker-panel")
-                .flex()
-                .flex_col()
-                .gap_0()
-                .ml(px(104.0))
-                .max_h(px(200.0))
-                .overflow_y_scroll()
-                .border_1()
-                .border_color(theme.colors.border)
-                .rounded_md()
-                .bg(theme.colors.surface)
-                .child(
-                    div()
-                        .id("profile-picker-filter")
-                        .px_2()
-                        .py_1()
-                        .border_b_1()
-                        .border_color(theme.colors.border)
-                        .child(text_field(
-                            "profile-picker-filter-input",
-                            TextFieldModel {
-                                state: &form.profile_picker_filter,
-                                placeholder: "Filter profiles…",
-                                focused: true,
-                                masked: false,
-                            },
-                            cx,
-                        )),
-                );
+            let mut picker_content = div().flex().flex_col().gap_0().child(
+                div()
+                    .id("profile-picker-filter")
+                    .px_2()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(theme.colors.border)
+                    .child(text_field(
+                        "profile-picker-filter-input",
+                        TextFieldModel {
+                            state: &form.profile_picker_filter,
+                            placeholder: "Filter profiles…",
+                            focused: true,
+                            masked: false,
+                        },
+                        cx,
+                    )),
+            );
             if profiles.is_empty() {
-                picker_panel = picker_panel.child(
+                picker_content = picker_content.child(
                     div()
                         .px_2()
                         .py_1()
@@ -694,7 +683,7 @@ impl crate::workspace::Workspace {
                         .child("No saved profiles — manage in Settings"),
                 );
             } else if filtered.is_empty() {
-                picker_panel = picker_panel.child(
+                picker_content = picker_content.child(
                     div()
                         .px_2()
                         .py_1()
@@ -703,7 +692,7 @@ impl crate::workspace::Workspace {
                         .child("No matches"),
                 );
             } else {
-                picker_panel = picker_panel.children(filtered.into_iter().map(|profile| {
+                picker_content = picker_content.children(filtered.into_iter().map(|profile| {
                     let profile_id = profile.id;
                     let label = profile_list_label(profile);
                     div()
@@ -721,7 +710,7 @@ impl crate::workspace::Workspace {
                         .child(label)
                 }));
             }
-            picker_panel = picker_panel.child(
+            picker_content = picker_content.child(
                 div()
                     .id("profile-picker-manual-entry")
                     .px_2()
@@ -738,6 +727,31 @@ impl crate::workspace::Workspace {
                     }))
                     .child("Manual entry"),
             );
+            let picker_panel = div()
+                .id("profile-picker-panel")
+                .ml(px(104.0))
+                .max_h(px(200.0))
+                .relative()
+                .border_1()
+                .border_color(theme.colors.border)
+                .rounded_md()
+                .bg(theme.colors.surface)
+                .child(
+                    div()
+                        .id("profile-picker-scroll")
+                        .max_h(px(200.0))
+                        .overflow_y_scroll()
+                        .scrollbar_width(px(0.0))
+                        .track_scroll(self.profile_picker_scroll())
+                        .child(picker_content),
+                )
+                .child(macsftp_ui::Scrollbar::vertical(
+                    "profile-picker-scrollbar",
+                    self.profile_picker_scroll().clone(),
+                    self.profile_picker_scrollbar(),
+                    window,
+                    cx,
+                ));
             card = card.child(picker_panel);
         }
 
