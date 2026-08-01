@@ -125,7 +125,7 @@ impl MockRemoteSessionActor {
             decision = decision_rx => {
                 match decision {
                     Ok(TrustDecision::TrustAndSave) => {
-                        let _ = self
+                        if let Err(error) = self
                             .event_tx
                             .send_async(AppEvent::TabConnected(RemoteScoped::new(
                                 scope,
@@ -133,12 +133,16 @@ impl MockRemoteSessionActor {
                                     remote_root: self.config.remote_root.clone(),
                                 },
                             )))
-                            .await;
+                            .await
+                        {
+                            // Event channel closed; the run ends here anyway.
+                            tracing::warn!(error = %error, "mock actor event channel closed");
+                        }
                     }
                     Ok(TrustDecision::Reject)
                     | Ok(TrustDecision::TimedOut)
                     | Ok(TrustDecision::RequestExpired) => {
-                        let _ = self
+                        if let Err(error) = self
                             .event_tx
                             .send_async(AppEvent::TabDisconnected(RemoteScoped::new(
                                 scope,
@@ -146,7 +150,11 @@ impl MockRemoteSessionActor {
                                     reason: DisconnectReason::UserRequested,
                                 },
                             )))
-                            .await;
+                            .await
+                        {
+                            // Event channel closed; the run ends here anyway.
+                            tracing::warn!(error = %error, "mock actor event channel closed");
+                        }
                     }
                     Err(_) => {
                         // Responder dropped without sending — actor was
@@ -194,10 +202,14 @@ impl MockTransferJob {
     /// Returns when the transfer completes or the cancel token fires.
     pub async fn run(self, cancel: CancellationToken) {
         // Emit TransferQueued.
-        let _ = self
+        if self
             .event_tx
             .send_async(AppEvent::TransferQueued(self.snapshot(0)))
-            .await;
+            .await
+            .is_err()
+        {
+            return; // event channel closed — stop the mock transfer
+        }
 
         let interval = Duration::from_millis(100); // 10 Hz
         let bytes_per_tick = self.bytes_per_sec.saturating_div(10).max(1);
@@ -210,15 +222,18 @@ impl MockTransferJob {
                     bytes_done = bytes_done.saturating_add(bytes_per_tick).min(self.total_bytes);
 
                     let now = std::time::Instant::now();
-                    if throttle.should_send(now) {
-                        let _ = self
+                    if throttle.should_send(now)
+                        && self
                             .event_tx
                             .send_async(AppEvent::TransferProgress(TransferProgress {
                                 transfer_id: self.transfer_id,
                                 bytes_done,
                                 bytes_total: Some(self.total_bytes),
                             }))
-                            .await;
+                            .await
+                            .is_err()
+                    {
+                        return; // event channel closed — stop the mock transfer
                     }
                 }
                 _ = cancel.cancelled() => {
@@ -230,22 +245,31 @@ impl MockTransferJob {
 
         // Emit final progress (force-send by resetting throttle).
         throttle.reset();
-        let _ = self
+        if self
             .event_tx
             .send_async(AppEvent::TransferProgress(TransferProgress {
                 transfer_id: self.transfer_id,
                 bytes_done: self.total_bytes,
                 bytes_total: Some(self.total_bytes),
             }))
-            .await;
+            .await
+            .is_err()
+        {
+            return; // event channel closed — completion cannot be delivered
+        }
 
         // Emit completion.
-        let _ = self
+        if let Err(error) = self
             .event_tx
             .send_async(AppEvent::TransferCompleted {
                 transfer_id: self.transfer_id,
             })
-            .await;
+            .await
+        {
+            // Event channel closed; the run ends here regardless, but the
+            // failure is worth recording for test diagnostics.
+            tracing::warn!(error = %error, "mock transfer event channel closed");
+        }
     }
 
     fn snapshot(&self, bytes_done: u64) -> TransferSnapshot {
@@ -505,6 +529,62 @@ mod tests {
             assert!(got_completed, "should receive TransferCompleted");
 
             job_handle.await.expect("job should complete");
+        });
+
+        helper.shutdown_timeout(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn mock_actor_exits_when_event_channel_closed() {
+        // Audit SFTP-MOCK-001: a dropped receiver must make the mock exit
+        // promptly instead of silently continuing or deadlocking.
+        let registry = Arc::new(TrustRegistry::new());
+        let (event_tx, event_rx) = flume::bounded::<AppEvent>(1);
+        drop(event_rx); // close the channel before the actor starts
+
+        let actor = mock_actor(1, 10, 1, 100, registry.clone(), event_tx);
+        let cancel = CancellationToken::new();
+        let helper = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("helper runtime");
+
+        helper.block_on(async {
+            // The very first HostKeyUnknown send fails, so run() must return
+            // immediately without waiting on the trust decision.
+            let actor_handle = tokio::spawn(actor.run(cancel));
+            let finished = tokio::time::timeout(Duration::from_secs(1), actor_handle).await;
+            assert!(
+                finished.is_ok(),
+                "mock actor must exit quickly when the event channel is closed"
+            );
+        });
+
+        helper.shutdown_timeout(Duration::from_secs(1));
+    }
+
+    #[test]
+    fn mock_transfer_job_exits_when_event_channel_closed() {
+        // Audit SFTP-MOCK-001: same guarantee for the mock transfer job.
+        let (event_tx, event_rx) = flume::bounded::<AppEvent>(1);
+        drop(event_rx); // close the channel before the job starts
+
+        let job = MockTransferJob::new(TransferId(1), 1000, 10_000, event_tx);
+        let cancel = CancellationToken::new();
+        let helper = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("helper runtime");
+
+        helper.block_on(async {
+            // TransferQueued send fails immediately; the job must not spin in
+            // its progress loop or deadlock.
+            let job_handle = tokio::spawn(job.run(cancel));
+            let finished = tokio::time::timeout(Duration::from_secs(1), job_handle).await;
+            assert!(
+                finished.is_ok(),
+                "mock transfer job must exit quickly when the event channel is closed"
+            );
         });
 
         helper.shutdown_timeout(Duration::from_secs(1));
