@@ -29,22 +29,22 @@ first_party_manifests=(
     crates/test_support/Cargo.toml
     crates/ui/Cargo.toml
 )
-if rg -n '^version\s*=\s*"' "${first_party_manifests[@]}"; then
+if grep -nE '^version[[:space:]]*=' "${first_party_manifests[@]}"; then
     echo "error: first-party crate versions must inherit workspace.package.version" >&2
     exit 1
 fi
 
-if ! rg -q '<string>@VERSION@</string>' packaging/macos/Info.plist.in; then
+if ! grep -qF '<string>@VERSION@</string>' packaging/macos/Info.plist.in; then
     echo "error: Info.plist must derive its version from the app package" >&2
     exit 1
 fi
 
 if [[ "$tag_version" == "$base_version" ]]; then
-    if ! rg -q "^## \[$base_version\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md; then
+    if ! grep -qE "^## \[$base_version\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md; then
         echo "error: final release requires a dated CHANGELOG section for $base_version" >&2
         exit 1
     fi
-elif ! rg -q "^## \[($base_version|Unreleased)\]" CHANGELOG.md; then
+elif ! grep -qE "^## \[($base_version|Unreleased)\]" CHANGELOG.md; then
     echo "error: release candidate has no matching CHANGELOG content" >&2
     exit 1
 fi

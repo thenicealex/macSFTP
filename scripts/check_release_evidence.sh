@@ -17,19 +17,19 @@ if [[ ! -f "$evidence" ]]; then
     echo "error: missing release evidence: $evidence" >&2
     exit 1
 fi
-if ! rg -q "^Version: ${version}$" "$evidence"; then
+if ! grep -qE "^Version: ${version}$" "$evidence"; then
     echo "error: release evidence version does not match $version" >&2
     exit 1
 fi
-if ! rg -q '^Status: PASS$' "$evidence"; then
+if ! grep -qE '^Status: PASS$' "$evidence"; then
     echo "error: release evidence status is not PASS" >&2
     exit 1
 fi
-if rg -q '^- \[ \]' "$evidence"; then
+if grep -qE '^- \[ \]' "$evidence"; then
     echo "error: release evidence still has unchecked items" >&2
     exit 1
 fi
-if rg -q ': TBD$|^- TBD$' "$evidence"; then
+if grep -qE ': TBD$|^- TBD$' "$evidence"; then
     echo "error: release evidence still contains TBD metadata" >&2
     exit 1
 fi
