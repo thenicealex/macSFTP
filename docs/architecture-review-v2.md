@@ -1,7 +1,7 @@
 # macSFTP 架构评审 v2
 
 > 评审对象：`docs/gpui-russh-plan.md`（修订版，含 ADR-002/003/004）
-> 对比基线：`docs/architecture-review.md`（v1 评审）
+> 对比基线：`docs/archive/architecture-review.md`（v1 评审）
 > 评审立场：闭合质量审视 + 实现期风险预警。文档改得好不等于没有洞。
 
 ---

@@ -2143,7 +2143,7 @@ M7 ≈ 100%；MVP ≈ 100%。
 
 ## 22. Review 后补充决策
 
-根据 `docs/architecture-review.md`、`docs/architecture-review-v2.md` 和 `docs/architecture-review-v3.md`，以下问题已转为明确决策：
+根据 `docs/archive/architecture-review.md`、`docs/architecture-review-v2.md` 和 `docs/architecture-review-v3.md`，以下问题已转为明确决策：
 
 1. Profile folder/group：MVP 不做 UI，但 profile 数据结构预留 `group_id: Option<ProfileGroupId>`。
 2. 同 profile 多 tab：允许。`TabState` 与 `ProfileId` 是多对一。
@@ -2225,6 +2225,6 @@ M7 ≈ 100%；MVP ≈ 100%。
 - russh docs: <https://docs.rs/russh/latest/russh/>
 - russh-sftp docs: <https://docs.rs/russh-sftp/latest/russh_sftp/>
 - ssh-key docs: <https://docs.rs/ssh-key/latest/ssh_key/>
-- Architecture review: `docs/architecture-review.md`
+- Architecture review: `docs/archive/architecture-review.md`
 - Architecture review v2: `docs/architecture-review-v2.md`
 - Architecture review v3: `docs/architecture-review-v3.md`
