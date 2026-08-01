@@ -6,3 +6,6 @@ build/
 .DS_Store
 .worktrees/
 .superpowers/
+
+# Website lives in its own repository; the accidental gitlink was removed.
+website/
