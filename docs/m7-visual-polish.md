@@ -22,13 +22,13 @@
 | V8 | accent 克制使用（主按钮/选中/焦点环） | accent 仅用于主按钮（About Close、设置激活项）、`border_focused` 焦点环 | 不过度使用 | PASS |
 | V9 | modal/popover 用 elevated_surface + border | connect/host-key/conflict modal、About 卡片均 `elevated_surface`+`border` | 浮层层级一致 | PASS |
 | V10 | 图标体系：AppIcon 全尺寸集 + 应用内 IconName 令牌 | 可编辑 `AppIcon.svg` + 同步 1024px PNG；`build_app.sh` 生成 16–1024px 全集；应用内使用 `IconName` | 白色圆角底板、宽安全区、简化双端点/双向传输符号；小尺寸可辨认 | PASS（16/32/64/128px 见 M7-05 目检） |
-| V11 | 文本/背景对比度达标（可读性） | 抽样：暗色 text `#c8ccd4`/bg `#1f2127` 高对比；亮色 text `#33373e`/bg `#fafafa` 高对比；muted 文字刻意降对比做层级 | 代码层无违规；最终可读性需实机目检 | PASS（代码层）/ NEEDS-INTERACTIVE |
+| V11 | 文本/背景对比度达标（可读性） | 抽样：暗色 text `#c8ccd4`/bg `#1f2127` 高对比；亮色 text `#33373e`/bg `#fafafa` 高对比；muted 文字刻意降对比做层级 | 代码层无违规；2026-08-01 用户实机目检亮/暗主题可读性 | PASS（代码层 + 实机目检） |
 | V12 | 颜色无散落魔法数（全部集中在 theme.rs） | `grep "rgb(\|hsla("` 在 `crates/{ui,app}/src` 仅 `theme.rs` 命中 | 单一颜色来源 | PASS |
 
 ## 结论
 
 实现层面 Zed-style 视觉打磨**已实质完成**：颜色、尺寸、字体、语义状态全部令牌化并统一驱动；
-原先缺口仅为「缺少系统化验证记录」，本文档即补此记录。逐项核查 12/12 通过
-（V11 可读性需一次 macOS 实机目检做最终签字，但代码层无对比度违规）。
+原先缺口仅为「缺少系统化验证记录」，本文档即补此记录。逐项核查 12/12 通过，
+V11 可读性已由用户于 2026-08-01 在 macOS 实机目检亮/暗主题后签字。
 
 与 `docs/m7-test-matrix.md` M7-12、`crates/app/src/m7_regression.rs` 共同构成 M7 验收证据。
