@@ -299,12 +299,26 @@ pub fn open_in_editor(temp: &LocalPath, editor: Option<&str>) -> std::io::Result
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use macsftp_core::{FileKind, LocalPath, Timestamp};
 
     use super::{
         AppPaths, LocalEntryDraft, core_crate_name, crate_name, create_directory, delete_entry,
         read_local_directory, rename_entry,
     };
+
+    /// Per-process unique sequence so parallel test invocations never share a
+    /// temp directory (AGENTS.md §9; audit TEST-001).
+    static TEMP_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+        let sequence = TEMP_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "macsftp-platform-test-{label}-{}-{sequence}",
+            std::process::id()
+        ))
+    }
 
     #[test]
     fn links_core_crate() {
@@ -373,8 +387,7 @@ mod tests {
 
     #[test]
     fn reads_real_directory_entries() {
-        let dir = std::env::temp_dir().join("macsftp_read_local_test");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = unique_temp_dir("read_local");
         std::fs::create_dir_all(&dir).expect("create temp dir");
         let base = LocalPath::new(dir.to_string_lossy().into_owned());
 

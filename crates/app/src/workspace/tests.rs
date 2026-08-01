@@ -59,6 +59,7 @@ mod tests {
     use macsftp_ui::{Appearance, Theme};
 
     use std::cell::RefCell;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{
         AppPaths, PaneSide, RestoredTabTarget, STATUS_BUSY_TRY_AGAIN,
@@ -78,6 +79,18 @@ mod tests {
     use macsftp_ui::InputState;
 
     const TEST_REMOTE_ROOT: &str = "/home/tester";
+
+    /// Per-process unique sequence so parallel test invocations never share a
+    /// temp directory (AGENTS.md §9; audit TEST-001).
+    static TEMP_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+        let sequence = TEMP_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "macsftp-app-test-{label}-{}-{sequence}",
+            std::process::id()
+        ))
+    }
 
     thread_local! {
         static REOPENED_EDIT_PATHS: RefCell<Vec<LocalPath>> = const { RefCell::new(Vec::new()) };
@@ -304,8 +317,7 @@ mod tests {
 
         // Point the local pane at a real, deterministic directory so the
         // selection indices are stable (directory-first sort: beta, alpha, gamma).
-        let dir = std::env::temp_dir().join("macsftp_sel_test");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = unique_temp_dir("sel");
         std::fs::create_dir_all(&dir).expect("create temp dir");
         std::fs::write(dir.join("alpha.txt"), b"a").expect("write alpha.txt");
         std::fs::create_dir(dir.join("beta")).expect("create beta dir");
