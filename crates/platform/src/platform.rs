@@ -241,6 +241,18 @@ pub fn clear_edits_dir(edits_dir: &LocalPath) -> std::io::Result<()> {
     std::fs::set_permissions(edits_dir.as_str(), std::fs::Permissions::from_mode(0o700))
 }
 
+/// Remove one remote-edit session's temp directory (`<edits>/<run>/<id>/`).
+/// NotFound is treated as success so callers can best-effort clean up without
+/// distinguishing "already gone" from a real error. Any other failure is
+/// returned so the caller can log or record a residual (audit APP-EDIT-003).
+pub fn cleanup_edit_session_dir(session_dir: &LocalPath) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(session_dir.as_str()) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 /// Map a local IO error into a user-facing error for Fs ops.
 pub fn local_fs_error(title: &str, error: &std::io::Error) -> macsftp_core::UserFacingError {
     use macsftp_core::{ErrorCode, UserFacingError};
@@ -509,6 +521,26 @@ mod tests {
         assert!(base.exists());
         assert_eq!(std::fs::read_dir(&base).expect("read edits dir").count(), 0);
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn cleanup_edit_session_dir_removes_contents() {
+        let session = LocalPath::new(
+            unique_temp_dir("edit-session").to_string_lossy().to_string(),
+        );
+        std::fs::create_dir_all(format!("{}/nested", session.as_str())).expect("create session dir");
+        std::fs::write(format!("{}/nested/a.txt", session.as_str()), b"x")
+            .expect("write temp file");
+        super::cleanup_edit_session_dir(&session).expect("cleanup edit session dir");
+        assert!(!std::path::Path::new(session.as_str()).exists());
+    }
+
+    #[test]
+    fn cleanup_edit_session_dir_treats_missing_as_success() {
+        let session = LocalPath::new(
+            unique_temp_dir("edit-session-missing").to_string_lossy().to_string(),
+        );
+        super::cleanup_edit_session_dir(&session).expect("missing dir is not an error");
     }
 
     #[test]

@@ -114,11 +114,7 @@ pub(crate) fn poll_edit_sessions(cx: &mut App) {
                 // just the store entry, so an empty `<edits>/<run>/<id>/` is not left
                 // behind until quit (symmetric with advance_downloading's
                 // failure cleanup).
-                if let Some(parent) =
-                    std::path::Path::new(session.local_temp_path.as_str()).parent()
-                {
-                    let _ = std::fs::remove_dir_all(parent);
-                }
+                crate::workspace::cleanup_edit_temp_dir(&session.local_temp_path);
                 if phase == EditPhase::RemoteConflict {
                     cx.refresh_windows();
                 }

@@ -239,9 +239,7 @@ fn advance_downloading(
         };
         // Clean up the per-session temp directory (`<edits_dir>/<run>/<id>/<file>`);
         // best-effort, so ignore errors (e.g. it was never created).
-        if let Some(parent) = std::path::Path::new(temp_path.as_str()).parent() {
-            let _ = std::fs::remove_dir_all(parent);
-        }
+        crate::workspace::cleanup_edit_temp_dir(&temp_path);
         // Surface the failure in the owning window's status bar. Edit sessions
         // are process-global, so the owner is whichever window holds the tab.
         let message = format!("Could not download {name} for editing");

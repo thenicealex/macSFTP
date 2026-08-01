@@ -14,6 +14,19 @@ use crate::workspace::helpers::connected_transfer_session;
 
 pub(crate) const EDIT_SIZE_WARN_THRESHOLD: u64 = 100 * 1024 * 1024;
 
+/// Best-effort removal of a remote-edit session's temp directory
+/// (`<edits>/<run>/<id>/`). NotFound is treated as success; any other failure
+/// is logged so a leaked remote-file copy is at least diagnosable instead of
+/// silent (audit APP-EDIT-003). Never records the remote path or file name.
+pub(crate) fn cleanup_edit_temp_dir(temp_path: &LocalPath) {
+    if let Some(parent) = std::path::Path::new(temp_path.as_str()).parent() {
+        let session_dir = LocalPath::new(parent.to_string_lossy().to_string());
+        if let Err(error) = macsftp_platform::cleanup_edit_session_dir(&session_dir) {
+            warn!(error = %error, "could not remove edit session temp directory");
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PendingEdit {
     pub remote_path: RemotePath,
@@ -160,10 +173,9 @@ impl Workspace {
             id.0,
             file_name
         ));
-        // 建会话目录（忽略已存在）。
-        if let Some(parent) = std::path::Path::new(local_temp_path.as_str()).parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
+        // The download worker creates the parent directory itself and reports
+        // creation failures as transfer errors, so no synchronous FS call
+        // belongs in this UI path (audit APP-EDIT-002).
         let session = EditSession {
             id,
             remote_path: pending.remote_path.clone(),
@@ -206,11 +218,8 @@ impl Workspace {
             // find_active would block re-editing this file forever. Roll it back
             // and delete its temp directory. send_command already set a
             // "Busy — try again" status.
-            if let Some(session) = cx.resources_mut().edit_sessions.remove(id)
-                && let Some(parent) =
-                    std::path::Path::new(session.local_temp_path.as_str()).parent()
-            {
-                let _ = std::fs::remove_dir_all(parent);
+            if let Some(session) = cx.resources_mut().edit_sessions.remove(id) {
+                cleanup_edit_temp_dir(&session.local_temp_path);
             }
         }
     }
@@ -307,11 +316,7 @@ impl Workspace {
                 // start_edit_download mints a NEW session id (and a new temp
                 // dir), so the discarded session's `<edits>/<run>/<old_id>/` directory
                 // would orphan. Delete it now rather than leaking it until quit.
-                if let Some(parent) =
-                    std::path::Path::new(session.local_temp_path.as_str()).parent()
-                {
-                    let _ = std::fs::remove_dir_all(parent);
-                }
+                cleanup_edit_temp_dir(&session.local_temp_path);
                 self.start_edit_download(pending, cx);
             }
             ConflictChoice::Later => {
@@ -502,9 +507,7 @@ impl Workspace {
 pub(crate) fn cleanup_edit_sessions_for_tab(cx: &mut gpui::App, tab_id: TabId) {
     let removed = cx.resources_mut().edit_sessions.remove_for_tab(tab_id);
     for session in removed {
-        if let Some(parent) = std::path::Path::new(session.local_temp_path.as_str()).parent() {
-            let _ = std::fs::remove_dir_all(parent);
-        }
+        cleanup_edit_temp_dir(&session.local_temp_path);
     }
 }
 
