@@ -526,9 +526,12 @@ mod tests {
     #[test]
     fn cleanup_edit_session_dir_removes_contents() {
         let session = LocalPath::new(
-            unique_temp_dir("edit-session").to_string_lossy().to_string(),
+            unique_temp_dir("edit-session")
+                .to_string_lossy()
+                .to_string(),
         );
-        std::fs::create_dir_all(format!("{}/nested", session.as_str())).expect("create session dir");
+        std::fs::create_dir_all(format!("{}/nested", session.as_str()))
+            .expect("create session dir");
         std::fs::write(format!("{}/nested/a.txt", session.as_str()), b"x")
             .expect("write temp file");
         super::cleanup_edit_session_dir(&session).expect("cleanup edit session dir");
@@ -538,7 +541,9 @@ mod tests {
     #[test]
     fn cleanup_edit_session_dir_treats_missing_as_success() {
         let session = LocalPath::new(
-            unique_temp_dir("edit-session-missing").to_string_lossy().to_string(),
+            unique_temp_dir("edit-session-missing")
+                .to_string_lossy()
+                .to_string(),
         );
         super::cleanup_edit_session_dir(&session).expect("missing dir is not an error");
     }
