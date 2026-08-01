@@ -79,18 +79,18 @@ CI（`.github/workflows/ci.yml`）在 `macos-15` 上以 `MACSFTP_REQUIRE_SSHD=1`
 
 ## 5. 已知缺口与风险
 
-1. **交互式 GUI 手测仍未签字**：`docs/release-evidence/v0.1.0.md` 状态仍为 IN PROGRESS，多窗口关闭顺序、10k 条目、四路并发 transfer、720×480/Retina/双主题/键盘/VoiceOver 等 `Interactive` 项未勾选；M7 矩阵 `NEEDS-INTERACTIVE` 项未关闭。
+1. **交互式 GUI 手测已签字（2026-08-01）**：用户实机手测完成，`docs/release-evidence/v0.1.0.md` 状态改为 INTERACTIVE PASSED，全部交互项勾选；M7 矩阵 GUI 目检项与视觉文档 V11 均标记 PASS。
 2. **版本/发布未定**：无 git tag，CHANGELOG 全部内容都在 `[Unreleased]`；未签名 bundle 按发布流程不允许作为公开 release。
-3. **远端历史重写，本地未推送**：`origin/master` 是重新发布的快照历史（与本地无共同祖先），本地 master 比 origin/master 多出 07-28 之后的全部修复与功能。差异存在真实产品源码（非仅文档）。推送前需要确认策略（rebase/force-push/重新开 PR），否则后续协作会持续对不上。
+3. **远端同步已解决（2026-08-01）**：`origin/master` 是重写后的快照历史（与本地无共同祖先）。本地 master 确认为快照的完整超集：吸收唯一缺口（ci.yml 的 GitHub Actions 版本升级），临时降级分支保护后 force-push 同步，修复 CI 暴露的 `website` 坏 gitlink（`28ec9eb` 曾把独立 website repo 误作 submodule 指针提交，`846ccc8` 移除并 ignore），最终远端 = 本地 = `846ccc8`，CI 全绿，保护规则完整恢复（force 禁止 + 4 checks）。基于旧历史的 8 个 deps PR 被 GitHub 自动关闭，dependabot 下周一自动重开。
 4. **审计中低优先级 4 项未修**（§4），其中 TEST-001 违反 AGENTS.md §9 的并发临时路径纪律，属于已知 flaky 来源。
 5. 长期已知限制（有意保留）：RSA 私钥认证禁用（RUSTSEC-2023-0071）；传输队列不跨进程恢复；i18n 未做；远程编辑同秒同大小并发修改漏检。
 
 ## 6. 建议的下一步（价值 × 成本）
 
 1. **P1 — 交互式 GUI 验收**：按 0.1.0 release evidence 清单实机跑一遍，把 IN PROGRESS 收口为 pass 或具体 bug 单；同时关闭 M7 的 `NEEDS-INTERACTIVE` 项。这是当前唯一没被自动验证覆盖的产品风险。
-2. **P1 — 推送/远端同步**：确认本地 master 与 origin/master 的关系（历史重写），选定合并策略并推送，避免分支继续分叉。
+2. ~~**P1 — 推送/远端同步**~~ **已完成（2026-08-01）：** 本地 master force-push 至远端（临时降级保护→推送→恢复）；修复 `website` 坏 gitlink；CI 全绿。可选项：删除远端 `origin/codex/custom-scrollbar-hardening` 分支（已含于 master）。
 3. **P2 — TEST-001**：把两处固定临时路径改为唯一标识（label + pid + 原子序号），顺带审查仅 PID 的路径；这是唯一可确定性复现的 flaky 源。
-4. **P2 — 发布准备**：跑 `scripts/test_password_auth.sh`（release evidence 未勾选）、`scripts/check_release.sh`，决定 0.1.0 是否发版及签名策略。
+4. ~~**P2 — 发布准备（部分）**~~ **已完成（2026-08-01）：** `scripts/test_password_auth.sh` 通过（Docker 真实 sshd）；release evidence 仅剩 CI-only 的 `iconutil` 主路径确认。待定：0.1.0 是否发版及签名策略。
 5. **P3 — APP-EDIT-002/003 + SFTP-MOCK-001**：统一编辑临时目录的错误传播与清理可观测性；mock actor 终态事件 send 失败即退出。
 
 ## 7. 进度量化（粗估）
