@@ -3,6 +3,14 @@
 All notable user-visible and security changes are recorded here. The format is
 based on Keep a Changelog, and releases use semantic versioning.
 
+## [0.1.1] - 2026-08-05
+
+### Changed
+
+- Redesign the delete confirmation dialog with clearer destructive-action
+  hierarchy, file and folder previews, concise permanent-delete guidance, and
+  responsive sizing in light and dark themes.
+
 ## [0.1.0] - 2026-08-01
 
 ### Security
