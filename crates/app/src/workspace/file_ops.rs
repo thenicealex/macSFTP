@@ -11,13 +11,70 @@ use macsftp_core::{
     TabId, UserFacingError,
 };
 use macsftp_platform::{create_directory, delete_entry, local_fs_error, rename_entry};
-use macsftp_ui::{ActiveTheme, InputKeyResult, InputState, text_button};
+use macsftp_ui::{ActiveTheme, IconName, InputKeyResult, InputState, icon, text_button};
 use tracing::warn;
 
 use crate::resources::ActiveResources;
 use crate::workspace::*;
 
 const DELETE_NAME_PREVIEW_LIMIT: usize = 8;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeleteNamePreview {
+    name: String,
+    is_dir: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeleteConfirmPresentation {
+    title: String,
+    names: Vec<DeleteNamePreview>,
+    overflow: usize,
+    risk_message: String,
+}
+
+fn delete_confirm_presentation(entries: &[FsEntryRef]) -> DeleteConfirmPresentation {
+    let count = entries.len();
+    let names: Vec<DeleteNamePreview> = entries
+        .iter()
+        .take(DELETE_NAME_PREVIEW_LIMIT)
+        .map(|entry| DeleteNamePreview {
+            name: Path::new(entry.path.as_str())
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| entry.path.as_str().to_string()),
+            is_dir: entry.is_dir,
+        })
+        .collect();
+    let directory_count = entries.iter().filter(|entry| entry.is_dir).count();
+    let title = if count == 1 {
+        format!(
+            "Delete “{}”?",
+            names.first().map_or("item", |entry| &entry.name)
+        )
+    } else {
+        format!("Delete {count} items?")
+    };
+    let risk_message = match (count, directory_count) {
+        (1, 1) => "This folder and all of its contents will be permanently deleted.".to_string(),
+        (1, _) => "This item will be permanently deleted.".to_string(),
+        (_, 0) => "These items will be permanently deleted.".to_string(),
+        (_, 1) => {
+            "This selection includes 1 folder. All selected items and folder contents will be permanently deleted."
+                .to_string()
+        }
+        (_, directory_count) => format!(
+            "This selection includes {directory_count} folders. All selected items and folder contents will be permanently deleted."
+        ),
+    };
+
+    DeleteConfirmPresentation {
+        title,
+        overflow: count.saturating_sub(names.len()),
+        names,
+        risk_message,
+    }
+}
 
 /// Pending delete confirmation (view-local; not a core ModalRequest).
 #[derive(Debug, Clone)]
@@ -417,44 +474,51 @@ impl crate::workspace::Workspace {
     ) -> Option<gpui::AnyElement> {
         let state = self.delete_confirm.as_ref()?;
         let theme = cx.theme().clone();
-        let count = state.entries.len();
-        let title = if count == 1 {
-            "Delete 1 item?".to_string()
-        } else {
-            format!("Delete {count} items?")
-        };
-        let names: Vec<String> = state
-            .entries
-            .iter()
-            .take(DELETE_NAME_PREVIEW_LIMIT)
-            .map(|entry| {
-                Path::new(entry.path.as_str())
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| entry.path.as_str().to_string())
-            })
-            .collect();
-        let overflow = count.saturating_sub(names.len());
-        let dir_count = state.entries.iter().filter(|e| e.is_dir).count();
+        let presentation = delete_confirm_presentation(&state.entries);
         let show_dont_ask = cx.resources().config.config().confirm_delete;
 
-        let mut name_list = div().flex().flex_col().gap_1().min_w_0();
-        for name in &names {
+        let mut name_list = div()
+            .flex()
+            .flex_col()
+            .min_w_0()
+            .rounded_sm()
+            .border_1()
+            .border_color(theme.colors.border)
+            .bg(theme.colors.surface);
+        for (index, entry) in presentation.names.iter().enumerate() {
+            let name = entry.name.clone();
+            let entry_icon = if entry.is_dir {
+                IconName::Folder
+            } else {
+                IconName::File
+            };
             name_list = name_list.child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
                     .min_w_0()
-                    .truncate()
+                    .px_2()
+                    .py_1()
+                    .when(index > 0, |row| {
+                        row.border_t_1().border_color(theme.colors.border)
+                    })
                     .text_size(px(12.0))
                     .text_color(theme.colors.text)
-                    .child(name.clone()),
+                    .child(icon(entry_icon, theme.colors.text_muted))
+                    .child(div().min_w_0().truncate().child(name)),
             );
         }
-        if overflow > 0 {
+        if presentation.overflow > 0 {
             name_list = name_list.child(
                 div()
+                    .px_2()
+                    .py_1()
+                    .border_t_1()
+                    .border_color(theme.colors.border)
                     .text_size(px(12.0))
                     .text_color(theme.colors.text_muted)
-                    .child(format!("and {overflow} more")),
+                    .child(format!("and {} more", presentation.overflow)),
             );
         }
 
@@ -473,44 +537,65 @@ impl crate::workspace::Workspace {
             }))
             .flex()
             .flex_col()
-            .gap_3()
-            .w(px(420.0))
-            .p_4()
+            .gap_4()
+            .w_full()
+            .max_w(px(440.0))
+            .p_5()
             .bg(theme.colors.elevated_surface)
             .border_1()
             .border_color(theme.colors.border)
             .rounded_md()
+            .shadow_sm()
             .font_family(theme.fonts.ui_family.clone())
             .child(
                 div()
-                    .text_size(px(14.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(theme.colors.text)
-                    .child(title),
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div()
+                            .size(px(30.0))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(gpui::hsla(0.0, 0.55, 0.45, 0.15))
+                            .child(icon(IconName::Trash, theme.colors.error)),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(15.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.colors.text)
+                            .child(presentation.title.clone()),
+                    ),
             )
             .child(name_list);
 
-        if dir_count > 0 {
-            let dir_label = if dir_count == 1 {
-                "Includes 1 directory. Recursive delete removes all contents permanently."
-                    .to_string()
-            } else {
-                format!(
-                    "Includes {dir_count} directories. Recursive delete removes all contents permanently."
+        card = card.child(
+            div()
+                .flex()
+                .items_start()
+                .gap_2()
+                .child(
+                    div()
+                        .mt(px(1.0))
+                        .text_size(px(12.0))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(theme.colors.error)
+                        .child("!"),
                 )
-            };
-            card = card.child(
-                div()
-                    .p_2()
-                    .rounded_sm()
-                    .bg(gpui::hsla(0.0, 0.55, 0.45, 0.15))
-                    .border_1()
-                    .border_color(theme.colors.error)
-                    .text_size(px(12.0))
-                    .text_color(theme.colors.error)
-                    .child(dir_label),
-            );
-        }
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_size(px(12.0))
+                        .text_color(theme.colors.text_muted)
+                        .child(presentation.risk_message),
+                ),
+        );
 
         if show_dont_ask {
             let checked = state.dont_ask_again;
@@ -544,7 +629,7 @@ impl crate::workspace::Workspace {
                         div()
                             .text_size(px(12.0))
                             .text_color(theme.colors.text_muted)
-                            .child("Don't ask again"),
+                            .child("Don't ask again before deleting items"),
                     ),
             );
         }
@@ -555,13 +640,11 @@ impl crate::workspace::Workspace {
                 .flex_wrap()
                 .justify_end()
                 .gap_2()
-                .child(
-                    text_button("delete-cancel", "Cancel")
-                        .primary(true)
-                        .on_click(cx.listener(|workspace, _event, window, cx| {
-                            workspace.cancel_delete_confirm(window, cx);
-                        })),
-                )
+                .child(text_button("delete-cancel", "Cancel").on_click(cx.listener(
+                    |workspace, _event, window, cx| {
+                        workspace.cancel_delete_confirm(window, cx);
+                    },
+                )))
                 .child(
                     text_button("delete-confirm", "Delete")
                         .danger(true)
@@ -580,6 +663,7 @@ impl crate::workspace::Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
+                .p_4()
                 .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
                 .child(card)
                 .into_any_element(),
@@ -758,5 +842,50 @@ fn execute_local_fs_operation(op: &FsOp) -> Result<(), UserFacingError> {
                 .map(|_| ())
                 .map_err(|error| local_fs_error("Could not create folder", &error))
         }
+    }
+}
+
+#[cfg(test)]
+mod delete_confirm_presentation_tests {
+    use macsftp_core::{FsEntryRef, FsPath, LocalPath};
+
+    use super::{DELETE_NAME_PREVIEW_LIMIT, delete_confirm_presentation};
+
+    fn local_entry(path: &str, is_dir: bool) -> FsEntryRef {
+        FsEntryRef {
+            path: FsPath::Local(LocalPath::new(path)),
+            is_dir,
+        }
+    }
+
+    #[test]
+    fn single_folder_uses_its_name_and_recursive_delete_warning() {
+        let presentation = delete_confirm_presentation(&[local_entry("/tmp/project-assets", true)]);
+
+        assert_eq!(presentation.title, "Delete “project-assets”?");
+        assert_eq!(presentation.names.len(), 1);
+        assert_eq!(presentation.names[0].name, "project-assets");
+        assert!(presentation.names[0].is_dir);
+        assert_eq!(presentation.overflow, 0);
+        assert_eq!(
+            presentation.risk_message,
+            "This folder and all of its contents will be permanently deleted."
+        );
+    }
+
+    #[test]
+    fn mixed_selection_reports_folder_count_and_preview_overflow() {
+        let entries: Vec<FsEntryRef> = (0..DELETE_NAME_PREVIEW_LIMIT + 2)
+            .map(|index| local_entry(&format!("/tmp/item-{index}"), index < 2))
+            .collect();
+        let presentation = delete_confirm_presentation(&entries);
+
+        assert_eq!(presentation.title, "Delete 10 items?");
+        assert_eq!(presentation.names.len(), DELETE_NAME_PREVIEW_LIMIT);
+        assert_eq!(presentation.overflow, 2);
+        assert_eq!(
+            presentation.risk_message,
+            "This selection includes 2 folders. All selected items and folder contents will be permanently deleted."
+        );
     }
 }
