@@ -340,13 +340,23 @@ impl RemoteSessionActor {
                     break;
                 }
                 _ = self.shared_connection.connection_lost.cancelled() => {
+                    // The physical layer records the classified cause before
+                    // cancelling the token, so it is always readable here.
+                    let recorded_cause = self
+                        .shared_connection
+                        .disconnect_cause
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .as_ref()
+                        .copied();
+                    let reason = recorded_cause
+                        .map(crate::physical_connection::PhysicalDisconnectCause::disconnect_reason)
+                        .unwrap_or(macsftp_core::DisconnectReason::ConnectionLost);
                     if let Err(error) = self
                         .event_tx
                         .send_async(AppEvent::TabDisconnected(RemoteScoped::new(
                             scope.clone(),
-                            macsftp_core::TabDisconnected {
-                                reason: macsftp_core::DisconnectReason::ConnectionLost,
-                            },
+                            macsftp_core::TabDisconnected { reason },
                         )))
                         .await
                     {

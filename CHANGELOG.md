@@ -3,6 +3,15 @@
 All notable user-visible and security changes are recorded here. The format is
 based on Keep a Changelog, and releases use semantic versioning.
 
+## [Unreleased]
+
+### Changed
+
+- Mid-session disconnects now show the classified cause in the remote pane —
+  "Server closed the connection" or "Connection lost" with a network-timeout
+  hint — instead of a generic "Disconnected" message, with the same Reconnect
+  and Edit actions as before.
+
 ## [0.1.1] - 2026-08-05
 
 ### Changed

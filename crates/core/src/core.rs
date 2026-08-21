@@ -355,6 +355,12 @@ pub enum ErrorCode {
     UnsupportedSymlink,
     MetadataPreservationFailed,
     ChannelClosed,
+    /// Mid-session loss: no inbound traffic for ~60s (keepalive gave up).
+    NetworkTimeout,
+    /// Mid-session loss: any other local transport failure.
+    NetworkError,
+    /// Mid-session loss: the server sent an SSH DISCONNECT message.
+    ServerDisconnected,
     Cancelled,
     Unknown,
 }
@@ -2555,6 +2561,9 @@ impl fmt::Display for ErrorCode {
             Self::UnsupportedSymlink => "unsupported_symlink",
             Self::MetadataPreservationFailed => "metadata_preservation_failed",
             Self::ChannelClosed => "channel_closed",
+            Self::NetworkTimeout => "network_timeout",
+            Self::NetworkError => "network_error",
+            Self::ServerDisconnected => "server_disconnected",
             Self::Cancelled => "cancelled",
             Self::Unknown => "unknown",
         };

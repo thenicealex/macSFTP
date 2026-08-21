@@ -1444,6 +1444,83 @@ mod tests {
     }
 
     #[gpui::test]
+    fn classified_disconnect_reasons_reach_the_connection_state(cx: &mut TestAppContext) {
+        // Mid-session drops now arrive with a classified UserFacingError so
+        // the remote pane can say WHY the connection dropped instead of a
+        // generic "Disconnected". The stale-event guard must keep treating
+        // them like any other scoped TabDisconnected.
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
+        });
+        let _ = channels.command_rx.try_recv();
+
+        let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                AppEvent::TabConnected(RemoteScoped::new(
+                    scope.clone(),
+                    TabConnected {
+                        remote_root: RemotePath::new(TEST_REMOTE_ROOT),
+                    },
+                )),
+                window,
+                cx,
+            );
+        });
+
+        let network_timeout = macsftp_core::UserFacingError::new(
+            macsftp_core::ErrorCode::NetworkTimeout,
+            "Connection lost",
+            "No response from the server for about a minute.",
+        )
+        .with_retryable(true);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                AppEvent::TabDisconnected(RemoteScoped::new(
+                    scope.clone(),
+                    TabDisconnected {
+                        reason: DisconnectReason::Error(network_timeout),
+                    },
+                )),
+                window,
+                cx,
+            );
+            let tab = workspace.active_tab().expect("tab must exist");
+            let macsftp_core::ConnectionState::Disconnected {
+                reason: DisconnectReason::Error(error),
+            } = &tab.connection
+            else {
+                panic!("expected Disconnected(Error), got {:?}", tab.connection);
+            };
+            assert_eq!(error.code, macsftp_core::ErrorCode::NetworkTimeout);
+            assert!(tab.remote.entries.is_empty());
+        });
+
+        // A stale-epoch repeat of the same event must not resurrect state.
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            let stale_scope = RemoteEventScope::new(TabId(1), SessionId(1), 0);
+            workspace.handle_app_event(
+                AppEvent::TabDisconnected(RemoteScoped::new(
+                    stale_scope,
+                    TabDisconnected {
+                        reason: DisconnectReason::UserRequested,
+                    },
+                )),
+                window,
+                cx,
+            );
+            let tab = workspace.active_tab().expect("tab must exist");
+            assert!(matches!(
+                &tab.connection,
+                macsftp_core::ConnectionState::Disconnected {
+                    reason: DisconnectReason::Error(error),
+                } if error.code == macsftp_core::ErrorCode::NetworkTimeout
+            ));
+        });
+    }
+
+    #[gpui::test]
     fn disconnect_preserves_last_remote_path_for_session_restore(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
         workspace.update_in(&mut cx, |workspace, window, cx| {

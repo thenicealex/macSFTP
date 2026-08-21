@@ -755,6 +755,20 @@ impl crate::workspace::Workspace {
                     )
                     .into_any_element(),
                 ),
+                // Mid-session disconnects carry a classified cause (server
+                // hung up vs network went silent vs other transport error);
+                // show it so users know whether reconnecting is likely to
+                // help. Buttons stay identical to the generic disconnect.
+                Some(ConnectionState::Disconnected {
+                    reason: macsftp_core::DisconnectReason::Error(error),
+                }) => Some(remote_empty_with_recents(
+                    format!("{} — {}", error.title, error.message).into(),
+                    vec![
+                        connect_button("reconnect-remote", "Reconnect (⌘⇧R)"),
+                        edit_connection_button("edit-connection-disconnected"),
+                    ],
+                    cx,
+                )),
                 Some(ConnectionState::Disconnected { .. }) => Some(remote_empty_with_recents(
                     "Disconnected".into(),
                     vec![
