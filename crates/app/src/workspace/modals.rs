@@ -18,9 +18,9 @@ use macsftp_ui::{
 use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::connect_form::*;
 use crate::workspace::helpers::*;
-use crate::workspace::nav::HistoryOp;
 use crate::workspace::profiles::{SettingsSection, profile_list_label};
 use crate::workspace::*;
+use macsftp_core::HistoryOp;
 
 impl crate::workspace::Workspace {
     pub(crate) fn has_transfer_conflict_modal(&self, request_id: ConflictRequestId) -> bool {

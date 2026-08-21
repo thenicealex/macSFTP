@@ -74,8 +74,8 @@ mod tests {
     use crate::resources::{ActiveResources, ActiveTransfers};
     use crate::session_coordinator::SessionCoordinator;
     use crate::workspace::ConflictChoice;
-    use crate::workspace::nav::HistoryOp;
     use crate::workspace::profiles::{SettingsSection, profile_matches_filter};
+    use macsftp_core::HistoryOp;
     use macsftp_ui::InputState;
 
     const TEST_REMOTE_ROOT: &str = "/home/tester";
@@ -3415,31 +3415,23 @@ mod tests {
         // Refresh must not push history.
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.focused_side = PaneSide::Local;
-            let back_len_before = workspace
-                .tab_nav
-                .get(&workspace.active_tab().expect("tab").id)
-                .map(|nav| nav.local.back.len())
-                .unwrap_or(0);
+            let back_len_before = workspace.active_tab().expect("tab").nav.local.back.len();
             workspace.refresh_focused_pane(window, cx);
-            let back_len_after = workspace
-                .tab_nav
-                .get(&workspace.active_tab().expect("tab").id)
-                .map(|nav| nav.local.back.len())
-                .unwrap_or(0);
+            let back_len_after = workspace.active_tab().expect("tab").nav.local.back.len();
             assert_eq!(
                 back_len_before, back_len_after,
                 "refresh must not push history"
             );
         });
 
-        // Closing the tab drops its nav state.
+        // Closing the tab drops its nav state with it (no side table left).
         workspace.update_in(&mut cx, |workspace, window, cx| {
             let tab_id = workspace.active_tab().expect("tab").id;
-            assert!(workspace.tab_nav.contains_key(&tab_id));
+            assert!(workspace.state.tabs.find_tab(tab_id).is_some());
             workspace.close_tab_by_id(tab_id, window, cx);
             assert!(
-                !workspace.tab_nav.contains_key(&tab_id),
-                "close_tab must remove tab_nav entry"
+                workspace.state.tabs.find_tab(tab_id).is_none(),
+                "close_tab must remove the tab owning the nav state"
             );
         });
 

@@ -30,8 +30,8 @@ use crate::app_actions::{
 use crate::resources::ActiveResources;
 use crate::session_coordinator::SessionCoordinator;
 use crate::workspace::file_ops::{ContextMenuState, DeleteConfirmState, InlineEditState};
-use crate::workspace::nav::{HistoryOp, TabNavState};
 use crate::workspace::profiles::{ProfileEditorState, SettingsSection};
+use macsftp_core::HistoryOp;
 
 /// Status bar copy when the command channel is full (non-blocking drop).
 pub(crate) const STATUS_BUSY_TRY_AGAIN: &str = "Busy — try again in a moment.";
@@ -170,12 +170,6 @@ pub struct Workspace {
     /// Session credentials per tab, kept in memory only so Reconnect
     /// works without re-typing. Replaced by Keychain-backed profiles.
     tab_settings: HashMap<TabId, ConnectionSettings>,
-    /// Per-tab local/remote back-forward history (session-only).
-    tab_nav: HashMap<TabId, TabNavState>,
-    /// Monotonic local-directory request generation per tab. A path alone is
-    /// insufficient when navigation returns to the same directory before an
-    /// older background scan completes.
-    local_read_epochs: HashMap<TabId, u64>,
     /// Connection meta restored from `session.json` (form prefill / path).
     restored_targets: HashMap<TabId, RestoredTabTarget>,
     _appearance_subscription: Subscription,
@@ -281,8 +275,6 @@ impl Workspace {
             remote_filter: PaneFilter::default(),
             selection_anchor: None,
             tab_settings: HashMap::new(),
-            tab_nav: HashMap::new(),
-            local_read_epochs: HashMap::new(),
             restored_targets: HashMap::new(),
             _appearance_subscription: appearance_subscription,
         };
@@ -524,8 +516,6 @@ impl Workspace {
         // profile+path, not tab).
         cleanup_edit_sessions_for_tab(cx, tab_id);
         self.tab_mru.retain(|id| *id != tab_id);
-        self.tab_nav.remove(&tab_id);
-        self.local_read_epochs.remove(&tab_id);
         self.restored_targets.remove(&tab_id);
         // Keep MRU front aligned with the newly active tab after close
         // (TabStore promotes another tab without going through activate_tab).

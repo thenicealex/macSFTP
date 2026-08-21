@@ -1986,7 +1986,7 @@ symlink 均复制 link 本身，不解引用，并由真实 sshd 集成测试覆
 目录上传保留每个选中目录的顶层名称，多目录不会把相对路径铺平到同一个目标；空目录也
 生成 child job。已有同名目录按 merge 处理，文件级冲突仍逐项进入 plan-scoped 决策。
 本地目录 listing 及递归删除/rename/mkdir 已移到 GPUI background executor；每个 tab 用
-单调 local request epoch 丢弃过期结果，路径相同也不能绕过陈旧结果校验。
+单调 local request epoch 丢弃过期结果，路径相同也不能绕过陈旧结果校验。（2026-08-21 更新：该 epoch 及其守卫判断已从 app view 层移入 `core::LocalPaneState`（`read_epoch` + `accepts_local_result`），per-tab 导航历史同步移入 `core::TabState.nav`——两者随 tab 关闭自动终结，不再需要 view 层的 side-table 手动清理。）
 
 ### M6: Conflict + metadata
 

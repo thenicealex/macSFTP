@@ -8,8 +8,8 @@ use macsftp_core::ConnectionState;
 use macsftp_ui::{ActiveTheme, InputKeyResult, TextFieldModel, text_field};
 
 use crate::palette_commands::{PaletteCommand, PaletteContext, filter_palette_commands};
-use crate::workspace::nav::HistoryOp;
 use crate::workspace::{PaneSide, Workspace, WorkspaceSurface};
+use macsftp_core::HistoryOp;
 
 impl Workspace {
     pub(crate) fn palette_context(&self) -> PaletteContext {

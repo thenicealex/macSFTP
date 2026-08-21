@@ -13,7 +13,8 @@ use crate::palette_commands::labeled_shortcut;
 use crate::resources::ActiveResources;
 use crate::workspace::PaneSide;
 use crate::workspace::helpers::*;
-use crate::workspace::nav::{HistoryOp, breadcrumb_display_indices, breadcrumb_segments};
+use crate::workspace::nav::{breadcrumb_display_indices, breadcrumb_segments};
+use macsftp_core::HistoryOp;
 
 impl crate::workspace::Workspace {
     pub(crate) fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
