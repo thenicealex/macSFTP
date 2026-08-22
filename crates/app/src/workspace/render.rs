@@ -678,11 +678,11 @@ impl crate::workspace::Workspace {
         } else {
             Vec::new()
         };
-        // Full empty-state composition: glyph badge, title, one-line detail,
-        // primary action, and the recent-connection list as real hover rows —
-        // shared by every idle/disconnected remote variant.
+        // Full empty-state composition: optional title/detail, primary action,
+        // and the recent-connection list as real hover rows — shared by every
+        // idle/disconnected remote variant.
         let remote_empty_with_recents =
-            |title: SharedString,
+            |title: Option<SharedString>,
              detail: Option<SharedString>,
              actions: Vec<macsftp_ui::TextButton>,
              cx: &mut Context<Self>| {
@@ -695,30 +695,34 @@ impl crate::workspace::Workspace {
                     .items_center()
                     .justify_center()
                     .gap_4()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .gap_1()
-                            .max_w(px(420.0))
-                            .child(
-                                div()
-                                    .text_size(px(15.0))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.colors.text)
-                                    .child(title),
-                            )
-                            .when_some(detail, |container, detail| {
-                                container.child(
-                                    div()
-                                        .text_size(px(13.0))
-                                        .text_color(theme.colors.text_muted)
-                                        .text_center()
-                                        .child(detail),
-                                )
-                            }),
-                    )
+                    .when(title.is_some() || detail.is_some(), |container| {
+                        container.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .items_center()
+                                .gap_1()
+                                .max_w(px(420.0))
+                                .when_some(title, |container, title| {
+                                    container.child(
+                                        div()
+                                            .text_size(px(15.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.colors.text)
+                                            .child(title),
+                                    )
+                                })
+                                .when_some(detail, |container, detail| {
+                                    container.child(
+                                        div()
+                                            .text_size(px(13.0))
+                                            .text_color(theme.colors.text_muted)
+                                            .text_center()
+                                            .child(detail),
+                                    )
+                                }),
+                        )
+                    })
                     .child(div().flex().gap_2().children(actions))
                     .when(!rows.is_empty(), |container| {
                         container.child(
@@ -761,7 +765,7 @@ impl crate::workspace::Workspace {
         let connection_placeholder: Option<gpui::AnyElement> = if side == PaneSide::Remote {
             match tab_state.map(|tab| &tab.connection) {
                 Some(ConnectionState::Empty) => Some(remote_empty_with_recents(
-                    "Connect to a server".into(),
+                    None,
                     None,
                     vec![primary_connect_button("connect-remote", "Connect… (⌘⇧R)")],
                     cx,
@@ -824,7 +828,7 @@ impl crate::workspace::Workspace {
                 Some(ConnectionState::Disconnected {
                     reason: macsftp_core::DisconnectReason::Error(error),
                 }) => Some(remote_empty_with_recents(
-                    error.title.clone().into(),
+                    Some(error.title.clone().into()),
                     Some(error.message.clone().into()),
                     vec![
                         connect_button("reconnect-remote", "Reconnect (⌘⇧R)"),
@@ -833,7 +837,7 @@ impl crate::workspace::Workspace {
                     cx,
                 )),
                 Some(ConnectionState::Disconnected { .. }) => Some(remote_empty_with_recents(
-                    "Disconnected".into(),
+                    Some("Disconnected".into()),
                     None,
                     vec![
                         connect_button("reconnect-remote", "Reconnect (⌘⇧R)"),
