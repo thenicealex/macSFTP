@@ -133,3 +133,15 @@ impl TransferDrawerUi {
         }
     }
 }
+
+/// Connect form sheet state (form model + focus handle).
+pub(crate) struct ConnectFormUi {
+    pub(crate) form: Option<crate::workspace::connect_form::ConnectForm>,
+    pub(crate) focus: gpui::FocusHandle,
+}
+
+impl ConnectFormUi {
+    pub(crate) fn new(focus: gpui::FocusHandle) -> Self {
+        Self { form: None, focus }
+    }
+}

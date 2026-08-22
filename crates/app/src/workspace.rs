@@ -91,8 +91,8 @@ pub struct Workspace {
     status_message: Option<SharedString>,
     config_error: Option<SharedString>,
     log_file: LocalPath,
-    connect_form: Option<ConnectForm>,
-    connect_form_focus: FocusHandle,
+    connect_form_ui: view_state::ConnectFormUi,
+
     /// Draft name for the active transfer-conflict rename decision.
     /// It is view-local because the runtime only receives a decision
     /// after the user submits it.
@@ -195,8 +195,8 @@ impl Workspace {
             status_message: None,
             config_error,
             log_file,
-            connect_form: None,
-            connect_form_focus: cx.focus_handle(),
+            connect_form_ui: view_state::ConnectFormUi::new(cx.focus_handle()),
+
             conflict_rename: InputState::new(),
             conflict_rename_error: None,
             delete_confirm: None,
@@ -984,14 +984,15 @@ impl Workspace {
         {
             self.use_profile(profile_id, cx);
             if self
-                .connect_form
+                .connect_form_ui
+                .form
                 .as_ref()
                 .is_some_and(|form| form.can_auto_connect())
             {
                 self.submit_connect_form(window, cx);
                 return;
             }
-            window.focus(&self.connect_form_focus);
+            window.focus(&self.connect_form_ui.focus);
             cx.notify();
             return;
         }
@@ -1198,7 +1199,7 @@ impl Render for Workspace {
                 }),
             )
             .on_action(cx.listener(|workspace, _: &OpenSettings, window, cx| {
-                if workspace.connect_form.is_none()
+                if workspace.connect_form_ui.form.is_none()
                     && workspace.active_host_key_prompt().is_none()
                     && workspace.active_transfer_conflict_prompt().is_none()
                     && workspace.delete_confirm.is_none()
@@ -1212,7 +1213,7 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|workspace, _: &OpenProfiles, window, cx| {
-                if workspace.connect_form.is_none()
+                if workspace.connect_form_ui.form.is_none()
                     && workspace.active_host_key_prompt().is_none()
                     && workspace.active_transfer_conflict_prompt().is_none()
                     && workspace.delete_confirm.is_none()
@@ -1226,7 +1227,7 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|workspace, _: &ShowAbout, _window, cx| {
-                if workspace.connect_form.is_none()
+                if workspace.connect_form_ui.form.is_none()
                     && workspace.active_host_key_prompt().is_none()
                     && workspace.active_transfer_conflict_prompt().is_none()
                     && workspace.delete_confirm.is_none()
@@ -1291,7 +1292,6 @@ mod transfers;
 pub(crate) mod view_state;
 mod visible_entries;
 
-use connect_form::ConnectForm;
 #[cfg(test)]
 pub(crate) use remote_edit::ConflictChoice;
 pub(crate) use remote_edit::build_edit_upload_command;

@@ -279,7 +279,7 @@ impl crate::workspace::Workspace {
         }
         // Connect profile picker sits above the form: Esc closes the picker
         // first, then a second Esc dismisses Connect.
-        if let Some(form) = &mut self.connect_form {
+        if let Some(form) = &mut self.connect_form_ui.form {
             if form.profile_picker_open {
                 form.close_profile_picker();
                 cx.notify();
@@ -297,7 +297,7 @@ impl crate::workspace::Workspace {
     }
 
     pub(crate) fn open_go_to_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.connect_form.is_some()
+        if self.connect_form_ui.form.is_some()
             || self.active_host_key_prompt().is_some()
             || self.active_transfer_conflict_prompt().is_some()
             || self.delete_confirm.is_some()
@@ -497,7 +497,7 @@ impl crate::workspace::Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        let form = self.connect_form.as_ref()?;
+        let form = self.connect_form_ui.form.as_ref()?;
         let theme = cx.theme().clone();
 
         let field_row = |label: &'static str,
@@ -512,7 +512,7 @@ impl crate::workspace::Workspace {
                 .items_center()
                 .gap_2()
                 .on_click(cx.listener(move |workspace, _event, _window, cx| {
-                    if let Some(form) = &mut workspace.connect_form {
+                    if let Some(form) = &mut workspace.connect_form_ui.form {
                         form.focused_field = field;
                         cx.notify();
                     }
@@ -544,7 +544,7 @@ impl crate::workspace::Workspace {
             text_button(id, label)
                 .primary(form.auth_method == method)
                 .on_click(cx.listener(move |workspace, _event, _window, cx| {
-                    if let Some(form) = &mut workspace.connect_form {
+                    if let Some(form) = &mut workspace.connect_form_ui.form {
                         form.set_auth_method(method);
                         cx.notify();
                     }
@@ -553,7 +553,7 @@ impl crate::workspace::Workspace {
 
         let mut card = div()
             .key_context("ConnectForm")
-            .track_focus(&self.connect_form_focus)
+            .track_focus(&self.connect_form_ui.focus)
             .on_key_down(cx.listener(Self::handle_connect_form_key))
             .flex()
             .flex_col()
@@ -616,7 +616,7 @@ impl crate::workspace::Workspace {
                             .rounded_md()
                             .cursor_pointer()
                             .on_click(cx.listener(|workspace, _event, _window, cx| {
-                                if let Some(form) = &mut workspace.connect_form {
+                                if let Some(form) = &mut workspace.connect_form_ui.form {
                                     form.profile_picker_open = !form.profile_picker_open;
                                     cx.notify();
                                 }
@@ -720,7 +720,7 @@ impl crate::workspace::Workspace {
                     .text_size(px(12.0))
                     .text_color(theme.colors.text_muted)
                     .on_click(cx.listener(|workspace, _event, _window, cx| {
-                        if let Some(form) = &mut workspace.connect_form {
+                        if let Some(form) = &mut workspace.connect_form_ui.form {
                             form.switch_to_manual_entry();
                             cx.notify();
                         }
@@ -878,7 +878,7 @@ impl crate::workspace::Workspace {
                             .min_w_0()
                             .on_click(cx.listener(
                                 move |workspace, _event: &ClickEvent, _window, cx| {
-                                    if let Some(form) = &mut workspace.connect_form {
+                                    if let Some(form) = &mut workspace.connect_form_ui.form {
                                         form.focused_field = ConnectField::ProfileName;
                                         cx.notify();
                                     }
@@ -913,7 +913,7 @@ impl crate::workspace::Workspace {
                     .text_size(px(12.0))
                     .text_color(theme.colors.text_muted)
                     .on_click(cx.listener(|workspace, _event, _window, cx| {
-                        if let Some(form) = &mut workspace.connect_form {
+                        if let Some(form) = &mut workspace.connect_form_ui.form {
                             form.save_as_expanded = true;
                             form.focused_field = ConnectField::ProfileName;
                             cx.notify();

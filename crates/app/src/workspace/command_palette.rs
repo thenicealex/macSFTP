@@ -97,7 +97,7 @@ impl Workspace {
                 cx.notify();
             }
             "OpenSettings" => {
-                if self.connect_form.is_none()
+                if self.connect_form_ui.form.is_none()
                     && self.active_host_key_prompt().is_none()
                     && self.active_transfer_conflict_prompt().is_none()
                     && self.delete_confirm.is_none()
@@ -111,7 +111,7 @@ impl Workspace {
                 }
             }
             "OpenProfiles" => {
-                if self.connect_form.is_none()
+                if self.connect_form_ui.form.is_none()
                     && self.active_host_key_prompt().is_none()
                     && self.active_transfer_conflict_prompt().is_none()
                     && self.delete_confirm.is_none()
@@ -128,7 +128,7 @@ impl Workspace {
                 }
             }
             "ShowAbout" => {
-                if self.connect_form.is_none()
+                if self.connect_form_ui.form.is_none()
                     && self.active_host_key_prompt().is_none()
                     && self.active_transfer_conflict_prompt().is_none()
                     && self.delete_confirm.is_none()

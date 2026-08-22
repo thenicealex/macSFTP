@@ -1748,7 +1748,8 @@ mod tests {
 
         workspace.read_with(&cx, |workspace, _| {
             let form = workspace
-                .connect_form
+                .connect_form_ui
+                .form
                 .as_ref()
                 .expect("form must open when recent has no profile");
             assert_eq!(form.host.value(), "recent.example.com");
@@ -1780,7 +1781,11 @@ mod tests {
             workspace.open_connect_form(window, cx);
         });
         workspace.update_in(&mut cx, |workspace, _window, cx| {
-            let form = workspace.connect_form.as_mut().expect("form is open");
+            let form = workspace
+                .connect_form_ui
+                .form
+                .as_mut()
+                .expect("form is open");
             form.host.set_value("profile.example.com");
             form.port.set_value("22");
             form.username.set_value("deploy");
@@ -1811,7 +1816,7 @@ mod tests {
 
         workspace.update_in(&mut cx, |workspace, window, cx| {
             // Close any leftover form so open_recent owns the path.
-            workspace.connect_form = None;
+            workspace.connect_form_ui.form = None;
             workspace.open_recent_connection(recent_id, window, cx);
         });
 
@@ -1830,7 +1835,7 @@ mod tests {
         }
         workspace.read_with(&cx, |workspace, _| {
             assert!(
-                workspace.connect_form.is_none(),
+                workspace.connect_form_ui.form.is_none(),
                 "form closes when auto-connect succeeds"
             );
             let tab = workspace.state.tabs.active_tab().expect("tab exists");
@@ -1856,7 +1861,11 @@ mod tests {
             workspace.open_connect_form(window, cx);
         });
         workspace.update_in(&mut cx, |workspace, _window, cx| {
-            let form = workspace.connect_form.as_mut().expect("form is open");
+            let form = workspace
+                .connect_form_ui
+                .form
+                .as_mut()
+                .expect("form is open");
             form.host.set_value("missing-secret.example.com");
             form.port.set_value("22");
             form.username.set_value("deploy");
@@ -1897,7 +1906,7 @@ mod tests {
         });
 
         workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.connect_form = None;
+            workspace.connect_form_ui.form = None;
             workspace.open_recent_connection(recent_id, window, cx);
         });
 
@@ -1907,7 +1916,8 @@ mod tests {
         );
         workspace.read_with(&cx, |workspace, _| {
             let form = workspace
-                .connect_form
+                .connect_form_ui
+                .form
                 .as_ref()
                 .expect("form stays open so user can re-enter password");
             assert_eq!(form.host.value(), "missing-secret.example.com");
@@ -3770,13 +3780,17 @@ mod tests {
             workspace.request_connect(window, cx);
         });
         workspace.read_with(&cx, |workspace, _| {
-            assert!(workspace.connect_form.is_some(), "form must open");
+            assert!(workspace.connect_form_ui.form.is_some(), "form must open");
         });
         assert!(channels.command_rx.try_recv().is_err(), "no command yet");
 
         // Fill the form and submit.
         workspace.update_in(&mut cx, |workspace, window, cx| {
-            let form = workspace.connect_form.as_mut().expect("form is open");
+            let form = workspace
+                .connect_form_ui
+                .form
+                .as_mut()
+                .expect("form is open");
             form.host.set_value("server.example.com");
             form.port.set_value("2200");
             form.username.set_value("alex");
@@ -3797,7 +3811,10 @@ mod tests {
             other => panic!("expected ConnectTab, got {other:?}"),
         }
         workspace.read_with(&cx, |workspace, _| {
-            assert!(workspace.connect_form.is_none(), "form closes on submit");
+            assert!(
+                workspace.connect_form_ui.form.is_none(),
+                "form closes on submit"
+            );
             let tab = workspace.state.tabs.active_tab().expect("tab must exist");
             assert_eq!(tab.title, "server.example.com");
             assert!(matches!(tab.connection, ConnectionState::Connecting { .. }));
@@ -3823,7 +3840,7 @@ mod tests {
         });
         workspace.read_with(&cx, |workspace, _| {
             assert!(
-                workspace.connect_form.is_none(),
+                workspace.connect_form_ui.form.is_none(),
                 "cached credentials must skip the form"
             );
         });
@@ -3845,13 +3862,13 @@ mod tests {
         let (workspace, mut cx, _) = init_workspace(cx);
         workspace.update_in(&mut cx, |ws, window, cx| {
             ws.open_connect_form(window, cx);
-            let form = ws.connect_form.as_mut().expect("form opens");
+            let form = ws.connect_form_ui.form.as_mut().expect("form opens");
             form.profile_picker_open = true;
             form.save_as_expanded = true;
             form.profile_picker_filter.set_value("partial");
             ws.close_connect_form(window, cx);
             ws.open_connect_form(window, cx);
-            let form = ws.connect_form.as_ref().expect("form reopens");
+            let form = ws.connect_form_ui.form.as_ref().expect("form reopens");
             assert!(
                 !form.profile_picker_open,
                 "reopening connect form must reset profile_picker_open"
@@ -3872,7 +3889,7 @@ mod tests {
         let (workspace, mut cx, _) = init_workspace(cx);
         workspace.update_in(&mut cx, |ws, window, cx| {
             ws.open_connect_form(window, cx);
-            let form = ws.connect_form.as_ref().expect("form opens");
+            let form = ws.connect_form_ui.form.as_ref().expect("form opens");
             assert!(
                 !form.save_as_expanded,
                 "Save as profile must start collapsed"
@@ -3886,7 +3903,11 @@ mod tests {
 
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.open_connect_form(window, cx);
-            let form = workspace.connect_form.as_mut().expect("form is open");
+            let form = workspace
+                .connect_form_ui
+                .form
+                .as_mut()
+                .expect("form is open");
             assert!(!form.save_as_expanded);
             form.save_as_expanded = true;
             form.host.set_value("save-as.example.com");
@@ -3904,7 +3925,8 @@ mod tests {
             assert_eq!(profiles[0].host, "save-as.example.com");
             assert_eq!(profiles[0].username, "deploy");
             let form = workspace
-                .connect_form
+                .connect_form_ui
+                .form
                 .as_ref()
                 .expect("form stays open after save");
             assert!(!form.save_as_expanded, "successful save collapses Save as");
@@ -3924,7 +3946,11 @@ mod tests {
             workspace.open_connect_form(window, cx);
         });
         workspace.update_in(&mut cx, |workspace, _window, cx| {
-            let form = workspace.connect_form.as_mut().expect("form is open");
+            let form = workspace
+                .connect_form_ui
+                .form
+                .as_mut()
+                .expect("form is open");
             form.host.set_value("example.com");
             form.username.set_value("alex");
             form.password.set_value("hunter2");
@@ -3940,7 +3966,11 @@ mod tests {
         });
 
         workspace.update_in(&mut cx, |workspace, _window, cx| {
-            let form = workspace.connect_form.as_mut().expect("form is open");
+            let form = workspace
+                .connect_form_ui
+                .form
+                .as_mut()
+                .expect("form is open");
             form.host.set_value("other.example.com");
             form.username.set_value("other");
             form.password.clear();
@@ -3951,7 +3981,8 @@ mod tests {
 
         workspace.read_with(&cx, |workspace, _| {
             let form = workspace
-                .connect_form
+                .connect_form_ui
+                .form
                 .as_ref()
                 .expect("form open after select");
             assert_eq!(form.source_profile_id, Some(saved_id));
@@ -4007,7 +4038,7 @@ mod tests {
 
             workspace.open_connect_form(window, cx);
             {
-                let form = workspace.connect_form.as_mut().expect("form opens");
+                let form = workspace.connect_form_ui.form.as_mut().expect("form opens");
                 form.profile_picker_open = true;
             }
 
@@ -4018,7 +4049,7 @@ mod tests {
             );
 
             {
-                let form = workspace.connect_form.as_mut().expect("form opens");
+                let form = workspace.connect_form_ui.form.as_mut().expect("form opens");
                 form.profile_picker_filter.set_value("work");
             }
             let filtered = workspace.filtered_connect_profiles(cx);
@@ -4027,7 +4058,7 @@ mod tests {
             assert_eq!(filtered[0].name, "Work Server");
 
             {
-                let form = workspace.connect_form.as_mut().expect("form opens");
+                let form = workspace.connect_form_ui.form.as_mut().expect("form opens");
                 form.profile_picker_filter.set_value("nomatch");
             }
             assert!(
@@ -4043,13 +4074,14 @@ mod tests {
 
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.open_connect_form(window, cx);
-            let form = workspace.connect_form.as_mut().expect("form opens");
+            let form = workspace.connect_form_ui.form.as_mut().expect("form opens");
             form.profile_picker_open = true;
             form.profile_picker_filter.set_value("work");
 
             workspace.cancel_active_modal(window, cx);
             let form = workspace
-                .connect_form
+                .connect_form_ui
+                .form
                 .as_ref()
                 .expect("first Esc must keep Connect open");
             assert!(
@@ -4063,7 +4095,7 @@ mod tests {
 
             workspace.cancel_active_modal(window, cx);
             assert!(
-                workspace.connect_form.is_none(),
+                workspace.connect_form_ui.form.is_none(),
                 "second Esc must close the Connect form"
             );
         });
@@ -4119,7 +4151,7 @@ mod tests {
 
             workspace.open_connect_form(window, cx);
             {
-                let form = workspace.connect_form.as_mut().expect("form");
+                let form = workspace.connect_form_ui.form.as_mut().expect("form");
                 form.profile_picker_open = true;
                 form.profile_picker_filter.set_value("work");
             }
@@ -4132,7 +4164,7 @@ mod tests {
             assert_eq!(first_id, ProfileId(1));
             workspace.select_connect_profile(first_id, cx);
 
-            let form = workspace.connect_form.as_ref().expect("form");
+            let form = workspace.connect_form_ui.form.as_ref().expect("form");
             assert_eq!(form.source_profile_id, Some(ProfileId(1)));
             assert_eq!(form.host.value(), "work.example.com");
             assert!(!form.profile_picker_open);
@@ -4188,7 +4220,11 @@ mod tests {
             workspace.open_connect_form(window, cx);
         });
         workspace.update_in(&mut cx, |workspace, _window, cx| {
-            let form = workspace.connect_form.as_mut().expect("form is open");
+            let form = workspace
+                .connect_form_ui
+                .form
+                .as_mut()
+                .expect("form is open");
             form.host.set_value("example.com");
             form.username.set_value("alex");
             form.password.set_value("hunter2");
@@ -4202,7 +4238,11 @@ mod tests {
 
         workspace.update_in(&mut cx, |workspace, _window, cx| {
             workspace.select_connect_profile(saved_id, cx);
-            let form = workspace.connect_form.as_mut().expect("form is open");
+            let form = workspace
+                .connect_form_ui
+                .form
+                .as_mut()
+                .expect("form is open");
             form.profile_picker_open = true;
             form.profile_picker_filter.set_value("work");
             form.switch_to_manual_entry();
@@ -4210,7 +4250,8 @@ mod tests {
 
         workspace.read_with(&cx, |workspace, _| {
             let form = workspace
-                .connect_form
+                .connect_form_ui
+                .form
                 .as_ref()
                 .expect("form stays open after manual entry");
             assert!(
@@ -4250,14 +4291,22 @@ mod tests {
             workspace.submit_connect_form(window, cx);
         });
         workspace.read_with(&cx, |workspace, _| {
-            let form = workspace.connect_form.as_ref().expect("form stays open");
+            let form = workspace
+                .connect_form_ui
+                .form
+                .as_ref()
+                .expect("form stays open");
             assert!(form.error.is_some(), "validation error must be shown");
         });
         assert!(channels.command_rx.try_recv().is_err());
 
         // Bad port is rejected too.
         workspace.update_in(&mut cx, |workspace, window, cx| {
-            let form = workspace.connect_form.as_mut().expect("form is open");
+            let form = workspace
+                .connect_form_ui
+                .form
+                .as_mut()
+                .expect("form is open");
             form.host.set_value("h");
             form.username.set_value("u");
             form.port.set_value("99999");
@@ -4266,7 +4315,8 @@ mod tests {
         workspace.read_with(&cx, |workspace, _| {
             assert!(
                 workspace
-                    .connect_form
+                    .connect_form_ui
+                    .form
                     .as_ref()
                     .expect("open")
                     .error
@@ -4286,7 +4336,7 @@ mod tests {
         cx.simulate_keystrokes("escape");
         workspace.read_with(&cx, |workspace, _| {
             assert!(
-                workspace.connect_form.is_none(),
+                workspace.connect_form_ui.form.is_none(),
                 "escape must close the connect form"
             );
         });
@@ -4303,7 +4353,11 @@ mod tests {
         });
         // Fill a valid connection (including a password) and save it.
         workspace.update_in(&mut cx, |workspace, _window, cx| {
-            let form = workspace.connect_form.as_mut().expect("form is open");
+            let form = workspace
+                .connect_form_ui
+                .form
+                .as_mut()
+                .expect("form is open");
             form.host.set_value("example.com");
             form.username.set_value("alex");
             form.password.set_value("hunter2");
@@ -4347,7 +4401,8 @@ mod tests {
         });
         workspace.read_with(&cx, |workspace, _| {
             let form = workspace
-                .connect_form
+                .connect_form_ui
+                .form
                 .as_ref()
                 .expect("form open after use");
             assert_eq!(form.host.value(), "example.com");

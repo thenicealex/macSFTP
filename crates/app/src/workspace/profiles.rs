@@ -467,8 +467,8 @@ impl crate::workspace::Workspace {
     /// After dismissing the delete confirm, return keyboard focus to Connect
     /// or Settings when those surfaces are still open (not always the file pane).
     fn restore_focus_after_profile_delete(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
-        if self.connect_form.is_some() {
-            window.focus(&self.connect_form_focus);
+        if self.connect_form_ui.form.is_some() {
+            window.focus(&self.connect_form_ui.focus);
         } else if self.surface == WorkspaceSurface::Settings {
             window.focus(&self.workspace_focus);
         } else {

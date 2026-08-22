@@ -280,25 +280,25 @@ impl crate::workspace::Workspace {
             None
         }
         .unwrap_or_else(ConnectForm::empty);
-        self.connect_form = Some(form);
-        window.focus(&self.connect_form_focus);
+        self.connect_form_ui.form = Some(form);
+        window.focus(&self.connect_form_ui.focus);
         cx.notify();
     }
 
     pub(crate) fn close_connect_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.connect_form = None;
+        self.connect_form_ui.form = None;
         self.focus_pane(self.focused_side, window, cx);
         cx.notify();
     }
 
     pub(crate) fn submit_connect_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(form) = &mut self.connect_form else {
+        let Some(form) = &mut self.connect_form_ui.form else {
             return;
         };
         match form.build_settings() {
             Ok(settings) => {
                 let profile_id = form.source_profile_id;
-                self.connect_form = None;
+                self.connect_form_ui.form = None;
                 self.focus_pane(self.focused_side, window, cx);
                 self.connect_with(settings, profile_id, window, cx);
             }
@@ -355,7 +355,7 @@ impl crate::workspace::Workspace {
         // from_profile starts from empty() which already closes the picker;
         // set explicitly so callers that mutate flags before assignment stay correct.
         form.profile_picker_open = false;
-        self.connect_form = Some(form);
+        self.connect_form_ui.form = Some(form);
         cx.notify();
     }
 
@@ -363,7 +363,7 @@ impl crate::workspace::Workspace {
     /// then ensure the popover is closed and the filter is cleared.
     pub(crate) fn select_connect_profile(&mut self, profile_id: ProfileId, cx: &mut Context<Self>) {
         self.use_profile(profile_id, cx);
-        if let Some(form) = &mut self.connect_form {
+        if let Some(form) = &mut self.connect_form_ui.form {
             form.profile_picker_open = false;
             form.profile_picker_filter = InputState::new();
         }
@@ -376,7 +376,8 @@ impl crate::workspace::Workspace {
         cx: &'a App,
     ) -> Vec<&'a ConnectionProfile> {
         let query = self
-            .connect_form
+            .connect_form_ui
+            .form
             .as_ref()
             .map(|form| form.profile_picker_filter.value().to_string())
             .unwrap_or_default();
@@ -395,11 +396,11 @@ impl crate::workspace::Workspace {
     /// profile is only flushed to `profiles.json` after the Keychain
     /// write succeeds, so the two never drift apart.
     pub(crate) fn save_current_profile(&mut self, cx: &mut Context<Self>) {
-        let settings = match &self.connect_form {
+        let settings = match &self.connect_form_ui.form {
             Some(form) => match form.build_settings() {
                 Ok(settings) => settings,
                 Err(message) => {
-                    if let Some(form) = self.connect_form.as_mut() {
+                    if let Some(form) = self.connect_form_ui.form.as_mut() {
                         form.error = Some(message);
                     }
                     cx.notify();
@@ -409,12 +410,14 @@ impl crate::workspace::Workspace {
             None => return,
         };
         let name = self
-            .connect_form
+            .connect_form_ui
+            .form
             .as_ref()
             .map(|form| form.profile_name.value().trim().to_string())
             .unwrap_or_default();
         let source_profile_id = self
-            .connect_form
+            .connect_form_ui
+            .form
             .as_ref()
             .and_then(|form| form.source_profile_id);
         let name = if name.is_empty() {
@@ -446,7 +449,7 @@ impl crate::workspace::Workspace {
                         "could not remove obsolete Keychain secret after profile update"
                     );
                 }
-                if let Some(form) = self.connect_form.as_mut() {
+                if let Some(form) = self.connect_form_ui.form.as_mut() {
                     form.source_profile_id = Some(outcome.profile.id);
                     form.profile_name = InputState::new();
                     form.save_as_expanded = false;
@@ -471,7 +474,7 @@ impl crate::workspace::Workspace {
             .delete_profile_and_credentials(profile_id)
         {
             Ok(outcome) => {
-                if let Some(form) = self.connect_form.as_mut()
+                if let Some(form) = self.connect_form_ui.form.as_mut()
                     && form.source_profile_id == Some(profile_id)
                 {
                     form.source_profile_id = None;
@@ -503,7 +506,7 @@ impl crate::workspace::Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(form) = &mut self.connect_form else {
+        let Some(form) = &mut self.connect_form_ui.form else {
             return;
         };
         let keystroke = &event.keystroke;
