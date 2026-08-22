@@ -173,22 +173,7 @@ impl Workspace {
             workspace.open_new_tab(window, cx);
         }
         workspace.register_runtime_tabs(cx);
-        workspace.update_window_title(window);
         workspace
-    }
-
-    /// Pure format helper for the window title (unit-testable without GPUI).
-    pub(crate) fn window_title_for_active_tab(tab_title: Option<&str>) -> String {
-        match tab_title {
-            Some(title) if !title.is_empty() => format!("{title} — macSFTP"),
-            _ => "macSFTP".to_string(),
-        }
-    }
-
-    pub(crate) fn update_window_title(&self, window: &mut Window) {
-        let title =
-            Self::window_title_for_active_tab(self.active_tab().map(|tab| tab.title.as_str()));
-        window.set_window_title(&title);
     }
 
     pub(crate) fn set_drawer_height(&mut self, height: Pixels, viewport_height: Pixels) {
@@ -375,7 +360,6 @@ impl Workspace {
         self.clear_filters();
         self.reset_scroll_positions();
         self.focus_pane(PaneSide::Local, window, cx);
-        self.update_window_title(window);
         cx.notify();
     }
     pub(crate) fn close_tab_by_id(
@@ -429,13 +413,12 @@ impl Workspace {
             window.focus(&self.workspace_focus);
         }
         self.reset_scroll_positions();
-        self.update_window_title(window);
         cx.notify();
     }
     pub(crate) fn activate_tab(
         &mut self,
         tab_id: TabId,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.state.tabs.find_tab(tab_id).is_some() {
@@ -448,7 +431,6 @@ impl Workspace {
             self.clear_filters();
             self.selection_anchor = None;
             self.reset_scroll_positions();
-            self.update_window_title(window);
             cx.notify();
         }
     }
@@ -733,7 +715,7 @@ impl Workspace {
         &mut self,
         settings: ConnectionSettings,
         profile_id: Option<ProfileId>,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(tab) = self.active_tab() else {
@@ -795,7 +777,6 @@ impl Workspace {
         }
         // The epoch bump invalidates any modal from a previous session.
         self.state.drain_expired_modals();
-        self.update_window_title(window);
         cx.notify();
     }
     pub(crate) fn set_appearance(
