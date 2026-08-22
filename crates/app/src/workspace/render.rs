@@ -629,30 +629,24 @@ impl crate::workspace::Workspace {
                 }
             }))
         };
-        let primary_connect_button = |id: &'static str, label: &'static str| {
-            text_button(id, label).primary(true).on_click(cx.listener(
-                |workspace, _event, window, cx| {
-                    workspace.request_connect(window, cx);
-                },
-            ))
-        };
+
         let recent_rows: Vec<(u64, SharedString)> = if side == PaneSide::Remote {
             cx.resources()
                 .recents
                 .entries()
                 .iter()
+                .take(6)
                 .map(|entry| (entry.id, SharedString::from(format_recent_label(entry))))
                 .collect()
         } else {
             Vec::new()
         };
-        // Full empty-state composition: optional title/detail, primary action,
-        // and the recent-connection list as real hover rows — shared by every
-        // idle/disconnected remote variant.
+        // Keep idle/disconnected actions on a stable top-aligned axis. The
+        // unused pane height remains below the group instead of moving it.
         let remote_empty_with_recents =
             |title: Option<SharedString>,
              detail: Option<SharedString>,
-             actions: Vec<macsftp_ui::TextButton>,
+             actions: Vec<gpui::AnyElement>,
              cx: &mut Context<Self>| {
                 let theme = cx.theme();
                 let rows = recent_rows.clone();
@@ -661,83 +655,131 @@ impl crate::workspace::Workspace {
                     .flex_col()
                     .flex_1()
                     .items_center()
-                    .justify_center()
-                    .gap_4()
-                    .when(title.is_some() || detail.is_some(), |container| {
-                        container.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .items_center()
-                                .gap_1()
-                                .max_w(px(420.0))
-                                .when_some(title, |container, title| {
-                                    container.child(
-                                        div()
-                                            .text_size(px(15.0))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(theme.colors.text)
-                                            .child(title),
-                                    )
-                                })
-                                .when_some(detail, |container, detail| {
-                                    container.child(
-                                        div()
-                                            .text_size(px(13.0))
-                                            .text_color(theme.colors.text_muted)
-                                            .text_center()
-                                            .child(detail),
-                                    )
-                                }),
-                        )
-                    })
-                    .child(div().flex().gap_2().children(actions))
-                    .when(!rows.is_empty(), |container| {
-                        container.child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .w(px(340.0))
-                                .mt_2()
-                                .child(
+                    .pt(px(56.0))
+                    .px_3()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .w_full()
+                            .max_w(px(320.0))
+                            .when(title.is_some() || detail.is_some(), |container| {
+                                container.child(
                                     div()
-                                        .text_size(px(11.0))
-                                        .text_color(theme.colors.text_disabled)
-                                        .child("RECENT CONNECTIONS"),
-                                )
-                                .children(rows.into_iter().map(|(id, label)| {
-                                    div()
-                                        .id(SharedString::from(format!("recent-{id}")))
                                         .flex()
-                                        .px_2()
-                                        .py_1()
-                                        .rounded_sm()
-                                        .hover(|style| style.bg(theme.colors.element_hover))
+                                        .flex_col()
+                                        .items_center()
+                                        .gap_1()
+                                        .mb_4()
+                                        .when_some(title, |container, title| {
+                                            container.child(
+                                                div()
+                                                    .text_size(px(15.0))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(theme.colors.text)
+                                                    .child(title),
+                                            )
+                                        })
+                                        .when_some(detail, |container, detail| {
+                                            container.child(
+                                                div()
+                                                    .text_size(px(13.0))
+                                                    .text_color(theme.colors.text_muted)
+                                                    .text_center()
+                                                    .child(detail),
+                                            )
+                                        }),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap_2()
+                                    .children(actions),
+                            )
+                            .when(!rows.is_empty(), |container| {
+                                container.child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .w_full()
+                                        .mt(px(26.0))
                                         .child(
                                             div()
-                                                .text_size(px(13.0))
-                                                .text_color(theme.colors.text)
-                                                .child(label),
+                                                .mb(px(8.0))
+                                                .text_size(px(11.0))
+                                                .text_color(theme.colors.text_muted)
+                                                .opacity(0.5)
+                                                .child("RECENT CONNECTIONS"),
                                         )
-                                        .on_click(cx.listener(
-                                            move |workspace, _event, window, cx| {
-                                                workspace.open_recent_connection(id, window, cx);
-                                            },
-                                        ))
-                                })),
-                        )
-                    })
+                                        .children(rows.into_iter().map(|(id, label)| {
+                                            div()
+                                                .id(SharedString::from(format!("recent-{id}")))
+                                                .flex()
+                                                .items_center()
+                                                .h(px(36.0))
+                                                .mb(px(2.0))
+                                                .px(px(10.0))
+                                                .rounded_md()
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(theme.colors.element_hover))
+                                                .active(|style| {
+                                                    style.bg(theme.colors.element_active)
+                                                })
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .text_size(px(13.0))
+                                                        .text_color(theme.colors.text)
+                                                        .child(label),
+                                                )
+                                                .on_click(cx.listener(
+                                                    move |workspace, _event, window, cx| {
+                                                        workspace
+                                                            .open_recent_connection(id, window, cx);
+                                                    },
+                                                ))
+                                        })),
+                                )
+                            }),
+                    )
                     .into_any_element()
             };
         let connection_placeholder: Option<gpui::AnyElement> = if side == PaneSide::Remote {
             match tab_state.map(|tab| &tab.connection) {
-                Some(ConnectionState::Empty) => Some(remote_empty_with_recents(
-                    None,
-                    None,
-                    vec![primary_connect_button("connect-remote", "Connect… (⌘⇧R)")],
-                    cx,
-                )),
+                Some(ConnectionState::Empty) => {
+                    let theme = cx.theme();
+                    let connect_action = div()
+                        .id("connect-remote")
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .w(px(160.0))
+                        .h(px(34.0))
+                        .px_3()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .bg(theme.colors.accent)
+                        .text_size(px(13.0))
+                        .text_color(theme.colors.background)
+                        .hover(|style| style.opacity(0.9))
+                        .child("Connect…")
+                        .child(div().opacity(0.6).child("⌘⇧R"))
+                        .on_click(cx.listener(|workspace, _event, window, cx| {
+                            workspace.request_connect(window, cx);
+                        }))
+                        .into_any_element();
+                    Some(remote_empty_with_recents(
+                        None,
+                        None,
+                        vec![connect_action],
+                        cx,
+                    ))
+                }
                 Some(ConnectionState::Connecting { .. } | ConnectionState::Reconnecting { .. }) => {
                     Some(
                         empty_state(
@@ -799,8 +841,8 @@ impl crate::workspace::Workspace {
                     Some(error.title.clone().into()),
                     Some(error.message.clone().into()),
                     vec![
-                        connect_button("reconnect-remote", "Reconnect (⌘⇧R)"),
-                        edit_connection_button("edit-connection-disconnected"),
+                        connect_button("reconnect-remote", "Reconnect (⌘⇧R)").into_any_element(),
+                        edit_connection_button("edit-connection-disconnected").into_any_element(),
                     ],
                     cx,
                 )),
@@ -808,8 +850,8 @@ impl crate::workspace::Workspace {
                     Some("Disconnected".into()),
                     None,
                     vec![
-                        connect_button("reconnect-remote", "Reconnect (⌘⇧R)"),
-                        edit_connection_button("edit-connection-disconnected"),
+                        connect_button("reconnect-remote", "Reconnect (⌘⇧R)").into_any_element(),
+                        edit_connection_button("edit-connection-disconnected").into_any_element(),
                     ],
                     cx,
                 )),
