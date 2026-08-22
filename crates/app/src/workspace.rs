@@ -82,15 +82,7 @@ pub struct Workspace {
     /// user accepts the size warning; accepting starts the download.
     large_edit_confirm: Option<remote_edit::PendingEdit>,
     about_open: bool,
-    drawer_open: bool,
-    drawer_height: Pixels,
-    /// Active transfer-drawer resize drag (session-only; cleared on mouse up).
-    drawer_resize: Option<drawer_height::TransferDrawerResize>,
-    completed_section_expanded: bool,
-    failed_section_expanded: bool,
-
-    transfer_scroll: gpui::ScrollHandle,
-    transfer_scrollbar: ScrollbarState,
+    transfer_drawer: view_state::TransferDrawerUi,
 
     profile_picker_scroll: gpui::ScrollHandle,
     profile_picker_scrollbar: ScrollbarState,
@@ -194,14 +186,7 @@ impl Workspace {
             profile_delete_confirm: None,
             large_edit_confirm: None,
             about_open: false,
-            drawer_open: true,
-            drawer_height: drawer_height::DEFAULT_DRAWER_HEIGHT,
-            drawer_resize: None,
-            completed_section_expanded: false,
-            failed_section_expanded: false,
-
-            transfer_scroll: gpui::ScrollHandle::new(),
-            transfer_scrollbar: ScrollbarState::new(),
+            transfer_drawer: view_state::TransferDrawerUi::new(),
 
             profile_picker_scroll: gpui::ScrollHandle::new(),
             profile_picker_scrollbar: ScrollbarState::new(),
@@ -254,7 +239,7 @@ impl Workspace {
 
     pub(crate) fn set_drawer_height(&mut self, height: Pixels, viewport_height: Pixels) {
         let content = drawer_height::content_area_height_from_viewport(viewport_height);
-        self.drawer_height = drawer_height::clamp_drawer_height(height, content);
+        self.transfer_drawer.height = drawer_height::clamp_drawer_height(height, content);
     }
 
     pub(crate) fn reset_drawer_height(&mut self, viewport_height: Pixels) {
@@ -262,7 +247,7 @@ impl Workspace {
     }
 
     pub(crate) fn reclamp_drawer_height(&mut self, viewport_height: Pixels) {
-        self.set_drawer_height(self.drawer_height, viewport_height);
+        self.set_drawer_height(self.transfer_drawer.height, viewport_height);
     }
 
     /// Rebuild disconnected tabs from one window snapshot. Does not send ConnectTab.
@@ -394,10 +379,10 @@ impl Workspace {
         }
     }
     pub(crate) fn transfer_scroll(&self) -> &gpui::ScrollHandle {
-        &self.transfer_scroll
+        &self.transfer_drawer.scroll
     }
     pub(crate) fn transfer_scrollbar(&self) -> &ScrollbarState {
-        &self.transfer_scrollbar
+        &self.transfer_drawer.scrollbar
     }
     pub(crate) fn palette_scroll(&self) -> &gpui::ScrollHandle {
         &self.palette.scroll
@@ -1061,7 +1046,7 @@ impl Render for Workspace {
                 .min_h_0()
                 .child(self.render_tab_bar(cx))
                 .child(main_area)
-                .when(self.drawer_open, |workspace_root| {
+                .when(self.transfer_drawer.open, |workspace_root| {
                     workspace_root.child(self.render_transfer_drawer(window, cx))
                 })
                 .child(self.render_status_bar(cx))
@@ -1077,7 +1062,7 @@ impl Render for Workspace {
             .on_mouse_up(
                 gpui::MouseButton::Left,
                 cx.listener(|workspace, _event, _window, cx| {
-                    if workspace.drawer_resize.take().is_some() {
+                    if workspace.transfer_drawer.resize.take().is_some() {
                         cx.notify();
                     }
                 }),
@@ -1115,7 +1100,7 @@ impl Render for Workspace {
             }))
             .on_action(
                 cx.listener(|workspace, _: &ShowTransferDrawer, _window, cx| {
-                    workspace.drawer_open = !workspace.drawer_open;
+                    workspace.transfer_drawer.open = !workspace.transfer_drawer.open;
                     cx.notify();
                 }),
             )

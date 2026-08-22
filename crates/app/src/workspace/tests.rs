@@ -469,17 +469,17 @@ mod tests {
         let (workspace, mut cx, _channels) = init_workspace(cx);
 
         workspace.read_with(&cx, |workspace, _| {
-            assert!(workspace.drawer_open, "drawer starts open");
+            assert!(workspace.transfer_drawer.open, "drawer starts open");
         });
 
         cx.dispatch_action(ShowTransferDrawer);
         workspace.read_with(&cx, |workspace, _| {
-            assert!(!workspace.drawer_open);
+            assert!(!workspace.transfer_drawer.open);
         });
 
         cx.dispatch_action(ShowTransferDrawer);
         workspace.read_with(&cx, |workspace, _| {
-            assert!(workspace.drawer_open);
+            assert!(workspace.transfer_drawer.open);
         });
     }
 
@@ -488,7 +488,7 @@ mod tests {
         let (workspace, _cx, _channels) = init_workspace(cx);
         workspace.read_with(&_cx, |workspace, _| {
             assert_eq!(
-                workspace.drawer_height,
+                workspace.transfer_drawer.height,
                 crate::workspace::drawer_height::DEFAULT_DRAWER_HEIGHT
             );
         });
@@ -503,8 +503,8 @@ mod tests {
         cx.dispatch_action(ShowTransferDrawer);
         cx.dispatch_action(ShowTransferDrawer);
         workspace.read_with(&cx, |workspace, _| {
-            assert!(workspace.drawer_open);
-            assert_eq!(workspace.drawer_height, gpui::px(180.0));
+            assert!(workspace.transfer_drawer.open);
+            assert_eq!(workspace.transfer_drawer.height, gpui::px(180.0));
         });
     }
 
@@ -517,7 +517,7 @@ mod tests {
         });
         workspace.read_with(&cx, |workspace, _| {
             assert_eq!(
-                workspace.drawer_height,
+                workspace.transfer_drawer.height,
                 crate::workspace::drawer_height::DEFAULT_DRAWER_HEIGHT
             );
         });
@@ -532,14 +532,14 @@ mod tests {
         });
         workspace.read_with(&cx, |workspace, _| {
             assert!(
-                workspace.drawer_open,
+                workspace.transfer_drawer.open,
                 "clamping to min height must not auto-close the drawer"
             );
             assert_eq!(
-                workspace.drawer_height,
+                workspace.transfer_drawer.height,
                 crate::workspace::drawer_height::MIN_DRAWER_HEIGHT
             );
-            assert!(workspace.drawer_resize.is_none());
+            assert!(workspace.transfer_drawer.resize.is_none());
         });
     }
 
@@ -552,16 +552,16 @@ mod tests {
                 start_height: gpui::px(240.0),
                 start_y: gpui::px(500.0),
             };
-            workspace.drawer_resize = Some(start.clone());
+            workspace.transfer_drawer.resize = Some(start.clone());
             let current_y = gpui::px(400.0); // drag up → taller
             let new_height = start.start_height + (start.start_y - current_y);
             workspace.set_drawer_height(new_height, gpui::px(900.0));
-            workspace.drawer_resize = None;
+            workspace.transfer_drawer.resize = None;
         });
         workspace.read_with(&cx, |workspace, _| {
-            assert_eq!(workspace.drawer_height, gpui::px(340.0));
-            assert!(workspace.drawer_resize.is_none());
-            assert!(workspace.drawer_open);
+            assert_eq!(workspace.transfer_drawer.height, gpui::px(340.0));
+            assert!(workspace.transfer_drawer.resize.is_none());
+            assert!(workspace.transfer_drawer.open);
         });
     }
 

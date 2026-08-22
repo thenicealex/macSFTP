@@ -6,8 +6,10 @@
 //! are plain data holders: no behavior beyond trivial constructors, and
 //! nothing here is persisted.
 
-use gpui::UniformListScrollHandle;
+use gpui::{Pixels, UniformListScrollHandle};
 use macsftp_ui::{InputState, ScrollbarState};
+
+use crate::workspace::drawer_height;
 
 /// Per-pane type-to-filter / cmd-f state (view-only; not persisted).
 #[derive(Debug, Clone, Default)]
@@ -101,6 +103,33 @@ impl GoToPathUi {
             open: false,
             input: InputState::new(),
             error: None,
+        }
+    }
+}
+
+/// Transfer drawer visibility, geometry, and section expansion state.
+pub(crate) struct TransferDrawerUi {
+    pub(crate) open: bool,
+    pub(crate) height: Pixels,
+    pub(crate) resize: Option<drawer_height::TransferDrawerResize>,
+    pub(crate) completed_section_expanded: bool,
+    pub(crate) failed_section_expanded: bool,
+    pub(crate) scroll: gpui::ScrollHandle,
+    pub(crate) scrollbar: ScrollbarState,
+}
+
+impl TransferDrawerUi {
+    /// The product default ships with the drawer open; `open: false` would
+    /// hide transfers on first launch.
+    pub(crate) fn new() -> Self {
+        Self {
+            open: true,
+            height: drawer_height::DEFAULT_DRAWER_HEIGHT,
+            resize: None,
+            completed_section_expanded: false,
+            failed_section_expanded: false,
+            scroll: gpui::ScrollHandle::new(),
+            scrollbar: ScrollbarState::new(),
         }
     }
 }

@@ -93,7 +93,7 @@ impl Workspace {
             "UploadSelection" => self.upload_selection(cx),
             "DownloadSelection" => self.download_selection(cx),
             "ShowTransferDrawer" => {
-                self.drawer_open = !self.drawer_open;
+                self.transfer_drawer.open = !self.transfer_drawer.open;
                 cx.notify();
             }
             "OpenSettings" => {

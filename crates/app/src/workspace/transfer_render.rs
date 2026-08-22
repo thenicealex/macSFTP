@@ -77,7 +77,7 @@ impl crate::workspace::Workspace {
 
         // Reclamp after window shrink so stored height never exceeds max.
         self.reclamp_drawer_height(window.viewport_size().height);
-        let height = self.drawer_height;
+        let height = self.transfer_drawer.height;
 
         let theme = cx.theme().clone();
         let workspace_entity = cx.entity();
@@ -183,14 +183,14 @@ impl crate::workspace::Workspace {
                         // does not steal the reset gesture.
                         if event.click_count >= 2 {
                             workspace.reset_drawer_height(window.viewport_size().height);
-                            workspace.drawer_resize = None;
+                            workspace.transfer_drawer.resize = None;
                             cx.notify();
                         }
                     }),
                 )
                 .on_drag(
                     TransferDrawerResize {
-                        start_height: self.drawer_height,
+                        start_height: self.transfer_drawer.height,
                         start_y: px(0.0),
                     },
                     {
@@ -198,8 +198,8 @@ impl crate::workspace::Workspace {
                         move |_value, _cursor_offset, window, cx| {
                             let start_y = window.mouse_position().y;
                             workspace_entity.update(cx, |workspace, cx| {
-                                workspace.drawer_resize = Some(TransferDrawerResize {
-                                    start_height: workspace.drawer_height,
+                                workspace.transfer_drawer.resize = Some(TransferDrawerResize {
+                                    start_height: workspace.transfer_drawer.height,
                                     start_y,
                                 });
                                 cx.notify();
@@ -210,7 +210,7 @@ impl crate::workspace::Workspace {
                 )
                 .on_drag_move(cx.listener(
                     |workspace, event: &DragMoveEvent<TransferDrawerResize>, window, cx| {
-                        let Some(start) = workspace.drawer_resize.clone() else {
+                        let Some(start) = workspace.transfer_drawer.resize.clone() else {
                             return;
                         };
                         let current_y = event.event.position.y;
@@ -316,13 +316,13 @@ impl crate::workspace::Workspace {
             (
                 "Completed",
                 completed_jobs,
-                self.completed_section_expanded,
+                self.transfer_drawer.completed_section_expanded,
                 "toggle-completed",
             ),
             (
                 "Failed",
                 failed_jobs,
-                self.failed_section_expanded,
+                self.transfer_drawer.failed_section_expanded,
                 "toggle-failed",
             ),
         ] {
@@ -344,10 +344,11 @@ impl crate::workspace::Workspace {
                     .hover(|style| style.bg(theme.colors.element_hover))
                     .on_click(cx.listener(move |workspace, _event, _window, cx| {
                         if is_completed_section {
-                            workspace.completed_section_expanded =
-                                !workspace.completed_section_expanded;
+                            workspace.transfer_drawer.completed_section_expanded =
+                                !workspace.transfer_drawer.completed_section_expanded;
                         } else {
-                            workspace.failed_section_expanded = !workspace.failed_section_expanded;
+                            workspace.transfer_drawer.failed_section_expanded =
+                                !workspace.transfer_drawer.failed_section_expanded;
                         }
                         cx.notify();
                     }))
@@ -618,7 +619,7 @@ impl crate::workspace::Workspace {
                         "ShowTransferDrawer",
                     )))
                     .on_click(cx.listener(|workspace, _event, _window, cx| {
-                        workspace.drawer_open = !workspace.drawer_open;
+                        workspace.transfer_drawer.open = !workspace.transfer_drawer.open;
                         cx.notify();
                     }))
                     .child(icon(

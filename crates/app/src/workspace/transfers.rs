@@ -59,7 +59,7 @@ impl crate::workspace::Workspace {
             conflict_policy: Default::default(),
         });
         if self.send_command(command, cx) {
-            self.drawer_open = true;
+            self.transfer_drawer.open = true;
             self.status_message = Some("Planning upload…".into());
             cx.notify();
         }
@@ -100,7 +100,7 @@ impl crate::workspace::Workspace {
             conflict_policy: Default::default(),
         });
         if self.send_command(command, cx) {
-            self.drawer_open = true;
+            self.transfer_drawer.open = true;
             self.status_message = Some("Planning download…".into());
             cx.notify();
         }
@@ -205,8 +205,8 @@ impl crate::workspace::Workspace {
     }
     pub(crate) fn clear_transfer_records(&mut self, cx: &mut Context<Self>) {
         if cx.clear_terminal_transfers() {
-            self.completed_section_expanded = false;
-            self.failed_section_expanded = false;
+            self.transfer_drawer.completed_section_expanded = false;
+            self.transfer_drawer.failed_section_expanded = false;
             cx.notify();
         }
     }
