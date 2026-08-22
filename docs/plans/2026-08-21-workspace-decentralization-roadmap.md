@@ -47,9 +47,15 @@
 
 ---
 
-## Stage 3 — 平铺 UI 字段按 feature 分组
+## Stage 3 — 平铺 UI 字段按 feature 分组（✅ 已交付，2026-08-21）
 
 > **详细执行计划见 `2026-08-21-stage3-stage4-plan.md`**（含逐字段映射表、访问点实测、commit 序列）。
+>
+> **交付记录：** 8 组全部落地，状态组集中定义于 `workspace/view_state.rs`。Workspace 顶层字段 60 → 25（其中 10 个为组实例）。提交序列：S3-1 PaneUi `2f026ae`、S3-2 CommandPaletteUi `1e71423`、S3-3 TabSwitcherUi `a0f00e1`、S3-4 GoToPathUi `9d1660f`、S3-5 TransferDrawerUi `4a02d5f`、S3-6 ConnectFormUi `31dab1e`、S3-7 ModalInputsUi `8ef4950`、S3-8 SettingsUi `eb094db`。
+
+## Stage 4 — mod.rs → workspace.rs（✅ 已交付，2026-08-21，随计划先行）
+
+交付于 `b6d6591`（含 Stage 3/4 计划文档）；AGENTS.md §2 的 mod.rs 违规清零。
 
 ### 现状
 
