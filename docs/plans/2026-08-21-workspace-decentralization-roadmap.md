@@ -49,6 +49,8 @@
 
 ## Stage 3 — 平铺 UI 字段按 feature 分组
 
+> **详细执行计划见 `2026-08-21-stage3-stage4-plan.md`**（含逐字段映射表、访问点实测、commit 序列）。
+
 ### 现状
 
 Stage 1/2 后 Workspace 仍有 ~50 个平铺 UI 字段，其中大量只在与同组字段组合时才有意义。
