@@ -36,6 +36,7 @@ embedded_icons!(
     "symlink.svg",
     "trash.svg",
     "chevron_down.svg",
+    "chevron_left.svg",
     "chevron_right.svg",
     "transfers.svg",
     "server.svg",
@@ -76,8 +77,10 @@ mod tests {
             IconName::Symlink,
             IconName::Trash,
             IconName::ChevronDown,
+            IconName::ChevronLeft,
             IconName::ChevronRight,
             IconName::Transfers,
+            IconName::Server,
         ];
 
         for icon in icons {

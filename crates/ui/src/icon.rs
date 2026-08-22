@@ -16,6 +16,7 @@ pub enum IconName {
     Symlink,
     Trash,
     ChevronDown,
+    ChevronLeft,
     ChevronRight,
     Transfers,
     Server,
@@ -36,6 +37,7 @@ impl IconName {
             Self::Symlink => "icons/symlink.svg",
             Self::Trash => "icons/trash.svg",
             Self::ChevronDown => "icons/chevron_down.svg",
+            Self::ChevronLeft => "icons/chevron_left.svg",
             Self::ChevronRight => "icons/chevron_right.svg",
             Self::Transfers => "icons/transfers.svg",
             Self::Server => "icons/server.svg",
@@ -46,10 +48,14 @@ impl IconName {
 pub const ICON_SIZE: Pixels = px(14.0);
 
 pub fn icon(name: IconName, color: Hsla) -> Svg {
+    icon_with_size(name, color, ICON_SIZE)
+}
+
+pub(crate) fn icon_with_size(name: IconName, color: Hsla, size: Pixels) -> Svg {
     svg()
         .path(name.path())
-        .w(ICON_SIZE)
-        .h(ICON_SIZE)
+        .w(size)
+        .h(size)
         .flex_none()
         .text_color(color)
 }

@@ -3,10 +3,15 @@ use gpui::{
     RenderOnce, SharedString, Styled, Window, div, prelude::*, px,
 };
 
-use crate::icon::{IconName, icon};
+use crate::icon::{IconName, icon_with_size};
 use crate::theme::ActiveTheme;
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+
+const ICON_BUTTON_ICON_SIZE: gpui::Pixels = px(16.0);
+const ICON_BUTTON_OPACITY: f32 = 0.65;
+const ICON_BUTTON_HOVER_OPACITY: f32 = 0.9;
+const ICON_BUTTON_DISABLED_OPACITY: f32 = 0.25;
 
 /// Minimal text tooltip view used by icon-only buttons, which must all
 /// carry a label per the accessibility rules.
@@ -91,11 +96,7 @@ impl IconButton {
 impl RenderOnce for IconButton {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
-        let icon_color = if self.disabled {
-            theme.colors.text_disabled
-        } else {
-            self.icon_color.unwrap_or(theme.colors.text_muted)
-        };
+        let icon_color = self.icon_color.unwrap_or(theme.colors.text);
         let hover_background = theme.colors.element_hover;
         let active_background = theme.colors.element_active;
 
@@ -107,10 +108,19 @@ impl RenderOnce for IconButton {
             .items_center()
             .justify_center()
             .rounded_sm()
+            .opacity(if self.disabled {
+                ICON_BUTTON_DISABLED_OPACITY
+            } else {
+                ICON_BUTTON_OPACITY
+            })
             .tooltip(text_tooltip(self.tooltip_label))
             .when(!self.disabled, |element| {
                 element
-                    .hover(|style| style.bg(hover_background))
+                    .hover(|style| {
+                        style
+                            .bg(hover_background)
+                            .opacity(ICON_BUTTON_HOVER_OPACITY)
+                    })
                     .active(|style| style.bg(active_background))
             })
             .when_some(
@@ -119,7 +129,7 @@ impl RenderOnce for IconButton {
                     element.on_click(move |event, window, cx| handler(event, window, cx))
                 },
             )
-            .child(icon(self.icon, icon_color))
+            .child(icon_with_size(self.icon, icon_color, ICON_BUTTON_ICON_SIZE))
     }
 }
 

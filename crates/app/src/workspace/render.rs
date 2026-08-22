@@ -323,62 +323,30 @@ impl crate::workspace::Workspace {
             } else {
                 theme.colors.border
             })
-            .child({
-                let hover_background = theme.colors.element_hover;
-                let active_background = theme.colors.element_active;
-                let label_color = if can_navigate_back {
-                    theme.colors.text_muted
-                } else {
-                    theme.colors.text_disabled
-                };
-                div()
-                    .id(back_id)
-                    .size(px(22.0))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .rounded_sm()
-                    .tooltip(text_tooltip(labeled_shortcut("Back", "NavigateBack")))
-                    .when(can_navigate_back, |button| {
-                        button
-                            .hover(|style| style.bg(hover_background))
-                            .active(|style| style.bg(active_background))
-                            .on_click(cx.listener(move |workspace, _event, window, cx| {
-                                workspace.focused_side = side;
-                                workspace.navigate_focused(HistoryOp::Back, window, cx);
-                            }))
-                    })
-                    .child(div().text_size(px(11.0)).text_color(label_color).child("◀"))
-            })
-            .child({
-                let hover_background = theme.colors.element_hover;
-                let active_background = theme.colors.element_active;
-                let label_color = if can_navigate_forward {
-                    theme.colors.text_muted
-                } else {
-                    theme.colors.text_disabled
-                };
-                div()
-                    .id(forward_id)
-                    .size(px(22.0))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .rounded_sm()
-                    .tooltip(text_tooltip(labeled_shortcut("Forward", "NavigateForward")))
-                    .when(can_navigate_forward, |button| {
-                        button
-                            .hover(|style| style.bg(hover_background))
-                            .active(|style| style.bg(active_background))
-                            .on_click(cx.listener(move |workspace, _event, window, cx| {
-                                workspace.focused_side = side;
-                                workspace.navigate_focused(HistoryOp::Forward, window, cx);
-                            }))
-                    })
-                    .child(div().text_size(px(11.0)).text_color(label_color).child("▶"))
-            })
+            .child(
+                icon_button(
+                    back_id,
+                    IconName::ChevronLeft,
+                    labeled_shortcut("Back", "NavigateBack"),
+                )
+                .disabled(!can_navigate_back)
+                .on_click(cx.listener(move |workspace, _event, window, cx| {
+                    workspace.focused_side = side;
+                    workspace.navigate_focused(HistoryOp::Back, window, cx);
+                })),
+            )
+            .child(
+                icon_button(
+                    forward_id,
+                    IconName::ChevronRight,
+                    labeled_shortcut("Forward", "NavigateForward"),
+                )
+                .disabled(!can_navigate_forward)
+                .on_click(cx.listener(move |workspace, _event, window, cx| {
+                    workspace.focused_side = side;
+                    workspace.navigate_focused(HistoryOp::Forward, window, cx);
+                })),
+            )
             .child(
                 icon_button(
                     up_id,
