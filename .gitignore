@@ -1,6 +1,7 @@
 target/
 build/
 .claude/
+.pi/
 .codegraph/
 .workbuddy/
 .DS_Store
