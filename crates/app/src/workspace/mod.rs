@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::Path;
 
 use gpui::{
@@ -31,7 +30,7 @@ use crate::resources::ActiveResources;
 use crate::session_coordinator::SessionCoordinator;
 use crate::workspace::file_ops::{ContextMenuState, DeleteConfirmState, InlineEditState};
 use crate::workspace::profiles::{ProfileEditorState, SettingsSection};
-use macsftp_core::HistoryOp;
+use macsftp_core::{HistoryOp, RestoredTabTarget};
 
 /// Status bar copy when the command channel is full (non-blocking drop).
 pub(crate) const STATUS_BUSY_TRY_AGAIN: &str = "Busy — try again in a moment.";
@@ -70,17 +69,6 @@ impl PaneFilter {
 pub(crate) enum WorkspaceSurface {
     Files,
     Settings,
-}
-
-/// Non-secret connection target restored from `session.json` for form
-/// prefill and post-connect remote path navigation.
-#[derive(Debug, Clone)]
-pub(crate) struct RestoredTabTarget {
-    pub host: String,
-    pub port: u16,
-    pub username: String,
-    pub profile_id: Option<ProfileId>,
-    pub remote_path: Option<RemotePath>,
 }
 
 pub struct Workspace {
@@ -169,9 +157,8 @@ pub struct Workspace {
     selection_anchor: Option<EntryPath>,
     /// Session credentials per tab, kept in memory only so Reconnect
     /// works without re-typing. Replaced by Keychain-backed profiles.
-    tab_settings: HashMap<TabId, ConnectionSettings>,
-    /// Connection meta restored from `session.json` (form prefill / path).
-    restored_targets: HashMap<TabId, RestoredTabTarget>,
+    /// Per-tab cached credentials (reconnect without re-typing) and
+    /// session-restore metadata now live on `TabState` in core.
     _appearance_subscription: Subscription,
 }
 
@@ -274,8 +261,6 @@ impl Workspace {
             local_filter: PaneFilter::default(),
             remote_filter: PaneFilter::default(),
             selection_anchor: None,
-            tab_settings: HashMap::new(),
-            restored_targets: HashMap::new(),
             _appearance_subscription: appearance_subscription,
         };
         // Restored tabs remain disconnected until the user explicitly connects.
@@ -338,6 +323,16 @@ impl Workspace {
             let mut tab = TabState::new(tab_id, title);
             tab.profile_id = snap.profile_id.map(ProfileId);
             tab.connection = ConnectionState::Empty;
+            tab.restored_target = Some(Box::new(RestoredTabTarget {
+                host: snap.host.clone(),
+                port: snap.port,
+                username: snap.username.clone(),
+                profile_id: snap.profile_id.map(ProfileId),
+                remote_path: snap
+                    .remote_path
+                    .as_ref()
+                    .map(|path| RemotePath::new(path.clone())),
+            }));
             let local_path = snap
                 .local_path
                 .as_ref()
@@ -348,19 +343,6 @@ impl Workspace {
                 tab.remote.path = Some(RemotePath::new(remote.clone()));
                 tab.remote.entries.clear();
             }
-            self.restored_targets.insert(
-                tab_id,
-                RestoredTabTarget {
-                    host: snap.host.clone(),
-                    port: snap.port,
-                    username: snap.username.clone(),
-                    profile_id: snap.profile_id.map(ProfileId),
-                    remote_path: snap
-                        .remote_path
-                        .as_ref()
-                        .map(|path| RemotePath::new(path.clone())),
-                },
-            );
             self.state.tabs.open_tab(tab);
             self.request_local_directory(tab_id, local_path, cx);
             restored_ids.push(tab_id);
@@ -386,8 +368,8 @@ impl Workspace {
             .tabs
             .iter()
             .map(|tab| {
-                let settings = self.tab_settings.get(&tab.id);
-                let restored = self.restored_targets.get(&tab.id);
+                let settings = tab.connection_settings.as_ref();
+                let restored = tab.restored_target.as_ref();
                 SessionTabSnapshot {
                     title: tab.title.clone(),
                     profile_id: tab.profile_id.map(|id| id.0),
@@ -516,7 +498,6 @@ impl Workspace {
         // profile+path, not tab).
         cleanup_edit_sessions_for_tab(cx, tab_id);
         self.tab_mru.retain(|id| *id != tab_id);
-        self.restored_targets.remove(&tab_id);
         // Keep MRU front aligned with the newly active tab after close
         // (TabStore promotes another tab without going through activate_tab).
         if let Some(active_id) = self.state.tabs.active_tab_id {
@@ -839,9 +820,9 @@ impl Workspace {
         if crate::workspace::helpers::connection_in_flight(&tab.connection) {
             return;
         }
-        let tab_id = tab.id;
-        match self.tab_settings.get(&tab_id).cloned() {
-            Some(settings) => self.connect_with(settings, tab.profile_id, window, cx),
+        let cached_settings = tab.connection_settings.clone();
+        match cached_settings {
+            Some(settings) => self.connect_with(*settings, tab.profile_id, window, cx),
             None => self.open_connect_form(window, cx),
         }
     }
@@ -905,9 +886,10 @@ impl Workspace {
             .update_epoch_for_tab(tab_id, next_epoch);
         // Keep the credentials for this tab's lifetime so Reconnect
         // works without re-typing. The persisted copy lives in the
-        // Keychain (plan §11); this in-memory copy is dropped with the
-        // workspace.
-        self.tab_settings.insert(tab_id, settings);
+        // Keychain (plan §11); this in-memory copy is zeroized with the tab.
+        if let Some(tab) = self.state.tabs.find_tab_mut(tab_id) {
+            tab.connection_settings = Some(Box::new(settings));
+        }
         // The epoch bump invalidates any modal from a previous session.
         self.state.drain_expired_modals();
         self.update_window_title(window);
@@ -957,8 +939,8 @@ impl Workspace {
         let Some(tab) = self.state.tabs.find_tab(tab_id) else {
             return;
         };
-        let settings = self.tab_settings.get(&tab_id);
-        let restored = self.restored_targets.get(&tab_id);
+        let settings = tab.connection_settings.as_ref();
+        let restored = tab.restored_target.as_ref();
         let host = settings
             .map(|s| s.host.clone())
             .or_else(|| restored.map(|r| r.host.clone()))
@@ -1028,17 +1010,14 @@ impl Workspace {
                 .last_remote_path
                 .as_ref()
                 .map(|path| RemotePath::new(path.clone()));
-            self.restored_targets.insert(
-                tab_id,
-                RestoredTabTarget {
+            if let Some(tab) = self.state.tabs.find_tab_mut(tab_id) {
+                tab.restored_target = Some(Box::new(RestoredTabTarget {
                     host: entry.host.clone(),
                     port: entry.port,
                     username: entry.username.clone(),
                     profile_id: entry.profile_id.map(ProfileId),
                     remote_path: remote_path.clone(),
-                },
-            );
-            if let Some(tab) = self.state.tabs.find_tab_mut(tab_id) {
+                }));
                 tab.profile_id = entry.profile_id.map(ProfileId);
                 if let Some(path) = remote_path {
                     tab.remote.path = Some(path);

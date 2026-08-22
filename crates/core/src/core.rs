@@ -1168,8 +1168,18 @@ pub struct TabState {
     pub connection: ConnectionState,
     pub sort: FileSort,
     pub selection: SelectionState,
+    /// Cached credentials for reconnect-without-retyping on ephemeral
+    /// (unsaved-profile) connections; the persisted copy lives in the
+    /// Keychain. Zeroized on drop; Debug is fully redacted. MUST stay out of
+    /// any serialized surface (session snapshots take only host/port/user).
+    /// Boxed: cold field, keeps TabSnapshot-carrying events compact.
+    pub connection_settings: Option<Box<ConnectionSettings>>,
     pub nav: TabNavState,
     pub pending: Vec<PendingOperation>,
+    /// Non-secret connection metadata restored from `session.json` or
+    /// recents, consumed by reconnect prefill and snapshot building.
+    /// Boxed: cold field, keeps TabSnapshot-carrying events compact.
+    pub restored_target: Option<Box<RestoredTabTarget>>,
 }
 
 impl TabState {
@@ -1184,8 +1194,10 @@ impl TabState {
             connection: ConnectionState::Empty,
             sort: FileSort::default(),
             selection: SelectionState::default(),
+            connection_settings: None,
             nav: TabNavState::default(),
             pending: Vec::new(),
+            restored_target: None,
         }
     }
 
@@ -1364,6 +1376,19 @@ impl PaneNavHistory {
 pub struct TabNavState {
     pub local: PaneNavHistory,
     pub remote: PaneNavHistory,
+}
+
+/// Non-secret connection metadata restored from `session.json` or the
+/// recents list, used for reconnect prefill and session snapshot building.
+/// Deliberately secret-free: credentials live only in
+/// [`TabState::connection_settings`] (memory, zeroized) and the Keychain.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RestoredTabTarget {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub profile_id: Option<ProfileId>,
+    pub remote_path: Option<RemotePath>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

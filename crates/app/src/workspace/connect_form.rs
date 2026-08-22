@@ -253,27 +253,33 @@ impl crate::workspace::Workspace {
     /// Open the connect form for the active tab, prefilling any cached
     /// session credentials or restored non-secret connection metadata.
     pub(crate) fn open_connect_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let tab_id = self.state.tabs.active_tab_id;
-        let form = tab_id
-            .and_then(|id| self.tab_settings.get(&id))
-            .map(ConnectForm::prefilled)
-            .or_else(|| {
-                let id = tab_id?;
-                let restored = self.restored_targets.get(&id)?;
-                // Prefer live profile if still present.
-                if let Some(profile_id) = restored.profile_id
-                    && let Some(profile) = cx.resources().profiles.find_profile(profile_id)
-                {
-                    return Some(ConnectForm::from_profile(profile));
-                }
+        let tab = self
+            .state
+            .tabs
+            .active_tab_id
+            .and_then(|id| self.state.tabs.find_tab(id));
+        let cached_settings = tab.and_then(|tab| tab.connection_settings.clone());
+        let restored_target = tab.and_then(|tab| tab.restored_target.clone());
+        let form = if let Some(settings) = cached_settings {
+            Some(ConnectForm::prefilled(&settings))
+        } else if let Some(restored) = restored_target {
+            // Prefer live profile if still present.
+            if let Some(profile_id) = restored.profile_id
+                && let Some(profile) = cx.resources().profiles.find_profile(profile_id)
+            {
+                Some(ConnectForm::from_profile(profile))
+            } else {
                 let mut form = ConnectForm::empty();
                 form.host = InputState::with_value(restored.host.clone());
                 form.port = InputState::with_value(restored.port.to_string());
                 form.username = InputState::with_value(restored.username.clone());
                 form.source_profile_id = restored.profile_id;
                 Some(form)
-            })
-            .unwrap_or_else(ConnectForm::empty);
+            }
+        } else {
+            None
+        }
+        .unwrap_or_else(ConnectForm::empty);
         self.connect_form = Some(form);
         window.focus(&self.connect_form_focus);
         cx.notify();

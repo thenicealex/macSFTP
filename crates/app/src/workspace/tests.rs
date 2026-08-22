@@ -46,10 +46,11 @@ mod tests {
         ConnectionState, DisconnectReason, EditPhase, EntryPath, ErrorCode, FileKind,
         FileSortField, HostKeyPrompt, LocalPath, MetadataPolicy, ProfileId, RemoteDirSnapshot,
         RemoteEntry, RemoteEventScope, RemoteOperationFailure, RemotePath, RemoteScoped,
-        RuntimeBridgeConfig, SessionId, SortDirection, TabConnected, TabDisconnected, TabId,
-        Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferId,
-        TransferJob, TransferPlanId, TransferPlanProgress, TransferPlanSnapshot, TransferPlanState,
-        TransferState, TrustRequestId, UserFacingError, WindowSessionId,
+        RestoredTabTarget, RuntimeBridgeConfig, SessionId, SortDirection, TabConnected,
+        TabDisconnected, TabId, Timestamp, TransferConflictPrompt, TransferDirection,
+        TransferEndpoint, TransferId, TransferJob, TransferPlanId, TransferPlanProgress,
+        TransferPlanSnapshot, TransferPlanState, TransferState, TrustRequestId, UserFacingError,
+        WindowSessionId,
     };
     use macsftp_core::{EditSession, EditSessionId, RemoteSnapshot};
     use macsftp_sftp::{BridgeChannels, EventReceiver, RuntimeClient};
@@ -62,8 +63,8 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{
-        AppPaths, PaneSide, RestoredTabTarget, STATUS_BUSY_TRY_AGAIN,
-        STATUS_CONNECTION_SERVICE_UNAVAILABLE, Workspace, WorkspaceSurface,
+        AppPaths, PaneSide, STATUS_BUSY_TRY_AGAIN, STATUS_CONNECTION_SERVICE_UNAVAILABLE,
+        Workspace, WorkspaceSurface,
     };
     use crate::app_actions::{
         self, ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, FilterPane, GoToPath,
@@ -1388,19 +1389,21 @@ mod tests {
     }
 
     #[gpui::test]
-    fn tab_connected_prefers_restored_remote_path(cx: &mut TestAppContext) {
+    fn session_snapshot_never_contains_cached_credentials(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
         workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.restored_targets.insert(
-                TabId(1),
-                RestoredTabTarget {
-                    host: "mock.example.com".into(),
-                    port: 22,
-                    username: "tester".into(),
-                    profile_id: None,
-                    remote_path: Some(RemotePath::new("/home/restored")),
-                },
-            );
+            let tab = workspace
+                .state
+                .tabs
+                .find_tab_mut(TabId(1))
+                .expect("initial tab must exist");
+            tab.restored_target = Some(Box::new(RestoredTabTarget {
+                host: "mock.example.com".into(),
+                port: 22,
+                username: "tester".into(),
+                profile_id: None,
+                remote_path: Some(RemotePath::new("/home/restored")),
+            }));
             workspace.connect_with(test_settings(), None, window, cx);
         });
         let _ = channels.command_rx.try_recv();
@@ -1428,8 +1431,10 @@ mod tests {
             );
             assert!(
                 workspace
-                    .restored_targets
-                    .get(&TabId(1))
+                    .state
+                    .tabs
+                    .find_tab(TabId(1))
+                    .and_then(|tab| tab.restored_target.as_ref())
                     .and_then(|target| target.remote_path.as_ref())
                     .is_none(),
                 "restored path preference must be cleared after first connect"
@@ -5570,17 +5575,19 @@ mod tests {
 
         workspace.update_in(&mut cx, |workspace, _window, _cx| {
             let tab_id = workspace.active_tab().expect("default tab").id;
-            workspace.tab_settings.insert(
-                tab_id,
-                ConnectionSettings {
-                    host: "saved-host".into(),
-                    port: 2222,
-                    username: "deploy".into(),
-                    auth: AuthCredential::Password {
-                        password: "not-persisted".into(),
-                    },
+            let tab = workspace
+                .state
+                .tabs
+                .find_tab_mut(tab_id)
+                .expect("default tab must exist");
+            tab.connection_settings = Some(Box::new(ConnectionSettings {
+                host: "saved-host".into(),
+                port: 2222,
+                username: "deploy".into(),
+                auth: AuthCredential::Password {
+                    password: "not-persisted".into(),
                 },
-            );
+            }));
             SessionFile {
                 version: SessionFile::CURRENT_VERSION,
                 active_window_index: 0,
