@@ -13,7 +13,8 @@ use crate::palette_commands::labeled_shortcut;
 use crate::resources::ActiveResources;
 use crate::workspace::PaneSide;
 use crate::workspace::helpers::*;
-use crate::workspace::nav::{HistoryOp, breadcrumb_display_indices, breadcrumb_segments};
+use crate::workspace::nav::{breadcrumb_display_indices, breadcrumb_segments};
+use macsftp_core::HistoryOp;
 
 impl crate::workspace::Workspace {
     pub(crate) fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -76,11 +77,11 @@ impl crate::workspace::Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        if !self.tab_switcher_open || self.tab_mru.is_empty() {
+        if !self.tab_switcher.open || self.tab_mru.is_empty() {
             return None;
         }
         let theme = cx.theme().clone();
-        let selected = self.tab_switcher_index.min(self.tab_mru.len() - 1);
+        let selected = self.tab_switcher.index.min(self.tab_mru.len() - 1);
 
         let rows = self
             .tab_mru
@@ -114,7 +115,7 @@ impl crate::workspace::Workspace {
                         })
                         .on_click(cx.listener(move |workspace, _event, window, cx| {
                             // Click selects that tab immediately (same as Enter on that row).
-                            workspace.tab_switcher_index = index;
+                            workspace.tab_switcher.index = index;
                             workspace.confirm_tab_switcher(window, cx);
                         }))
                         .child(
@@ -227,6 +228,7 @@ impl crate::workspace::Workspace {
             .then(|| tab_state.and_then(|tab| tab.local.error.clone()))
             .flatten();
         let inline_edit_active = self
+            .modal_inputs
             .inline_edit
             .as_ref()
             .is_some_and(|edit| edit.side == side);
@@ -755,6 +757,20 @@ impl crate::workspace::Workspace {
                     )
                     .into_any_element(),
                 ),
+                // Mid-session disconnects carry a classified cause (server
+                // hung up vs network went silent vs other transport error);
+                // show it so users know whether reconnecting is likely to
+                // help. Buttons stay identical to the generic disconnect.
+                Some(ConnectionState::Disconnected {
+                    reason: macsftp_core::DisconnectReason::Error(error),
+                }) => Some(remote_empty_with_recents(
+                    format!("{} — {}", error.title, error.message).into(),
+                    vec![
+                        connect_button("reconnect-remote", "Reconnect (⌘⇧R)"),
+                        edit_connection_button("edit-connection-disconnected"),
+                    ],
+                    cx,
+                )),
                 Some(ConnectionState::Disconnected { .. }) => Some(remote_empty_with_recents(
                     "Disconnected".into(),
                     vec![
@@ -904,6 +920,7 @@ impl crate::workspace::Workspace {
             .track_focus(self.pane_focus(side))
             .on_key_down(cx.listener(move |workspace, event, window, cx| {
                 if workspace
+                    .modal_inputs
                     .inline_edit
                     .as_ref()
                     .is_some_and(|edit| edit.side == side)
@@ -1030,7 +1047,11 @@ impl crate::workspace::Workspace {
                 )
             })
             .when(inline_edit_active, |pane| {
-                let edit = self.inline_edit.as_ref().expect("checked active");
+                let edit = self
+                    .modal_inputs
+                    .inline_edit
+                    .as_ref()
+                    .expect("checked active");
                 let label = match &edit.kind {
                     crate::workspace::file_ops::InlineEditKind::Rename { .. } => "Rename",
                     crate::workspace::file_ops::InlineEditKind::NewFolder { .. } => "New Folder",
@@ -1120,7 +1141,7 @@ impl crate::workspace::Workspace {
             ))
     }
     pub(crate) fn render_about(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        if !self.about_open {
+        if !self.modal_inputs.about_open {
             return None;
         }
         let theme = cx.theme().clone();

@@ -15,8 +15,8 @@ use tracing::{info, warn};
 
 use crate::known_hosts::KnownHostsStore;
 use crate::physical_connection::{
-    ClientHandler, ConnectFailure, establish_physical_connection, host_key_mismatch_event,
-    log_connect_failure, sftp_connection_error,
+    ClientHandler, ConnectFailure, PhysicalDisconnectCause, establish_physical_connection,
+    host_key_mismatch_event, log_connect_failure, sftp_connection_error,
 };
 use crate::session_actor::HostTrustConfig;
 use crate::trust::TrustRegistry;
@@ -29,6 +29,9 @@ pub struct SharedConnection {
     pub active_channels: AtomicUsize,
     pub last_used: Mutex<Instant>,
     pub connection_lost: CancellationToken,
+    /// Classified cause of the physical drop, recorded by the russh
+    /// handler before `connection_lost` fires (see `ClientHandler`).
+    pub disconnect_cause: Arc<std::sync::Mutex<Option<PhysicalDisconnectCause>>>,
 }
 
 impl std::fmt::Debug for SharedConnection {
@@ -131,6 +134,7 @@ impl ConnectionManager {
         let key_clone = key.clone();
         tokio::spawn(async move {
             let connection_lost = CancellationToken::new();
+            let disconnect_cause = Arc::new(std::sync::Mutex::new(None));
             let result = async {
                 let handle = establish_physical_connection(
                     &settings,
@@ -141,6 +145,7 @@ impl ConnectionManager {
                     trust_registry,
                     event_tx,
                     connection_lost.clone(),
+                    disconnect_cause.clone(),
                 )
                 .await?;
 
@@ -195,6 +200,7 @@ impl ConnectionManager {
                     active_channels: AtomicUsize::new(0),
                     last_used: Mutex::new(Instant::now()),
                     connection_lost,
+                    disconnect_cause,
                 }))
             }
             .await;

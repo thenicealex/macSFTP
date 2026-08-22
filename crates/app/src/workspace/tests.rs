@@ -46,10 +46,11 @@ mod tests {
         ConnectionState, DisconnectReason, EditPhase, EntryPath, ErrorCode, FileKind,
         FileSortField, HostKeyPrompt, LocalPath, MetadataPolicy, ProfileId, RemoteDirSnapshot,
         RemoteEntry, RemoteEventScope, RemoteOperationFailure, RemotePath, RemoteScoped,
-        RuntimeBridgeConfig, SessionId, SortDirection, TabConnected, TabDisconnected, TabId,
-        Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferId,
-        TransferJob, TransferPlanId, TransferPlanProgress, TransferPlanSnapshot, TransferPlanState,
-        TransferState, TrustRequestId, UserFacingError, WindowSessionId,
+        RestoredTabTarget, RuntimeBridgeConfig, SessionId, SortDirection, TabConnected,
+        TabDisconnected, TabId, Timestamp, TransferConflictPrompt, TransferDirection,
+        TransferEndpoint, TransferId, TransferJob, TransferPlanId, TransferPlanProgress,
+        TransferPlanSnapshot, TransferPlanState, TransferState, TrustRequestId, UserFacingError,
+        WindowSessionId,
     };
     use macsftp_core::{EditSession, EditSessionId, RemoteSnapshot};
     use macsftp_sftp::{BridgeChannels, EventReceiver, RuntimeClient};
@@ -62,8 +63,8 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{
-        AppPaths, PaneSide, RestoredTabTarget, STATUS_BUSY_TRY_AGAIN,
-        STATUS_CONNECTION_SERVICE_UNAVAILABLE, Workspace, WorkspaceSurface,
+        AppPaths, PaneSide, STATUS_BUSY_TRY_AGAIN, STATUS_CONNECTION_SERVICE_UNAVAILABLE,
+        Workspace, WorkspaceSurface,
     };
     use crate::app_actions::{
         self, ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, FilterPane, GoToPath,
@@ -74,8 +75,8 @@ mod tests {
     use crate::resources::{ActiveResources, ActiveTransfers};
     use crate::session_coordinator::SessionCoordinator;
     use crate::workspace::ConflictChoice;
-    use crate::workspace::nav::HistoryOp;
     use crate::workspace::profiles::{SettingsSection, profile_matches_filter};
+    use macsftp_core::HistoryOp;
     use macsftp_ui::InputState;
 
     const TEST_REMOTE_ROOT: &str = "/home/tester";
@@ -468,17 +469,17 @@ mod tests {
         let (workspace, mut cx, _channels) = init_workspace(cx);
 
         workspace.read_with(&cx, |workspace, _| {
-            assert!(workspace.drawer_open, "drawer starts open");
+            assert!(workspace.transfer_drawer.open, "drawer starts open");
         });
 
         cx.dispatch_action(ShowTransferDrawer);
         workspace.read_with(&cx, |workspace, _| {
-            assert!(!workspace.drawer_open);
+            assert!(!workspace.transfer_drawer.open);
         });
 
         cx.dispatch_action(ShowTransferDrawer);
         workspace.read_with(&cx, |workspace, _| {
-            assert!(workspace.drawer_open);
+            assert!(workspace.transfer_drawer.open);
         });
     }
 
@@ -487,7 +488,7 @@ mod tests {
         let (workspace, _cx, _channels) = init_workspace(cx);
         workspace.read_with(&_cx, |workspace, _| {
             assert_eq!(
-                workspace.drawer_height,
+                workspace.transfer_drawer.height,
                 crate::workspace::drawer_height::DEFAULT_DRAWER_HEIGHT
             );
         });
@@ -502,8 +503,8 @@ mod tests {
         cx.dispatch_action(ShowTransferDrawer);
         cx.dispatch_action(ShowTransferDrawer);
         workspace.read_with(&cx, |workspace, _| {
-            assert!(workspace.drawer_open);
-            assert_eq!(workspace.drawer_height, gpui::px(180.0));
+            assert!(workspace.transfer_drawer.open);
+            assert_eq!(workspace.transfer_drawer.height, gpui::px(180.0));
         });
     }
 
@@ -516,7 +517,7 @@ mod tests {
         });
         workspace.read_with(&cx, |workspace, _| {
             assert_eq!(
-                workspace.drawer_height,
+                workspace.transfer_drawer.height,
                 crate::workspace::drawer_height::DEFAULT_DRAWER_HEIGHT
             );
         });
@@ -531,14 +532,14 @@ mod tests {
         });
         workspace.read_with(&cx, |workspace, _| {
             assert!(
-                workspace.drawer_open,
+                workspace.transfer_drawer.open,
                 "clamping to min height must not auto-close the drawer"
             );
             assert_eq!(
-                workspace.drawer_height,
+                workspace.transfer_drawer.height,
                 crate::workspace::drawer_height::MIN_DRAWER_HEIGHT
             );
-            assert!(workspace.drawer_resize.is_none());
+            assert!(workspace.transfer_drawer.resize.is_none());
         });
     }
 
@@ -551,16 +552,16 @@ mod tests {
                 start_height: gpui::px(240.0),
                 start_y: gpui::px(500.0),
             };
-            workspace.drawer_resize = Some(start.clone());
+            workspace.transfer_drawer.resize = Some(start.clone());
             let current_y = gpui::px(400.0); // drag up → taller
             let new_height = start.start_height + (start.start_y - current_y);
             workspace.set_drawer_height(new_height, gpui::px(900.0));
-            workspace.drawer_resize = None;
+            workspace.transfer_drawer.resize = None;
         });
         workspace.read_with(&cx, |workspace, _| {
-            assert_eq!(workspace.drawer_height, gpui::px(340.0));
-            assert!(workspace.drawer_resize.is_none());
-            assert!(workspace.drawer_open);
+            assert_eq!(workspace.transfer_drawer.height, gpui::px(340.0));
+            assert!(workspace.transfer_drawer.resize.is_none());
+            assert!(workspace.transfer_drawer.open);
         });
     }
 
@@ -572,7 +573,7 @@ mod tests {
         workspace.read_with(&cx, |workspace, _| {
             assert_eq!(workspace.surface, WorkspaceSurface::Settings);
             assert_eq!(
-                workspace.settings_section,
+                workspace.settings.section,
                 SettingsSection::General,
                 "OpenSettings resets to General"
             );
@@ -603,7 +604,7 @@ mod tests {
         workspace.read_with(&cx, |workspace, _| {
             assert_eq!(workspace.surface, WorkspaceSurface::Settings);
             assert_eq!(
-                workspace.settings_section,
+                workspace.settings.section,
                 SettingsSection::Profiles,
                 "OpenProfiles opens Settings on the Profiles section"
             );
@@ -630,20 +631,20 @@ mod tests {
             }
             ws.surface = WorkspaceSurface::Settings;
             ws.set_settings_section(SettingsSection::Profiles, cx);
-            assert_eq!(ws.settings_section, SettingsSection::Profiles);
+            assert_eq!(ws.settings.section, SettingsSection::Profiles);
             let n = cx.resources().profiles.profiles().len();
             assert!(n >= 1, "expected at least one saved profile");
             assert!(
-                ws.selected_profile_id.is_some(),
+                ws.settings.selected_profile_id.is_some(),
                 "selected defaults to first when entering Profiles with a non-empty list"
             );
             assert_eq!(
-                ws.selected_profile_id,
+                ws.settings.selected_profile_id,
                 Some(ProfileId(1)),
                 "first saved profile is selected"
             );
             assert!(
-                ws.profile_editor.is_some(),
+                ws.settings.profile_editor.is_some(),
                 "entering Profiles with a selection opens the editor"
             );
         });
@@ -659,6 +660,7 @@ mod tests {
             ws.start_new_profile(cx);
 
             let editor = ws
+                .settings
                 .profile_editor
                 .as_mut()
                 .expect("start_new_profile opens editor");
@@ -697,13 +699,14 @@ mod tests {
             assert_eq!(password, "s3cret", "password must be stored in Keychain");
 
             let editor = ws
+                .settings
                 .profile_editor
                 .as_ref()
                 .expect("editor remains after save");
             assert!(!editor.is_new, "saved editor is no longer new");
             assert!(editor.secret_present_hint);
             assert!(editor.error.is_none());
-            assert_eq!(ws.selected_profile_id, Some(profile.id));
+            assert_eq!(ws.settings.selected_profile_id, Some(profile.id));
         });
     }
 
@@ -734,6 +737,7 @@ mod tests {
             ws.load_profile_editor(profile_id, cx);
 
             let editor = ws
+                .settings
                 .profile_editor
                 .as_mut()
                 .expect("load_profile_editor opens editor");
@@ -777,6 +781,7 @@ mod tests {
             ws.start_new_profile(cx);
 
             let editor = ws
+                .settings
                 .profile_editor
                 .as_mut()
                 .expect("start_new_profile opens editor");
@@ -790,7 +795,7 @@ mod tests {
                 cx.resources().profiles.profiles().is_empty(),
                 "validation failure must not write profiles.json"
             );
-            let editor = ws.profile_editor.as_ref().expect("editor remains");
+            let editor = ws.settings.profile_editor.as_ref().expect("editor remains");
             assert!(editor.is_new);
             assert_eq!(
                 editor.error.as_ref().map(|s| s.as_ref()),
@@ -825,11 +830,11 @@ mod tests {
 
             ws.surface = WorkspaceSurface::Settings;
             ws.set_settings_section(SettingsSection::Profiles, cx);
-            assert_eq!(ws.selected_profile_id, Some(profile_id));
+            assert_eq!(ws.settings.selected_profile_id, Some(profile_id));
 
             // Request only arms the confirm state — store and Keychain stay intact.
             ws.request_delete_profile(profile_id, window, cx);
-            assert_eq!(ws.profile_delete_confirm, Some(profile_id));
+            assert_eq!(ws.settings.profile_delete_confirm, Some(profile_id));
             assert!(
                 cx.resources().profiles.find_profile(profile_id).is_some(),
                 "request_delete must not remove the profile yet"
@@ -849,7 +854,7 @@ mod tests {
 
             // Cancel leaves everything as-is.
             ws.cancel_delete_profile(window, cx);
-            assert!(ws.profile_delete_confirm.is_none());
+            assert!(ws.settings.profile_delete_confirm.is_none());
             assert!(
                 cx.resources().profiles.find_profile(profile_id).is_some(),
                 "cancel must keep the profile"
@@ -858,17 +863,17 @@ mod tests {
             // Confirm deletes profile + Keychain entry and clears settings selection.
             ws.request_delete_profile(profile_id, window, cx);
             ws.confirm_delete_profile(window, cx);
-            assert!(ws.profile_delete_confirm.is_none());
+            assert!(ws.settings.profile_delete_confirm.is_none());
             assert!(
                 cx.resources().profiles.profiles().is_empty(),
                 "confirm must delete the profile from the store"
             );
             assert!(
-                ws.selected_profile_id.is_none(),
+                ws.settings.selected_profile_id.is_none(),
                 "deleted selection clears selected_profile_id when no profiles remain"
             );
             assert!(
-                ws.profile_editor.is_none(),
+                ws.settings.profile_editor.is_none(),
                 "editor closes when the selected profile is deleted and none remain"
             );
         });
@@ -934,13 +939,13 @@ mod tests {
                 "empty filter matches every profile"
             );
 
-            ws.profile_filter.set_value("nas.local");
+            ws.settings.profile_filter.set_value("nas.local");
             let filtered = ws.filtered_profiles(&all);
             assert_eq!(filtered.len(), 1, "filter must narrow to one host");
             assert_eq!(filtered[0].id, ProfileId(2));
             assert_eq!(filtered[0].host, "nas.local");
 
-            ws.profile_filter.set_value("nomatch");
+            ws.settings.profile_filter.set_value("nomatch");
             assert!(
                 ws.filtered_profiles(&all).is_empty(),
                 "non-matching filter yields no profiles"
@@ -953,10 +958,14 @@ mod tests {
         let (workspace, mut cx, _channels) = init_workspace(cx);
 
         cx.dispatch_action(ShowAbout);
-        workspace.read_with(&cx, |workspace, _| assert!(workspace.about_open));
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(workspace.modal_inputs.about_open)
+        });
 
         cx.dispatch_action(CancelActiveModal);
-        workspace.read_with(&cx, |workspace, _| assert!(!workspace.about_open));
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(!workspace.modal_inputs.about_open)
+        });
     }
 
     #[gpui::test]
@@ -965,9 +974,9 @@ mod tests {
         workspace.update_in(&mut cx, |ws, window, cx| {
             // Simulate focus having left the pane (e.g. after interacting with About).
             window.focus(&ws.modal_focus);
-            ws.about_open = true;
+            ws.modal_inputs.about_open = true;
             ws.cancel_active_modal(window, cx);
-            assert!(!ws.about_open, "Esc must close About");
+            assert!(!ws.modal_inputs.about_open, "Esc must close About");
             let pane = ws.pane_focus(ws.focused_side).clone();
             assert!(
                 pane.is_focused(window),
@@ -981,9 +990,9 @@ mod tests {
         let (workspace, mut cx, _channels) = init_workspace(cx);
         workspace.update_in(&mut cx, |ws, window, cx| {
             window.focus(&ws.modal_focus);
-            ws.about_open = true;
+            ws.modal_inputs.about_open = true;
             ws.close_about(window, cx);
-            assert!(!ws.about_open, "Close must dismiss About");
+            assert!(!ws.modal_inputs.about_open, "Close must dismiss About");
             let pane = ws.pane_focus(ws.focused_side).clone();
             assert!(
                 pane.is_focused(window),
@@ -997,13 +1006,13 @@ mod tests {
         let (workspace, mut cx, _channels) = init_workspace(cx);
         workspace.update_in(&mut cx, |ws, window, cx| {
             ws.open_go_to_path(window, cx);
-            assert!(ws.go_to_path_open);
+            assert!(ws.go_to_path.open);
             assert!(
                 ws.modal_focus.is_focused(window),
                 "open_go_to_path focuses modal_focus"
             );
             ws.cancel_active_modal(window, cx);
-            assert!(!ws.go_to_path_open);
+            assert!(!ws.go_to_path.open);
             let pane = ws.pane_focus(ws.focused_side).clone();
             assert!(
                 pane.is_focused(window),
@@ -1230,7 +1239,10 @@ mod tests {
         };
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.handle_app_event(AppEvent::TransferConflict(prompt.clone()), window, cx);
-            assert_eq!(workspace.conflict_rename.value(), "existing (copy).txt");
+            assert_eq!(
+                workspace.modal_inputs.conflict_rename.value(),
+                "existing (copy).txt"
+            );
             let pending = cx
                 .transfers()
                 .pending_conflicts
@@ -1242,12 +1254,15 @@ mod tests {
                 Some(macsftp_core::Timestamp::from_secs_since_epoch(42))
             );
 
-            workspace.conflict_rename.set_value("..");
+            workspace.modal_inputs.conflict_rename.set_value("..");
             workspace.submit_transfer_rename(false, window, cx);
-            assert!(workspace.conflict_rename_error.is_some());
+            assert!(workspace.modal_inputs.conflict_rename_error.is_some());
             assert!(workspace.active_transfer_conflict_prompt().is_some());
 
-            workspace.conflict_rename.set_value("renamed.txt");
+            workspace
+                .modal_inputs
+                .conflict_rename
+                .set_value("renamed.txt");
             workspace.submit_transfer_rename(true, window, cx);
         });
 
@@ -1269,7 +1284,7 @@ mod tests {
         );
         workspace.read_with(&cx, |workspace, _| {
             assert!(workspace.state.modals.active.is_empty());
-            assert!(workspace.conflict_rename_error.is_none());
+            assert!(workspace.modal_inputs.conflict_rename_error.is_none());
         });
     }
 
@@ -1388,19 +1403,21 @@ mod tests {
     }
 
     #[gpui::test]
-    fn tab_connected_prefers_restored_remote_path(cx: &mut TestAppContext) {
+    fn session_snapshot_never_contains_cached_credentials(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
         workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.restored_targets.insert(
-                TabId(1),
-                RestoredTabTarget {
-                    host: "mock.example.com".into(),
-                    port: 22,
-                    username: "tester".into(),
-                    profile_id: None,
-                    remote_path: Some(RemotePath::new("/home/restored")),
-                },
-            );
+            let tab = workspace
+                .state
+                .tabs
+                .find_tab_mut(TabId(1))
+                .expect("initial tab must exist");
+            tab.restored_target = Some(Box::new(RestoredTabTarget {
+                host: "mock.example.com".into(),
+                port: 22,
+                username: "tester".into(),
+                profile_id: None,
+                remote_path: Some(RemotePath::new("/home/restored")),
+            }));
             workspace.connect_with(test_settings(), None, window, cx);
         });
         let _ = channels.command_rx.try_recv();
@@ -1428,8 +1445,10 @@ mod tests {
             );
             assert!(
                 workspace
-                    .restored_targets
-                    .get(&TabId(1))
+                    .state
+                    .tabs
+                    .find_tab(TabId(1))
+                    .and_then(|tab| tab.restored_target.as_ref())
                     .and_then(|target| target.remote_path.as_ref())
                     .is_none(),
                 "restored path preference must be cleared after first connect"
@@ -1441,6 +1460,83 @@ mod tests {
             Ok(AppCommand::ReadRemoteDir { tab_id: TabId(1), path })
                 if path == RemotePath::new("/home/restored")
         ));
+    }
+
+    #[gpui::test]
+    fn classified_disconnect_reasons_reach_the_connection_state(cx: &mut TestAppContext) {
+        // Mid-session drops now arrive with a classified UserFacingError so
+        // the remote pane can say WHY the connection dropped instead of a
+        // generic "Disconnected". The stale-event guard must keep treating
+        // them like any other scoped TabDisconnected.
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
+        });
+        let _ = channels.command_rx.try_recv();
+
+        let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                AppEvent::TabConnected(RemoteScoped::new(
+                    scope.clone(),
+                    TabConnected {
+                        remote_root: RemotePath::new(TEST_REMOTE_ROOT),
+                    },
+                )),
+                window,
+                cx,
+            );
+        });
+
+        let network_timeout = macsftp_core::UserFacingError::new(
+            macsftp_core::ErrorCode::NetworkTimeout,
+            "Connection lost",
+            "No response from the server for about a minute.",
+        )
+        .with_retryable(true);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                AppEvent::TabDisconnected(RemoteScoped::new(
+                    scope.clone(),
+                    TabDisconnected {
+                        reason: DisconnectReason::Error(network_timeout),
+                    },
+                )),
+                window,
+                cx,
+            );
+            let tab = workspace.active_tab().expect("tab must exist");
+            let macsftp_core::ConnectionState::Disconnected {
+                reason: DisconnectReason::Error(error),
+            } = &tab.connection
+            else {
+                panic!("expected Disconnected(Error), got {:?}", tab.connection);
+            };
+            assert_eq!(error.code, macsftp_core::ErrorCode::NetworkTimeout);
+            assert!(tab.remote.entries.is_empty());
+        });
+
+        // A stale-epoch repeat of the same event must not resurrect state.
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            let stale_scope = RemoteEventScope::new(TabId(1), SessionId(1), 0);
+            workspace.handle_app_event(
+                AppEvent::TabDisconnected(RemoteScoped::new(
+                    stale_scope,
+                    TabDisconnected {
+                        reason: DisconnectReason::UserRequested,
+                    },
+                )),
+                window,
+                cx,
+            );
+            let tab = workspace.active_tab().expect("tab must exist");
+            assert!(matches!(
+                &tab.connection,
+                macsftp_core::ConnectionState::Disconnected {
+                    reason: DisconnectReason::Error(error),
+                } if error.code == macsftp_core::ErrorCode::NetworkTimeout
+            ));
+        });
     }
 
     #[gpui::test]
@@ -1666,7 +1762,8 @@ mod tests {
 
         workspace.read_with(&cx, |workspace, _| {
             let form = workspace
-                .connect_form
+                .connect_form_ui
+                .form
                 .as_ref()
                 .expect("form must open when recent has no profile");
             assert_eq!(form.host.value(), "recent.example.com");
@@ -1698,7 +1795,11 @@ mod tests {
             workspace.open_connect_form(window, cx);
         });
         workspace.update_in(&mut cx, |workspace, _window, cx| {
-            let form = workspace.connect_form.as_mut().expect("form is open");
+            let form = workspace
+                .connect_form_ui
+                .form
+                .as_mut()
+                .expect("form is open");
             form.host.set_value("profile.example.com");
             form.port.set_value("22");
             form.username.set_value("deploy");
@@ -1729,7 +1830,7 @@ mod tests {
 
         workspace.update_in(&mut cx, |workspace, window, cx| {
             // Close any leftover form so open_recent owns the path.
-            workspace.connect_form = None;
+            workspace.connect_form_ui.form = None;
             workspace.open_recent_connection(recent_id, window, cx);
         });
 
@@ -1748,7 +1849,7 @@ mod tests {
         }
         workspace.read_with(&cx, |workspace, _| {
             assert!(
-                workspace.connect_form.is_none(),
+                workspace.connect_form_ui.form.is_none(),
                 "form closes when auto-connect succeeds"
             );
             let tab = workspace.state.tabs.active_tab().expect("tab exists");
@@ -1774,7 +1875,11 @@ mod tests {
             workspace.open_connect_form(window, cx);
         });
         workspace.update_in(&mut cx, |workspace, _window, cx| {
-            let form = workspace.connect_form.as_mut().expect("form is open");
+            let form = workspace
+                .connect_form_ui
+                .form
+                .as_mut()
+                .expect("form is open");
             form.host.set_value("missing-secret.example.com");
             form.port.set_value("22");
             form.username.set_value("deploy");
@@ -1815,7 +1920,7 @@ mod tests {
         });
 
         workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.connect_form = None;
+            workspace.connect_form_ui.form = None;
             workspace.open_recent_connection(recent_id, window, cx);
         });
 
@@ -1825,7 +1930,8 @@ mod tests {
         );
         workspace.read_with(&cx, |workspace, _| {
             let form = workspace
-                .connect_form
+                .connect_form_ui
+                .form
                 .as_ref()
                 .expect("form stays open so user can re-enter password");
             assert_eq!(form.host.value(), "missing-secret.example.com");
@@ -2061,7 +2167,7 @@ mod tests {
         // <edits_dir>/<run-id>/<session-id>/<filename>.
         let expected_temp = workspace.read_with(&cx, |workspace, cx| {
             assert!(
-                workspace.large_edit_confirm.is_none(),
+                workspace.modal_inputs.large_edit_confirm.is_none(),
                 "a small file must not raise the large-file confirmation"
             );
             let store = &cx.resources().edit_sessions;
@@ -2271,6 +2377,7 @@ mod tests {
         // a session yet.
         workspace.read_with(&cx, |workspace, cx| {
             let pending = workspace
+                .modal_inputs
                 .large_edit_confirm
                 .as_ref()
                 .expect("large file must arm the confirmation");
@@ -2309,7 +2416,7 @@ mod tests {
 
         workspace.read_with(&cx, |workspace, _| {
             assert!(
-                workspace.large_edit_confirm.is_none(),
+                workspace.modal_inputs.large_edit_confirm.is_none(),
                 "closing the owning tab must dismiss its large-file confirmation"
             );
         });
@@ -2335,6 +2442,7 @@ mod tests {
 
         workspace.read_with(&cx, |workspace, _| {
             let pending = workspace
+                .modal_inputs
                 .large_edit_confirm
                 .as_ref()
                 .expect("closing another tab must preserve the confirmation");
@@ -2363,7 +2471,7 @@ mod tests {
         });
         workspace.read_with(&cx, |workspace, _| {
             assert!(
-                workspace.large_edit_confirm.is_some(),
+                workspace.modal_inputs.large_edit_confirm.is_some(),
                 "large file must arm the confirmation"
             );
         });
@@ -2376,7 +2484,7 @@ mod tests {
 
         let expected_temp = workspace.read_with(&cx, |workspace, cx| {
             assert!(
-                workspace.large_edit_confirm.is_none(),
+                workspace.modal_inputs.large_edit_confirm.is_none(),
                 "confirming must clear the pending large-file edit"
             );
             let store = &cx.resources().edit_sessions;
@@ -2422,7 +2530,7 @@ mod tests {
             workspace.begin_edit(entry.path.clone(), entry.size, entry.modified_at, cx);
         });
         workspace.read_with(&cx, |workspace, _| {
-            assert!(workspace.large_edit_confirm.is_some());
+            assert!(workspace.modal_inputs.large_edit_confirm.is_some());
         });
 
         // While the modal is up, the tab reconnects → epoch bumps to 2. Complete
@@ -2502,7 +2610,7 @@ mod tests {
         // large-file confirmation).
         workspace.read_with(&cx, |workspace, cx| {
             assert!(
-                workspace.large_edit_confirm.is_none(),
+                workspace.modal_inputs.large_edit_confirm.is_none(),
                 "a small file must not raise the large-file confirmation"
             );
             let session = cx
@@ -2548,7 +2656,7 @@ mod tests {
         // A directory is not editable: no session, no command.
         workspace.read_with(&cx, |workspace, cx| {
             assert!(
-                workspace.large_edit_confirm.is_none(),
+                workspace.modal_inputs.large_edit_confirm.is_none(),
                 "a directory must not arm any edit confirmation"
             );
             assert!(
@@ -2608,7 +2716,7 @@ mod tests {
 
         // Clearing the field (empty → None) removes the override and round-trips.
         workspace.update(&mut cx, |workspace, cx| {
-            workspace.external_editor_input.set_value("");
+            workspace.settings.external_editor_input.set_value("");
             workspace.commit_external_editor(cx);
         });
         workspace.read_with(&cx, |_workspace, cx| {
@@ -3338,31 +3446,23 @@ mod tests {
         // Refresh must not push history.
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.focused_side = PaneSide::Local;
-            let back_len_before = workspace
-                .tab_nav
-                .get(&workspace.active_tab().expect("tab").id)
-                .map(|nav| nav.local.back.len())
-                .unwrap_or(0);
+            let back_len_before = workspace.active_tab().expect("tab").nav.local.back.len();
             workspace.refresh_focused_pane(window, cx);
-            let back_len_after = workspace
-                .tab_nav
-                .get(&workspace.active_tab().expect("tab").id)
-                .map(|nav| nav.local.back.len())
-                .unwrap_or(0);
+            let back_len_after = workspace.active_tab().expect("tab").nav.local.back.len();
             assert_eq!(
                 back_len_before, back_len_after,
                 "refresh must not push history"
             );
         });
 
-        // Closing the tab drops its nav state.
+        // Closing the tab drops its nav state with it (no side table left).
         workspace.update_in(&mut cx, |workspace, window, cx| {
             let tab_id = workspace.active_tab().expect("tab").id;
-            assert!(workspace.tab_nav.contains_key(&tab_id));
+            assert!(workspace.state.tabs.find_tab(tab_id).is_some());
             workspace.close_tab_by_id(tab_id, window, cx);
             assert!(
-                !workspace.tab_nav.contains_key(&tab_id),
-                "close_tab must remove tab_nav entry"
+                workspace.state.tabs.find_tab(tab_id).is_none(),
+                "close_tab must remove the tab owning the nav state"
             );
         });
 
@@ -3381,10 +3481,10 @@ mod tests {
             workspace.set_local_path(parent.clone(), window, cx);
             workspace.focused_side = PaneSide::Local;
             workspace.open_go_to_path(window, cx);
-            assert!(workspace.go_to_path_open);
-            workspace.go_to_path_input.set_value(child.as_str());
+            assert!(workspace.go_to_path.open);
+            workspace.go_to_path.input.set_value(child.as_str());
             workspace.submit_go_to_path(window, cx);
-            assert!(!workspace.go_to_path_open);
+            assert!(!workspace.go_to_path.open);
             assert_eq!(
                 workspace.active_tab().and_then(|tab| tab
                     .local
@@ -3404,15 +3504,16 @@ mod tests {
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.open_go_to_path(window, cx);
             workspace
-                .go_to_path_input
+                .go_to_path
+                .input
                 .set_value(format!("{}/does-not-exist", parent.as_str()));
             workspace.submit_go_to_path(window, cx);
             assert!(
-                workspace.go_to_path_open,
+                workspace.go_to_path.open,
                 "modal stays open on missing path"
             );
             assert_eq!(
-                workspace.go_to_path_error.as_ref().map(|s| s.as_ref()),
+                workspace.go_to_path.error.as_ref().map(|s| s.as_ref()),
                 Some("Path not found")
             );
             assert_eq!(
@@ -3430,7 +3531,7 @@ mod tests {
         cx.dispatch_action(CancelActiveModal);
         workspace.read_with(&cx, |workspace, _| {
             assert!(
-                !workspace.go_to_path_open,
+                !workspace.go_to_path.open,
                 "CancelActiveModal closes go to path"
             );
         });
@@ -3438,16 +3539,16 @@ mod tests {
         // Action opens the modal again.
         cx.dispatch_action(GoToPath);
         workspace.read_with(&cx, |workspace, _| {
-            assert!(workspace.go_to_path_open, "GoToPath action opens modal");
+            assert!(workspace.go_to_path.open, "GoToPath action opens modal");
         });
 
         // Empty path is rejected.
         workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.go_to_path_input.clear();
+            workspace.go_to_path.input.clear();
             workspace.submit_go_to_path(window, cx);
-            assert!(workspace.go_to_path_open);
+            assert!(workspace.go_to_path.open);
             assert_eq!(
-                workspace.go_to_path_error.as_ref().map(|s| s.as_ref()),
+                workspace.go_to_path.error.as_ref().map(|s| s.as_ref()),
                 Some("Enter a path")
             );
         });
@@ -3458,15 +3559,16 @@ mod tests {
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.open_go_to_path(window, cx);
             workspace
-                .go_to_path_input
+                .go_to_path
+                .input
                 .set_value(file_path.to_string_lossy().as_ref());
             workspace.submit_go_to_path(window, cx);
             assert!(
-                workspace.go_to_path_open,
+                workspace.go_to_path.open,
                 "modal stays open when target is a file"
             );
             assert_eq!(
-                workspace.go_to_path_error.as_ref().map(|s| s.as_ref()),
+                workspace.go_to_path.error.as_ref().map(|s| s.as_ref()),
                 Some("Not a directory")
             );
             assert_eq!(
@@ -3496,16 +3598,16 @@ mod tests {
         set_local_path_and_wait(&workspace, &mut cx, parent);
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.focused_side = PaneSide::Local;
-            workspace.local_filter.query = "alpha".into();
-            workspace.local_filter.explicit_focus = true;
+            workspace.local.filter.query = "alpha".into();
+            workspace.local.filter.explicit_focus = true;
             assert_eq!(workspace.entry_count(PaneSide::Local, cx), 1);
             workspace.navigate_pane_local(child, HistoryOp::Push, window, cx);
             assert!(
-                workspace.local_filter.query.is_empty(),
+                workspace.local.filter.query.is_empty(),
                 "navigate must clear filter query"
             );
             assert!(
-                !workspace.local_filter.explicit_focus,
+                !workspace.local.filter.explicit_focus,
                 "navigate must clear filter focus"
             );
         });
@@ -3553,10 +3655,11 @@ mod tests {
             workspace.focused_side = PaneSide::Remote;
             workspace.open_go_to_path(window, cx);
             workspace
-                .go_to_path_input
+                .go_to_path
+                .input
                 .set_value(format!("{TEST_REMOTE_ROOT}/docs"));
             workspace.submit_go_to_path(window, cx);
-            assert!(!workspace.go_to_path_open);
+            assert!(!workspace.go_to_path.open);
             assert!(
                 workspace.pane_can_navigate_back(PaneSide::Remote),
                 "remote go to path must push history"
@@ -3693,13 +3796,17 @@ mod tests {
             workspace.request_connect(window, cx);
         });
         workspace.read_with(&cx, |workspace, _| {
-            assert!(workspace.connect_form.is_some(), "form must open");
+            assert!(workspace.connect_form_ui.form.is_some(), "form must open");
         });
         assert!(channels.command_rx.try_recv().is_err(), "no command yet");
 
         // Fill the form and submit.
         workspace.update_in(&mut cx, |workspace, window, cx| {
-            let form = workspace.connect_form.as_mut().expect("form is open");
+            let form = workspace
+                .connect_form_ui
+                .form
+                .as_mut()
+                .expect("form is open");
             form.host.set_value("server.example.com");
             form.port.set_value("2200");
             form.username.set_value("alex");
@@ -3720,7 +3827,10 @@ mod tests {
             other => panic!("expected ConnectTab, got {other:?}"),
         }
         workspace.read_with(&cx, |workspace, _| {
-            assert!(workspace.connect_form.is_none(), "form closes on submit");
+            assert!(
+                workspace.connect_form_ui.form.is_none(),
+                "form closes on submit"
+            );
             let tab = workspace.state.tabs.active_tab().expect("tab must exist");
             assert_eq!(tab.title, "server.example.com");
             assert!(matches!(tab.connection, ConnectionState::Connecting { .. }));
@@ -3746,7 +3856,7 @@ mod tests {
         });
         workspace.read_with(&cx, |workspace, _| {
             assert!(
-                workspace.connect_form.is_none(),
+                workspace.connect_form_ui.form.is_none(),
                 "cached credentials must skip the form"
             );
         });
@@ -3768,13 +3878,13 @@ mod tests {
         let (workspace, mut cx, _) = init_workspace(cx);
         workspace.update_in(&mut cx, |ws, window, cx| {
             ws.open_connect_form(window, cx);
-            let form = ws.connect_form.as_mut().expect("form opens");
+            let form = ws.connect_form_ui.form.as_mut().expect("form opens");
             form.profile_picker_open = true;
             form.save_as_expanded = true;
             form.profile_picker_filter.set_value("partial");
             ws.close_connect_form(window, cx);
             ws.open_connect_form(window, cx);
-            let form = ws.connect_form.as_ref().expect("form reopens");
+            let form = ws.connect_form_ui.form.as_ref().expect("form reopens");
             assert!(
                 !form.profile_picker_open,
                 "reopening connect form must reset profile_picker_open"
@@ -3795,7 +3905,7 @@ mod tests {
         let (workspace, mut cx, _) = init_workspace(cx);
         workspace.update_in(&mut cx, |ws, window, cx| {
             ws.open_connect_form(window, cx);
-            let form = ws.connect_form.as_ref().expect("form opens");
+            let form = ws.connect_form_ui.form.as_ref().expect("form opens");
             assert!(
                 !form.save_as_expanded,
                 "Save as profile must start collapsed"
@@ -3809,7 +3919,11 @@ mod tests {
 
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.open_connect_form(window, cx);
-            let form = workspace.connect_form.as_mut().expect("form is open");
+            let form = workspace
+                .connect_form_ui
+                .form
+                .as_mut()
+                .expect("form is open");
             assert!(!form.save_as_expanded);
             form.save_as_expanded = true;
             form.host.set_value("save-as.example.com");
@@ -3827,7 +3941,8 @@ mod tests {
             assert_eq!(profiles[0].host, "save-as.example.com");
             assert_eq!(profiles[0].username, "deploy");
             let form = workspace
-                .connect_form
+                .connect_form_ui
+                .form
                 .as_ref()
                 .expect("form stays open after save");
             assert!(!form.save_as_expanded, "successful save collapses Save as");
@@ -3847,7 +3962,11 @@ mod tests {
             workspace.open_connect_form(window, cx);
         });
         workspace.update_in(&mut cx, |workspace, _window, cx| {
-            let form = workspace.connect_form.as_mut().expect("form is open");
+            let form = workspace
+                .connect_form_ui
+                .form
+                .as_mut()
+                .expect("form is open");
             form.host.set_value("example.com");
             form.username.set_value("alex");
             form.password.set_value("hunter2");
@@ -3863,7 +3982,11 @@ mod tests {
         });
 
         workspace.update_in(&mut cx, |workspace, _window, cx| {
-            let form = workspace.connect_form.as_mut().expect("form is open");
+            let form = workspace
+                .connect_form_ui
+                .form
+                .as_mut()
+                .expect("form is open");
             form.host.set_value("other.example.com");
             form.username.set_value("other");
             form.password.clear();
@@ -3874,7 +3997,8 @@ mod tests {
 
         workspace.read_with(&cx, |workspace, _| {
             let form = workspace
-                .connect_form
+                .connect_form_ui
+                .form
                 .as_ref()
                 .expect("form open after select");
             assert_eq!(form.source_profile_id, Some(saved_id));
@@ -3930,7 +4054,7 @@ mod tests {
 
             workspace.open_connect_form(window, cx);
             {
-                let form = workspace.connect_form.as_mut().expect("form opens");
+                let form = workspace.connect_form_ui.form.as_mut().expect("form opens");
                 form.profile_picker_open = true;
             }
 
@@ -3941,7 +4065,7 @@ mod tests {
             );
 
             {
-                let form = workspace.connect_form.as_mut().expect("form opens");
+                let form = workspace.connect_form_ui.form.as_mut().expect("form opens");
                 form.profile_picker_filter.set_value("work");
             }
             let filtered = workspace.filtered_connect_profiles(cx);
@@ -3950,7 +4074,7 @@ mod tests {
             assert_eq!(filtered[0].name, "Work Server");
 
             {
-                let form = workspace.connect_form.as_mut().expect("form opens");
+                let form = workspace.connect_form_ui.form.as_mut().expect("form opens");
                 form.profile_picker_filter.set_value("nomatch");
             }
             assert!(
@@ -3966,13 +4090,14 @@ mod tests {
 
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.open_connect_form(window, cx);
-            let form = workspace.connect_form.as_mut().expect("form opens");
+            let form = workspace.connect_form_ui.form.as_mut().expect("form opens");
             form.profile_picker_open = true;
             form.profile_picker_filter.set_value("work");
 
             workspace.cancel_active_modal(window, cx);
             let form = workspace
-                .connect_form
+                .connect_form_ui
+                .form
                 .as_ref()
                 .expect("first Esc must keep Connect open");
             assert!(
@@ -3986,7 +4111,7 @@ mod tests {
 
             workspace.cancel_active_modal(window, cx);
             assert!(
-                workspace.connect_form.is_none(),
+                workspace.connect_form_ui.form.is_none(),
                 "second Esc must close the Connect form"
             );
         });
@@ -4042,7 +4167,7 @@ mod tests {
 
             workspace.open_connect_form(window, cx);
             {
-                let form = workspace.connect_form.as_mut().expect("form");
+                let form = workspace.connect_form_ui.form.as_mut().expect("form");
                 form.profile_picker_open = true;
                 form.profile_picker_filter.set_value("work");
             }
@@ -4055,7 +4180,7 @@ mod tests {
             assert_eq!(first_id, ProfileId(1));
             workspace.select_connect_profile(first_id, cx);
 
-            let form = workspace.connect_form.as_ref().expect("form");
+            let form = workspace.connect_form_ui.form.as_ref().expect("form");
             assert_eq!(form.source_profile_id, Some(ProfileId(1)));
             assert_eq!(form.host.value(), "work.example.com");
             assert!(!form.profile_picker_open);
@@ -4078,6 +4203,7 @@ mod tests {
             workspace.start_new_profile(cx);
             {
                 let editor = workspace
+                    .settings
                     .profile_editor
                     .as_mut()
                     .expect("new profile draft");
@@ -4085,7 +4211,11 @@ mod tests {
                 editor.username.set_value("draft-user");
             }
             assert!(
-                workspace.profile_editor.as_ref().is_some_and(|e| e.is_new),
+                workspace
+                    .settings
+                    .profile_editor
+                    .as_ref()
+                    .is_some_and(|e| e.is_new),
                 "draft should be open"
             );
 
@@ -4093,7 +4223,7 @@ mod tests {
 
             assert_eq!(workspace.surface, WorkspaceSurface::Files);
             assert!(
-                workspace.profile_editor.is_none(),
+                workspace.settings.profile_editor.is_none(),
                 "leave Settings must discard unsaved New draft"
             );
             assert!(
@@ -4111,7 +4241,11 @@ mod tests {
             workspace.open_connect_form(window, cx);
         });
         workspace.update_in(&mut cx, |workspace, _window, cx| {
-            let form = workspace.connect_form.as_mut().expect("form is open");
+            let form = workspace
+                .connect_form_ui
+                .form
+                .as_mut()
+                .expect("form is open");
             form.host.set_value("example.com");
             form.username.set_value("alex");
             form.password.set_value("hunter2");
@@ -4125,7 +4259,11 @@ mod tests {
 
         workspace.update_in(&mut cx, |workspace, _window, cx| {
             workspace.select_connect_profile(saved_id, cx);
-            let form = workspace.connect_form.as_mut().expect("form is open");
+            let form = workspace
+                .connect_form_ui
+                .form
+                .as_mut()
+                .expect("form is open");
             form.profile_picker_open = true;
             form.profile_picker_filter.set_value("work");
             form.switch_to_manual_entry();
@@ -4133,7 +4271,8 @@ mod tests {
 
         workspace.read_with(&cx, |workspace, _| {
             let form = workspace
-                .connect_form
+                .connect_form_ui
+                .form
                 .as_ref()
                 .expect("form stays open after manual entry");
             assert!(
@@ -4173,14 +4312,22 @@ mod tests {
             workspace.submit_connect_form(window, cx);
         });
         workspace.read_with(&cx, |workspace, _| {
-            let form = workspace.connect_form.as_ref().expect("form stays open");
+            let form = workspace
+                .connect_form_ui
+                .form
+                .as_ref()
+                .expect("form stays open");
             assert!(form.error.is_some(), "validation error must be shown");
         });
         assert!(channels.command_rx.try_recv().is_err());
 
         // Bad port is rejected too.
         workspace.update_in(&mut cx, |workspace, window, cx| {
-            let form = workspace.connect_form.as_mut().expect("form is open");
+            let form = workspace
+                .connect_form_ui
+                .form
+                .as_mut()
+                .expect("form is open");
             form.host.set_value("h");
             form.username.set_value("u");
             form.port.set_value("99999");
@@ -4189,7 +4336,8 @@ mod tests {
         workspace.read_with(&cx, |workspace, _| {
             assert!(
                 workspace
-                    .connect_form
+                    .connect_form_ui
+                    .form
                     .as_ref()
                     .expect("open")
                     .error
@@ -4209,7 +4357,7 @@ mod tests {
         cx.simulate_keystrokes("escape");
         workspace.read_with(&cx, |workspace, _| {
             assert!(
-                workspace.connect_form.is_none(),
+                workspace.connect_form_ui.form.is_none(),
                 "escape must close the connect form"
             );
         });
@@ -4226,7 +4374,11 @@ mod tests {
         });
         // Fill a valid connection (including a password) and save it.
         workspace.update_in(&mut cx, |workspace, _window, cx| {
-            let form = workspace.connect_form.as_mut().expect("form is open");
+            let form = workspace
+                .connect_form_ui
+                .form
+                .as_mut()
+                .expect("form is open");
             form.host.set_value("example.com");
             form.username.set_value("alex");
             form.password.set_value("hunter2");
@@ -4270,7 +4422,8 @@ mod tests {
         });
         workspace.read_with(&cx, |workspace, _| {
             let form = workspace
-                .connect_form
+                .connect_form_ui
+                .form
                 .as_ref()
                 .expect("form open after use");
             assert_eq!(form.host.value(), "example.com");
@@ -4723,11 +4876,12 @@ mod tests {
                 "both files visible before filter"
             );
 
-            workspace.local_filter.query = "a".into();
+            workspace.local.filter.query = "a".into();
             workspace
-                .local_filter
+                .local
+                .filter
                 .input
-                .set_value(workspace.local_filter.query.clone());
+                .set_value(workspace.local.filter.query.clone());
             assert_eq!(
                 workspace.entry_count(PaneSide::Local, cx),
                 1,
@@ -4758,21 +4912,21 @@ mod tests {
                 2,
                 "clear restores full list"
             );
-            assert!(!workspace.local_filter.is_active());
+            assert!(!workspace.local.filter.is_active());
         });
 
         // cmd-f / FilterPane opens explicit focus without requiring a query.
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.open_filter_pane(window, cx);
-            assert!(workspace.local_filter.explicit_focus);
-            assert!(workspace.local_filter.is_active());
-            workspace.local_filter.query = "b".into();
+            assert!(workspace.local.filter.explicit_focus);
+            assert!(workspace.local.filter.is_active());
+            workspace.local.filter.query = "b".into();
             assert_eq!(workspace.entry_count(PaneSide::Local, cx), 1);
         });
         cx.dispatch_action(FilterPane);
         workspace.read_with(&cx, |workspace, _cx| {
             assert!(
-                workspace.local_filter.explicit_focus,
+                workspace.local.filter.explicit_focus,
                 "FilterPane action sets explicit_focus"
             );
         });
@@ -4780,8 +4934,8 @@ mod tests {
         // Tab switch clears filters.
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.open_new_tab(window, cx);
-            assert!(!workspace.local_filter.is_active());
-            assert!(!workspace.remote_filter.is_active());
+            assert!(!workspace.local.filter.is_active());
+            assert!(!workspace.remote.filter.is_active());
         });
 
         let _ = std::fs::remove_dir_all(&fixture);
@@ -4869,6 +5023,7 @@ mod tests {
             workspace.focused_side = PaneSide::Local;
             workspace.request_delete_selection(window, cx);
             let confirm = workspace
+                .modal_inputs
                 .delete_confirm
                 .as_ref()
                 .expect("confirm modal open");
@@ -4900,7 +5055,7 @@ mod tests {
             }
             workspace.focused_side = PaneSide::Local;
             workspace.request_delete_selection(window, cx);
-            if let Some(state) = &mut workspace.delete_confirm {
+            if let Some(state) = &mut workspace.modal_inputs.delete_confirm {
                 state.dont_ask_again = true;
             }
             workspace.confirm_delete(window, cx);
@@ -4929,7 +5084,7 @@ mod tests {
                 tab.selection.selected_paths = vec![EntryPath::Local(path)];
             }
             workspace.request_delete_selection(window, cx);
-            assert!(workspace.delete_confirm.is_none());
+            assert!(workspace.modal_inputs.delete_confirm.is_none());
         });
         cx.run_until_parked();
         assert!(!fixture.join("second.txt").exists());
@@ -4945,7 +5100,7 @@ mod tests {
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.focused_side = PaneSide::Local;
             workspace.begin_new_folder(window, cx);
-            if let Some(edit) = &mut workspace.inline_edit {
+            if let Some(edit) = &mut workspace.modal_inputs.inline_edit {
                 edit.input.set_value("Created Folder");
             }
             workspace.submit_inline_edit(window, cx);
@@ -4969,7 +5124,7 @@ mod tests {
                 tab.selection.selected_paths = vec![EntryPath::Local(path)];
             }
             workspace.begin_rename_selection(window, cx);
-            if let Some(edit) = &mut workspace.inline_edit {
+            if let Some(edit) = &mut workspace.modal_inputs.inline_edit {
                 edit.input.set_value("Renamed Folder");
             }
             workspace.submit_inline_edit(window, cx);
@@ -5272,11 +5427,11 @@ mod tests {
         cx.dispatch_action(NewTab); // mru: 3, 2, 1 active 3
         workspace.update_in(&mut cx, |ws, window, cx| {
             ws.tab_switcher_next(window, cx);
-            assert!(ws.tab_switcher_open);
-            assert_eq!(ws.tab_switcher_index, 1, "first open starts at MRU[1]");
+            assert!(ws.tab_switcher.open);
+            assert_eq!(ws.tab_switcher.index, 1, "first open starts at MRU[1]");
             assert_eq!(ws.tab_mru[1], TabId(2));
             ws.confirm_tab_switcher(window, cx);
-            assert!(!ws.tab_switcher_open);
+            assert!(!ws.tab_switcher.open);
             assert_eq!(ws.state.tabs.active_tab_id, Some(TabId(2)));
             assert_eq!(ws.tab_mru[0], TabId(2));
         });
@@ -5290,9 +5445,9 @@ mod tests {
         workspace.update_in(&mut cx, |ws, window, cx| {
             assert_eq!(ws.state.tabs.active_tab_id, Some(TabId(3)));
             ws.tab_switcher_next(window, cx);
-            assert_eq!(ws.tab_switcher_index, 1);
+            assert_eq!(ws.tab_switcher.index, 1);
             ws.cancel_active_modal(window, cx);
-            assert!(!ws.tab_switcher_open);
+            assert!(!ws.tab_switcher.open);
             assert_eq!(
                 ws.state.tabs.active_tab_id,
                 Some(TabId(3)),
@@ -5328,14 +5483,14 @@ mod tests {
         cx.dispatch_action(NewTab);
         workspace.update_in(&mut cx, |ws, window, cx| {
             ws.tab_switcher_next(window, cx);
-            assert!(ws.tab_switcher_open);
+            assert!(ws.tab_switcher.open);
             ws.open_command_palette(window, cx);
-            assert!(ws.palette_open);
+            assert!(ws.palette.open);
             ws.cancel_active_modal(window, cx);
-            assert!(!ws.palette_open, "palette closes first");
-            assert!(ws.tab_switcher_open, "switcher remains until next Esc");
+            assert!(!ws.palette.open, "palette closes first");
+            assert!(ws.tab_switcher.open, "switcher remains until next Esc");
             ws.cancel_active_modal(window, cx);
-            assert!(!ws.tab_switcher_open);
+            assert!(!ws.tab_switcher.open);
         });
     }
 
@@ -5345,12 +5500,12 @@ mod tests {
         workspace.update_in(&mut cx, |ws, window, cx| {
             assert_eq!(ws.state.tabs.tabs.len(), 1);
             ws.open_command_palette(window, cx);
-            assert!(ws.palette_open);
-            ws.palette_input.set_value("new tab");
+            assert!(ws.palette.open);
+            ws.palette.input.set_value("new tab");
             // rebuild selection to first hit
-            ws.palette_selected = 0;
+            ws.palette.selected = 0;
             ws.execute_palette_selected(window, cx);
-            assert!(!ws.palette_open);
+            assert!(!ws.palette.open);
             assert_eq!(ws.state.tabs.tabs.len(), 2);
         });
     }
@@ -5360,12 +5515,12 @@ mod tests {
         let (workspace, mut cx, _) = init_workspace(cx);
         workspace.update_in(&mut cx, |ws, window, cx| {
             ws.open_command_palette(window, cx);
-            ws.palette_input.set_value("manage profiles");
-            ws.palette_selected = 0;
+            ws.palette.input.set_value("manage profiles");
+            ws.palette.selected = 0;
             ws.execute_palette_selected(window, cx);
-            assert!(!ws.palette_open);
+            assert!(!ws.palette.open);
             assert_eq!(ws.surface, WorkspaceSurface::Settings);
-            assert_eq!(ws.settings_section, SettingsSection::Profiles);
+            assert_eq!(ws.settings.section, SettingsSection::Profiles);
         });
     }
 
@@ -5374,14 +5529,14 @@ mod tests {
         let (workspace, mut cx, _) = init_workspace(cx);
         workspace.update_in(&mut cx, |ws, window, cx| {
             ws.open_go_to_path(window, cx);
-            assert!(ws.go_to_path_open);
+            assert!(ws.go_to_path.open);
             ws.open_command_palette(window, cx);
-            assert!(ws.palette_open);
+            assert!(ws.palette.open);
             ws.cancel_active_modal(window, cx);
-            assert!(!ws.palette_open, "Esc closes palette first");
-            assert!(ws.go_to_path_open, "underlying go-to-path stays open");
+            assert!(!ws.palette.open, "Esc closes palette first");
+            assert!(ws.go_to_path.open, "underlying go-to-path stays open");
             ws.cancel_active_modal(window, cx);
-            assert!(!ws.go_to_path_open);
+            assert!(!ws.go_to_path.open);
         });
     }
 
@@ -5501,17 +5656,19 @@ mod tests {
 
         workspace.update_in(&mut cx, |workspace, _window, _cx| {
             let tab_id = workspace.active_tab().expect("default tab").id;
-            workspace.tab_settings.insert(
-                tab_id,
-                ConnectionSettings {
-                    host: "saved-host".into(),
-                    port: 2222,
-                    username: "deploy".into(),
-                    auth: AuthCredential::Password {
-                        password: "not-persisted".into(),
-                    },
+            let tab = workspace
+                .state
+                .tabs
+                .find_tab_mut(tab_id)
+                .expect("default tab must exist");
+            tab.connection_settings = Some(Box::new(ConnectionSettings {
+                host: "saved-host".into(),
+                port: 2222,
+                username: "deploy".into(),
+                auth: AuthCredential::Password {
+                    password: "not-persisted".into(),
                 },
-            );
+            }));
             SessionFile {
                 version: SessionFile::CURRENT_VERSION,
                 active_window_index: 0,

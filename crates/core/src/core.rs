@@ -355,6 +355,12 @@ pub enum ErrorCode {
     UnsupportedSymlink,
     MetadataPreservationFailed,
     ChannelClosed,
+    /// Mid-session loss: no inbound traffic for ~60s (keepalive gave up).
+    NetworkTimeout,
+    /// Mid-session loss: any other local transport failure.
+    NetworkError,
+    /// Mid-session loss: the server sent an SSH DISCONNECT message.
+    ServerDisconnected,
     Cancelled,
     Unknown,
 }
@@ -1162,7 +1168,20 @@ pub struct TabState {
     pub connection: ConnectionState,
     pub sort: FileSort,
     pub selection: SelectionState,
+    /// Cached credentials for reconnect-without-retyping. Populated for every
+    /// successful connect: for saved profiles this mirrors what was last
+    /// resolved from the Keychain, for manual entries it is the only copy and
+    /// never persists anywhere. Zeroized on drop; Debug is fully redacted.
+    /// MUST stay out of any serialized surface (session snapshots take only
+    /// host/port/user).
+    /// Boxed: cold field, keeps TabSnapshot-carrying events compact.
+    pub connection_settings: Option<Box<ConnectionSettings>>,
+    pub nav: TabNavState,
     pub pending: Vec<PendingOperation>,
+    /// Non-secret connection metadata restored from `session.json` or
+    /// recents, consumed by reconnect prefill and snapshot building.
+    /// Boxed: cold field, keeps TabSnapshot-carrying events compact.
+    pub restored_target: Option<Box<RestoredTabTarget>>,
 }
 
 impl TabState {
@@ -1177,7 +1196,10 @@ impl TabState {
             connection: ConnectionState::Empty,
             sort: FileSort::default(),
             selection: SelectionState::default(),
+            connection_settings: None,
+            nav: TabNavState::default(),
             pending: Vec::new(),
+            restored_target: None,
         }
     }
 
@@ -1262,6 +1284,113 @@ pub struct LocalPaneState {
     pub entries: Vec<LocalEntry>,
     /// Latest recoverable local Fs error for the current path (phase 1).
     pub error: Option<UserFacingError>,
+    /// Monotonic generation for background local directory reads. Bumped on
+    /// every request; a completed read is applied only when its epoch still
+    /// matches (stale-result guard, same discipline as the remote
+    /// `RemoteEventScope` check). Lives here so it dies with the tab.
+    pub read_epoch: u64,
+}
+
+impl LocalPaneState {
+    /// Start a new background directory read and return its generation.
+    pub fn begin_local_read(&mut self) -> u64 {
+        self.read_epoch = self.read_epoch.saturating_add(1);
+        self.read_epoch
+    }
+
+    /// Whether a finished read may still be applied: the tab must not have
+    /// started a newer read, and must still be showing the requested path.
+    pub fn accepts_local_result(&self, request_epoch: u64, requested_path: &LocalPath) -> bool {
+        self.read_epoch == request_epoch && self.path.as_ref() == Some(requested_path)
+    }
+}
+
+/// How a path change interacts with [`PaneNavHistory`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryOp {
+    /// Record the previous path on the back stack and clear forward.
+    Push,
+    /// Change path without touching history (refresh-adjacent or rare replace).
+    Replace,
+    /// Pop back → go there; push current onto forward.
+    Back,
+    /// Pop forward → go there; push current onto back.
+    Forward,
+}
+
+/// Back/forward stacks for one pane side.
+///
+/// Session navigation history is per-tab business state (like selection and
+/// sort) but is intentionally not persisted across app restarts.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PaneNavHistory {
+    pub back: Vec<String>,
+    pub forward: Vec<String>,
+}
+
+impl PaneNavHistory {
+    pub const MAX: usize = 50;
+
+    /// Record a user navigation from `from` to `to`.
+    ///
+    /// No-op when `from` is missing or equal to `to`. Otherwise pushes `from`
+    /// onto back, clears forward, and trims back to [`Self::MAX`].
+    pub fn push_navigating_from(&mut self, from: Option<&str>, to: &str) {
+        let Some(from) = from else {
+            return;
+        };
+        if from == to {
+            return;
+        }
+        self.back.push(from.to_string());
+        if self.back.len() > Self::MAX {
+            let excess = self.back.len() - Self::MAX;
+            self.back.drain(0..excess);
+        }
+        self.forward.clear();
+    }
+
+    /// Pop the previous path; push `current` onto forward.
+    pub fn go_back(&mut self, current: &str) -> Option<String> {
+        let target = self.back.pop()?;
+        self.forward.push(current.to_string());
+        Some(target)
+    }
+
+    /// Pop the next path; push `current` onto back.
+    pub fn go_forward(&mut self, current: &str) -> Option<String> {
+        let target = self.forward.pop()?;
+        self.back.push(current.to_string());
+        Some(target)
+    }
+
+    pub fn can_back(&self) -> bool {
+        !self.back.is_empty()
+    }
+
+    pub fn can_forward(&self) -> bool {
+        !self.forward.is_empty()
+    }
+}
+
+/// Local + remote history for one connection tab.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TabNavState {
+    pub local: PaneNavHistory,
+    pub remote: PaneNavHistory,
+}
+
+/// Non-secret connection metadata restored from `session.json` or the
+/// recents list, used for reconnect prefill and session snapshot building.
+/// Deliberately secret-free: credentials live only in
+/// [`TabState::connection_settings`] (memory, zeroized) and the Keychain.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RestoredTabTarget {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub profile_id: Option<ProfileId>,
+    pub remote_path: Option<RemotePath>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -2555,6 +2684,9 @@ impl fmt::Display for ErrorCode {
             Self::UnsupportedSymlink => "unsupported_symlink",
             Self::MetadataPreservationFailed => "metadata_preservation_failed",
             Self::ChannelClosed => "channel_closed",
+            Self::NetworkTimeout => "network_timeout",
+            Self::NetworkError => "network_error",
+            Self::ServerDisconnected => "server_disconnected",
             Self::Cancelled => "cancelled",
             Self::Unknown => "unknown",
         };
@@ -4430,5 +4562,87 @@ mod tests {
         };
 
         assert!(!store.clear_terminal());
+    }
+
+    #[test]
+    fn local_read_guard_rejects_stale_epochs_and_paths() {
+        let mut tab = TabState::new(TabId(1), "t");
+        let path_a = LocalPath::new("/tmp/a");
+        let path_b = LocalPath::new("/tmp/b");
+
+        tab.local.path = Some(path_a.clone());
+        let first = tab.local.begin_local_read();
+
+        // Matching epoch + matching path applies.
+        assert!(tab.local.accepts_local_result(first, &path_a));
+
+        // A newer request invalidates the in-flight result.
+        let second = tab.local.begin_local_read();
+        assert!(!tab.local.accepts_local_result(first, &path_a));
+
+        // Same epoch but navigated elsewhere does not apply.
+        tab.local.path = Some(path_b.clone());
+        assert!(!tab.local.accepts_local_result(second, &path_a));
+    }
+
+    #[test]
+    fn local_read_epoch_dies_with_the_tab() {
+        // The guard lives on TabState, so closing a tab cannot leave a stale
+        // side-table entry behind for a future tab to collide with.
+        let mut store = AppState::default().tabs;
+        store.open_tab(TabState::new(TabId(1), "one"));
+        let tab_id = store.active_tab_id.expect("tab must exist");
+        let epoch = store
+            .find_tab_mut(tab_id)
+            .expect("tab must exist")
+            .local
+            .begin_local_read();
+        assert_eq!(epoch, 1);
+
+        store.close_tab(tab_id);
+        store.open_tab(TabState::new(TabId(2), "two"));
+        assert_ne!(
+            store.active_tab_id,
+            Some(tab_id),
+            "new tab must not reuse the closed id"
+        );
+    }
+
+    #[test]
+    fn pane_nav_history_push_back_forward_and_trim() {
+        use super::PaneNavHistory as History;
+
+        let mut history = History::default();
+        history.push_navigating_from(Some("/a"), "/b");
+        assert_eq!(history.back, vec!["/a".to_string()]);
+        assert!(history.forward.is_empty());
+
+        // Same-path navigation records nothing.
+        history.push_navigating_from(Some("/b"), "/b");
+        assert_eq!(history.back.len(), 1);
+
+        // Missing current path records nothing.
+        history.push_navigating_from(None, "/z");
+        assert_eq!(history.back.len(), 1);
+
+        // Back on an empty stack returns nothing and records no forward.
+        let mut empty = History::default();
+        assert_eq!(empty.go_back("/here"), None);
+        assert!(empty.forward.is_empty());
+
+        assert_eq!(history.go_back("/b"), Some("/a".to_string()));
+        assert_eq!(history.forward, vec!["/b".to_string()]);
+        assert_eq!(history.go_forward("/a"), Some("/b".to_string()));
+        assert!(history.back.contains(&"/a".to_string()));
+
+        // A fresh push clears forward.
+        history.push_navigating_from(Some("/b"), "/c");
+        assert!(history.forward.is_empty());
+
+        // Back stack trims to MAX.
+        for i in 0..(History::MAX + 5) {
+            history.push_navigating_from(Some(&format!("/{i}")), &format!("/{}", i + 1));
+        }
+        assert_eq!(history.back.len(), History::MAX);
     }
 }

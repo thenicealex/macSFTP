@@ -18,9 +18,9 @@ use macsftp_ui::{
 use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::connect_form::*;
 use crate::workspace::helpers::*;
-use crate::workspace::nav::HistoryOp;
 use crate::workspace::profiles::{SettingsSection, profile_list_label};
 use crate::workspace::*;
+use macsftp_core::HistoryOp;
 
 impl crate::workspace::Workspace {
     pub(crate) fn has_transfer_conflict_modal(&self, request_id: ConflictRequestId) -> bool {
@@ -45,8 +45,8 @@ impl crate::workspace::Workspace {
             .modals
             .active
             .push(ModalRequest::TransferConflict(prompt));
-        self.conflict_rename.set_value(default_rename);
-        self.conflict_rename_error = None;
+        self.modal_inputs.conflict_rename.set_value(default_rename);
+        self.modal_inputs.conflict_rename_error = None;
         window.focus(&self.modal_focus);
         cx.notify();
     }
@@ -90,14 +90,14 @@ impl crate::workspace::Workspace {
             .active
             .retain(|modal| modal.request_id() != Some(ModalRequestId::Conflict(request_id)));
         cx.remove_transfer_conflict(request_id);
-        self.conflict_rename_error = None;
+        self.modal_inputs.conflict_rename_error = None;
         if let Some(default_name) = self
             .active_transfer_conflict_prompt()
             .map(|prompt| copy_name(&prompt.destination))
         {
-            self.conflict_rename.set_value(default_name);
+            self.modal_inputs.conflict_rename.set_value(default_name);
         } else {
-            self.conflict_rename.clear();
+            self.modal_inputs.conflict_rename.clear();
         }
     }
     pub(crate) fn resolve_transfer_conflict(
@@ -130,9 +130,9 @@ impl crate::workspace::Workspace {
         let Some(prompt) = self.active_transfer_conflict_prompt().cloned() else {
             return;
         };
-        let new_name = self.conflict_rename.value().trim().to_string();
+        let new_name = self.modal_inputs.conflict_rename.value().trim().to_string();
         if new_name.is_empty() || new_name == "." || new_name == ".." || new_name.contains('/') {
-            self.conflict_rename_error =
+            self.modal_inputs.conflict_rename_error =
                 Some("Enter a file name without path separators or parent-directory names.".into());
             cx.notify();
             return;
@@ -165,15 +165,20 @@ impl crate::workspace::Workspace {
         }
         if keystroke.modifiers.platform && keystroke.key == "v" {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                self.conflict_rename.insert(&text);
-                self.conflict_rename_error = None;
+                self.modal_inputs.conflict_rename.insert(&text);
+                self.modal_inputs.conflict_rename_error = None;
                 cx.stop_propagation();
                 cx.notify();
             }
             return;
         }
-        if self.conflict_rename.handle_keystroke(keystroke) == InputKeyResult::Handled {
-            self.conflict_rename_error = None;
+        if self
+            .modal_inputs
+            .conflict_rename
+            .handle_keystroke(keystroke)
+            == InputKeyResult::Handled
+        {
+            self.modal_inputs.conflict_rename_error = None;
             cx.stop_propagation();
             cx.notify();
         }
@@ -235,27 +240,27 @@ impl crate::workspace::Workspace {
     }
     pub(crate) fn cancel_active_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Command palette sits above other modals (phase 4 design §2.3).
-        if self.palette_open {
+        if self.palette.open {
             self.close_command_palette(window, cx);
             return;
         }
         // MRU tab switcher next (phase 4 design §4.3 — Esc cancels without switching).
-        if self.tab_switcher_open {
+        if self.tab_switcher.open {
             self.close_tab_switcher(window, cx);
             return;
         }
         // Go to Path next so Esc dismisses the path field when palette is closed.
-        if self.go_to_path_open {
+        if self.go_to_path.open {
             self.close_go_to_path(window, cx);
             return;
         }
-        if self.about_open {
+        if self.modal_inputs.about_open {
             self.close_about(window, cx);
             return;
         }
         // Profile-delete confirm sits above Settings / Connect so Esc dismisses
         // the confirm first rather than leaving the parent surface.
-        if self.profile_delete_confirm.is_some() {
+        if self.settings.profile_delete_confirm.is_some() {
             self.cancel_delete_profile(window, cx);
             return;
         }
@@ -263,23 +268,23 @@ impl crate::workspace::Workspace {
             self.leave_settings(window, cx);
             return;
         }
-        if self.delete_confirm.is_some() {
+        if self.modal_inputs.delete_confirm.is_some() {
             self.cancel_delete_confirm(window, cx);
             return;
         }
-        if self.context_menu.is_some() {
+        if self.modal_inputs.context_menu.is_some() {
             self.close_context_menu(cx);
             self.focus_pane(self.focused_side, window, cx);
             return;
         }
-        if self.inline_edit.is_some() {
+        if self.modal_inputs.inline_edit.is_some() {
             self.cancel_inline_edit(cx);
             self.focus_pane(self.focused_side, window, cx);
             return;
         }
         // Connect profile picker sits above the form: Esc closes the picker
         // first, then a second Esc dismisses Connect.
-        if let Some(form) = &mut self.connect_form {
+        if let Some(form) = &mut self.connect_form_ui.form {
             if form.profile_picker_open {
                 form.close_profile_picker();
                 cx.notify();
@@ -297,44 +302,44 @@ impl crate::workspace::Workspace {
     }
 
     pub(crate) fn open_go_to_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.connect_form.is_some()
+        if self.connect_form_ui.form.is_some()
             || self.active_host_key_prompt().is_some()
             || self.active_transfer_conflict_prompt().is_some()
-            || self.delete_confirm.is_some()
-            || self.inline_edit.is_some()
+            || self.modal_inputs.delete_confirm.is_some()
+            || self.modal_inputs.inline_edit.is_some()
         {
             return;
         }
-        self.about_open = false;
-        self.go_to_path_open = true;
-        self.go_to_path_input.clear();
-        self.go_to_path_error = None;
+        self.modal_inputs.about_open = false;
+        self.go_to_path.open = true;
+        self.go_to_path.input.clear();
+        self.go_to_path.error = None;
         window.focus(&self.modal_focus);
         cx.notify();
     }
 
     pub(crate) fn close_go_to_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.go_to_path_open = false;
-        self.go_to_path_input.clear();
-        self.go_to_path_error = None;
+        self.go_to_path.open = false;
+        self.go_to_path.input.clear();
+        self.go_to_path.error = None;
         self.focus_pane(self.focused_side, window, cx);
         cx.notify();
     }
 
     /// Dismiss About and restore keyboard-usable pane focus.
     pub(crate) fn close_about(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.about_open {
+        if !self.modal_inputs.about_open {
             return;
         }
-        self.about_open = false;
+        self.modal_inputs.about_open = false;
         self.focus_pane(self.focused_side, window, cx);
         cx.notify();
     }
 
     pub(crate) fn submit_go_to_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let raw = self.go_to_path_input.value().trim().to_string();
+        let raw = self.go_to_path.input.value().trim().to_string();
         if raw.is_empty() {
-            self.go_to_path_error = Some("Enter a path".into());
+            self.go_to_path.error = Some("Enter a path".into());
             cx.notify();
             return;
         }
@@ -350,20 +355,20 @@ impl crate::workspace::Workspace {
                     } else {
                         "Path not found"
                     };
-                    self.go_to_path_error = Some(message.into());
+                    self.go_to_path.error = Some(message.into());
                     self.status_message = Some(message.into());
                     cx.notify();
                     return;
                 }
-                self.go_to_path_open = false;
-                self.go_to_path_input.clear();
-                self.go_to_path_error = None;
+                self.go_to_path.open = false;
+                self.go_to_path.input.clear();
+                self.go_to_path.error = None;
                 self.navigate_pane_local(path, HistoryOp::Push, window, cx);
             }
             PaneSide::Remote => {
-                self.go_to_path_open = false;
-                self.go_to_path_input.clear();
-                self.go_to_path_error = None;
+                self.go_to_path.open = false;
+                self.go_to_path.input.clear();
+                self.go_to_path.error = None;
                 self.navigate_pane_remote(RemotePath::new(raw), HistoryOp::Push, cx);
             }
         }
@@ -377,7 +382,7 @@ impl crate::workspace::Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.go_to_path_open {
+        if !self.go_to_path.open {
             return;
         }
         let keystroke = &event.keystroke;
@@ -388,15 +393,15 @@ impl crate::workspace::Workspace {
         }
         if keystroke.modifiers.platform && keystroke.key == "v" {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                self.go_to_path_input.insert(&text);
-                self.go_to_path_error = None;
+                self.go_to_path.input.insert(&text);
+                self.go_to_path.error = None;
                 cx.stop_propagation();
                 cx.notify();
             }
             return;
         }
-        if self.go_to_path_input.handle_keystroke(keystroke) == InputKeyResult::Handled {
-            self.go_to_path_error = None;
+        if self.go_to_path.input.handle_keystroke(keystroke) == InputKeyResult::Handled {
+            self.go_to_path.error = None;
             cx.stop_propagation();
             cx.notify();
         }
@@ -406,7 +411,7 @@ impl crate::workspace::Workspace {
         &self,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        if !self.go_to_path_open {
+        if !self.go_to_path.open {
             return None;
         }
         let theme = cx.theme().clone();
@@ -456,14 +461,14 @@ impl crate::workspace::Workspace {
                         .child(text_field(
                             "go-to-path-input",
                             TextFieldModel {
-                                state: &self.go_to_path_input,
+                                state: &self.go_to_path.input,
                                 placeholder: "Absolute path",
                                 focused: true,
                                 masked: false,
                             },
                             cx,
                         ))
-                        .when_some(self.go_to_path_error.clone(), |card, error| {
+                        .when_some(self.go_to_path.error.clone(), |card, error| {
                             card.child(
                                 div()
                                     .text_size(px(11.0))
@@ -497,7 +502,7 @@ impl crate::workspace::Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        let form = self.connect_form.as_ref()?;
+        let form = self.connect_form_ui.form.as_ref()?;
         let theme = cx.theme().clone();
 
         let field_row = |label: &'static str,
@@ -512,7 +517,7 @@ impl crate::workspace::Workspace {
                 .items_center()
                 .gap_2()
                 .on_click(cx.listener(move |workspace, _event, _window, cx| {
-                    if let Some(form) = &mut workspace.connect_form {
+                    if let Some(form) = &mut workspace.connect_form_ui.form {
                         form.focused_field = field;
                         cx.notify();
                     }
@@ -544,7 +549,7 @@ impl crate::workspace::Workspace {
             text_button(id, label)
                 .primary(form.auth_method == method)
                 .on_click(cx.listener(move |workspace, _event, _window, cx| {
-                    if let Some(form) = &mut workspace.connect_form {
+                    if let Some(form) = &mut workspace.connect_form_ui.form {
                         form.set_auth_method(method);
                         cx.notify();
                     }
@@ -553,7 +558,7 @@ impl crate::workspace::Workspace {
 
         let mut card = div()
             .key_context("ConnectForm")
-            .track_focus(&self.connect_form_focus)
+            .track_focus(&self.connect_form_ui.focus)
             .on_key_down(cx.listener(Self::handle_connect_form_key))
             .flex()
             .flex_col()
@@ -616,7 +621,7 @@ impl crate::workspace::Workspace {
                             .rounded_md()
                             .cursor_pointer()
                             .on_click(cx.listener(|workspace, _event, _window, cx| {
-                                if let Some(form) = &mut workspace.connect_form {
+                                if let Some(form) = &mut workspace.connect_form_ui.form {
                                     form.profile_picker_open = !form.profile_picker_open;
                                     cx.notify();
                                 }
@@ -643,7 +648,7 @@ impl crate::workspace::Workspace {
                             // OpenProfiles is gated on connect_form being closed;
                             // dismiss Connect first so Settings Profiles can open.
                             workspace.close_connect_form(window, cx);
-                            workspace.about_open = false;
+                            workspace.modal_inputs.about_open = false;
                             workspace.surface = WorkspaceSurface::Settings;
                             workspace.set_settings_section(SettingsSection::Profiles, cx);
                             workspace.workspace_focus.focus(window);
@@ -720,7 +725,7 @@ impl crate::workspace::Workspace {
                     .text_size(px(12.0))
                     .text_color(theme.colors.text_muted)
                     .on_click(cx.listener(|workspace, _event, _window, cx| {
-                        if let Some(form) = &mut workspace.connect_form {
+                        if let Some(form) = &mut workspace.connect_form_ui.form {
                             form.switch_to_manual_entry();
                             cx.notify();
                         }
@@ -878,7 +883,7 @@ impl crate::workspace::Workspace {
                             .min_w_0()
                             .on_click(cx.listener(
                                 move |workspace, _event: &ClickEvent, _window, cx| {
-                                    if let Some(form) = &mut workspace.connect_form {
+                                    if let Some(form) = &mut workspace.connect_form_ui.form {
                                         form.focused_field = ConnectField::ProfileName;
                                         cx.notify();
                                     }
@@ -913,7 +918,7 @@ impl crate::workspace::Workspace {
                     .text_size(px(12.0))
                     .text_color(theme.colors.text_muted)
                     .on_click(cx.listener(|workspace, _event, _window, cx| {
-                        if let Some(form) = &mut workspace.connect_form {
+                        if let Some(form) = &mut workspace.connect_form_ui.form {
                             form.save_as_expanded = true;
                             form.focused_field = ConnectField::ProfileName;
                             cx.notify();
@@ -1193,7 +1198,7 @@ impl crate::workspace::Workspace {
                                 .child(div().flex_1().min_w_0().child(text_field(
                                     "conflict-rename-input",
                                     TextFieldModel {
-                                        state: &self.conflict_rename,
+                                        state: &self.modal_inputs.conflict_rename,
                                         placeholder: "new file name",
                                         focused: true,
                                         masked: false,
@@ -1201,14 +1206,17 @@ impl crate::workspace::Workspace {
                                     cx,
                                 ))),
                         )
-                        .when_some(self.conflict_rename_error.clone(), |card, error| {
-                            card.child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(theme.colors.error)
-                                    .child(error),
-                            )
-                        })
+                        .when_some(
+                            self.modal_inputs.conflict_rename_error.clone(),
+                            |card, error| {
+                                card.child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .text_color(theme.colors.error)
+                                        .child(error),
+                                )
+                            },
+                        )
                         .child(
                             div()
                                 .flex()
@@ -1284,7 +1292,7 @@ impl crate::workspace::Workspace {
         &self,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        let profile_id = self.profile_delete_confirm?;
+        let profile_id = self.settings.profile_delete_confirm?;
         let body = {
             let profile = cx.resources().profiles.find_profile(profile_id)?;
             format!(

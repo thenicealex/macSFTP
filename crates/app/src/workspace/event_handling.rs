@@ -1,13 +1,12 @@
 use gpui::{Context, UniformListScrollHandle, Window};
 use macsftp_core::{
-    AppEvent, EditSessionId, ErrorCode, ModalRequest, RemotePath, RemoteSnapshot, TabId,
-    UserFacingError, sort_entries,
+    AppEvent, EditSessionId, ErrorCode, ModalRequest, RemotePath, RemoteSnapshot,
+    RestoredTabTarget, TabId, UserFacingError, sort_entries,
 };
 
 use tracing::{debug, warn};
 
 use crate::resources::{ActiveResources, ActiveTransfers};
-use crate::workspace::*;
 
 impl crate::workspace::Workspace {
     pub(crate) fn handle_app_event(
@@ -86,21 +85,19 @@ impl crate::workspace::Workspace {
             AppEvent::TabConnected(scoped) => {
                 let tab_id = scoped.scope.tab_id;
                 let remote_root = scoped.payload.remote_root;
-                // Prefer the path restored from the previous session so the
-                // user lands where they left off; fall back to the actor's
-                // remote_root. Clear the preference after use so reconnect
-                // navigates from the live path.
-                let navigate_to = {
-                    let restored = self
-                        .restored_targets
-                        .get(&tab_id)
-                        .and_then(|target| target.remote_path.clone());
-                    restored.unwrap_or(remote_root)
-                };
-                if let Some(target) = self.restored_targets.get_mut(&tab_id) {
-                    target.remote_path = None;
-                }
                 if let Some(tab) = self.state.tabs.find_tab_mut(tab_id) {
+                    // Prefer the path restored from the previous session so the
+                    // user lands where they left off; fall back to the actor's
+                    // remote_root. Clear the preference after use so reconnect
+                    // navigates from the live path.
+                    let navigate_to = tab
+                        .restored_target
+                        .as_ref()
+                        .and_then(|target| target.remote_path.clone())
+                        .unwrap_or_else(|| remote_root.clone());
+                    if let Some(target) = tab.restored_target.as_mut() {
+                        target.remote_path = None;
+                    }
                     tab.complete_connect(
                         scoped.scope.session_id,
                         macsftp_core::Timestamp(std::time::SystemTime::now()),
@@ -110,44 +107,40 @@ impl crate::workspace::Workspace {
                     tab.remote.is_refreshing = false;
                     tab.remote.error = None;
                     tab.selection.selected_paths.clear();
+                    self.remote.scroll = UniformListScrollHandle::new();
+                    self.request_remote_directory(tab_id, navigate_to, cx);
+                    // Reconcile remote residual temp files from a previous run
+                    // now that a live session to this host exists (plan M5/M6).
+                    self.clean_remote_residual_temps(tab_id, cx);
+                    self.record_recent_for_tab(tab_id, cx);
                 }
-                self.remote_scroll = UniformListScrollHandle::new();
-                self.request_remote_directory(tab_id, navigate_to, cx);
-                // Reconcile remote residual temp files from a previous run
-                // now that a live session to this host exists (plan M5/M6).
-                self.clean_remote_residual_temps(tab_id, cx);
-                self.record_recent_for_tab(tab_id, cx);
             }
             AppEvent::TabDisconnected(scoped) => {
                 let tab_id = scoped.scope.tab_id;
-                // Before clearing the live remote path, stash it in
-                // restored_targets so build_session_snapshot still records
-                // the last browsing location after disconnect-then-quit.
+                // Before clearing the live remote path, stash it in the tab's
+                // restored_target so build_session_snapshot still records the
+                // last browsing location after disconnect-then-quit.
                 // TabConnected clears this preference once it is consumed.
-                let last_remote_path = self
-                    .state
-                    .tabs
-                    .find_tab(tab_id)
-                    .and_then(|tab| tab.remote.path.clone());
-                if let Some(remote_path) = last_remote_path {
-                    if let Some(target) = self.restored_targets.get_mut(&tab_id) {
-                        target.remote_path = Some(remote_path);
-                    } else if let Some(settings) = self.tab_settings.get(&tab_id) {
-                        let profile_id = self
-                            .state
-                            .tabs
-                            .find_tab(tab_id)
-                            .and_then(|tab| tab.profile_id);
-                        self.restored_targets.insert(
-                            tab_id,
-                            RestoredTabTarget {
-                                host: settings.host.clone(),
-                                port: settings.port,
-                                username: settings.username.clone(),
-                                profile_id,
-                                remote_path: Some(remote_path),
-                            },
-                        );
+                if let Some(tab) = self.state.tabs.find_tab_mut(tab_id)
+                    && let Some(remote_path) = tab.remote.path.take()
+                {
+                    match tab.restored_target.as_mut() {
+                        Some(target) => target.remote_path = Some(remote_path),
+                        None => {
+                            if let Some(settings) = tab.connection_settings.as_ref() {
+                                let host = settings.host.clone();
+                                let port = settings.port;
+                                let username = settings.username.clone();
+                                let profile_id = tab.profile_id;
+                                tab.restored_target = Some(Box::new(RestoredTabTarget {
+                                    host,
+                                    port,
+                                    username,
+                                    profile_id,
+                                    remote_path: Some(remote_path),
+                                }));
+                            }
+                        }
                     }
                 }
                 if let Some(tab) = self.state.tabs.find_tab_mut(tab_id) {
@@ -199,7 +192,7 @@ impl crate::workspace::Workspace {
                     tab.remote.is_refreshing = false;
                     tab.remote.error = None;
                     tab.selection.selected_paths.clear();
-                    self.remote_scroll = UniformListScrollHandle::new();
+                    self.remote.scroll = UniformListScrollHandle::new();
                     applied_listing = Some(
                         tab.remote
                             .entries
@@ -270,7 +263,7 @@ impl crate::workspace::Workspace {
                     tab.local.entries = entries;
                     tab.local.error = None;
                     tab.selection.selected_paths.clear();
-                    self.local_scroll = UniformListScrollHandle::new();
+                    self.local.scroll = UniformListScrollHandle::new();
                 }
             }
             AppEvent::ResidualTempCreated(record) => {

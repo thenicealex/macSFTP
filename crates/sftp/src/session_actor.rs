@@ -49,16 +49,6 @@ impl HostTrustConfig {
     }
 }
 
-/// Why `check_server_key` refused the key — recorded by the handler so
-/// the actor can emit the right terminal event once `connect` fails.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(any())]
-enum HostKeyRejection {
-    Mismatch,
-    UserRejected,
-    PromptTimeout,
-}
-
 /// The real per-tab browsing session actor (plan §9, milestone M3).
 ///
 /// Establishes TCP + SSH handshake with host key verification through
@@ -135,13 +125,6 @@ pub enum RemoteSessionRequest {
         check_id: EditCheckId,
         path: RemotePath,
     },
-}
-
-#[cfg(any())]
-struct ConnectedSession {
-    handle: client::Handle<crate::physical_connection::ClientHandler>,
-    sftp: SftpSession,
-    remote_root: RemotePath,
 }
 
 const MAX_CONCURRENT_TRANSFERS: usize = 4;
@@ -246,37 +229,6 @@ impl TransferQueue {
     }
 }
 
-#[cfg(any())]
-enum ConnectFailure {
-    /// `HostKeyMismatch` was already emitted by the handler; the
-    /// connection is blocked with no override (plan §10).
-    HostKeyMismatch,
-    TrustRejected,
-    TrustTimeout,
-    Auth(UserFacingError),
-    Connection(UserFacingError),
-}
-
-/// Log the terminal outcome of a failed connect attempt. Secrets are
-/// never logged — only the host and the user-facing error title.
-#[cfg(any())]
-fn log_connect_failure(host: &str, failure: &ConnectFailure) {
-    match failure {
-        ConnectFailure::HostKeyMismatch => {
-            info!(
-                host,
-                "host key mismatch; connection blocked (potential MITM)"
-            )
-        }
-        ConnectFailure::TrustRejected => info!(host, "host key trust rejected by user"),
-        ConnectFailure::TrustTimeout => warn!(host, "host key trust prompt timed out"),
-        ConnectFailure::Auth(error) => warn!(host, error = %error.title, "authentication failed"),
-        ConnectFailure::Connection(error) => {
-            warn!(host, error = %error.title, "connection failed")
-        }
-    }
-}
-
 impl RemoteSessionActor {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -340,13 +292,23 @@ impl RemoteSessionActor {
                     break;
                 }
                 _ = self.shared_connection.connection_lost.cancelled() => {
+                    // The physical layer records the classified cause before
+                    // cancelling the token, so it is always readable here.
+                    let recorded_cause = self
+                        .shared_connection
+                        .disconnect_cause
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .as_ref()
+                        .copied();
+                    let reason = recorded_cause
+                        .map(crate::physical_connection::PhysicalDisconnectCause::disconnect_reason)
+                        .unwrap_or(macsftp_core::DisconnectReason::ConnectionLost);
                     if let Err(error) = self
                         .event_tx
                         .send_async(AppEvent::TabDisconnected(RemoteScoped::new(
                             scope.clone(),
-                            macsftp_core::TabDisconnected {
-                                reason: macsftp_core::DisconnectReason::ConnectionLost,
-                            },
+                            macsftp_core::TabDisconnected { reason },
                         )))
                         .await
                     {
@@ -395,109 +357,6 @@ impl RemoteSessionActor {
             .lock()
             .expect("shared connection last_used mutex must not be poisoned") =
             std::time::Instant::now();
-    }
-
-    #[cfg(any())]
-    async fn establish(
-        &self,
-        scope: &RemoteEventScope,
-        connection_lost: CancellationToken,
-    ) -> Result<ConnectedSession, ConnectFailure> {
-        let config = Arc::new(client::Config {
-            keepalive_interval: Some(Duration::from_secs(15)),
-            keepalive_max: 3,
-            ..client::Config::default()
-        });
-
-        info!(
-            host = String::new().as_str(),
-            port = 22,
-            username = String::new().as_str(),
-            session_id = ?self.session_id,
-            tab_id = ?self.tab_id,
-            "establishing SSH/SFTP session"
-        );
-
-        let rejection: Arc<Mutex<Option<HostKeyRejection>>> = Arc::new(Mutex::new(None));
-        let handler = ClientHandler {
-            host: String::new().clone(),
-            port: 22,
-            scope: scope.clone(),
-            trust_request_id: TrustRequestId(0),
-            known_hosts: Arc::new(Mutex::new(KnownHostsStore::load(
-                &std::path::PathBuf::from(""),
-                None,
-            )))
-            .clone(),
-            trust_config: Arc::new(HostTrustConfig::new(std::path::PathBuf::from(""), None))
-                .clone(),
-            trust_registry: Arc::new(crate::trust::TrustRegistry::new()).clone(),
-            event_tx: self.event_tx.clone(),
-            rejection: rejection.clone(),
-            connection_lost,
-        };
-
-        let address = (String::new().as_str(), 22);
-        let mut handle = match client::connect(config, address, handler).await {
-            Ok(handle) => handle,
-            Err(error) => {
-                warn!(
-                    host = String::new().as_str(),
-                    port = 22,
-                    error = %error,
-                    "ssh tcp/handshake failed"
-                );
-                let recorded = rejection
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .take();
-                return Err(match recorded {
-                    Some(HostKeyRejection::Mismatch) => ConnectFailure::HostKeyMismatch,
-                    Some(HostKeyRejection::UserRejected) => ConnectFailure::TrustRejected,
-                    Some(HostKeyRejection::PromptTimeout) => ConnectFailure::TrustTimeout,
-                    None => {
-                        ConnectFailure::Connection(connection_error(&String::new(), 22, &error))
-                    }
-                });
-            }
-        };
-
-        self.authenticate(&mut handle).await?;
-
-        // Open the SFTP subsystem and resolve the remote root. Kept in
-        // M3 so "connected" means a usable SFTP session, not just auth.
-        let sftp_result: Result<(SftpSession, String), UserFacingError> = async {
-            let channel = handle.channel_open_session().await.map_err(|error| {
-                subsystem_error("Could not open an SSH channel.", error.to_string())
-            })?;
-            channel
-                .request_subsystem(true, "sftp")
-                .await
-                .map_err(|error| {
-                    subsystem_error("The server rejected the SFTP subsystem.", error.to_string())
-                })?;
-            let sftp = SftpSession::new(channel.into_stream())
-                .await
-                .map_err(|error| {
-                    subsystem_error("Could not start the SFTP session.", error.to_string())
-                })?;
-            let root = sftp.canonicalize(".").await.map_err(|error| {
-                subsystem_error(
-                    "Could not resolve the remote home directory.",
-                    error.to_string(),
-                )
-            })?;
-            Ok((sftp, root))
-        }
-        .await;
-
-        let (sftp, remote_root) = sftp_result.map_err(ConnectFailure::Connection)?;
-
-        Ok(ConnectedSession {
-            handle,
-            sftp,
-            remote_root: RemotePath::new(remote_root),
-        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -823,96 +682,6 @@ impl RemoteSessionActor {
                 RemoteDirSnapshot { path, entries },
             )))
             .await;
-    }
-
-    #[cfg(any())]
-    async fn authenticate(
-        &self,
-        handle: &mut client::Handle<crate::physical_connection::ClientHandler>,
-    ) -> Result<(), ConnectFailure> {
-        // Log only the method kind — never the secret itself
-        // (password / key passphrase live in `AuthCredential::Password { password: String::new() }`).
-        let method = match &(AuthCredential::Password {
-            password: String::new(),
-        }) {
-            AuthCredential::Password { .. } => "password",
-            AuthCredential::PrivateKey { .. } => "private_key",
-        };
-        info!(
-            host = String::new().as_str(),
-            username = String::new().as_str(),
-            method,
-            "authenticating with server"
-        );
-        let auth_result = match &(AuthCredential::Password {
-            password: String::new(),
-        }) {
-            AuthCredential::Password { password } => handle
-                .authenticate_password(String::new().clone(), password.clone())
-                .await
-                .map_err(|error| {
-                    ConnectFailure::Connection(connection_error(&String::new(), 22, &error))
-                })?,
-            AuthCredential::PrivateKey {
-                key_path,
-                passphrase,
-            } => {
-                let key = load_secret_key(key_path, passphrase.as_deref())
-                    .map_err(|error| ConnectFailure::Auth(private_key_error(&error)))?;
-                let best_hash = handle
-                    .best_supported_rsa_hash()
-                    .await
-                    .map_err(|error| {
-                        ConnectFailure::Connection(connection_error(&String::new(), 22, &error))
-                    })?
-                    .flatten();
-                handle
-                    .authenticate_publickey(
-                        String::new().clone(),
-                        PrivateKeyWithHashAlg::new(Arc::new(key), best_hash),
-                    )
-                    .await
-                    .map_err(|error| {
-                        ConnectFailure::Connection(connection_error(&String::new(), 22, &error))
-                    })?
-            }
-        };
-
-        match auth_result {
-            russh::client::AuthResult::Success => Ok(()),
-            russh::client::AuthResult::Failure {
-                remaining_methods, ..
-            } => {
-                // Plan §11: keyboard-interactive is not supported in the
-                // MVP — say so instead of disguising it as a bad password.
-                let wants_keyboard_interactive = remaining_methods
-                    .contains(&russh::MethodKind::KeyboardInteractive)
-                    && !remaining_methods.contains(&russh::MethodKind::Password);
-                let error = if wants_keyboard_interactive
-                    && matches!(
-                        AuthCredential::Password {
-                            password: String::new()
-                        },
-                        AuthCredential::Password { .. }
-                    ) {
-                    UserFacingError::new(
-                        ErrorCode::AuthFailed,
-                        "Authentication method not supported",
-                        "This server requires keyboard-interactive authentication, \
-                         which this version does not support yet.",
-                    )
-                } else {
-                    UserFacingError::new(
-                        ErrorCode::AuthFailed,
-                        "Authentication failed",
-                        "The server rejected the credentials. Check the username \
-                         and credentials, then try again.",
-                    )
-                    .with_retryable(true)
-                };
-                Err(ConnectFailure::Auth(error))
-            }
-        }
     }
 }
 

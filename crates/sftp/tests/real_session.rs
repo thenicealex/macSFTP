@@ -266,6 +266,80 @@ async fn known_host_connects_without_prompt() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn server_teardown_emits_classified_disconnect_reason() {
+    // End-to-end coverage for the disconnect-cause pipeline: the russh
+    // handler classifies the drop, records it on SharedConnection before
+    // cancelling the token, and the actor surfaces it as a classified
+    // TabDisconnected instead of the legacy bare ConnectionLost.
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    let fixture = spawn_actor(
+        &server,
+        client_key_auth(&server),
+        Some(&server.host_public_key),
+    );
+
+    let event = next_event(&fixture, "TabConnected").await;
+    assert!(
+        matches!(event, AppEvent::TabConnected(_)),
+        "expected connect first, got {event:?}"
+    );
+
+    // Kill the established sshd session processes: abrupt TCP teardown must
+    // surface as a classified transport failure (NetworkError family), not
+    // an unclassified loss. Killing only the listener would leave the
+    // per-connection forked sessions alive.
+    let me = std::process::id();
+    let lsof = std::process::Command::new("/usr/sbin/lsof")
+        .args([
+            "-t",
+            "-i",
+            &format!("TCP:{}", server.port),
+            "-s",
+            "TCP:ESTABLISHED",
+        ])
+        .output()
+        .expect("lsof must run for disconnect fixture");
+    let mut killed = 0;
+    for pid in std::str::from_utf8(&lsof.stdout)
+        .expect("lsof output utf8")
+        .lines()
+    {
+        let pid: u32 = pid.trim().parse().expect("lsof pid");
+        if pid == me {
+            continue;
+        }
+        // /bin/kill: macOS has no /usr/bin/kill binary.
+        let status = std::process::Command::new("/bin/kill")
+            .arg("-9")
+            .arg(pid.to_string())
+            .status()
+            .expect("kill spawn");
+        assert!(status.success(), "kill -9 {pid} failed: {status}");
+        killed += 1;
+    }
+    assert!(killed > 0, "expected at least one sshd session to kill");
+
+    let event = next_event(&fixture, "TabDisconnected").await;
+    let AppEvent::TabDisconnected(scoped) = event else {
+        panic!("expected TabDisconnected after server teardown, got {event:?}");
+    };
+    match scoped.payload.reason {
+        DisconnectReason::Error(error) => assert!(
+            matches!(
+                error.code,
+                ErrorCode::NetworkError | ErrorCode::NetworkTimeout | ErrorCode::ServerDisconnected
+            ),
+            "teardown must map to a classified transport code, got {error:?}"
+        ),
+        other => panic!("expected DisconnectReason::Error, got {other:?}"),
+    }
+
+    fixture.cancel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn read_dir_returns_real_remote_entries() {
     let Some(server) = SshTestServer::spawn() else {
         return;

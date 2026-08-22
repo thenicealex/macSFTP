@@ -162,9 +162,9 @@ impl crate::workspace::Workspace {
             cx.notify();
             return;
         };
-        self.context_menu = None;
+        self.modal_inputs.context_menu = None;
         if cx.resources().config.config().confirm_delete {
-            self.delete_confirm = Some(DeleteConfirmState {
+            self.modal_inputs.delete_confirm = Some(DeleteConfirmState {
                 scope,
                 entries,
                 dont_ask_again: false,
@@ -184,7 +184,7 @@ impl crate::workspace::Workspace {
     }
 
     pub(crate) fn confirm_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(state) = self.delete_confirm.take() else {
+        let Some(state) = self.modal_inputs.delete_confirm.take() else {
             return;
         };
         if state.dont_ask_again {
@@ -212,7 +212,7 @@ impl crate::workspace::Workspace {
     }
 
     pub(crate) fn cancel_delete_confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.delete_confirm = None;
+        self.modal_inputs.delete_confirm = None;
         self.focus_pane(self.focused_side, window, cx);
         cx.notify();
     }
@@ -235,8 +235,8 @@ impl crate::workspace::Workspace {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        self.context_menu = None;
-        self.inline_edit = Some(InlineEditState {
+        self.modal_inputs.context_menu = None;
+        self.modal_inputs.inline_edit = Some(InlineEditState {
             side,
             kind: InlineEditKind::Rename { entry },
             input: InputState::with_value(name),
@@ -267,8 +267,8 @@ impl crate::workspace::Workspace {
             cx.notify();
             return;
         };
-        self.context_menu = None;
-        self.inline_edit = Some(InlineEditState {
+        self.modal_inputs.context_menu = None;
+        self.modal_inputs.inline_edit = Some(InlineEditState {
             side,
             kind: InlineEditKind::NewFolder { parent },
             input: InputState::with_value("Untitled Folder"),
@@ -279,17 +279,17 @@ impl crate::workspace::Workspace {
     }
 
     pub(crate) fn cancel_inline_edit(&mut self, cx: &mut Context<Self>) {
-        self.inline_edit = None;
+        self.modal_inputs.inline_edit = None;
         cx.notify();
     }
 
     pub(crate) fn submit_inline_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(edit) = self.inline_edit.clone() else {
+        let Some(edit) = self.modal_inputs.inline_edit.clone() else {
             return;
         };
         let name = edit.input.value().trim().to_string();
         if name.is_empty() || name == "." || name == ".." || name.contains('/') {
-            if let Some(edit) = &mut self.inline_edit {
+            if let Some(edit) = &mut self.modal_inputs.inline_edit {
                 edit.error = Some("Enter a name without path separators.".into());
             }
             cx.notify();
@@ -302,7 +302,7 @@ impl crate::workspace::Workspace {
                 PaneSide::Remote => tab.remote.entries.iter().any(|e| e.name == name),
             };
             if collision {
-                if let Some(edit) = &mut self.inline_edit {
+                if let Some(edit) = &mut self.modal_inputs.inline_edit {
                     edit.error = Some("An item with that name already exists.".into());
                 }
                 cx.notify();
@@ -319,7 +319,7 @@ impl crate::workspace::Workspace {
                 let parent = match entry.path.parent() {
                     Some(parent) => parent,
                     None => {
-                        if let Some(edit) = &mut self.inline_edit {
+                        if let Some(edit) = &mut self.modal_inputs.inline_edit {
                             edit.error = Some("Cannot rename the filesystem root.".into());
                         }
                         cx.notify();
@@ -333,7 +333,7 @@ impl crate::workspace::Workspace {
             }
             InlineEditKind::NewFolder { parent } => FsOp::CreateDirectory { parent, name },
         };
-        self.inline_edit = None;
+        self.modal_inputs.inline_edit = None;
         self.dispatch_fs(FsCommand { scope, op }, window, cx);
     }
 
@@ -343,7 +343,7 @@ impl crate::workspace::Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.inline_edit.is_none() {
+        if self.modal_inputs.inline_edit.is_none() {
             return;
         }
         let keystroke = &event.keystroke;
@@ -357,7 +357,7 @@ impl crate::workspace::Workspace {
             self.submit_inline_edit(window, cx);
             return;
         }
-        if let Some(edit) = &mut self.inline_edit {
+        if let Some(edit) = &mut self.modal_inputs.inline_edit {
             if keystroke.modifiers.platform && keystroke.key == "v" {
                 if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
                     edit.input.insert(&text);
@@ -449,12 +449,12 @@ impl crate::workspace::Workspace {
         if let Some(index) = entry_index {
             self.select_index(side, index, cx);
         }
-        self.context_menu = Some(ContextMenuState { side, entry_index });
+        self.modal_inputs.context_menu = Some(ContextMenuState { side, entry_index });
         cx.notify();
     }
 
     pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
-        self.context_menu = None;
+        self.modal_inputs.context_menu = None;
         cx.notify();
     }
 
@@ -472,7 +472,7 @@ impl crate::workspace::Workspace {
         &self,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        let state = self.delete_confirm.as_ref()?;
+        let state = self.modal_inputs.delete_confirm.as_ref()?;
         let theme = cx.theme().clone();
         let presentation = delete_confirm_presentation(&state.entries);
         let show_dont_ask = cx.resources().config.config().confirm_delete;
@@ -607,7 +607,7 @@ impl crate::workspace::Workspace {
                     .gap_2()
                     .cursor_pointer()
                     .on_click(cx.listener(|workspace, _event, _window, cx| {
-                        if let Some(state) = &mut workspace.delete_confirm {
+                        if let Some(state) = &mut workspace.modal_inputs.delete_confirm {
                             state.dont_ask_again = !state.dont_ask_again;
                             cx.notify();
                         }
@@ -671,7 +671,7 @@ impl crate::workspace::Workspace {
     }
 
     pub(crate) fn render_context_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        let menu = self.context_menu.as_ref()?;
+        let menu = self.modal_inputs.context_menu.as_ref()?;
         let theme = cx.theme().clone();
         let side = menu.side;
         let is_local = side == PaneSide::Local;
@@ -685,7 +685,7 @@ impl crate::workspace::Workspace {
             items.push(
                 text_button("ctx-rename", "Rename")
                     .on_click(cx.listener(move |workspace, _event, window, cx| {
-                        workspace.context_menu = None;
+                        workspace.modal_inputs.context_menu = None;
                         workspace.focused_side = side;
                         workspace.begin_rename_selection(window, cx);
                     }))
@@ -695,7 +695,7 @@ impl crate::workspace::Workspace {
                 text_button("ctx-delete", "Delete")
                     .danger(true)
                     .on_click(cx.listener(move |workspace, _event, window, cx| {
-                        workspace.context_menu = None;
+                        workspace.modal_inputs.context_menu = None;
                         workspace.focused_side = side;
                         workspace.request_delete_selection(window, cx);
                     }))
@@ -705,7 +705,7 @@ impl crate::workspace::Workspace {
         items.push(
             text_button("ctx-new-folder", "New Folder")
                 .on_click(cx.listener(move |workspace, _event, window, cx| {
-                    workspace.context_menu = None;
+                    workspace.modal_inputs.context_menu = None;
                     workspace.focused_side = side;
                     workspace.begin_new_folder(window, cx);
                 }))
@@ -715,7 +715,7 @@ impl crate::workspace::Workspace {
             items.push(
                 text_button("ctx-upload", "Upload")
                     .on_click(cx.listener(|workspace, _event, _window, cx| {
-                        workspace.context_menu = None;
+                        workspace.modal_inputs.context_menu = None;
                         workspace.focused_side = PaneSide::Local;
                         workspace.upload_selection(cx);
                     }))
@@ -724,7 +724,7 @@ impl crate::workspace::Workspace {
             items.push(
                 text_button("ctx-reveal", "Reveal in Finder")
                     .on_click(cx.listener(|workspace, _event, _window, cx| {
-                        workspace.context_menu = None;
+                        workspace.modal_inputs.context_menu = None;
                         workspace.reveal_local_selection(cx);
                     }))
                     .into_any_element(),
@@ -734,7 +734,7 @@ impl crate::workspace::Workspace {
             items.push(
                 text_button("ctx-edit", "Edit")
                     .on_click(cx.listener(|workspace, _event, _window, cx| {
-                        workspace.context_menu = None;
+                        workspace.modal_inputs.context_menu = None;
                         workspace.focused_side = PaneSide::Remote;
                         workspace.request_edit_selection(cx);
                     }))
@@ -743,7 +743,7 @@ impl crate::workspace::Workspace {
             items.push(
                 text_button("ctx-download", "Download")
                     .on_click(cx.listener(|workspace, _event, _window, cx| {
-                        workspace.context_menu = None;
+                        workspace.modal_inputs.context_menu = None;
                         workspace.focused_side = PaneSide::Remote;
                         workspace.download_selection(cx);
                     }))
@@ -754,7 +754,7 @@ impl crate::workspace::Workspace {
             items.push(
                 text_button("ctx-copy-path", "Copy Path")
                     .on_click(cx.listener(move |workspace, _event, _window, cx| {
-                        workspace.context_menu = None;
+                        workspace.modal_inputs.context_menu = None;
                         workspace.focused_side = side;
                         workspace.copy_focused_path(cx);
                     }))
@@ -765,7 +765,7 @@ impl crate::workspace::Workspace {
             items.push(
                 text_button("ctx-refresh", "Refresh")
                     .on_click(cx.listener(move |workspace, _event, window, cx| {
-                        workspace.context_menu = None;
+                        workspace.modal_inputs.context_menu = None;
                         workspace.focused_side = side;
                         workspace.refresh_focused_pane(window, cx);
                     }))

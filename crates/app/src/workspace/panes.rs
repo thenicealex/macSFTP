@@ -12,9 +12,9 @@ use macsftp_ui::InputKeyResult;
 use tracing::warn;
 
 use crate::resources::ActiveResources;
-use crate::workspace::nav::HistoryOp;
 use crate::workspace::visible_entries::{visible_local_indices, visible_remote_indices};
 use crate::workspace::*;
+use macsftp_core::HistoryOp;
 
 /// Visible-list page step for PageUp / PageDown (design §3).
 pub const PAGE_SIZE: usize = 10;
@@ -33,15 +33,15 @@ impl crate::workspace::Workspace {
 
     pub(crate) fn pane_filter(&self, side: PaneSide) -> &PaneFilter {
         match side {
-            PaneSide::Local => &self.local_filter,
-            PaneSide::Remote => &self.remote_filter,
+            PaneSide::Local => &self.local.filter,
+            PaneSide::Remote => &self.remote.filter,
         }
     }
 
     pub(crate) fn pane_filter_mut(&mut self, side: PaneSide) -> &mut PaneFilter {
         match side {
-            PaneSide::Local => &mut self.local_filter,
-            PaneSide::Remote => &mut self.remote_filter,
+            PaneSide::Local => &mut self.local.filter,
+            PaneSide::Remote => &mut self.remote.filter,
         }
     }
 
@@ -366,7 +366,7 @@ impl crate::workspace::Workspace {
             tab.selection.selected_paths.clear();
             self.request_local_directory(tab_id, path, cx);
         }
-        self.local_scroll = UniformListScrollHandle::new();
+        self.local.scroll = UniformListScrollHandle::new();
         cx.notify();
     }
 
@@ -376,12 +376,12 @@ impl crate::workspace::Workspace {
         path: LocalPath,
         cx: &mut Context<Self>,
     ) {
-        let request_epoch = self
-            .local_read_epochs
-            .entry(tab_id)
-            .and_modify(|epoch| *epoch = epoch.saturating_add(1))
-            .or_insert(1)
-            .to_owned();
+        // The read generation lives on the tab itself, so requesting for a
+        // missing tab cannot create phantom side-table state.
+        let Some(tab) = self.state.tabs.find_tab_mut(tab_id) else {
+            return;
+        };
+        let request_epoch = tab.local.begin_local_read();
         if self.state.tabs.active_tab_id == Some(tab_id) {
             self.status_message = Some("Loading local directory…".into());
         }
@@ -392,20 +392,13 @@ impl crate::workspace::Workspace {
         cx.spawn(async move |workspace, cx| {
             let result = read_task.await;
             let _ = workspace.update(cx, |workspace, cx| {
-                let is_current = workspace.local_read_epochs.get(&tab_id) == Some(&request_epoch)
-                    && workspace
-                        .state
-                        .tabs
-                        .find_tab(tab_id)
-                        .and_then(|tab| tab.local.path.as_ref())
-                        == Some(&path);
-                if !is_current {
-                    return;
-                }
                 let is_active = workspace.state.tabs.active_tab_id == Some(tab_id);
                 let Some(tab) = workspace.state.tabs.find_tab_mut(tab_id) else {
                     return;
                 };
+                if !tab.local.accepts_local_result(request_epoch, &path) {
+                    return;
+                }
                 match result {
                     Ok(mut entries) => {
                         macsftp_core::sort_entries(&mut entries, &tab.sort);
@@ -434,7 +427,7 @@ impl crate::workspace::Workspace {
                     }
                 }
                 if is_active {
-                    workspace.local_scroll = UniformListScrollHandle::new();
+                    workspace.local.scroll = UniformListScrollHandle::new();
                 }
                 cx.notify();
             });
@@ -532,8 +525,8 @@ impl crate::workspace::Workspace {
     }
 
     pub(crate) fn clear_filters(&mut self) {
-        self.local_filter.clear();
-        self.remote_filter.clear();
+        self.local.filter.clear();
+        self.remote.filter.clear();
     }
 
     /// `cmd-f`: show the filter bar and route keys into the filter input.
@@ -551,13 +544,13 @@ impl crate::workspace::Workspace {
 
     /// Surfaces that own keyboard input block type-to-filter / cmd-f.
     fn filter_input_blocked(&self) -> bool {
-        self.go_to_path_open
-            || self.connect_form.is_some()
-            || self.delete_confirm.is_some()
-            || self.inline_edit.is_some()
+        self.go_to_path.open
+            || self.connect_form_ui.form.is_some()
+            || self.modal_inputs.delete_confirm.is_some()
+            || self.modal_inputs.inline_edit.is_some()
             || self.active_host_key_prompt().is_some()
             || self.active_transfer_conflict_prompt().is_some()
-            || self.about_open
+            || self.modal_inputs.about_open
             || self.surface != WorkspaceSurface::Files
     }
 
@@ -664,18 +657,20 @@ impl crate::workspace::Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab_id) = self.active_tab().map(|tab| tab.id) else {
+        let Some(tab) = self.active_tab() else {
             return;
         };
-        let current = self.active_tab().and_then(|tab| tab.local.path.clone());
+        let tab_id = tab.id;
+        let current = tab.local.path.clone();
 
         let target = match op {
             HistoryOp::Push => {
-                let nav = self.tab_nav.entry(tab_id).or_default();
-                nav.local.push_navigating_from(
-                    current.as_ref().map(|path| path.as_str()),
-                    path.as_str(),
-                );
+                let Some(tab) = self.state.tabs.find_tab_mut(tab_id) else {
+                    return;
+                };
+                tab.nav
+                    .local
+                    .push_navigating_from(current.as_ref().map(|p| p.as_str()), path.as_str());
                 path
             }
             HistoryOp::Replace => path,
@@ -683,8 +678,10 @@ impl crate::workspace::Workspace {
                 let Some(current_path) = current.as_ref() else {
                     return;
                 };
-                let nav = self.tab_nav.entry(tab_id).or_default();
-                let Some(target) = nav.local.go_back(current_path.as_str()) else {
+                let Some(tab) = self.state.tabs.find_tab_mut(tab_id) else {
+                    return;
+                };
+                let Some(target) = tab.nav.local.go_back(current_path.as_str()) else {
                     return;
                 };
                 LocalPath::new(target)
@@ -693,8 +690,10 @@ impl crate::workspace::Workspace {
                 let Some(current_path) = current.as_ref() else {
                     return;
                 };
-                let nav = self.tab_nav.entry(tab_id).or_default();
-                let Some(target) = nav.local.go_forward(current_path.as_str()) else {
+                let Some(tab) = self.state.tabs.find_tab_mut(tab_id) else {
+                    return;
+                };
+                let Some(target) = tab.nav.local.go_forward(current_path.as_str()) else {
                     return;
                 };
                 LocalPath::new(target)
@@ -712,29 +711,30 @@ impl crate::workspace::Workspace {
         op: HistoryOp,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab_id) = self.active_tab().map(|tab| tab.id) else {
+        let Some(tab) = self.active_tab() else {
             return;
         };
-        let current = self.active_tab().and_then(|tab| tab.remote.path.clone());
+        let tab_id = tab.id;
+        let current = tab.remote.path.clone();
 
         // Peek history targets for Back/Forward without mutating stacks until
         // the ReadRemoteDir command is successfully enqueued (review fix).
         let target = match op {
             HistoryOp::Push | HistoryOp::Replace => path,
             HistoryOp::Back => {
-                let Some(nav) = self.tab_nav.get(&tab_id) else {
+                let Some(tab) = self.state.tabs.find_tab(tab_id) else {
                     return;
                 };
-                let Some(target) = nav.remote.back.last() else {
+                let Some(target) = tab.nav.remote.back.last() else {
                     return;
                 };
                 RemotePath::new(target.clone())
             }
             HistoryOp::Forward => {
-                let Some(nav) = self.tab_nav.get(&tab_id) else {
+                let Some(tab) = self.state.tabs.find_tab(tab_id) else {
                     return;
                 };
-                let Some(target) = nav.remote.forward.last() else {
+                let Some(target) = tab.nav.remote.forward.last() else {
                     return;
                 };
                 RemotePath::new(target.clone())
@@ -747,8 +747,10 @@ impl crate::workspace::Workspace {
 
         match op {
             HistoryOp::Push => {
-                let nav = self.tab_nav.entry(tab_id).or_default();
-                nav.remote.push_navigating_from(
+                let Some(tab) = self.state.tabs.find_tab_mut(tab_id) else {
+                    return;
+                };
+                tab.nav.remote.push_navigating_from(
                     current.as_ref().map(|path| path.as_str()),
                     target.as_str(),
                 );
@@ -758,9 +760,11 @@ impl crate::workspace::Workspace {
                 let Some(current_path) = current.as_ref() else {
                     return;
                 };
-                let nav = self.tab_nav.entry(tab_id).or_default();
+                let Some(tab) = self.state.tabs.find_tab_mut(tab_id) else {
+                    return;
+                };
                 debug_assert_eq!(
-                    nav.remote.go_back(current_path.as_str()).as_deref(),
+                    tab.nav.remote.go_back(current_path.as_str()).as_deref(),
                     Some(target.as_str()),
                     "peeked remote back target must still be current",
                 );
@@ -769,9 +773,11 @@ impl crate::workspace::Workspace {
                 let Some(current_path) = current.as_ref() else {
                     return;
                 };
-                let nav = self.tab_nav.entry(tab_id).or_default();
+                let Some(tab) = self.state.tabs.find_tab_mut(tab_id) else {
+                    return;
+                };
                 debug_assert_eq!(
-                    nav.remote.go_forward(current_path.as_str()).as_deref(),
+                    tab.nav.remote.go_forward(current_path.as_str()).as_deref(),
                     Some(target.as_str()),
                     "peeked remote forward target must still be current",
                 );
@@ -783,28 +789,22 @@ impl crate::workspace::Workspace {
     }
 
     pub(crate) fn pane_can_navigate_back(&self, side: PaneSide) -> bool {
-        let Some(tab_id) = self.active_tab().map(|tab| tab.id) else {
-            return false;
-        };
-        let Some(nav) = self.tab_nav.get(&tab_id) else {
+        let Some(tab) = self.active_tab() else {
             return false;
         };
         match side {
-            PaneSide::Local => nav.local.can_back(),
-            PaneSide::Remote => nav.remote.can_back(),
+            PaneSide::Local => tab.nav.local.can_back(),
+            PaneSide::Remote => tab.nav.remote.can_back(),
         }
     }
 
     pub(crate) fn pane_can_navigate_forward(&self, side: PaneSide) -> bool {
-        let Some(tab_id) = self.active_tab().map(|tab| tab.id) else {
-            return false;
-        };
-        let Some(nav) = self.tab_nav.get(&tab_id) else {
+        let Some(tab) = self.active_tab() else {
             return false;
         };
         match side {
-            PaneSide::Local => nav.local.can_forward(),
-            PaneSide::Remote => nav.remote.can_forward(),
+            PaneSide::Local => tab.nav.local.can_forward(),
+            PaneSide::Remote => tab.nav.remote.can_forward(),
         }
     }
     pub(crate) fn copy_focused_path(&mut self, cx: &mut Context<Self>) {

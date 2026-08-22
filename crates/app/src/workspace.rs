@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::Path;
 
 use gpui::{
@@ -29,9 +28,8 @@ use crate::app_actions::{
 };
 use crate::resources::ActiveResources;
 use crate::session_coordinator::SessionCoordinator;
-use crate::workspace::file_ops::{ContextMenuState, DeleteConfirmState, InlineEditState};
-use crate::workspace::nav::{HistoryOp, TabNavState};
-use crate::workspace::profiles::{ProfileEditorState, SettingsSection};
+use crate::workspace::profiles::SettingsSection;
+use macsftp_core::{HistoryOp, RestoredTabTarget};
 
 /// Status bar copy when the command channel is full (non-blocking drop).
 pub(crate) const STATUS_BUSY_TRY_AGAIN: &str = "Busy — try again in a moment.";
@@ -45,42 +43,11 @@ pub enum PaneSide {
     Remote,
 }
 
-/// Per-pane type-to-filter / cmd-f state (view-only; not persisted).
-#[derive(Debug, Clone, Default)]
-pub(crate) struct PaneFilter {
-    pub(crate) query: String,
-    pub(crate) input: InputState,
-    /// `true` after `cmd-f`: key events prefer the filter input.
-    pub(crate) explicit_focus: bool,
-}
-
-impl PaneFilter {
-    pub(crate) fn is_active(&self) -> bool {
-        !self.query.is_empty() || self.explicit_focus
-    }
-
-    pub(crate) fn clear(&mut self) {
-        self.query.clear();
-        self.input.clear();
-        self.explicit_focus = false;
-    }
-}
-
+use crate::workspace::view_state::PaneFilter;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspaceSurface {
     Files,
     Settings,
-}
-
-/// Non-secret connection target restored from `session.json` for form
-/// prefill and post-connect remote path navigation.
-#[derive(Debug, Clone)]
-pub(crate) struct RestoredTabTarget {
-    pub host: String,
-    pub port: u16,
-    pub username: String,
-    pub profile_id: Option<ProfileId>,
-    pub remote_path: Option<RemotePath>,
 }
 
 pub struct Workspace {
@@ -93,91 +60,38 @@ pub struct Workspace {
     modal_focus: FocusHandle,
     focused_side: PaneSide,
     surface: WorkspaceSurface,
-    /// Active sidebar section when `surface == Settings`.
-    settings_section: SettingsSection,
-    /// Free-text filter for the Settings → Profiles list.
-    profile_filter: InputState,
-    /// `true` while the Profiles filter field owns key events.
-    profile_filter_focused: bool,
-    /// Settings → General external-editor override field. Committed to config
-    /// on every edit (empty → None).
-    external_editor_input: InputState,
-    /// `true` while the External editor field owns key events.
-    external_editor_focused: bool,
-    /// Selected profile in Settings → Profiles (None when the list is empty).
-    selected_profile_id: Option<ProfileId>,
-    /// Draft for New / Edit profile in Settings → Profiles.
-    profile_editor: Option<ProfileEditorState>,
-    /// Pending profile delete confirmation (Settings / Connect). View-local.
-    profile_delete_confirm: Option<ProfileId>,
+    settings: view_state::SettingsUi,
     /// Pending large-file edit confirmation. Holds the edit params until the
     /// user accepts the size warning; accepting starts the download.
-    large_edit_confirm: Option<remote_edit::PendingEdit>,
-    about_open: bool,
-    drawer_open: bool,
-    drawer_height: Pixels,
-    /// Active transfer-drawer resize drag (session-only; cleared on mouse up).
-    drawer_resize: Option<drawer_height::TransferDrawerResize>,
-    completed_section_expanded: bool,
-    failed_section_expanded: bool,
-    local_scroll: UniformListScrollHandle,
-    remote_scroll: UniformListScrollHandle,
-    local_scrollbar: ScrollbarState,
-    remote_scrollbar: ScrollbarState,
-    transfer_scroll: gpui::ScrollHandle,
-    transfer_scrollbar: ScrollbarState,
-    command_palette_scroll: gpui::ScrollHandle,
-    command_palette_scrollbar: ScrollbarState,
-    profile_picker_scroll: gpui::ScrollHandle,
-    profile_picker_scrollbar: ScrollbarState,
-    tab_switcher_scroll: gpui::ScrollHandle,
-    tab_switcher_scrollbar: ScrollbarState,
+    transfer_drawer: view_state::TransferDrawerUi,
+
     default_local_path: LocalPath,
     status_message: Option<SharedString>,
     config_error: Option<SharedString>,
     log_file: LocalPath,
-    connect_form: Option<ConnectForm>,
-    connect_form_focus: FocusHandle,
-    /// Draft name for the active transfer-conflict rename decision.
-    /// It is view-local because the runtime only receives a decision
-    /// after the user submits it.
-    conflict_rename: InputState,
-    conflict_rename_error: Option<SharedString>,
-    /// Phase 1 delete confirmation modal (view-local).
-    delete_confirm: Option<DeleteConfirmState>,
-    /// Phase 1 inline rename / new-folder editor.
-    inline_edit: Option<InlineEditState>,
-    /// Phase 1 context menu for the focused file pane.
-    context_menu: Option<ContextMenuState>,
+    connect_form_ui: view_state::ConnectFormUi,
+
+    modal_inputs: view_state::ModalInputsUi,
     /// Go to Path modal (`cmd-shift-g`).
-    go_to_path_open: bool,
-    go_to_path_input: InputState,
-    go_to_path_error: Option<SharedString>,
+    go_to_path: view_state::GoToPathUi,
+
     /// Command palette (`cmd-shift-p`).
-    palette_open: bool,
-    palette_input: InputState,
-    palette_selected: usize,
+    palette: view_state::CommandPaletteUi,
+
     /// MRU tab order for ctrl-tab switcher only (front = most recent).
     /// `cmd-shift-[/]` still walk creation order in `state.tabs.tabs`.
     tab_mru: Vec<TabId>,
-    tab_switcher_open: bool,
-    tab_switcher_index: usize,
+    tab_switcher: view_state::TabSwitcherUi,
+
     /// Active-tab type-to-filter state (cleared on tab switch / navigate).
-    local_filter: PaneFilter,
-    remote_filter: PaneFilter,
+    local: view_state::PaneUi,
+    remote: view_state::PaneUi,
     /// Anchor path for shift-range multi-select (view-local; single-select resets it).
     selection_anchor: Option<EntryPath>,
     /// Session credentials per tab, kept in memory only so Reconnect
     /// works without re-typing. Replaced by Keychain-backed profiles.
-    tab_settings: HashMap<TabId, ConnectionSettings>,
-    /// Per-tab local/remote back-forward history (session-only).
-    tab_nav: HashMap<TabId, TabNavState>,
-    /// Monotonic local-directory request generation per tab. A path alone is
-    /// insufficient when navigation returns to the same directory before an
-    /// older background scan completes.
-    local_read_epochs: HashMap<TabId, u64>,
-    /// Connection meta restored from `session.json` (form prefill / path).
-    restored_targets: HashMap<TabId, RestoredTabTarget>,
+    /// Per-tab cached credentials (reconnect without re-typing) and
+    /// session-restore metadata now live on `TabState` in core.
     _appearance_subscription: Subscription,
 }
 
@@ -230,60 +144,25 @@ impl Workspace {
             modal_focus: cx.focus_handle(),
             focused_side: PaneSide::Local,
             surface: WorkspaceSurface::Files,
-            settings_section: SettingsSection::General,
-            profile_filter: InputState::new(),
-            profile_filter_focused: false,
-            external_editor_input,
-            external_editor_focused: false,
-            selected_profile_id: None,
-            profile_editor: None,
-            profile_delete_confirm: None,
-            large_edit_confirm: None,
-            about_open: false,
-            drawer_open: true,
-            drawer_height: drawer_height::DEFAULT_DRAWER_HEIGHT,
-            drawer_resize: None,
-            completed_section_expanded: false,
-            failed_section_expanded: false,
-            local_scroll: UniformListScrollHandle::new(),
-            remote_scroll: UniformListScrollHandle::new(),
-            local_scrollbar: ScrollbarState::new(),
-            remote_scrollbar: ScrollbarState::new(),
-            transfer_scroll: gpui::ScrollHandle::new(),
-            transfer_scrollbar: ScrollbarState::new(),
-            command_palette_scroll: gpui::ScrollHandle::new(),
-            command_palette_scrollbar: ScrollbarState::new(),
-            profile_picker_scroll: gpui::ScrollHandle::new(),
-            profile_picker_scrollbar: ScrollbarState::new(),
-            tab_switcher_scroll: gpui::ScrollHandle::new(),
-            tab_switcher_scrollbar: ScrollbarState::new(),
+
+            transfer_drawer: view_state::TransferDrawerUi::new(),
+
+            settings: view_state::SettingsUi::new(external_editor_input),
+
             default_local_path,
             status_message: None,
             config_error,
             log_file,
-            connect_form: None,
-            connect_form_focus: cx.focus_handle(),
-            conflict_rename: InputState::new(),
-            conflict_rename_error: None,
-            delete_confirm: None,
-            inline_edit: None,
-            context_menu: None,
-            go_to_path_open: false,
-            go_to_path_input: InputState::new(),
-            go_to_path_error: None,
-            palette_open: false,
-            palette_input: InputState::new(),
-            palette_selected: 0,
+            connect_form_ui: view_state::ConnectFormUi::new(cx.focus_handle()),
+
+            modal_inputs: view_state::ModalInputsUi::new(),
+            go_to_path: view_state::GoToPathUi::new(),
+            palette: view_state::CommandPaletteUi::new(),
             tab_mru: Vec::new(),
-            tab_switcher_open: false,
-            tab_switcher_index: 0,
-            local_filter: PaneFilter::default(),
-            remote_filter: PaneFilter::default(),
+            tab_switcher: view_state::TabSwitcherUi::new(),
+            local: view_state::PaneUi::new(),
+            remote: view_state::PaneUi::new(),
             selection_anchor: None,
-            tab_settings: HashMap::new(),
-            tab_nav: HashMap::new(),
-            local_read_epochs: HashMap::new(),
-            restored_targets: HashMap::new(),
             _appearance_subscription: appearance_subscription,
         };
         // Restored tabs remain disconnected until the user explicitly connects.
@@ -314,7 +193,7 @@ impl Workspace {
 
     pub(crate) fn set_drawer_height(&mut self, height: Pixels, viewport_height: Pixels) {
         let content = drawer_height::content_area_height_from_viewport(viewport_height);
-        self.drawer_height = drawer_height::clamp_drawer_height(height, content);
+        self.transfer_drawer.height = drawer_height::clamp_drawer_height(height, content);
     }
 
     pub(crate) fn reset_drawer_height(&mut self, viewport_height: Pixels) {
@@ -322,7 +201,7 @@ impl Workspace {
     }
 
     pub(crate) fn reclamp_drawer_height(&mut self, viewport_height: Pixels) {
-        self.set_drawer_height(self.drawer_height, viewport_height);
+        self.set_drawer_height(self.transfer_drawer.height, viewport_height);
     }
 
     /// Rebuild disconnected tabs from one window snapshot. Does not send ConnectTab.
@@ -346,6 +225,16 @@ impl Workspace {
             let mut tab = TabState::new(tab_id, title);
             tab.profile_id = snap.profile_id.map(ProfileId);
             tab.connection = ConnectionState::Empty;
+            tab.restored_target = Some(Box::new(RestoredTabTarget {
+                host: snap.host.clone(),
+                port: snap.port,
+                username: snap.username.clone(),
+                profile_id: snap.profile_id.map(ProfileId),
+                remote_path: snap
+                    .remote_path
+                    .as_ref()
+                    .map(|path| RemotePath::new(path.clone())),
+            }));
             let local_path = snap
                 .local_path
                 .as_ref()
@@ -356,19 +245,6 @@ impl Workspace {
                 tab.remote.path = Some(RemotePath::new(remote.clone()));
                 tab.remote.entries.clear();
             }
-            self.restored_targets.insert(
-                tab_id,
-                RestoredTabTarget {
-                    host: snap.host.clone(),
-                    port: snap.port,
-                    username: snap.username.clone(),
-                    profile_id: snap.profile_id.map(ProfileId),
-                    remote_path: snap
-                        .remote_path
-                        .as_ref()
-                        .map(|path| RemotePath::new(path.clone())),
-                },
-            );
             self.state.tabs.open_tab(tab);
             self.request_local_directory(tab_id, local_path, cx);
             restored_ids.push(tab_id);
@@ -394,8 +270,8 @@ impl Workspace {
             .tabs
             .iter()
             .map(|tab| {
-                let settings = self.tab_settings.get(&tab.id);
-                let restored = self.restored_targets.get(&tab.id);
+                let settings = tab.connection_settings.as_ref();
+                let restored = tab.restored_target.as_ref();
                 SessionTabSnapshot {
                     title: tab.title.clone(),
                     profile_id: tab.profile_id.map(|id| id.0),
@@ -452,38 +328,38 @@ impl Workspace {
     }
     pub(crate) fn scroll_handle(&self, side: PaneSide) -> &UniformListScrollHandle {
         match side {
-            PaneSide::Local => &self.local_scroll,
-            PaneSide::Remote => &self.remote_scroll,
+            PaneSide::Local => &self.local.scroll,
+            PaneSide::Remote => &self.remote.scroll,
         }
     }
     pub(crate) fn transfer_scroll(&self) -> &gpui::ScrollHandle {
-        &self.transfer_scroll
+        &self.transfer_drawer.scroll
     }
     pub(crate) fn transfer_scrollbar(&self) -> &ScrollbarState {
-        &self.transfer_scrollbar
+        &self.transfer_drawer.scrollbar
     }
-    pub(crate) fn command_palette_scroll(&self) -> &gpui::ScrollHandle {
-        &self.command_palette_scroll
+    pub(crate) fn palette_scroll(&self) -> &gpui::ScrollHandle {
+        &self.palette.scroll
     }
-    pub(crate) fn command_palette_scrollbar(&self) -> &ScrollbarState {
-        &self.command_palette_scrollbar
+    pub(crate) fn palette_scrollbar(&self) -> &ScrollbarState {
+        &self.palette.scrollbar
     }
     pub(crate) fn profile_picker_scroll(&self) -> &gpui::ScrollHandle {
-        &self.profile_picker_scroll
+        &self.settings.picker_scroll
     }
     pub(crate) fn profile_picker_scrollbar(&self) -> &ScrollbarState {
-        &self.profile_picker_scrollbar
+        &self.settings.picker_scrollbar
     }
     pub(crate) fn tab_switcher_scroll(&self) -> &gpui::ScrollHandle {
-        &self.tab_switcher_scroll
+        &self.tab_switcher.scroll
     }
     pub(crate) fn tab_switcher_scrollbar(&self) -> &ScrollbarState {
-        &self.tab_switcher_scrollbar
+        &self.tab_switcher.scrollbar
     }
     pub(crate) fn pane_scrollbar(&self, side: PaneSide) -> &ScrollbarState {
         match side {
-            PaneSide::Local => &self.local_scrollbar,
-            PaneSide::Remote => &self.remote_scrollbar,
+            PaneSide::Local => &self.local.scrollbar,
+            PaneSide::Remote => &self.remote.scrollbar,
         }
     }
     pub(crate) fn open_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -512,11 +388,12 @@ impl Workspace {
             return;
         }
         if self
+            .modal_inputs
             .large_edit_confirm
             .as_ref()
             .is_some_and(|pending| pending.tab_id == tab_id)
         {
-            self.large_edit_confirm = None;
+            self.modal_inputs.large_edit_confirm = None;
         }
         // Tear down any edit sessions on this tab and delete their temp dirs.
         // A closed tab can never advance its edit sessions, and a lingering
@@ -524,20 +401,17 @@ impl Workspace {
         // profile+path, not tab).
         cleanup_edit_sessions_for_tab(cx, tab_id);
         self.tab_mru.retain(|id| *id != tab_id);
-        self.tab_nav.remove(&tab_id);
-        self.local_read_epochs.remove(&tab_id);
-        self.restored_targets.remove(&tab_id);
         // Keep MRU front aligned with the newly active tab after close
         // (TabStore promotes another tab without going through activate_tab).
         if let Some(active_id) = self.state.tabs.active_tab_id {
             self.touch_mru(active_id);
         }
-        if self.tab_switcher_open {
+        if self.tab_switcher.open {
             if self.tab_mru.is_empty() {
-                self.tab_switcher_open = false;
-                self.tab_switcher_index = 0;
+                self.tab_switcher.open = false;
+                self.tab_switcher.index = 0;
             } else {
-                self.tab_switcher_index = self.tab_switcher_index.min(self.tab_mru.len() - 1);
+                self.tab_switcher.index = self.tab_switcher.index.min(self.tab_mru.len() - 1);
             }
         }
         // Tell the runtime to cancel the tab's actor and reject its
@@ -567,9 +441,9 @@ impl Workspace {
         if self.state.tabs.find_tab(tab_id).is_some() {
             self.state.tabs.active_tab_id = Some(tab_id);
             self.touch_mru(tab_id);
-            if self.tab_switcher_open {
-                self.tab_switcher_open = false;
-                self.tab_switcher_index = 0;
+            if self.tab_switcher.open {
+                self.tab_switcher.open = false;
+                self.tab_switcher.index = 0;
             }
             self.clear_filters();
             self.selection_anchor = None;
@@ -609,14 +483,14 @@ impl Workspace {
         if self.tab_mru.is_empty() {
             return;
         }
-        if !self.tab_switcher_open {
-            self.tab_switcher_open = true;
+        if !self.tab_switcher.open {
+            self.tab_switcher.open = true;
             // First press targets the previous tab (MRU[1]), matching OS switchers.
-            self.tab_switcher_index = if self.tab_mru.len() > 1 { 1 } else { 0 };
+            self.tab_switcher.index = if self.tab_mru.len() > 1 { 1 } else { 0 };
             window.focus(&self.modal_focus);
         } else {
             let count = self.tab_mru.len();
-            self.tab_switcher_index = (self.tab_switcher_index + 1) % count;
+            self.tab_switcher.index = (self.tab_switcher.index + 1) % count;
         }
         cx.notify();
     }
@@ -624,33 +498,33 @@ impl Workspace {
         if self.tab_mru.is_empty() {
             return;
         }
-        if !self.tab_switcher_open {
-            self.tab_switcher_open = true;
-            self.tab_switcher_index = self.tab_mru.len() - 1;
+        if !self.tab_switcher.open {
+            self.tab_switcher.open = true;
+            self.tab_switcher.index = self.tab_mru.len() - 1;
             window.focus(&self.modal_focus);
         } else {
             let count = self.tab_mru.len() as isize;
-            self.tab_switcher_index =
-                (self.tab_switcher_index as isize - 1).rem_euclid(count) as usize;
+            self.tab_switcher.index =
+                (self.tab_switcher.index as isize - 1).rem_euclid(count) as usize;
         }
         cx.notify();
     }
     pub(crate) fn close_tab_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.tab_switcher_open {
+        if !self.tab_switcher.open {
             return;
         }
-        self.tab_switcher_open = false;
-        self.tab_switcher_index = 0;
+        self.tab_switcher.open = false;
+        self.tab_switcher.index = 0;
         self.focus_pane(self.focused_side, window, cx);
         cx.notify();
     }
     pub(crate) fn confirm_tab_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.tab_switcher_open {
+        if !self.tab_switcher.open {
             return;
         }
-        let tab_id = self.tab_mru.get(self.tab_switcher_index).copied();
-        self.tab_switcher_open = false;
-        self.tab_switcher_index = 0;
+        let tab_id = self.tab_mru.get(self.tab_switcher.index).copied();
+        self.tab_switcher.open = false;
+        self.tab_switcher.index = 0;
         if let Some(tab_id) = tab_id {
             // activate_tab also touch_mru's and would no-op the open flag.
             self.activate_tab(tab_id, window, cx);
@@ -659,8 +533,8 @@ impl Workspace {
         cx.notify();
     }
     pub(crate) fn reset_scroll_positions(&mut self) {
-        self.local_scroll = UniformListScrollHandle::new();
-        self.remote_scroll = UniformListScrollHandle::new();
+        self.local.scroll = UniformListScrollHandle::new();
+        self.remote.scroll = UniformListScrollHandle::new();
     }
     pub(crate) fn send_command(&mut self, command: AppCommand, cx: &mut Context<Self>) -> bool {
         match self.runtime_client.try_send(command) {
@@ -849,9 +723,9 @@ impl Workspace {
         if crate::workspace::helpers::connection_in_flight(&tab.connection) {
             return;
         }
-        let tab_id = tab.id;
-        match self.tab_settings.get(&tab_id).cloned() {
-            Some(settings) => self.connect_with(settings, tab.profile_id, window, cx),
+        let cached_settings = tab.connection_settings.clone();
+        match cached_settings {
+            Some(settings) => self.connect_with(*settings, tab.profile_id, window, cx),
             None => self.open_connect_form(window, cx),
         }
     }
@@ -915,9 +789,10 @@ impl Workspace {
             .update_epoch_for_tab(tab_id, next_epoch);
         // Keep the credentials for this tab's lifetime so Reconnect
         // works without re-typing. The persisted copy lives in the
-        // Keychain (plan §11); this in-memory copy is dropped with the
-        // workspace.
-        self.tab_settings.insert(tab_id, settings);
+        // Keychain (plan §11); this in-memory copy is zeroized with the tab.
+        if let Some(tab) = self.state.tabs.find_tab_mut(tab_id) {
+            tab.connection_settings = Some(Box::new(settings));
+        }
         // The epoch bump invalidates any modal from a previous session.
         self.state.drain_expired_modals();
         self.update_window_title(window);
@@ -967,8 +842,8 @@ impl Workspace {
         let Some(tab) = self.state.tabs.find_tab(tab_id) else {
             return;
         };
-        let settings = self.tab_settings.get(&tab_id);
-        let restored = self.restored_targets.get(&tab_id);
+        let settings = tab.connection_settings.as_ref();
+        let restored = tab.restored_target.as_ref();
         let host = settings
             .map(|s| s.host.clone())
             .or_else(|| restored.map(|r| r.host.clone()))
@@ -1038,17 +913,14 @@ impl Workspace {
                 .last_remote_path
                 .as_ref()
                 .map(|path| RemotePath::new(path.clone()));
-            self.restored_targets.insert(
-                tab_id,
-                RestoredTabTarget {
+            if let Some(tab) = self.state.tabs.find_tab_mut(tab_id) {
+                tab.restored_target = Some(Box::new(RestoredTabTarget {
                     host: entry.host.clone(),
                     port: entry.port,
                     username: entry.username.clone(),
                     profile_id: entry.profile_id.map(ProfileId),
                     remote_path: remote_path.clone(),
-                },
-            );
-            if let Some(tab) = self.state.tabs.find_tab_mut(tab_id) {
+                }));
                 tab.profile_id = entry.profile_id.map(ProfileId);
                 if let Some(path) = remote_path {
                     tab.remote.path = Some(path);
@@ -1067,14 +939,15 @@ impl Workspace {
         {
             self.use_profile(profile_id, cx);
             if self
-                .connect_form
+                .connect_form_ui
+                .form
                 .as_ref()
                 .is_some_and(|form| form.can_auto_connect())
             {
                 self.submit_connect_form(window, cx);
                 return;
             }
-            window.focus(&self.connect_form_focus);
+            window.focus(&self.connect_form_ui.focus);
             cx.notify();
             return;
         }
@@ -1129,7 +1002,7 @@ impl Render for Workspace {
                 .min_h_0()
                 .child(self.render_tab_bar(cx))
                 .child(main_area)
-                .when(self.drawer_open, |workspace_root| {
+                .when(self.transfer_drawer.open, |workspace_root| {
                     workspace_root.child(self.render_transfer_drawer(window, cx))
                 })
                 .child(self.render_status_bar(cx))
@@ -1145,7 +1018,7 @@ impl Render for Workspace {
             .on_mouse_up(
                 gpui::MouseButton::Left,
                 cx.listener(|workspace, _event, _window, cx| {
-                    if workspace.drawer_resize.take().is_some() {
+                    if workspace.transfer_drawer.resize.take().is_some() {
                         cx.notify();
                     }
                 }),
@@ -1183,7 +1056,7 @@ impl Render for Workspace {
             }))
             .on_action(
                 cx.listener(|workspace, _: &ShowTransferDrawer, _window, cx| {
-                    workspace.drawer_open = !workspace.drawer_open;
+                    workspace.transfer_drawer.open = !workspace.transfer_drawer.open;
                     cx.notify();
                 }),
             )
@@ -1281,27 +1154,27 @@ impl Render for Workspace {
                 }),
             )
             .on_action(cx.listener(|workspace, _: &OpenSettings, window, cx| {
-                if workspace.connect_form.is_none()
+                if workspace.connect_form_ui.form.is_none()
                     && workspace.active_host_key_prompt().is_none()
                     && workspace.active_transfer_conflict_prompt().is_none()
-                    && workspace.delete_confirm.is_none()
-                    && !workspace.go_to_path_open
+                    && workspace.modal_inputs.delete_confirm.is_none()
+                    && !workspace.go_to_path.open
                 {
-                    workspace.about_open = false;
+                    workspace.modal_inputs.about_open = false;
                     workspace.surface = WorkspaceSurface::Settings;
-                    workspace.settings_section = SettingsSection::General;
+                    workspace.settings.section = SettingsSection::General;
                     workspace.workspace_focus.focus(window);
                     cx.notify();
                 }
             }))
             .on_action(cx.listener(|workspace, _: &OpenProfiles, window, cx| {
-                if workspace.connect_form.is_none()
+                if workspace.connect_form_ui.form.is_none()
                     && workspace.active_host_key_prompt().is_none()
                     && workspace.active_transfer_conflict_prompt().is_none()
-                    && workspace.delete_confirm.is_none()
-                    && !workspace.go_to_path_open
+                    && workspace.modal_inputs.delete_confirm.is_none()
+                    && !workspace.go_to_path.open
                 {
-                    workspace.about_open = false;
+                    workspace.modal_inputs.about_open = false;
                     workspace.surface = WorkspaceSurface::Settings;
                     workspace.set_settings_section(SettingsSection::Profiles, cx);
                     workspace.workspace_focus.focus(window);
@@ -1309,13 +1182,13 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|workspace, _: &ShowAbout, _window, cx| {
-                if workspace.connect_form.is_none()
+                if workspace.connect_form_ui.form.is_none()
                     && workspace.active_host_key_prompt().is_none()
                     && workspace.active_transfer_conflict_prompt().is_none()
-                    && workspace.delete_confirm.is_none()
-                    && !workspace.go_to_path_open
+                    && workspace.modal_inputs.delete_confirm.is_none()
+                    && !workspace.go_to_path.open
                 {
-                    workspace.about_open = true;
+                    workspace.modal_inputs.about_open = true;
                     cx.notify();
                 }
             }))
@@ -1371,9 +1244,9 @@ mod settings_render;
 mod tests;
 mod transfer_render;
 mod transfers;
+pub(crate) mod view_state;
 mod visible_entries;
 
-use connect_form::ConnectForm;
 #[cfg(test)]
 pub(crate) use remote_edit::ConflictChoice;
 pub(crate) use remote_edit::build_edit_upload_command;

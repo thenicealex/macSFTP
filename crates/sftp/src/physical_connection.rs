@@ -57,6 +57,9 @@ pub struct ClientHandler {
     pub event_tx: flume::Sender<AppEvent>,
     pub rejection: Arc<Mutex<Option<HostKeyRejection>>>,
     pub connection_lost: CancellationToken,
+    /// Written before `connection_lost` is cancelled, so actors waking up on
+    /// the token can always read the classified cause of the drop.
+    pub disconnect_cause: Arc<Mutex<Option<PhysicalDisconnectCause>>>,
 }
 
 impl ClientHandler {
@@ -221,6 +224,47 @@ impl client::Handler for ClientHandler {
         &mut self,
         reason: client::DisconnectReason<Self::Error>,
     ) -> Result<(), Self::Error> {
+        // Record the cause BEFORE cancelling the token: actors wake up on
+        // cancellation and read this immediately to build their
+        // TabDisconnected reason. Intentional local teardown (`None`) keeps
+        // the legacy unclassified path — no live actor should observe it.
+        let classified = classify_mid_session_disconnect(&reason);
+        if let Some(cause) = classified
+            .as_ref()
+            .map(PhysicalDisconnectCause::from_mid_session_disconnect)
+        {
+            *self
+                .disconnect_cause
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(cause);
+        }
+        // Mid-session drops were previously invisible to diagnostics: the
+        // audited connection log (plan §17) only covered the connect
+        // lifecycle, so "why did my connection drop" was unanswerable.
+        match classify_mid_session_disconnect(&reason) {
+            Some(MidSessionDisconnect::ServerClosed(reason_code)) => info!(
+                target: "macsftp_sftp::connection",
+                host = self.host.as_str(),
+                port = self.port,
+                tab_id = self.scope.tab_id.0,
+                session_id = self.scope.session_id.0,
+                session_epoch = self.scope.session_epoch,
+                failure = "server_disconnected",
+                server_reason = ?reason_code,
+                "SSH connection closed by the server"
+            ),
+            Some(MidSessionDisconnect::TransportFailed(failure)) => warn!(
+                target: "macsftp_sftp::connection",
+                host = self.host.as_str(),
+                port = self.port,
+                tab_id = self.scope.tab_id.0,
+                session_id = self.scope.session_id.0,
+                session_epoch = self.scope.session_epoch,
+                failure,
+                "SSH connection lost"
+            ),
+            None => {}
+        }
         self.connection_lost.cancel();
         match reason {
             client::DisconnectReason::ReceivedDisconnect(_) => Ok(()),
@@ -276,6 +320,93 @@ impl TransportFailureKind {
             Self::ProtocolNegotiationFailed => "protocol_negotiation_failed",
             Self::Other => "network_or_protocol",
         }
+    }
+}
+
+/// Classified reason for a mid-session SSH disconnect, for the audited
+/// connection log. `None` means intentional local teardown: russh reports a
+/// dropped handle / runtime shutdown through the same `Error::Disconnect`
+/// sentinel it uses for the run loop's own exit path. Logging that sentinel
+/// would turn every user-initiated disconnect into a WARN incident and bury
+/// real drops, so it must stay unlogged.
+#[derive(Debug)]
+enum MidSessionDisconnect<'a> {
+    /// The server sent an SSH DISCONNECT message. Only the enumerated
+    /// reason code is logged — the free-text description from the wire is
+    /// untrusted third-party content (plan §17 redaction boundary).
+    ServerClosed(&'a russh::Disconnect),
+    /// The transport failed locally; label from the shared transport
+    /// failure taxonomy (`KeepaliveTimeout` maps to `timed_out`).
+    TransportFailed(&'static str),
+}
+
+fn classify_mid_session_disconnect(
+    reason: &client::DisconnectReason<russh::Error>,
+) -> Option<MidSessionDisconnect<'_>> {
+    match reason {
+        client::DisconnectReason::ReceivedDisconnect(info) => {
+            Some(MidSessionDisconnect::ServerClosed(&info.reason_code))
+        }
+        client::DisconnectReason::Error(russh::Error::Disconnect) => None,
+        client::DisconnectReason::Error(error) => Some(MidSessionDisconnect::TransportFailed(
+            TransportFailureKind::from_russh_error(error).as_str(),
+        )),
+    }
+}
+
+/// Coarse, user-visible bucket for a mid-session physical disconnect. This
+/// is the state-machine counterpart of the P1 log classification: the UI
+/// distinguishes "the server hung up" from "the network went silent", which
+/// need different recovery guidance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhysicalDisconnectCause {
+    /// The server sent an SSH DISCONNECT message.
+    ServerClosed,
+    /// No inbound traffic for ~60s — keepalive gave up (network path dead:
+    /// sleep/wake, Wi-Fi roaming, VPN reconnect...).
+    NetworkTimeout,
+    /// Any other local transport failure.
+    NetworkError,
+}
+
+impl PhysicalDisconnectCause {
+    fn from_mid_session_disconnect(disconnect: &MidSessionDisconnect<'_>) -> Self {
+        match disconnect {
+            MidSessionDisconnect::ServerClosed(_) => Self::ServerClosed,
+            // `timed_out` is exactly the keepalive/inactivity/IO-timeout
+            // family; everything else stays a generic network error.
+            MidSessionDisconnect::TransportFailed("timed_out") => Self::NetworkTimeout,
+            MidSessionDisconnect::TransportFailed(_) => Self::NetworkError,
+        }
+    }
+
+    /// Build the user-facing disconnect reason carried by
+    /// `AppEvent::TabDisconnected`. Reuses the existing
+    /// `DisconnectReason::Error(UserFacingError)` channel so core's state
+    /// machine stays untouched; new `ErrorCode`s let the UI map each cause
+    /// to distinct copy.
+    pub fn disconnect_reason(self) -> macsftp_core::DisconnectReason {
+        let (code, title, message) = match self {
+            Self::ServerClosed => (
+                ErrorCode::ServerDisconnected,
+                "Server closed the connection",
+                "The remote server ended the SSH session.",
+            ),
+            Self::NetworkTimeout => (
+                ErrorCode::NetworkTimeout,
+                "Connection lost",
+                "No response from the server for about a minute. \
+                 Check your network connection and reconnect.",
+            ),
+            Self::NetworkError => (
+                ErrorCode::NetworkError,
+                "Connection lost",
+                "A network error interrupted the connection.",
+            ),
+        };
+        macsftp_core::DisconnectReason::Error(
+            UserFacingError::new(code, title, message).with_retryable(true),
+        )
     }
 }
 
@@ -527,6 +658,7 @@ pub async fn establish_physical_connection(
     trust_registry: Arc<TrustRegistry>,
     event_tx: flume::Sender<AppEvent>,
     connection_lost: CancellationToken,
+    disconnect_cause: Arc<Mutex<Option<PhysicalDisconnectCause>>>,
 ) -> Result<client::Handle<ClientHandler>, ConnectFailure> {
     let config = Arc::new(client_config());
 
@@ -542,6 +674,7 @@ pub async fn establish_physical_connection(
         event_tx: event_tx.clone(),
         rejection: rejection.clone(),
         connection_lost,
+        disconnect_cause,
     };
 
     info!(
@@ -700,11 +833,20 @@ mod tests {
     use ssh_key::{Algorithm, HashAlg};
 
     use super::{
-        AppEvent, HostKeyMismatchDetails, TransportFailureKind, client_config, connection_error,
-        host_key_mismatch_event, legacy_rsa_host_key_bits, private_key_file_name,
-        sftp_connection_error, validate_private_key_algorithm,
+        AppEvent, ClientHandler, HostKeyMismatchDetails, MidSessionDisconnect,
+        PhysicalDisconnectCause, TransportFailureKind, classify_mid_session_disconnect,
+        client_config, connection_error, host_key_mismatch_event, legacy_rsa_host_key_bits,
+        private_key_file_name, sftp_connection_error, validate_private_key_algorithm,
     };
-    use macsftp_core::{RemoteEventScope, SessionId, TabId};
+    use crate::session_actor::HostTrustConfig;
+    use crate::trust::TrustRegistry;
+    use macsftp_core::{ErrorCode, RemoteEventScope, SessionId, TabId, TrustRequestId};
+    use russh::client;
+    #[allow(unused_imports)]
+    use russh::client::Handler as _;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn connection_error_does_not_copy_untrusted_technical_detail() {
@@ -890,5 +1032,144 @@ mod tests {
 
         assert_eq!(error.code, macsftp_core::ErrorCode::AuthFailed);
         assert!(validate_private_key_algorithm(Algorithm::Ed25519).is_ok());
+    }
+
+    #[test]
+    fn local_teardown_disconnect_is_not_logged_as_an_incident() {
+        // Dropping a handle or shutting the runtime down surfaces here as
+        // the same `Error::Disconnect` sentinel; it must stay unlogged so
+        // real mid-session drops stay visible in the WARN stream.
+        let reason = client::DisconnectReason::Error(russh::Error::Disconnect);
+
+        assert!(classify_mid_session_disconnect(&reason).is_none());
+    }
+
+    #[test]
+    fn keepalive_timeout_is_classified_as_transport_timeout() {
+        let reason = client::DisconnectReason::Error(russh::Error::KeepaliveTimeout);
+
+        match classify_mid_session_disconnect(&reason) {
+            Some(MidSessionDisconnect::TransportFailed("timed_out")) => {}
+            other => panic!("expected TransportFailed(\"timed_out\"), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn server_disconnect_keeps_only_the_enumerated_reason_code() {
+        // The wire message text is untrusted third-party content and must
+        // never reach the log; only the bounded reason-code enum may pass.
+        let reason =
+            client::DisconnectReason::ReceivedDisconnect(russh::client::RemoteDisconnectInfo {
+                reason_code: russh::Disconnect::ConnectionLost,
+                message: "free-form server text that must not be logged".to_string(),
+                lang_tag: "en-US".to_string(),
+            });
+
+        match classify_mid_session_disconnect(&reason) {
+            Some(MidSessionDisconnect::ServerClosed(russh::Disconnect::ConnectionLost)) => {}
+            other => panic!("expected ServerClosed(ConnectionLost), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn each_physical_cause_maps_to_a_distinct_user_facing_code() {
+        let reason = PhysicalDisconnectCause::ServerClosed.disconnect_reason();
+        let macsftp_core::DisconnectReason::Error(error) = reason else {
+            panic!("physical causes must map to DisconnectReason::Error")
+        };
+        assert_eq!(error.code, ErrorCode::ServerDisconnected);
+        assert_eq!(error.title, "Server closed the connection");
+
+        let reason = PhysicalDisconnectCause::NetworkTimeout.disconnect_reason();
+        let macsftp_core::DisconnectReason::Error(error) = reason else {
+            panic!("physical causes must map to DisconnectReason::Error")
+        };
+        assert_eq!(error.code, ErrorCode::NetworkTimeout);
+        assert!(error.retryable);
+
+        let reason = PhysicalDisconnectCause::NetworkError.disconnect_reason();
+        let macsftp_core::DisconnectReason::Error(error) = reason else {
+            panic!("physical causes must map to DisconnectReason::Error")
+        };
+        assert_eq!(error.code, ErrorCode::NetworkError);
+    }
+
+    fn test_handler() -> ClientHandler {
+        ClientHandler {
+            host: "example.com".to_string(),
+            port: 22,
+            scope: RemoteEventScope::new(TabId(1), SessionId(1), 1),
+            trust_request_id: TrustRequestId(1),
+            known_hosts: Arc::new(Mutex::new(crate::known_hosts::KnownHostsStore::empty())),
+            trust_config: Arc::new(HostTrustConfig::new(
+                PathBuf::from("/tmp/known_hosts"),
+                None,
+            )),
+            trust_registry: Arc::new(TrustRegistry::new()),
+            event_tx: flume::unbounded().0,
+            rejection: Arc::new(Mutex::new(None)),
+            connection_lost: CancellationToken::new(),
+            disconnect_cause: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[tokio::test]
+    async fn server_disconnect_records_cause_before_cancelling_token() {
+        // The actor reads the cause only after waking up on the cancelled
+        // token, so recording must happen strictly before cancellation —
+        // otherwise it races and users see an unclassified disconnect.
+        let mut handler = test_handler();
+        let reason =
+            client::DisconnectReason::ReceivedDisconnect(russh::client::RemoteDisconnectInfo {
+                reason_code: russh::Disconnect::ByApplication,
+                message: "free-form text".to_string(),
+                lang_tag: "en-US".to_string(),
+            });
+
+        handler.disconnected(reason).await.expect("must succeed");
+
+        assert!(handler.connection_lost.is_cancelled());
+        let recorded = handler
+            .disconnect_cause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(*recorded, Some(PhysicalDisconnectCause::ServerClosed));
+    }
+
+    #[tokio::test]
+    async fn keepalive_timeout_records_network_timeout_cause() {
+        let mut handler = test_handler();
+        let reason = client::DisconnectReason::Error(russh::Error::KeepaliveTimeout);
+
+        let result = handler
+            .disconnected(reason)
+            .await
+            .expect_err("transport errors must propagate");
+
+        assert!(matches!(result, russh::Error::KeepaliveTimeout));
+        let recorded = handler
+            .disconnect_cause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(*recorded, Some(PhysicalDisconnectCause::NetworkTimeout));
+    }
+
+    #[tokio::test]
+    async fn local_teardown_records_no_cause() {
+        // The Error::Disconnect sentinel means macSFTP closed the connection
+        // itself; no incident cause must be recorded for it.
+        let mut handler = test_handler();
+        let reason = client::DisconnectReason::Error(russh::Error::Disconnect);
+
+        handler
+            .disconnected(reason)
+            .await
+            .expect_err("sentinel must propagate as error");
+
+        let recorded = handler
+            .disconnect_cause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(*recorded, None);
     }
 }

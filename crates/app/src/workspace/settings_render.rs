@@ -15,7 +15,7 @@ use macsftp_storage::AppearancePreference;
 impl crate::workspace::Workspace {
     pub(crate) fn render_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme().clone();
-        let selected_section = self.settings_section;
+        let selected_section = self.settings.section;
         let selected_appearance = cx.resources().config.config().appearance;
         let appearance_button = |id: &'static str,
                                  label: &'static str,
@@ -81,7 +81,7 @@ impl crate::workspace::Workspace {
                 .child(label)
         };
 
-        let body = match self.settings_section {
+        let body = match self.settings.section {
             SettingsSection::General => div()
                 .flex_1()
                 .min_w_0()
@@ -177,9 +177,9 @@ impl crate::workspace::Workspace {
                                         .child(text_field(
                                             ("settings-external-editor-input", 0usize),
                                             TextFieldModel {
-                                                state: &self.external_editor_input,
+                                                state: &self.settings.external_editor_input,
                                                 placeholder: "System default",
-                                                focused: self.external_editor_focused,
+                                                focused: self.settings.external_editor_focused,
                                                 masked: false,
                                             },
                                             cx,
@@ -291,7 +291,7 @@ impl crate::workspace::Workspace {
 
     /// Focus the Settings → General external-editor field (click or key entry).
     pub(crate) fn focus_external_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.external_editor_focused = true;
+        self.settings.external_editor_focused = true;
         window.focus(&self.workspace_focus);
         cx.notify();
     }
@@ -302,20 +302,25 @@ impl crate::workspace::Workspace {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.external_editor_focused {
+        if !self.settings.external_editor_focused {
             return;
         }
         let keystroke = &event.keystroke;
         if keystroke.modifiers.platform && keystroke.key == "v" {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                self.external_editor_input.insert(&text);
+                self.settings.external_editor_input.insert(&text);
                 self.commit_external_editor(cx);
                 cx.stop_propagation();
                 cx.notify();
             }
             return;
         }
-        if self.external_editor_input.handle_keystroke(keystroke) == InputKeyResult::Handled {
+        if self
+            .settings
+            .external_editor_input
+            .handle_keystroke(keystroke)
+            == InputKeyResult::Handled
+        {
             self.commit_external_editor(cx);
             cx.stop_propagation();
             cx.notify();
@@ -326,7 +331,12 @@ impl crate::workspace::Workspace {
     /// value (after trim) clears the override (`None`); otherwise the trimmed
     /// value is stored. Mirrors the other config setters' error handling.
     pub(crate) fn commit_external_editor(&mut self, cx: &mut Context<Self>) {
-        let trimmed = self.external_editor_input.value().trim().to_string();
+        let trimmed = self
+            .settings
+            .external_editor_input
+            .value()
+            .trim()
+            .to_string();
         let editor = if trimmed.is_empty() {
             None
         } else {
@@ -349,13 +359,14 @@ impl crate::workspace::Workspace {
         let total_count = profiles.len();
         let filtered = self.filtered_profiles(&profiles);
         let filtered_count = filtered.len();
-        let filter_active = !self.profile_filter.value().trim().is_empty();
-        let selected_id = self.selected_profile_id;
+        let filter_active = !self.settings.profile_filter.value().trim().is_empty();
+        let selected_id = self.settings.selected_profile_id;
         let editing_new = self
+            .settings
             .profile_editor
             .as_ref()
             .is_some_and(|editor| editor.is_new);
-        let filter_focused = self.profile_filter_focused;
+        let filter_focused = self.settings.profile_filter_focused;
 
         // Materialize rows before the editor borrow of `cx` (listeners capture).
         let list_rows: Vec<_> = filtered
@@ -409,7 +420,7 @@ impl crate::workspace::Workspace {
                 .into_any_element()
         };
 
-        let detail = if self.profile_editor.is_some() {
+        let detail = if self.settings.profile_editor.is_some() {
             self.render_profile_editor(cx)
         } else if total_count == 0 {
             div()
@@ -456,7 +467,7 @@ impl crate::workspace::Workspace {
                             .child(text_field(
                                 "settings-profile-filter-input",
                                 TextFieldModel {
-                                    state: &self.profile_filter,
+                                    state: &self.settings.profile_filter,
                                     placeholder: "Filter profiles…",
                                     focused: filter_focused,
                                     masked: false,
@@ -471,7 +482,7 @@ impl crate::workspace::Workspace {
     }
 
     pub(crate) fn render_profile_editor(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let Some(editor) = self.profile_editor.as_ref() else {
+        let Some(editor) = self.settings.profile_editor.as_ref() else {
             return div().into_any_element();
         };
         let theme = cx.theme().clone();
@@ -489,8 +500,8 @@ impl crate::workspace::Workspace {
                 .items_center()
                 .gap_2()
                 .on_click(cx.listener(move |workspace, _event, window, cx| {
-                    workspace.profile_filter_focused = false;
-                    if let Some(editor) = workspace.profile_editor.as_mut() {
+                    workspace.settings.profile_filter_focused = false;
+                    if let Some(editor) = workspace.settings.profile_editor.as_mut() {
                         editor.focused_field = field;
                     }
                     window.focus(&workspace.modal_focus);
@@ -524,7 +535,7 @@ impl crate::workspace::Workspace {
             text_button(id, label)
                 .primary(active == method)
                 .on_click(cx.listener(move |workspace, _event, _window, cx| {
-                    if let Some(editor) = workspace.profile_editor.as_mut() {
+                    if let Some(editor) = workspace.settings.profile_editor.as_mut() {
                         editor.set_auth_method(method);
                         cx.notify();
                     }
@@ -715,7 +726,7 @@ impl crate::workspace::Workspace {
                             .on_click(cx.listener(move |workspace, _event, window, cx| {
                                 if let Some(id) = profile_id {
                                     workspace.request_delete_profile(id, window, cx);
-                                } else if let Some(id) = workspace.selected_profile_id {
+                                } else if let Some(id) = workspace.settings.selected_profile_id {
                                     workspace.request_delete_profile(id, window, cx);
                                 }
                             })),
