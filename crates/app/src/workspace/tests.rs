@@ -5405,9 +5405,9 @@ mod tests {
             ws.tab_switcher_next(window, cx);
             assert!(ws.tab_switcher_open);
             ws.open_command_palette(window, cx);
-            assert!(ws.palette_open);
+            assert!(ws.palette.open);
             ws.cancel_active_modal(window, cx);
-            assert!(!ws.palette_open, "palette closes first");
+            assert!(!ws.palette.open, "palette closes first");
             assert!(ws.tab_switcher_open, "switcher remains until next Esc");
             ws.cancel_active_modal(window, cx);
             assert!(!ws.tab_switcher_open);
@@ -5420,12 +5420,12 @@ mod tests {
         workspace.update_in(&mut cx, |ws, window, cx| {
             assert_eq!(ws.state.tabs.tabs.len(), 1);
             ws.open_command_palette(window, cx);
-            assert!(ws.palette_open);
-            ws.palette_input.set_value("new tab");
+            assert!(ws.palette.open);
+            ws.palette.input.set_value("new tab");
             // rebuild selection to first hit
-            ws.palette_selected = 0;
+            ws.palette.selected = 0;
             ws.execute_palette_selected(window, cx);
-            assert!(!ws.palette_open);
+            assert!(!ws.palette.open);
             assert_eq!(ws.state.tabs.tabs.len(), 2);
         });
     }
@@ -5435,10 +5435,10 @@ mod tests {
         let (workspace, mut cx, _) = init_workspace(cx);
         workspace.update_in(&mut cx, |ws, window, cx| {
             ws.open_command_palette(window, cx);
-            ws.palette_input.set_value("manage profiles");
-            ws.palette_selected = 0;
+            ws.palette.input.set_value("manage profiles");
+            ws.palette.selected = 0;
             ws.execute_palette_selected(window, cx);
-            assert!(!ws.palette_open);
+            assert!(!ws.palette.open);
             assert_eq!(ws.surface, WorkspaceSurface::Settings);
             assert_eq!(ws.settings_section, SettingsSection::Profiles);
         });
@@ -5451,9 +5451,9 @@ mod tests {
             ws.open_go_to_path(window, cx);
             assert!(ws.go_to_path_open);
             ws.open_command_palette(window, cx);
-            assert!(ws.palette_open);
+            assert!(ws.palette.open);
             ws.cancel_active_modal(window, cx);
-            assert!(!ws.palette_open, "Esc closes palette first");
+            assert!(!ws.palette.open, "Esc closes palette first");
             assert!(ws.go_to_path_open, "underlying go-to-path stays open");
             ws.cancel_active_modal(window, cx);
             assert!(!ws.go_to_path_open);

@@ -47,3 +47,24 @@ impl PaneUi {
         }
     }
 }
+
+/// Command palette popover state.
+pub(crate) struct CommandPaletteUi {
+    pub(crate) open: bool,
+    pub(crate) input: InputState,
+    pub(crate) selected: usize,
+    pub(crate) scroll: gpui::ScrollHandle,
+    pub(crate) scrollbar: ScrollbarState,
+}
+
+impl CommandPaletteUi {
+    pub(crate) fn new() -> Self {
+        Self {
+            open: false,
+            input: InputState::new(),
+            selected: 0,
+            scroll: gpui::ScrollHandle::new(),
+            scrollbar: ScrollbarState::new(),
+        }
+    }
+}

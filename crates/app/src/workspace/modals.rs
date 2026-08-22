@@ -235,7 +235,7 @@ impl crate::workspace::Workspace {
     }
     pub(crate) fn cancel_active_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Command palette sits above other modals (phase 4 design §2.3).
-        if self.palette_open {
+        if self.palette.open {
             self.close_command_palette(window, cx);
             return;
         }

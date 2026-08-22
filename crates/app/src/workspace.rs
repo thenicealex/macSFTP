@@ -91,8 +91,7 @@ pub struct Workspace {
 
     transfer_scroll: gpui::ScrollHandle,
     transfer_scrollbar: ScrollbarState,
-    command_palette_scroll: gpui::ScrollHandle,
-    command_palette_scrollbar: ScrollbarState,
+
     profile_picker_scroll: gpui::ScrollHandle,
     profile_picker_scrollbar: ScrollbarState,
     tab_switcher_scroll: gpui::ScrollHandle,
@@ -119,9 +118,8 @@ pub struct Workspace {
     go_to_path_input: InputState,
     go_to_path_error: Option<SharedString>,
     /// Command palette (`cmd-shift-p`).
-    palette_open: bool,
-    palette_input: InputState,
-    palette_selected: usize,
+    palette: view_state::CommandPaletteUi,
+
     /// MRU tab order for ctrl-tab switcher only (front = most recent).
     /// `cmd-shift-[/]` still walk creation order in `state.tabs.tabs`.
     tab_mru: Vec<TabId>,
@@ -206,8 +204,7 @@ impl Workspace {
 
             transfer_scroll: gpui::ScrollHandle::new(),
             transfer_scrollbar: ScrollbarState::new(),
-            command_palette_scroll: gpui::ScrollHandle::new(),
-            command_palette_scrollbar: ScrollbarState::new(),
+
             profile_picker_scroll: gpui::ScrollHandle::new(),
             profile_picker_scrollbar: ScrollbarState::new(),
             tab_switcher_scroll: gpui::ScrollHandle::new(),
@@ -226,9 +223,7 @@ impl Workspace {
             go_to_path_open: false,
             go_to_path_input: InputState::new(),
             go_to_path_error: None,
-            palette_open: false,
-            palette_input: InputState::new(),
-            palette_selected: 0,
+            palette: view_state::CommandPaletteUi::new(),
             tab_mru: Vec::new(),
             tab_switcher_open: false,
             tab_switcher_index: 0,
@@ -410,11 +405,11 @@ impl Workspace {
     pub(crate) fn transfer_scrollbar(&self) -> &ScrollbarState {
         &self.transfer_scrollbar
     }
-    pub(crate) fn command_palette_scroll(&self) -> &gpui::ScrollHandle {
-        &self.command_palette_scroll
+    pub(crate) fn palette_scroll(&self) -> &gpui::ScrollHandle {
+        &self.palette.scroll
     }
-    pub(crate) fn command_palette_scrollbar(&self) -> &ScrollbarState {
-        &self.command_palette_scrollbar
+    pub(crate) fn palette_scrollbar(&self) -> &ScrollbarState {
+        &self.palette.scrollbar
     }
     pub(crate) fn profile_picker_scroll(&self) -> &gpui::ScrollHandle {
         &self.profile_picker_scroll

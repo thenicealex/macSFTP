@@ -23,21 +23,21 @@ impl Workspace {
     }
 
     pub(crate) fn filtered_palette_commands(&self) -> Vec<&'static PaletteCommand> {
-        filter_palette_commands(self.palette_input.value(), &self.palette_context())
+        filter_palette_commands(self.palette.input.value(), &self.palette_context())
     }
 
     pub(crate) fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.palette_open = true;
-        self.palette_input.clear();
-        self.palette_selected = 0;
+        self.palette.open = true;
+        self.palette.input.clear();
+        self.palette.selected = 0;
         window.focus(&self.modal_focus);
         cx.notify();
     }
 
     pub(crate) fn close_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.palette_open = false;
-        self.palette_input.clear();
-        self.palette_selected = 0;
+        self.palette.open = false;
+        self.palette.input.clear();
+        self.palette.selected = 0;
         self.focus_pane(self.focused_side, window, cx);
         cx.notify();
     }
@@ -45,18 +45,18 @@ impl Workspace {
     pub(crate) fn move_palette_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
         let count = self.filtered_palette_commands().len();
         if count == 0 {
-            self.palette_selected = 0;
+            self.palette.selected = 0;
             cx.notify();
             return;
         }
-        let next = (self.palette_selected as isize + delta).rem_euclid(count as isize) as usize;
-        self.palette_selected = next;
+        let next = (self.palette.selected as isize + delta).rem_euclid(count as isize) as usize;
+        self.palette.selected = next;
         cx.notify();
     }
 
     pub(crate) fn execute_palette_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let hits = self.filtered_palette_commands();
-        let Some(command) = hits.get(self.palette_selected) else {
+        let Some(command) = hits.get(self.palette.selected) else {
             return;
         };
         let id = command.id;
@@ -70,7 +70,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.palette_selected = index;
+        self.palette.selected = index;
         self.execute_palette_selected(window, cx);
     }
 
@@ -161,7 +161,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.palette_open {
+        if !self.palette.open {
             return;
         }
         let keystroke = &event.keystroke;
@@ -182,15 +182,15 @@ impl Workspace {
         }
         if keystroke.modifiers.platform && keystroke.key == "v" {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                self.palette_input.insert(&text);
-                self.palette_selected = 0;
+                self.palette.input.insert(&text);
+                self.palette.selected = 0;
                 cx.stop_propagation();
                 cx.notify();
             }
             return;
         }
-        if self.palette_input.handle_keystroke(keystroke) == InputKeyResult::Handled {
-            self.palette_selected = 0;
+        if self.palette.input.handle_keystroke(keystroke) == InputKeyResult::Handled {
+            self.palette.selected = 0;
             cx.stop_propagation();
             cx.notify();
         }
@@ -201,7 +201,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        if !self.palette_open {
+        if !self.palette.open {
             return None;
         }
         let theme = cx.theme().clone();
@@ -209,7 +209,7 @@ impl Workspace {
         let selected = if commands.is_empty() {
             0
         } else {
-            self.palette_selected.min(commands.len() - 1)
+            self.palette.selected.min(commands.len() - 1)
         };
 
         let has_results = !commands.is_empty();
@@ -313,7 +313,7 @@ impl Workspace {
                         .child(text_field(
                             "command-palette-input",
                             TextFieldModel {
-                                state: &self.palette_input,
+                                state: &self.palette.input,
                                 placeholder: "Filter commands…",
                                 focused: true,
                                 masked: false,
@@ -339,8 +339,8 @@ impl Workspace {
                             macsftp_ui::scroll_area(
                                 "command-palette-results",
                                 list,
-                                self.command_palette_scroll(),
-                                self.command_palette_scrollbar(),
+                                self.palette_scroll(),
+                                self.palette_scrollbar(),
                                 window,
                                 cx,
                             )
