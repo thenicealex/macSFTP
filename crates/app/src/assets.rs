@@ -38,6 +38,7 @@ embedded_icons!(
     "chevron_down.svg",
     "chevron_right.svg",
     "transfers.svg",
+    "server.svg",
 );
 
 impl AssetSource for Assets {

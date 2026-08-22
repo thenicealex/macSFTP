@@ -1,6 +1,6 @@
 use gpui::{
     AppContext, ClickEvent, Context, FontWeight, IntoElement, ParentElement, SharedString, Styled,
-    Window, WindowControlArea, div, prelude::*, px, uniform_list,
+    Window, WindowControlArea, div, prelude::*, px, svg, uniform_list,
 };
 use macsftp_core::{ConnectionState, EntryPath, LocalPath, RemotePath};
 use macsftp_ui::{
@@ -661,6 +661,13 @@ impl crate::workspace::Workspace {
                 }
             }))
         };
+        let primary_connect_button = |id: &'static str, label: &'static str| {
+            text_button(id, label).primary(true).on_click(cx.listener(
+                |workspace, _event, window, cx| {
+                    workspace.request_connect(window, cx);
+                },
+            ))
+        };
         let recent_rows: Vec<(u64, SharedString)> = if side == PaneSide::Remote {
             cx.resources()
                 .recents
@@ -671,8 +678,12 @@ impl crate::workspace::Workspace {
         } else {
             Vec::new()
         };
+        // Full empty-state composition: glyph badge, title, one-line detail,
+        // primary action, and the recent-connection list as real hover rows —
+        // shared by every idle/disconnected remote variant.
         let remote_empty_with_recents =
-            |message: SharedString,
+            |title: SharedString,
+             detail: Option<SharedString>,
              actions: Vec<macsftp_ui::TextButton>,
              cx: &mut Context<Self>| {
                 let theme = cx.theme();
@@ -683,35 +694,94 @@ impl crate::workspace::Workspace {
                     .flex_1()
                     .items_center()
                     .justify_center()
-                    .gap_3()
-                    .child(empty_state(message, actions, cx))
-                    .when(!rows.is_empty(), |container| {
-                        container
+                    .gap_4()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .size(px(56.0))
+                            .rounded(px(28.0))
+                            .bg(theme.colors.element_hover)
+                            .child(
+                                svg()
+                                    .path(IconName::Server.path())
+                                    .size(px(28.0))
+                                    .text_color(theme.colors.text_muted),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .gap_1()
+                            .max_w(px(420.0))
                             .child(
                                 div()
-                                    .text_size(px(12.0))
-                                    .text_color(theme.colors.text_muted)
-                                    .font_family(theme.fonts.ui_family.clone())
-                                    .child("Recent connections"),
+                                    .text_size(px(15.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.colors.text)
+                                    .child(title),
                             )
-                            .child(div().flex().flex_col().items_center().gap_2().children(
-                                rows.into_iter().map(|(id, label)| {
-                                    text_button(SharedString::from(format!("recent-{id}")), label)
+                            .when_some(detail, |container, detail| {
+                                container.child(
+                                    div()
+                                        .text_size(px(13.0))
+                                        .text_color(theme.colors.text_muted)
+                                        .text_center()
+                                        .child(detail),
+                                )
+                            }),
+                    )
+                    .child(div().flex().gap_2().children(actions))
+                    .when(!rows.is_empty(), |container| {
+                        container.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .w(px(340.0))
+                                .mt_2()
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .text_color(theme.colors.text_disabled)
+                                        .child("RECENT CONNECTIONS"),
+                                )
+                                .children(rows.into_iter().map(|(id, label)| {
+                                    div()
+                                        .id(SharedString::from(format!("recent-{id}")))
+                                        .flex()
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_sm()
+                                        .hover(|style| style.bg(theme.colors.element_hover))
+                                        .child(
+                                            div()
+                                                .text_size(px(13.0))
+                                                .text_color(theme.colors.text)
+                                                .child(label),
+                                        )
                                         .on_click(cx.listener(
                                             move |workspace, _event, window, cx| {
                                                 workspace.open_recent_connection(id, window, cx);
                                             },
                                         ))
-                                }),
-                            ))
+                                })),
+                        )
                     })
                     .into_any_element()
             };
         let connection_placeholder: Option<gpui::AnyElement> = if side == PaneSide::Remote {
             match tab_state.map(|tab| &tab.connection) {
                 Some(ConnectionState::Empty) => Some(remote_empty_with_recents(
-                    "Not connected".into(),
-                    vec![connect_button("connect-remote", "Connect… (⌘⇧R)")],
+                    "Connect to a server".into(),
+                    Some(
+                        "Browse and transfer files over SFTP. Pick a recent host below, or start a new connection."
+                            .into(),
+                    ),
+                    vec![primary_connect_button("connect-remote", "Connect… (⌘⇧R)")],
                     cx,
                 )),
                 Some(ConnectionState::Connecting { .. } | ConnectionState::Reconnecting { .. }) => {
@@ -772,7 +842,8 @@ impl crate::workspace::Workspace {
                 Some(ConnectionState::Disconnected {
                     reason: macsftp_core::DisconnectReason::Error(error),
                 }) => Some(remote_empty_with_recents(
-                    format!("{} — {}", error.title, error.message).into(),
+                    error.title.clone().into(),
+                    Some(error.message.clone().into()),
                     vec![
                         connect_button("reconnect-remote", "Reconnect (⌘⇧R)"),
                         edit_connection_button("edit-connection-disconnected"),
@@ -781,6 +852,7 @@ impl crate::workspace::Workspace {
                 )),
                 Some(ConnectionState::Disconnected { .. }) => Some(remote_empty_with_recents(
                     "Disconnected".into(),
+                    None,
                     vec![
                         connect_button("reconnect-remote", "Reconnect (⌘⇧R)"),
                         edit_connection_button("edit-connection-disconnected"),
