@@ -256,6 +256,7 @@ impl crate::workspace::Workspace {
                             .font_weight(FontWeight::MEDIUM)
                             .child("Settings"),
                     )
+                    .child(div().flex_1())
                     .child(text_button("settings-done", "Done").on_click(cx.listener(
                         |workspace, _event, window, cx| {
                             workspace.leave_settings(window, cx);
