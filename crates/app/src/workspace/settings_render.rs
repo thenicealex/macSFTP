@@ -1,6 +1,6 @@
 use gpui::{
-    Context, FontWeight, IntoElement, KeyDownEvent, ParentElement, Styled, Window, div, prelude::*,
-    px,
+    Context, FontWeight, IntoElement, KeyDownEvent, ParentElement, Styled, Window,
+    WindowControlArea, div, prelude::*, px,
 };
 use macsftp_core::AuthMethodKind;
 use macsftp_ui::{
@@ -238,11 +238,18 @@ impl crate::workspace::Workspace {
                     .flex_none()
                     .flex()
                     .items_center()
-                    .justify_between()
+                    // Same transparent-titlebar strip as the tab bar: reserve
+                    // room for the native traffic lights, drag moves window.
+                    .window_control_area(WindowControlArea::Drag)
                     .px_3()
                     .bg(theme.colors.surface)
                     .border_b_1()
                     .border_color(theme.colors.border)
+                    .child(
+                        div()
+                            .w(px(crate::workspace::render::TRAFFIC_LIGHT_RESERVE))
+                            .flex_none(),
+                    )
                     .child(
                         div()
                             .text_size(px(13.0))

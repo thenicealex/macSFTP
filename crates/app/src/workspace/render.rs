@@ -1,6 +1,6 @@
 use gpui::{
     AppContext, ClickEvent, Context, FontWeight, IntoElement, ParentElement, SharedString, Styled,
-    Window, div, prelude::*, px, uniform_list,
+    Window, WindowControlArea, div, prelude::*, px, uniform_list,
 };
 use macsftp_core::{ConnectionState, EntryPath, LocalPath, RemotePath};
 use macsftp_ui::{
@@ -12,6 +12,10 @@ use macsftp_ui::{
 use crate::palette_commands::labeled_shortcut;
 use crate::resources::ActiveResources;
 use crate::workspace::PaneSide;
+
+/// Left inset of the transparent titlebar reserved for the native macOS
+/// traffic lights (`TitlebarOptions::traffic_light_position`).
+pub(crate) const TRAFFIC_LIGHT_RESERVE: f32 = 80.0;
 use crate::workspace::helpers::*;
 use crate::workspace::nav::{breadcrumb_display_indices, breadcrumb_segments};
 use macsftp_core::HistoryOp;
@@ -47,6 +51,10 @@ impl crate::workspace::Workspace {
             .bg(theme.colors.surface)
             .border_b_1()
             .border_color(theme.colors.border)
+            // Transparent-titlebar mode: the whole strip drags the window;
+            // tabs/buttons paint above this hitbox and keep their clicks.
+            .window_control_area(WindowControlArea::Drag)
+            .child(div().w(px(TRAFFIC_LIGHT_RESERVE)).flex_none().h_full())
             .child(
                 div()
                     .id("tab-strip")

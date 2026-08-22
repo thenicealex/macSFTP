@@ -11,7 +11,7 @@ mod workspace;
 
 use gpui::{
     App, AppContext, Application, Bounds, Global, Menu, MenuItem, SystemMenuType, TitlebarOptions,
-    WindowBounds, WindowHandle, WindowOptions, px, size,
+    WindowBounds, WindowHandle, WindowOptions, point, px, size,
 };
 use macsftp_core::RuntimeBridgeConfig;
 use macsftp_platform::{AppPaths, prune_log_files, write_crash_marker};
@@ -359,9 +359,13 @@ fn open_workspace_window(
         WindowOptions {
             window_bounds,
             window_min_size: Some(size(px(720.0), px(480.0))),
+            // Transparent custom titlebar: the tab bar is the top chrome
+            // (see render_tab_bar). The native traffic lights stay, placed
+            // inside its 34px strip; the tab bar reserves room for them.
             titlebar: Some(TitlebarOptions {
-                title: Some("macSFTP".into()),
-                ..Default::default()
+                title: None,
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(12.0), px(11.0))),
             }),
             ..Default::default()
         },
