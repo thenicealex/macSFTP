@@ -245,7 +245,7 @@ impl crate::workspace::Workspace {
             return;
         }
         // Go to Path next so Esc dismisses the path field when palette is closed.
-        if self.go_to_path_open {
+        if self.go_to_path.open {
             self.close_go_to_path(window, cx);
             return;
         }
@@ -306,17 +306,17 @@ impl crate::workspace::Workspace {
             return;
         }
         self.about_open = false;
-        self.go_to_path_open = true;
-        self.go_to_path_input.clear();
-        self.go_to_path_error = None;
+        self.go_to_path.open = true;
+        self.go_to_path.input.clear();
+        self.go_to_path.error = None;
         window.focus(&self.modal_focus);
         cx.notify();
     }
 
     pub(crate) fn close_go_to_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.go_to_path_open = false;
-        self.go_to_path_input.clear();
-        self.go_to_path_error = None;
+        self.go_to_path.open = false;
+        self.go_to_path.input.clear();
+        self.go_to_path.error = None;
         self.focus_pane(self.focused_side, window, cx);
         cx.notify();
     }
@@ -332,9 +332,9 @@ impl crate::workspace::Workspace {
     }
 
     pub(crate) fn submit_go_to_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let raw = self.go_to_path_input.value().trim().to_string();
+        let raw = self.go_to_path.input.value().trim().to_string();
         if raw.is_empty() {
-            self.go_to_path_error = Some("Enter a path".into());
+            self.go_to_path.error = Some("Enter a path".into());
             cx.notify();
             return;
         }
@@ -350,20 +350,20 @@ impl crate::workspace::Workspace {
                     } else {
                         "Path not found"
                     };
-                    self.go_to_path_error = Some(message.into());
+                    self.go_to_path.error = Some(message.into());
                     self.status_message = Some(message.into());
                     cx.notify();
                     return;
                 }
-                self.go_to_path_open = false;
-                self.go_to_path_input.clear();
-                self.go_to_path_error = None;
+                self.go_to_path.open = false;
+                self.go_to_path.input.clear();
+                self.go_to_path.error = None;
                 self.navigate_pane_local(path, HistoryOp::Push, window, cx);
             }
             PaneSide::Remote => {
-                self.go_to_path_open = false;
-                self.go_to_path_input.clear();
-                self.go_to_path_error = None;
+                self.go_to_path.open = false;
+                self.go_to_path.input.clear();
+                self.go_to_path.error = None;
                 self.navigate_pane_remote(RemotePath::new(raw), HistoryOp::Push, cx);
             }
         }
@@ -377,7 +377,7 @@ impl crate::workspace::Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.go_to_path_open {
+        if !self.go_to_path.open {
             return;
         }
         let keystroke = &event.keystroke;
@@ -388,15 +388,15 @@ impl crate::workspace::Workspace {
         }
         if keystroke.modifiers.platform && keystroke.key == "v" {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                self.go_to_path_input.insert(&text);
-                self.go_to_path_error = None;
+                self.go_to_path.input.insert(&text);
+                self.go_to_path.error = None;
                 cx.stop_propagation();
                 cx.notify();
             }
             return;
         }
-        if self.go_to_path_input.handle_keystroke(keystroke) == InputKeyResult::Handled {
-            self.go_to_path_error = None;
+        if self.go_to_path.input.handle_keystroke(keystroke) == InputKeyResult::Handled {
+            self.go_to_path.error = None;
             cx.stop_propagation();
             cx.notify();
         }
@@ -406,7 +406,7 @@ impl crate::workspace::Workspace {
         &self,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        if !self.go_to_path_open {
+        if !self.go_to_path.open {
             return None;
         }
         let theme = cx.theme().clone();
@@ -456,14 +456,14 @@ impl crate::workspace::Workspace {
                         .child(text_field(
                             "go-to-path-input",
                             TextFieldModel {
-                                state: &self.go_to_path_input,
+                                state: &self.go_to_path.input,
                                 placeholder: "Absolute path",
                                 focused: true,
                                 masked: false,
                             },
                             cx,
                         ))
-                        .when_some(self.go_to_path_error.clone(), |card, error| {
+                        .when_some(self.go_to_path.error.clone(), |card, error| {
                             card.child(
                                 div()
                                     .text_size(px(11.0))

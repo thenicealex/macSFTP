@@ -544,7 +544,7 @@ impl crate::workspace::Workspace {
 
     /// Surfaces that own keyboard input block type-to-filter / cmd-f.
     fn filter_input_blocked(&self) -> bool {
-        self.go_to_path_open
+        self.go_to_path.open
             || self.connect_form.is_some()
             || self.delete_confirm.is_some()
             || self.inline_edit.is_some()

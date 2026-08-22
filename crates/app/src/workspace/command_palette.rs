@@ -101,7 +101,7 @@ impl Workspace {
                     && self.active_host_key_prompt().is_none()
                     && self.active_transfer_conflict_prompt().is_none()
                     && self.delete_confirm.is_none()
-                    && !self.go_to_path_open
+                    && !self.go_to_path.open
                 {
                     self.about_open = false;
                     self.surface = WorkspaceSurface::Settings;
@@ -115,7 +115,7 @@ impl Workspace {
                     && self.active_host_key_prompt().is_none()
                     && self.active_transfer_conflict_prompt().is_none()
                     && self.delete_confirm.is_none()
-                    && !self.go_to_path_open
+                    && !self.go_to_path.open
                 {
                     self.about_open = false;
                     self.surface = WorkspaceSurface::Settings;
@@ -132,7 +132,7 @@ impl Workspace {
                     && self.active_host_key_prompt().is_none()
                     && self.active_transfer_conflict_prompt().is_none()
                     && self.delete_confirm.is_none()
-                    && !self.go_to_path_open
+                    && !self.go_to_path.open
                 {
                     self.about_open = true;
                     cx.notify();

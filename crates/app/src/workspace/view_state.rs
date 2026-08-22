@@ -87,3 +87,20 @@ impl TabSwitcherUi {
         }
     }
 }
+
+/// Go-to-path popover state (path jump within the focused pane).
+pub(crate) struct GoToPathUi {
+    pub(crate) open: bool,
+    pub(crate) input: InputState,
+    pub(crate) error: Option<gpui::SharedString>,
+}
+
+impl GoToPathUi {
+    pub(crate) fn new() -> Self {
+        Self {
+            open: false,
+            input: InputState::new(),
+            error: None,
+        }
+    }
+}

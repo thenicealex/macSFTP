@@ -998,13 +998,13 @@ mod tests {
         let (workspace, mut cx, _channels) = init_workspace(cx);
         workspace.update_in(&mut cx, |ws, window, cx| {
             ws.open_go_to_path(window, cx);
-            assert!(ws.go_to_path_open);
+            assert!(ws.go_to_path.open);
             assert!(
                 ws.modal_focus.is_focused(window),
                 "open_go_to_path focuses modal_focus"
             );
             ws.cancel_active_modal(window, cx);
-            assert!(!ws.go_to_path_open);
+            assert!(!ws.go_to_path.open);
             let pane = ws.pane_focus(ws.focused_side).clone();
             assert!(
                 pane.is_focused(window),
@@ -3455,10 +3455,10 @@ mod tests {
             workspace.set_local_path(parent.clone(), window, cx);
             workspace.focused_side = PaneSide::Local;
             workspace.open_go_to_path(window, cx);
-            assert!(workspace.go_to_path_open);
-            workspace.go_to_path_input.set_value(child.as_str());
+            assert!(workspace.go_to_path.open);
+            workspace.go_to_path.input.set_value(child.as_str());
             workspace.submit_go_to_path(window, cx);
-            assert!(!workspace.go_to_path_open);
+            assert!(!workspace.go_to_path.open);
             assert_eq!(
                 workspace.active_tab().and_then(|tab| tab
                     .local
@@ -3478,15 +3478,16 @@ mod tests {
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.open_go_to_path(window, cx);
             workspace
-                .go_to_path_input
+                .go_to_path
+                .input
                 .set_value(format!("{}/does-not-exist", parent.as_str()));
             workspace.submit_go_to_path(window, cx);
             assert!(
-                workspace.go_to_path_open,
+                workspace.go_to_path.open,
                 "modal stays open on missing path"
             );
             assert_eq!(
-                workspace.go_to_path_error.as_ref().map(|s| s.as_ref()),
+                workspace.go_to_path.error.as_ref().map(|s| s.as_ref()),
                 Some("Path not found")
             );
             assert_eq!(
@@ -3504,7 +3505,7 @@ mod tests {
         cx.dispatch_action(CancelActiveModal);
         workspace.read_with(&cx, |workspace, _| {
             assert!(
-                !workspace.go_to_path_open,
+                !workspace.go_to_path.open,
                 "CancelActiveModal closes go to path"
             );
         });
@@ -3512,16 +3513,16 @@ mod tests {
         // Action opens the modal again.
         cx.dispatch_action(GoToPath);
         workspace.read_with(&cx, |workspace, _| {
-            assert!(workspace.go_to_path_open, "GoToPath action opens modal");
+            assert!(workspace.go_to_path.open, "GoToPath action opens modal");
         });
 
         // Empty path is rejected.
         workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.go_to_path_input.clear();
+            workspace.go_to_path.input.clear();
             workspace.submit_go_to_path(window, cx);
-            assert!(workspace.go_to_path_open);
+            assert!(workspace.go_to_path.open);
             assert_eq!(
-                workspace.go_to_path_error.as_ref().map(|s| s.as_ref()),
+                workspace.go_to_path.error.as_ref().map(|s| s.as_ref()),
                 Some("Enter a path")
             );
         });
@@ -3532,15 +3533,16 @@ mod tests {
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.open_go_to_path(window, cx);
             workspace
-                .go_to_path_input
+                .go_to_path
+                .input
                 .set_value(file_path.to_string_lossy().as_ref());
             workspace.submit_go_to_path(window, cx);
             assert!(
-                workspace.go_to_path_open,
+                workspace.go_to_path.open,
                 "modal stays open when target is a file"
             );
             assert_eq!(
-                workspace.go_to_path_error.as_ref().map(|s| s.as_ref()),
+                workspace.go_to_path.error.as_ref().map(|s| s.as_ref()),
                 Some("Not a directory")
             );
             assert_eq!(
@@ -3627,10 +3629,11 @@ mod tests {
             workspace.focused_side = PaneSide::Remote;
             workspace.open_go_to_path(window, cx);
             workspace
-                .go_to_path_input
+                .go_to_path
+                .input
                 .set_value(format!("{TEST_REMOTE_ROOT}/docs"));
             workspace.submit_go_to_path(window, cx);
-            assert!(!workspace.go_to_path_open);
+            assert!(!workspace.go_to_path.open);
             assert!(
                 workspace.pane_can_navigate_back(PaneSide::Remote),
                 "remote go to path must push history"
@@ -5449,14 +5452,14 @@ mod tests {
         let (workspace, mut cx, _) = init_workspace(cx);
         workspace.update_in(&mut cx, |ws, window, cx| {
             ws.open_go_to_path(window, cx);
-            assert!(ws.go_to_path_open);
+            assert!(ws.go_to_path.open);
             ws.open_command_palette(window, cx);
             assert!(ws.palette.open);
             ws.cancel_active_modal(window, cx);
             assert!(!ws.palette.open, "Esc closes palette first");
-            assert!(ws.go_to_path_open, "underlying go-to-path stays open");
+            assert!(ws.go_to_path.open, "underlying go-to-path stays open");
             ws.cancel_active_modal(window, cx);
-            assert!(!ws.go_to_path_open);
+            assert!(!ws.go_to_path.open);
         });
     }
 

@@ -113,9 +113,8 @@ pub struct Workspace {
     /// Phase 1 context menu for the focused file pane.
     context_menu: Option<ContextMenuState>,
     /// Go to Path modal (`cmd-shift-g`).
-    go_to_path_open: bool,
-    go_to_path_input: InputState,
-    go_to_path_error: Option<SharedString>,
+    go_to_path: view_state::GoToPathUi,
+
     /// Command palette (`cmd-shift-p`).
     palette: view_state::CommandPaletteUi,
 
@@ -218,9 +217,7 @@ impl Workspace {
             delete_confirm: None,
             inline_edit: None,
             context_menu: None,
-            go_to_path_open: false,
-            go_to_path_input: InputState::new(),
-            go_to_path_error: None,
+            go_to_path: view_state::GoToPathUi::new(),
             palette: view_state::CommandPaletteUi::new(),
             tab_mru: Vec::new(),
             tab_switcher: view_state::TabSwitcherUi::new(),
@@ -1220,7 +1217,7 @@ impl Render for Workspace {
                     && workspace.active_host_key_prompt().is_none()
                     && workspace.active_transfer_conflict_prompt().is_none()
                     && workspace.delete_confirm.is_none()
-                    && !workspace.go_to_path_open
+                    && !workspace.go_to_path.open
                 {
                     workspace.about_open = false;
                     workspace.surface = WorkspaceSurface::Settings;
@@ -1234,7 +1231,7 @@ impl Render for Workspace {
                     && workspace.active_host_key_prompt().is_none()
                     && workspace.active_transfer_conflict_prompt().is_none()
                     && workspace.delete_confirm.is_none()
-                    && !workspace.go_to_path_open
+                    && !workspace.go_to_path.open
                 {
                     workspace.about_open = false;
                     workspace.surface = WorkspaceSurface::Settings;
@@ -1248,7 +1245,7 @@ impl Render for Workspace {
                     && workspace.active_host_key_prompt().is_none()
                     && workspace.active_transfer_conflict_prompt().is_none()
                     && workspace.delete_confirm.is_none()
-                    && !workspace.go_to_path_open
+                    && !workspace.go_to_path.open
                 {
                     workspace.about_open = true;
                     cx.notify();
