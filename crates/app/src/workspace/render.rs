@@ -1,6 +1,6 @@
 use gpui::{
     AppContext, ClickEvent, Context, FontWeight, IntoElement, ParentElement, SharedString, Styled,
-    Window, WindowControlArea, div, prelude::*, px, svg, uniform_list,
+    Window, WindowControlArea, div, prelude::*, px, uniform_list,
 };
 use macsftp_core::{ConnectionState, EntryPath, LocalPath, RemotePath};
 use macsftp_ui::{
@@ -698,21 +698,6 @@ impl crate::workspace::Workspace {
                     .child(
                         div()
                             .flex()
-                            .items_center()
-                            .justify_center()
-                            .size(px(56.0))
-                            .rounded(px(28.0))
-                            .bg(theme.colors.element_hover)
-                            .child(
-                                svg()
-                                    .path(IconName::Server.path())
-                                    .size(px(28.0))
-                                    .text_color(theme.colors.text_muted),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
                             .flex_col()
                             .items_center()
                             .gap_1()
@@ -777,10 +762,7 @@ impl crate::workspace::Workspace {
             match tab_state.map(|tab| &tab.connection) {
                 Some(ConnectionState::Empty) => Some(remote_empty_with_recents(
                     "Connect to a server".into(),
-                    Some(
-                        "Browse and transfer files over SFTP. Pick a recent host below, or start a new connection."
-                            .into(),
-                    ),
+                    None,
                     vec![primary_connect_button("connect-remote", "Connect… (⌘⇧R)")],
                     cx,
                 )),
