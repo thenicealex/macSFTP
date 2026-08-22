@@ -573,7 +573,7 @@ mod tests {
         workspace.read_with(&cx, |workspace, _| {
             assert_eq!(workspace.surface, WorkspaceSurface::Settings);
             assert_eq!(
-                workspace.settings_section,
+                workspace.settings.section,
                 SettingsSection::General,
                 "OpenSettings resets to General"
             );
@@ -604,7 +604,7 @@ mod tests {
         workspace.read_with(&cx, |workspace, _| {
             assert_eq!(workspace.surface, WorkspaceSurface::Settings);
             assert_eq!(
-                workspace.settings_section,
+                workspace.settings.section,
                 SettingsSection::Profiles,
                 "OpenProfiles opens Settings on the Profiles section"
             );
@@ -631,20 +631,20 @@ mod tests {
             }
             ws.surface = WorkspaceSurface::Settings;
             ws.set_settings_section(SettingsSection::Profiles, cx);
-            assert_eq!(ws.settings_section, SettingsSection::Profiles);
+            assert_eq!(ws.settings.section, SettingsSection::Profiles);
             let n = cx.resources().profiles.profiles().len();
             assert!(n >= 1, "expected at least one saved profile");
             assert!(
-                ws.selected_profile_id.is_some(),
+                ws.settings.selected_profile_id.is_some(),
                 "selected defaults to first when entering Profiles with a non-empty list"
             );
             assert_eq!(
-                ws.selected_profile_id,
+                ws.settings.selected_profile_id,
                 Some(ProfileId(1)),
                 "first saved profile is selected"
             );
             assert!(
-                ws.profile_editor.is_some(),
+                ws.settings.profile_editor.is_some(),
                 "entering Profiles with a selection opens the editor"
             );
         });
@@ -660,6 +660,7 @@ mod tests {
             ws.start_new_profile(cx);
 
             let editor = ws
+                .settings
                 .profile_editor
                 .as_mut()
                 .expect("start_new_profile opens editor");
@@ -698,13 +699,14 @@ mod tests {
             assert_eq!(password, "s3cret", "password must be stored in Keychain");
 
             let editor = ws
+                .settings
                 .profile_editor
                 .as_ref()
                 .expect("editor remains after save");
             assert!(!editor.is_new, "saved editor is no longer new");
             assert!(editor.secret_present_hint);
             assert!(editor.error.is_none());
-            assert_eq!(ws.selected_profile_id, Some(profile.id));
+            assert_eq!(ws.settings.selected_profile_id, Some(profile.id));
         });
     }
 
@@ -735,6 +737,7 @@ mod tests {
             ws.load_profile_editor(profile_id, cx);
 
             let editor = ws
+                .settings
                 .profile_editor
                 .as_mut()
                 .expect("load_profile_editor opens editor");
@@ -778,6 +781,7 @@ mod tests {
             ws.start_new_profile(cx);
 
             let editor = ws
+                .settings
                 .profile_editor
                 .as_mut()
                 .expect("start_new_profile opens editor");
@@ -791,7 +795,7 @@ mod tests {
                 cx.resources().profiles.profiles().is_empty(),
                 "validation failure must not write profiles.json"
             );
-            let editor = ws.profile_editor.as_ref().expect("editor remains");
+            let editor = ws.settings.profile_editor.as_ref().expect("editor remains");
             assert!(editor.is_new);
             assert_eq!(
                 editor.error.as_ref().map(|s| s.as_ref()),
@@ -826,11 +830,11 @@ mod tests {
 
             ws.surface = WorkspaceSurface::Settings;
             ws.set_settings_section(SettingsSection::Profiles, cx);
-            assert_eq!(ws.selected_profile_id, Some(profile_id));
+            assert_eq!(ws.settings.selected_profile_id, Some(profile_id));
 
             // Request only arms the confirm state — store and Keychain stay intact.
             ws.request_delete_profile(profile_id, window, cx);
-            assert_eq!(ws.profile_delete_confirm, Some(profile_id));
+            assert_eq!(ws.settings.profile_delete_confirm, Some(profile_id));
             assert!(
                 cx.resources().profiles.find_profile(profile_id).is_some(),
                 "request_delete must not remove the profile yet"
@@ -850,7 +854,7 @@ mod tests {
 
             // Cancel leaves everything as-is.
             ws.cancel_delete_profile(window, cx);
-            assert!(ws.profile_delete_confirm.is_none());
+            assert!(ws.settings.profile_delete_confirm.is_none());
             assert!(
                 cx.resources().profiles.find_profile(profile_id).is_some(),
                 "cancel must keep the profile"
@@ -859,17 +863,17 @@ mod tests {
             // Confirm deletes profile + Keychain entry and clears settings selection.
             ws.request_delete_profile(profile_id, window, cx);
             ws.confirm_delete_profile(window, cx);
-            assert!(ws.profile_delete_confirm.is_none());
+            assert!(ws.settings.profile_delete_confirm.is_none());
             assert!(
                 cx.resources().profiles.profiles().is_empty(),
                 "confirm must delete the profile from the store"
             );
             assert!(
-                ws.selected_profile_id.is_none(),
+                ws.settings.selected_profile_id.is_none(),
                 "deleted selection clears selected_profile_id when no profiles remain"
             );
             assert!(
-                ws.profile_editor.is_none(),
+                ws.settings.profile_editor.is_none(),
                 "editor closes when the selected profile is deleted and none remain"
             );
         });
@@ -935,13 +939,13 @@ mod tests {
                 "empty filter matches every profile"
             );
 
-            ws.profile_filter.set_value("nas.local");
+            ws.settings.profile_filter.set_value("nas.local");
             let filtered = ws.filtered_profiles(&all);
             assert_eq!(filtered.len(), 1, "filter must narrow to one host");
             assert_eq!(filtered[0].id, ProfileId(2));
             assert_eq!(filtered[0].host, "nas.local");
 
-            ws.profile_filter.set_value("nomatch");
+            ws.settings.profile_filter.set_value("nomatch");
             assert!(
                 ws.filtered_profiles(&all).is_empty(),
                 "non-matching filter yields no profiles"
@@ -2712,7 +2716,7 @@ mod tests {
 
         // Clearing the field (empty → None) removes the override and round-trips.
         workspace.update(&mut cx, |workspace, cx| {
-            workspace.external_editor_input.set_value("");
+            workspace.settings.external_editor_input.set_value("");
             workspace.commit_external_editor(cx);
         });
         workspace.read_with(&cx, |_workspace, cx| {
@@ -4199,6 +4203,7 @@ mod tests {
             workspace.start_new_profile(cx);
             {
                 let editor = workspace
+                    .settings
                     .profile_editor
                     .as_mut()
                     .expect("new profile draft");
@@ -4206,7 +4211,11 @@ mod tests {
                 editor.username.set_value("draft-user");
             }
             assert!(
-                workspace.profile_editor.as_ref().is_some_and(|e| e.is_new),
+                workspace
+                    .settings
+                    .profile_editor
+                    .as_ref()
+                    .is_some_and(|e| e.is_new),
                 "draft should be open"
             );
 
@@ -4214,7 +4223,7 @@ mod tests {
 
             assert_eq!(workspace.surface, WorkspaceSurface::Files);
             assert!(
-                workspace.profile_editor.is_none(),
+                workspace.settings.profile_editor.is_none(),
                 "leave Settings must discard unsaved New draft"
             );
             assert!(
@@ -5511,7 +5520,7 @@ mod tests {
             ws.execute_palette_selected(window, cx);
             assert!(!ws.palette.open);
             assert_eq!(ws.surface, WorkspaceSurface::Settings);
-            assert_eq!(ws.settings_section, SettingsSection::Profiles);
+            assert_eq!(ws.settings.section, SettingsSection::Profiles);
         });
     }
 

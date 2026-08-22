@@ -177,3 +177,43 @@ impl ModalInputsUi {
         }
     }
 }
+
+/// Settings surface state (sidebar section, Profiles list, editor fields).
+pub(crate) struct SettingsUi {
+    /// Active sidebar section when the workspace shows Settings.
+    pub(crate) section: crate::workspace::profiles::SettingsSection,
+    /// Free-text filter for the Settings → Profiles list.
+    pub(crate) profile_filter: InputState,
+    /// `true` while the Profiles filter field owns key events.
+    pub(crate) profile_filter_focused: bool,
+    /// Settings → General external-editor override field. Committed to config
+    /// on every edit (empty → None).
+    pub(crate) external_editor_input: InputState,
+    /// `true` while the External editor field owns key events.
+    pub(crate) external_editor_focused: bool,
+    /// Selected profile in Settings → Profiles (None when the list is empty).
+    pub(crate) selected_profile_id: Option<macsftp_core::ProfileId>,
+    /// Draft for New / Edit profile in Settings → Profiles.
+    pub(crate) profile_editor: Option<crate::workspace::profiles::ProfileEditorState>,
+    /// Pending profile delete confirmation (Settings / Connect). View-local.
+    pub(crate) profile_delete_confirm: Option<macsftp_core::ProfileId>,
+    pub(crate) picker_scroll: gpui::ScrollHandle,
+    pub(crate) picker_scrollbar: ScrollbarState,
+}
+
+impl SettingsUi {
+    pub(crate) fn new(external_editor_input: InputState) -> Self {
+        Self {
+            section: crate::workspace::profiles::SettingsSection::General,
+            profile_filter: InputState::new(),
+            profile_filter_focused: false,
+            external_editor_input,
+            external_editor_focused: false,
+            selected_profile_id: None,
+            profile_editor: None,
+            profile_delete_confirm: None,
+            picker_scroll: gpui::ScrollHandle::new(),
+            picker_scrollbar: ScrollbarState::new(),
+        }
+    }
+}

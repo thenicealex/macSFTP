@@ -260,7 +260,7 @@ impl crate::workspace::Workspace {
         }
         // Profile-delete confirm sits above Settings / Connect so Esc dismisses
         // the confirm first rather than leaving the parent surface.
-        if self.profile_delete_confirm.is_some() {
+        if self.settings.profile_delete_confirm.is_some() {
             self.cancel_delete_profile(window, cx);
             return;
         }
@@ -1292,7 +1292,7 @@ impl crate::workspace::Workspace {
         &self,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        let profile_id = self.profile_delete_confirm?;
+        let profile_id = self.settings.profile_delete_confirm?;
         let body = {
             let profile = cx.resources().profiles.find_profile(profile_id)?;
             format!(

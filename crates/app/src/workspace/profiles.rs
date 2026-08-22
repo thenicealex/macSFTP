@@ -189,16 +189,17 @@ impl crate::workspace::Workspace {
         section: SettingsSection,
         cx: &mut Context<Self>,
     ) {
-        self.settings_section = section;
+        self.settings.section = section;
         if section == SettingsSection::Profiles {
             let profiles = cx.resources().profiles.profiles();
             if self
+                .settings
                 .selected_profile_id
                 .is_none_or(|id| profiles.iter().all(|p| p.id != id))
             {
-                self.selected_profile_id = profiles.first().map(|p| p.id);
+                self.settings.selected_profile_id = profiles.first().map(|p| p.id);
             }
-            if let Some(id) = self.selected_profile_id {
+            if let Some(id) = self.settings.selected_profile_id {
                 let secret_present = cx
                     .resources()
                     .profiles
@@ -206,25 +207,30 @@ impl crate::workspace::Workspace {
                     .map(|profile| profile_secret_present(profile.id, cx))
                     .unwrap_or(false);
                 if let Some(profile) = cx.resources().profiles.find_profile(id).cloned() {
-                    self.profile_editor =
+                    self.settings.profile_editor =
                         Some(ProfileEditorState::from_profile(&profile, secret_present));
                 }
-            } else if self.profile_editor.as_ref().is_none_or(|e| !e.is_new) {
-                self.profile_editor = None;
+            } else if self
+                .settings
+                .profile_editor
+                .as_ref()
+                .is_none_or(|e| !e.is_new)
+            {
+                self.settings.profile_editor = None;
             }
         }
         cx.notify();
     }
 
     pub(crate) fn select_profile_in_settings(&mut self, id: ProfileId, cx: &mut Context<Self>) {
-        self.profile_filter_focused = false;
+        self.settings.profile_filter_focused = false;
         self.load_profile_editor(id, cx);
     }
 
     pub(crate) fn start_new_profile(&mut self, cx: &mut Context<Self>) {
-        self.profile_filter_focused = false;
-        self.selected_profile_id = None;
-        self.profile_editor = Some(ProfileEditorState::blank());
+        self.settings.profile_filter_focused = false;
+        self.settings.selected_profile_id = None;
+        self.settings.profile_editor = Some(ProfileEditorState::blank());
         cx.notify();
     }
 
@@ -233,9 +239,10 @@ impl crate::workspace::Workspace {
             return;
         };
         let secret_present = profile_secret_present(profile.id, cx);
-        self.profile_filter_focused = false;
-        self.selected_profile_id = Some(id);
-        self.profile_editor = Some(ProfileEditorState::from_profile(&profile, secret_present));
+        self.settings.profile_filter_focused = false;
+        self.settings.selected_profile_id = Some(id);
+        self.settings.profile_editor =
+            Some(ProfileEditorState::from_profile(&profile, secret_present));
         cx.notify();
     }
 
@@ -255,7 +262,7 @@ impl crate::workspace::Workspace {
             key_path_raw,
             passphrase,
         ) = {
-            let Some(editor) = self.profile_editor.as_ref() else {
+            let Some(editor) = self.settings.profile_editor.as_ref() else {
                 return;
             };
             (
@@ -274,7 +281,7 @@ impl crate::workspace::Workspace {
         };
 
         if host.is_empty() {
-            if let Some(editor) = self.profile_editor.as_mut() {
+            if let Some(editor) = self.settings.profile_editor.as_mut() {
                 editor.error = Some("Host is required.".into());
             }
             cx.notify();
@@ -286,7 +293,7 @@ impl crate::workspace::Workspace {
             match port_text.parse() {
                 Ok(port) if port > 0 => port,
                 _ => {
-                    if let Some(editor) = self.profile_editor.as_mut() {
+                    if let Some(editor) = self.settings.profile_editor.as_mut() {
                         editor.error = Some("Port must be a number between 1 and 65535.".into());
                     }
                     cx.notify();
@@ -295,7 +302,7 @@ impl crate::workspace::Workspace {
             }
         };
         if username.is_empty() {
-            if let Some(editor) = self.profile_editor.as_mut() {
+            if let Some(editor) = self.settings.profile_editor.as_mut() {
                 editor.error = Some("Username is required.".into());
             }
             cx.notify();
@@ -331,7 +338,7 @@ impl crate::workspace::Workspace {
             AuthMethodKind::PrivateKey => {
                 let key_path = expand_home(&key_path_raw);
                 if key_path.is_empty() {
-                    if let Some(editor) = self.profile_editor.as_mut() {
+                    if let Some(editor) = self.settings.profile_editor.as_mut() {
                         editor.error = Some("Private key path is required.".into());
                     }
                     cx.notify();
@@ -363,8 +370,8 @@ impl crate::workspace::Workspace {
                     );
                 }
                 let secret_present = profile_secret_present(outcome.profile.id, cx);
-                self.selected_profile_id = Some(outcome.profile.id);
-                self.profile_editor = Some(ProfileEditorState::from_profile(
+                self.settings.selected_profile_id = Some(outcome.profile.id);
+                self.settings.profile_editor = Some(ProfileEditorState::from_profile(
                     &outcome.profile,
                     secret_present,
                 ));
@@ -377,7 +384,7 @@ impl crate::workspace::Workspace {
                     }
                     other => format!("Could not save profile: {other}"),
                 };
-                if let Some(editor) = self.profile_editor.as_mut() {
+                if let Some(editor) = self.settings.profile_editor.as_mut() {
                     editor.error = Some(message.clone().into());
                 }
                 self.status_message = Some(message.into());
@@ -392,13 +399,13 @@ impl crate::workspace::Workspace {
     ) -> Vec<&'a ConnectionProfile> {
         profiles
             .iter()
-            .filter(|profile| profile_matches_filter(profile, self.profile_filter.value()))
+            .filter(|profile| profile_matches_filter(profile, self.settings.profile_filter.value()))
             .collect()
     }
 
     /// Focus the Profiles list filter field (click or explicit focus).
     pub(crate) fn focus_profile_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.profile_filter_focused = true;
+        self.settings.profile_filter_focused = true;
         window.focus(&self.workspace_focus);
         cx.notify();
     }
@@ -409,19 +416,19 @@ impl crate::workspace::Workspace {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.profile_filter_focused {
+        if !self.settings.profile_filter_focused {
             return;
         }
         let keystroke = &event.keystroke;
         if keystroke.modifiers.platform && keystroke.key == "v" {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                self.profile_filter.insert(&text);
+                self.settings.profile_filter.insert(&text);
                 cx.stop_propagation();
                 cx.notify();
             }
             return;
         }
-        if self.profile_filter.handle_keystroke(keystroke) == InputKeyResult::Handled {
+        if self.settings.profile_filter.handle_keystroke(keystroke) == InputKeyResult::Handled {
             cx.stop_propagation();
             cx.notify();
         }
@@ -434,22 +441,22 @@ impl crate::workspace::Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.profile_delete_confirm = Some(id);
+        self.settings.profile_delete_confirm = Some(id);
         window.focus(&self.modal_focus);
         cx.notify();
     }
 
     /// User confirmed: delete the profile (store + Keychain) and refresh settings selection.
     pub(crate) fn confirm_delete_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.profile_delete_confirm.take() else {
+        let Some(id) = self.settings.profile_delete_confirm.take() else {
             return;
         };
         self.delete_profile(id, cx);
-        if self.selected_profile_id == Some(id) {
-            self.selected_profile_id = None;
-            self.profile_editor = None;
+        if self.settings.selected_profile_id == Some(id) {
+            self.settings.selected_profile_id = None;
+            self.settings.profile_editor = None;
             // Reselect the first remaining profile when Profiles is the active section.
-            if self.settings_section == SettingsSection::Profiles {
+            if self.settings.section == SettingsSection::Profiles {
                 self.set_settings_section(SettingsSection::Profiles, cx);
             }
         }
@@ -459,7 +466,7 @@ impl crate::workspace::Workspace {
 
     /// Dismiss the profile-delete confirmation without deleting.
     pub(crate) fn cancel_delete_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.profile_delete_confirm = None;
+        self.settings.profile_delete_confirm = None;
         self.restore_focus_after_profile_delete(window, cx);
         cx.notify();
     }
@@ -479,12 +486,12 @@ impl crate::workspace::Workspace {
     /// Leave Settings: discard unsaved editor drafts (including New Profile)
     /// and return to the Files surface.
     pub(crate) fn leave_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.profile_editor = None;
-        self.selected_profile_id = None;
-        self.profile_filter = InputState::new();
-        self.profile_filter_focused = false;
-        self.profile_delete_confirm = None;
-        self.settings_section = SettingsSection::General;
+        self.settings.profile_editor = None;
+        self.settings.selected_profile_id = None;
+        self.settings.profile_filter = InputState::new();
+        self.settings.profile_filter_focused = false;
+        self.settings.profile_delete_confirm = None;
+        self.settings.section = SettingsSection::General;
         self.surface = WorkspaceSurface::Files;
         self.focus_pane(self.focused_side, window, cx);
         cx.notify();
@@ -496,10 +503,10 @@ impl crate::workspace::Workspace {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.profile_filter_focused {
+        if self.settings.profile_filter_focused {
             return;
         }
-        let Some(editor) = self.profile_editor.as_mut() else {
+        let Some(editor) = self.settings.profile_editor.as_mut() else {
             return;
         };
         let keystroke = &event.keystroke;

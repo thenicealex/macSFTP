@@ -28,7 +28,7 @@ use crate::app_actions::{
 };
 use crate::resources::ActiveResources;
 use crate::session_coordinator::SessionCoordinator;
-use crate::workspace::profiles::{ProfileEditorState, SettingsSection};
+use crate::workspace::profiles::SettingsSection;
 use macsftp_core::{HistoryOp, RestoredTabTarget};
 
 /// Status bar copy when the command channel is full (non-blocking drop).
@@ -60,29 +60,10 @@ pub struct Workspace {
     modal_focus: FocusHandle,
     focused_side: PaneSide,
     surface: WorkspaceSurface,
-    /// Active sidebar section when `surface == Settings`.
-    settings_section: SettingsSection,
-    /// Free-text filter for the Settings → Profiles list.
-    profile_filter: InputState,
-    /// `true` while the Profiles filter field owns key events.
-    profile_filter_focused: bool,
-    /// Settings → General external-editor override field. Committed to config
-    /// on every edit (empty → None).
-    external_editor_input: InputState,
-    /// `true` while the External editor field owns key events.
-    external_editor_focused: bool,
-    /// Selected profile in Settings → Profiles (None when the list is empty).
-    selected_profile_id: Option<ProfileId>,
-    /// Draft for New / Edit profile in Settings → Profiles.
-    profile_editor: Option<ProfileEditorState>,
-    /// Pending profile delete confirmation (Settings / Connect). View-local.
-    profile_delete_confirm: Option<ProfileId>,
+    settings: view_state::SettingsUi,
     /// Pending large-file edit confirmation. Holds the edit params until the
     /// user accepts the size warning; accepting starts the download.
     transfer_drawer: view_state::TransferDrawerUi,
-
-    profile_picker_scroll: gpui::ScrollHandle,
-    profile_picker_scrollbar: ScrollbarState,
 
     default_local_path: LocalPath,
     status_message: Option<SharedString>,
@@ -163,18 +144,10 @@ impl Workspace {
             modal_focus: cx.focus_handle(),
             focused_side: PaneSide::Local,
             surface: WorkspaceSurface::Files,
-            settings_section: SettingsSection::General,
-            profile_filter: InputState::new(),
-            profile_filter_focused: false,
-            external_editor_input,
-            external_editor_focused: false,
-            selected_profile_id: None,
-            profile_editor: None,
-            profile_delete_confirm: None,
+
             transfer_drawer: view_state::TransferDrawerUi::new(),
 
-            profile_picker_scroll: gpui::ScrollHandle::new(),
-            profile_picker_scrollbar: ScrollbarState::new(),
+            settings: view_state::SettingsUi::new(external_editor_input),
 
             default_local_path,
             status_message: None,
@@ -372,10 +345,10 @@ impl Workspace {
         &self.palette.scrollbar
     }
     pub(crate) fn profile_picker_scroll(&self) -> &gpui::ScrollHandle {
-        &self.profile_picker_scroll
+        &self.settings.picker_scroll
     }
     pub(crate) fn profile_picker_scrollbar(&self) -> &ScrollbarState {
-        &self.profile_picker_scrollbar
+        &self.settings.picker_scrollbar
     }
     pub(crate) fn tab_switcher_scroll(&self) -> &gpui::ScrollHandle {
         &self.tab_switcher.scroll
@@ -1189,7 +1162,7 @@ impl Render for Workspace {
                 {
                     workspace.modal_inputs.about_open = false;
                     workspace.surface = WorkspaceSurface::Settings;
-                    workspace.settings_section = SettingsSection::General;
+                    workspace.settings.section = SettingsSection::General;
                     workspace.workspace_focus.focus(window);
                     cx.notify();
                 }
