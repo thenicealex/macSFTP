@@ -107,7 +107,7 @@ impl crate::workspace::Workspace {
                     tab.remote.is_refreshing = false;
                     tab.remote.error = None;
                     tab.selection.selected_paths.clear();
-                    self.remote_scroll = UniformListScrollHandle::new();
+                    self.remote.scroll = UniformListScrollHandle::new();
                     self.request_remote_directory(tab_id, navigate_to, cx);
                     // Reconcile remote residual temp files from a previous run
                     // now that a live session to this host exists (plan M5/M6).
@@ -192,7 +192,7 @@ impl crate::workspace::Workspace {
                     tab.remote.is_refreshing = false;
                     tab.remote.error = None;
                     tab.selection.selected_paths.clear();
-                    self.remote_scroll = UniformListScrollHandle::new();
+                    self.remote.scroll = UniformListScrollHandle::new();
                     applied_listing = Some(
                         tab.remote
                             .entries
@@ -263,7 +263,7 @@ impl crate::workspace::Workspace {
                     tab.local.entries = entries;
                     tab.local.error = None;
                     tab.selection.selected_paths.clear();
-                    self.local_scroll = UniformListScrollHandle::new();
+                    self.local.scroll = UniformListScrollHandle::new();
                 }
             }
             AppEvent::ResidualTempCreated(record) => {

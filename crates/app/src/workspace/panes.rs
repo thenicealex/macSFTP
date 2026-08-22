@@ -33,15 +33,15 @@ impl crate::workspace::Workspace {
 
     pub(crate) fn pane_filter(&self, side: PaneSide) -> &PaneFilter {
         match side {
-            PaneSide::Local => &self.local_filter,
-            PaneSide::Remote => &self.remote_filter,
+            PaneSide::Local => &self.local.filter,
+            PaneSide::Remote => &self.remote.filter,
         }
     }
 
     pub(crate) fn pane_filter_mut(&mut self, side: PaneSide) -> &mut PaneFilter {
         match side {
-            PaneSide::Local => &mut self.local_filter,
-            PaneSide::Remote => &mut self.remote_filter,
+            PaneSide::Local => &mut self.local.filter,
+            PaneSide::Remote => &mut self.remote.filter,
         }
     }
 
@@ -366,7 +366,7 @@ impl crate::workspace::Workspace {
             tab.selection.selected_paths.clear();
             self.request_local_directory(tab_id, path, cx);
         }
-        self.local_scroll = UniformListScrollHandle::new();
+        self.local.scroll = UniformListScrollHandle::new();
         cx.notify();
     }
 
@@ -427,7 +427,7 @@ impl crate::workspace::Workspace {
                     }
                 }
                 if is_active {
-                    workspace.local_scroll = UniformListScrollHandle::new();
+                    workspace.local.scroll = UniformListScrollHandle::new();
                 }
                 cx.notify();
             });
@@ -525,8 +525,8 @@ impl crate::workspace::Workspace {
     }
 
     pub(crate) fn clear_filters(&mut self) {
-        self.local_filter.clear();
-        self.remote_filter.clear();
+        self.local.filter.clear();
+        self.remote.filter.clear();
     }
 
     /// `cmd-f`: show the filter bar and route keys into the filter input.

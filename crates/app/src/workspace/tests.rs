@@ -3570,16 +3570,16 @@ mod tests {
         set_local_path_and_wait(&workspace, &mut cx, parent);
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.focused_side = PaneSide::Local;
-            workspace.local_filter.query = "alpha".into();
-            workspace.local_filter.explicit_focus = true;
+            workspace.local.filter.query = "alpha".into();
+            workspace.local.filter.explicit_focus = true;
             assert_eq!(workspace.entry_count(PaneSide::Local, cx), 1);
             workspace.navigate_pane_local(child, HistoryOp::Push, window, cx);
             assert!(
-                workspace.local_filter.query.is_empty(),
+                workspace.local.filter.query.is_empty(),
                 "navigate must clear filter query"
             );
             assert!(
-                !workspace.local_filter.explicit_focus,
+                !workspace.local.filter.explicit_focus,
                 "navigate must clear filter focus"
             );
         });
@@ -4797,11 +4797,12 @@ mod tests {
                 "both files visible before filter"
             );
 
-            workspace.local_filter.query = "a".into();
+            workspace.local.filter.query = "a".into();
             workspace
-                .local_filter
+                .local
+                .filter
                 .input
-                .set_value(workspace.local_filter.query.clone());
+                .set_value(workspace.local.filter.query.clone());
             assert_eq!(
                 workspace.entry_count(PaneSide::Local, cx),
                 1,
@@ -4832,21 +4833,21 @@ mod tests {
                 2,
                 "clear restores full list"
             );
-            assert!(!workspace.local_filter.is_active());
+            assert!(!workspace.local.filter.is_active());
         });
 
         // cmd-f / FilterPane opens explicit focus without requiring a query.
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.open_filter_pane(window, cx);
-            assert!(workspace.local_filter.explicit_focus);
-            assert!(workspace.local_filter.is_active());
-            workspace.local_filter.query = "b".into();
+            assert!(workspace.local.filter.explicit_focus);
+            assert!(workspace.local.filter.is_active());
+            workspace.local.filter.query = "b".into();
             assert_eq!(workspace.entry_count(PaneSide::Local, cx), 1);
         });
         cx.dispatch_action(FilterPane);
         workspace.read_with(&cx, |workspace, _cx| {
             assert!(
-                workspace.local_filter.explicit_focus,
+                workspace.local.filter.explicit_focus,
                 "FilterPane action sets explicit_focus"
             );
         });
@@ -4854,8 +4855,8 @@ mod tests {
         // Tab switch clears filters.
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.open_new_tab(window, cx);
-            assert!(!workspace.local_filter.is_active());
-            assert!(!workspace.remote_filter.is_active());
+            assert!(!workspace.local.filter.is_active());
+            assert!(!workspace.remote.filter.is_active());
         });
 
         let _ = std::fs::remove_dir_all(&fixture);

@@ -44,27 +44,7 @@ pub enum PaneSide {
     Remote,
 }
 
-/// Per-pane type-to-filter / cmd-f state (view-only; not persisted).
-#[derive(Debug, Clone, Default)]
-pub(crate) struct PaneFilter {
-    pub(crate) query: String,
-    pub(crate) input: InputState,
-    /// `true` after `cmd-f`: key events prefer the filter input.
-    pub(crate) explicit_focus: bool,
-}
-
-impl PaneFilter {
-    pub(crate) fn is_active(&self) -> bool {
-        !self.query.is_empty() || self.explicit_focus
-    }
-
-    pub(crate) fn clear(&mut self) {
-        self.query.clear();
-        self.input.clear();
-        self.explicit_focus = false;
-    }
-}
-
+use crate::workspace::view_state::PaneFilter;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspaceSurface {
     Files,
@@ -108,10 +88,7 @@ pub struct Workspace {
     drawer_resize: Option<drawer_height::TransferDrawerResize>,
     completed_section_expanded: bool,
     failed_section_expanded: bool,
-    local_scroll: UniformListScrollHandle,
-    remote_scroll: UniformListScrollHandle,
-    local_scrollbar: ScrollbarState,
-    remote_scrollbar: ScrollbarState,
+
     transfer_scroll: gpui::ScrollHandle,
     transfer_scrollbar: ScrollbarState,
     command_palette_scroll: gpui::ScrollHandle,
@@ -151,8 +128,8 @@ pub struct Workspace {
     tab_switcher_open: bool,
     tab_switcher_index: usize,
     /// Active-tab type-to-filter state (cleared on tab switch / navigate).
-    local_filter: PaneFilter,
-    remote_filter: PaneFilter,
+    local: view_state::PaneUi,
+    remote: view_state::PaneUi,
     /// Anchor path for shift-range multi-select (view-local; single-select resets it).
     selection_anchor: Option<EntryPath>,
     /// Session credentials per tab, kept in memory only so Reconnect
@@ -226,10 +203,7 @@ impl Workspace {
             drawer_resize: None,
             completed_section_expanded: false,
             failed_section_expanded: false,
-            local_scroll: UniformListScrollHandle::new(),
-            remote_scroll: UniformListScrollHandle::new(),
-            local_scrollbar: ScrollbarState::new(),
-            remote_scrollbar: ScrollbarState::new(),
+
             transfer_scroll: gpui::ScrollHandle::new(),
             transfer_scrollbar: ScrollbarState::new(),
             command_palette_scroll: gpui::ScrollHandle::new(),
@@ -258,8 +232,8 @@ impl Workspace {
             tab_mru: Vec::new(),
             tab_switcher_open: false,
             tab_switcher_index: 0,
-            local_filter: PaneFilter::default(),
-            remote_filter: PaneFilter::default(),
+            local: view_state::PaneUi::new(),
+            remote: view_state::PaneUi::new(),
             selection_anchor: None,
             _appearance_subscription: appearance_subscription,
         };
@@ -426,8 +400,8 @@ impl Workspace {
     }
     pub(crate) fn scroll_handle(&self, side: PaneSide) -> &UniformListScrollHandle {
         match side {
-            PaneSide::Local => &self.local_scroll,
-            PaneSide::Remote => &self.remote_scroll,
+            PaneSide::Local => &self.local.scroll,
+            PaneSide::Remote => &self.remote.scroll,
         }
     }
     pub(crate) fn transfer_scroll(&self) -> &gpui::ScrollHandle {
@@ -456,8 +430,8 @@ impl Workspace {
     }
     pub(crate) fn pane_scrollbar(&self, side: PaneSide) -> &ScrollbarState {
         match side {
-            PaneSide::Local => &self.local_scrollbar,
-            PaneSide::Remote => &self.remote_scrollbar,
+            PaneSide::Local => &self.local.scrollbar,
+            PaneSide::Remote => &self.remote.scrollbar,
         }
     }
     pub(crate) fn open_new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -630,8 +604,8 @@ impl Workspace {
         cx.notify();
     }
     pub(crate) fn reset_scroll_positions(&mut self) {
-        self.local_scroll = UniformListScrollHandle::new();
-        self.remote_scroll = UniformListScrollHandle::new();
+        self.local.scroll = UniformListScrollHandle::new();
+        self.remote.scroll = UniformListScrollHandle::new();
     }
     pub(crate) fn send_command(&mut self, command: AppCommand, cx: &mut Context<Self>) -> bool {
         match self.runtime_client.try_send(command) {
@@ -1340,6 +1314,7 @@ mod settings_render;
 mod tests;
 mod transfer_render;
 mod transfers;
+pub(crate) mod view_state;
 mod visible_entries;
 
 use connect_form::ConnectForm;
