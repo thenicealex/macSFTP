@@ -5,7 +5,7 @@ use gpui::{
 use macsftp_core::{ConnectionState, EntryPath, LocalPath, RemotePath};
 use macsftp_ui::{
     ActiveTheme, DragPreview, FileRowModel, IconName, TextFieldModel, connection_status,
-    empty_state, file_row, file_table_header, format_size, format_timestamp, icon_button,
+    empty_state, file_row, file_table_header, format_size_label, format_timestamp, icon_button,
     loading_state, tab, text_button, text_field, text_tooltip,
 };
 
@@ -849,7 +849,7 @@ impl crate::workspace::Workspace {
                                             is_hidden: entry.name.starts_with('.'),
                                             selected: selected_paths
                                                 .contains(&EntryPath::Local(entry.path.clone())),
-                                            size_label: format_size(entry.size),
+                                            size_label: format_size_label(entry.kind, entry.size),
                                             modified_label: format_timestamp(entry.modified_at),
                                         },
                                         EntryPath::Local(entry.path.clone()),
@@ -864,7 +864,7 @@ impl crate::workspace::Workspace {
                                             is_hidden: entry.name.starts_with('.'),
                                             selected: selected_paths
                                                 .contains(&EntryPath::Remote(entry.path.clone())),
-                                            size_label: format_size(entry.size),
+                                            size_label: format_size_label(entry.kind, entry.size),
                                             modified_label: format_timestamp(entry.modified_at),
                                         },
                                         EntryPath::Remote(entry.path.clone()),

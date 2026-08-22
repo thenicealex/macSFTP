@@ -189,6 +189,18 @@ pub fn format_size(size: Option<u64>) -> SharedString {
     }
 }
 
+/// Size column text for a file-list row.
+///
+/// Directories render blank: their aggregate size is meaningless at browse
+/// time, and a full column of dashes reads as visual noise. Only files with
+/// an unknown size show the em dash.
+pub fn format_size_label(kind: FileKind, size: Option<u64>) -> SharedString {
+    match kind {
+        FileKind::Directory => SharedString::default(),
+        _ => format_size(size),
+    }
+}
+
 /// UTC `YYYY-MM-DD HH:MM` label. `None` renders as an em dash.
 pub fn format_timestamp(timestamp: Option<Timestamp>) -> SharedString {
     let Some(timestamp) = timestamp else {
@@ -236,11 +248,25 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
 mod tests {
     use macsftp_core::Timestamp;
 
-    use super::{format_size, format_timestamp};
+    use super::{format_size, format_size_label, format_timestamp};
+    use macsftp_core::FileKind;
 
     #[test]
     fn size_labels_use_decimal_units() {
         assert_eq!(format_size(None).as_ref(), "—");
+
+        // Directories render blank; the em dash is reserved for unknown file sizes.
+        assert_eq!(format_size_label(FileKind::Directory, None).as_ref(), "");
+        assert_eq!(
+            format_size_label(FileKind::Directory, Some(4096)).as_ref(),
+            ""
+        );
+        assert_eq!(format_size_label(FileKind::File, None).as_ref(), "—");
+        assert_eq!(
+            format_size_label(FileKind::File, Some(999)).as_ref(),
+            "999 B"
+        );
+        assert_eq!(format_size_label(FileKind::Symlink, None).as_ref(), "—");
         assert_eq!(format_size(Some(0)).as_ref(), "0 B");
         assert_eq!(format_size(Some(999)).as_ref(), "999 B");
         assert_eq!(format_size(Some(1_500)).as_ref(), "1.5 KB");
