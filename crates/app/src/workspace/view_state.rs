@@ -68,3 +68,22 @@ impl CommandPaletteUi {
         }
     }
 }
+
+/// Tab switcher (ctrl-tab) overlay state.
+pub(crate) struct TabSwitcherUi {
+    pub(crate) open: bool,
+    pub(crate) index: usize,
+    pub(crate) scroll: gpui::ScrollHandle,
+    pub(crate) scrollbar: ScrollbarState,
+}
+
+impl TabSwitcherUi {
+    pub(crate) fn new() -> Self {
+        Self {
+            open: false,
+            index: 0,
+            scroll: gpui::ScrollHandle::new(),
+            scrollbar: ScrollbarState::new(),
+        }
+    }
+}

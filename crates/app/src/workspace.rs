@@ -94,8 +94,7 @@ pub struct Workspace {
 
     profile_picker_scroll: gpui::ScrollHandle,
     profile_picker_scrollbar: ScrollbarState,
-    tab_switcher_scroll: gpui::ScrollHandle,
-    tab_switcher_scrollbar: ScrollbarState,
+
     default_local_path: LocalPath,
     status_message: Option<SharedString>,
     config_error: Option<SharedString>,
@@ -123,8 +122,8 @@ pub struct Workspace {
     /// MRU tab order for ctrl-tab switcher only (front = most recent).
     /// `cmd-shift-[/]` still walk creation order in `state.tabs.tabs`.
     tab_mru: Vec<TabId>,
-    tab_switcher_open: bool,
-    tab_switcher_index: usize,
+    tab_switcher: view_state::TabSwitcherUi,
+
     /// Active-tab type-to-filter state (cleared on tab switch / navigate).
     local: view_state::PaneUi,
     remote: view_state::PaneUi,
@@ -207,8 +206,7 @@ impl Workspace {
 
             profile_picker_scroll: gpui::ScrollHandle::new(),
             profile_picker_scrollbar: ScrollbarState::new(),
-            tab_switcher_scroll: gpui::ScrollHandle::new(),
-            tab_switcher_scrollbar: ScrollbarState::new(),
+
             default_local_path,
             status_message: None,
             config_error,
@@ -225,8 +223,7 @@ impl Workspace {
             go_to_path_error: None,
             palette: view_state::CommandPaletteUi::new(),
             tab_mru: Vec::new(),
-            tab_switcher_open: false,
-            tab_switcher_index: 0,
+            tab_switcher: view_state::TabSwitcherUi::new(),
             local: view_state::PaneUi::new(),
             remote: view_state::PaneUi::new(),
             selection_anchor: None,
@@ -418,10 +415,10 @@ impl Workspace {
         &self.profile_picker_scrollbar
     }
     pub(crate) fn tab_switcher_scroll(&self) -> &gpui::ScrollHandle {
-        &self.tab_switcher_scroll
+        &self.tab_switcher.scroll
     }
     pub(crate) fn tab_switcher_scrollbar(&self) -> &ScrollbarState {
-        &self.tab_switcher_scrollbar
+        &self.tab_switcher.scrollbar
     }
     pub(crate) fn pane_scrollbar(&self, side: PaneSide) -> &ScrollbarState {
         match side {
@@ -472,12 +469,12 @@ impl Workspace {
         if let Some(active_id) = self.state.tabs.active_tab_id {
             self.touch_mru(active_id);
         }
-        if self.tab_switcher_open {
+        if self.tab_switcher.open {
             if self.tab_mru.is_empty() {
-                self.tab_switcher_open = false;
-                self.tab_switcher_index = 0;
+                self.tab_switcher.open = false;
+                self.tab_switcher.index = 0;
             } else {
-                self.tab_switcher_index = self.tab_switcher_index.min(self.tab_mru.len() - 1);
+                self.tab_switcher.index = self.tab_switcher.index.min(self.tab_mru.len() - 1);
             }
         }
         // Tell the runtime to cancel the tab's actor and reject its
@@ -507,9 +504,9 @@ impl Workspace {
         if self.state.tabs.find_tab(tab_id).is_some() {
             self.state.tabs.active_tab_id = Some(tab_id);
             self.touch_mru(tab_id);
-            if self.tab_switcher_open {
-                self.tab_switcher_open = false;
-                self.tab_switcher_index = 0;
+            if self.tab_switcher.open {
+                self.tab_switcher.open = false;
+                self.tab_switcher.index = 0;
             }
             self.clear_filters();
             self.selection_anchor = None;
@@ -549,14 +546,14 @@ impl Workspace {
         if self.tab_mru.is_empty() {
             return;
         }
-        if !self.tab_switcher_open {
-            self.tab_switcher_open = true;
+        if !self.tab_switcher.open {
+            self.tab_switcher.open = true;
             // First press targets the previous tab (MRU[1]), matching OS switchers.
-            self.tab_switcher_index = if self.tab_mru.len() > 1 { 1 } else { 0 };
+            self.tab_switcher.index = if self.tab_mru.len() > 1 { 1 } else { 0 };
             window.focus(&self.modal_focus);
         } else {
             let count = self.tab_mru.len();
-            self.tab_switcher_index = (self.tab_switcher_index + 1) % count;
+            self.tab_switcher.index = (self.tab_switcher.index + 1) % count;
         }
         cx.notify();
     }
@@ -564,33 +561,33 @@ impl Workspace {
         if self.tab_mru.is_empty() {
             return;
         }
-        if !self.tab_switcher_open {
-            self.tab_switcher_open = true;
-            self.tab_switcher_index = self.tab_mru.len() - 1;
+        if !self.tab_switcher.open {
+            self.tab_switcher.open = true;
+            self.tab_switcher.index = self.tab_mru.len() - 1;
             window.focus(&self.modal_focus);
         } else {
             let count = self.tab_mru.len() as isize;
-            self.tab_switcher_index =
-                (self.tab_switcher_index as isize - 1).rem_euclid(count) as usize;
+            self.tab_switcher.index =
+                (self.tab_switcher.index as isize - 1).rem_euclid(count) as usize;
         }
         cx.notify();
     }
     pub(crate) fn close_tab_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.tab_switcher_open {
+        if !self.tab_switcher.open {
             return;
         }
-        self.tab_switcher_open = false;
-        self.tab_switcher_index = 0;
+        self.tab_switcher.open = false;
+        self.tab_switcher.index = 0;
         self.focus_pane(self.focused_side, window, cx);
         cx.notify();
     }
     pub(crate) fn confirm_tab_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.tab_switcher_open {
+        if !self.tab_switcher.open {
             return;
         }
-        let tab_id = self.tab_mru.get(self.tab_switcher_index).copied();
-        self.tab_switcher_open = false;
-        self.tab_switcher_index = 0;
+        let tab_id = self.tab_mru.get(self.tab_switcher.index).copied();
+        self.tab_switcher.open = false;
+        self.tab_switcher.index = 0;
         if let Some(tab_id) = tab_id {
             // activate_tab also touch_mru's and would no-op the open flag.
             self.activate_tab(tab_id, window, cx);

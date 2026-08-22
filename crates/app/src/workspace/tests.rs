@@ -5347,11 +5347,11 @@ mod tests {
         cx.dispatch_action(NewTab); // mru: 3, 2, 1 active 3
         workspace.update_in(&mut cx, |ws, window, cx| {
             ws.tab_switcher_next(window, cx);
-            assert!(ws.tab_switcher_open);
-            assert_eq!(ws.tab_switcher_index, 1, "first open starts at MRU[1]");
+            assert!(ws.tab_switcher.open);
+            assert_eq!(ws.tab_switcher.index, 1, "first open starts at MRU[1]");
             assert_eq!(ws.tab_mru[1], TabId(2));
             ws.confirm_tab_switcher(window, cx);
-            assert!(!ws.tab_switcher_open);
+            assert!(!ws.tab_switcher.open);
             assert_eq!(ws.state.tabs.active_tab_id, Some(TabId(2)));
             assert_eq!(ws.tab_mru[0], TabId(2));
         });
@@ -5365,9 +5365,9 @@ mod tests {
         workspace.update_in(&mut cx, |ws, window, cx| {
             assert_eq!(ws.state.tabs.active_tab_id, Some(TabId(3)));
             ws.tab_switcher_next(window, cx);
-            assert_eq!(ws.tab_switcher_index, 1);
+            assert_eq!(ws.tab_switcher.index, 1);
             ws.cancel_active_modal(window, cx);
-            assert!(!ws.tab_switcher_open);
+            assert!(!ws.tab_switcher.open);
             assert_eq!(
                 ws.state.tabs.active_tab_id,
                 Some(TabId(3)),
@@ -5403,14 +5403,14 @@ mod tests {
         cx.dispatch_action(NewTab);
         workspace.update_in(&mut cx, |ws, window, cx| {
             ws.tab_switcher_next(window, cx);
-            assert!(ws.tab_switcher_open);
+            assert!(ws.tab_switcher.open);
             ws.open_command_palette(window, cx);
             assert!(ws.palette.open);
             ws.cancel_active_modal(window, cx);
             assert!(!ws.palette.open, "palette closes first");
-            assert!(ws.tab_switcher_open, "switcher remains until next Esc");
+            assert!(ws.tab_switcher.open, "switcher remains until next Esc");
             ws.cancel_active_modal(window, cx);
-            assert!(!ws.tab_switcher_open);
+            assert!(!ws.tab_switcher.open);
         });
     }
 

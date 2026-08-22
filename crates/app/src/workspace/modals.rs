@@ -240,7 +240,7 @@ impl crate::workspace::Workspace {
             return;
         }
         // MRU tab switcher next (phase 4 design §4.3 — Esc cancels without switching).
-        if self.tab_switcher_open {
+        if self.tab_switcher.open {
             self.close_tab_switcher(window, cx);
             return;
         }

@@ -77,11 +77,11 @@ impl crate::workspace::Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        if !self.tab_switcher_open || self.tab_mru.is_empty() {
+        if !self.tab_switcher.open || self.tab_mru.is_empty() {
             return None;
         }
         let theme = cx.theme().clone();
-        let selected = self.tab_switcher_index.min(self.tab_mru.len() - 1);
+        let selected = self.tab_switcher.index.min(self.tab_mru.len() - 1);
 
         let rows = self
             .tab_mru
@@ -115,7 +115,7 @@ impl crate::workspace::Workspace {
                         })
                         .on_click(cx.listener(move |workspace, _event, window, cx| {
                             // Click selects that tab immediately (same as Enter on that row).
-                            workspace.tab_switcher_index = index;
+                            workspace.tab_switcher.index = index;
                             workspace.confirm_tab_switcher(window, cx);
                         }))
                         .child(
