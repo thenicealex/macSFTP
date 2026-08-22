@@ -145,3 +145,35 @@ impl ConnectFormUi {
         Self { form: None, focus }
     }
 }
+
+/// Modal and popover input state owned by the view while a prompt is open.
+pub(crate) struct ModalInputsUi {
+    /// Draft name for the active transfer-conflict rename decision. It is
+    /// view-local because the runtime only receives a decision after the
+    /// user submits it.
+    pub(crate) conflict_rename: InputState,
+    pub(crate) conflict_rename_error: Option<gpui::SharedString>,
+    /// Phase 1 delete confirmation modal (view-local).
+    pub(crate) delete_confirm: Option<crate::workspace::file_ops::DeleteConfirmState>,
+    /// Phase 1 inline rename / new-folder editor.
+    pub(crate) inline_edit: Option<crate::workspace::file_ops::InlineEditState>,
+    /// Phase 1 context menu for the focused file pane.
+    pub(crate) context_menu: Option<crate::workspace::file_ops::ContextMenuState>,
+    /// Confirmation before opening very large remote files for edit.
+    pub(crate) large_edit_confirm: Option<crate::workspace::remote_edit::PendingEdit>,
+    pub(crate) about_open: bool,
+}
+
+impl ModalInputsUi {
+    pub(crate) fn new() -> Self {
+        Self {
+            conflict_rename: InputState::new(),
+            conflict_rename_error: None,
+            delete_confirm: None,
+            inline_edit: None,
+            context_menu: None,
+            large_edit_confirm: None,
+            about_open: false,
+        }
+    }
+}

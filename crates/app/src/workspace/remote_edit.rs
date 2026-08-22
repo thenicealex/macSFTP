@@ -151,7 +151,7 @@ impl Workspace {
             tab_id,
         };
         if pending.size.unwrap_or(0) > EDIT_SIZE_WARN_THRESHOLD {
-            self.large_edit_confirm = Some(pending);
+            self.modal_inputs.large_edit_confirm = Some(pending);
             cx.notify();
             return;
         }
@@ -231,7 +231,7 @@ impl Workspace {
     /// epoch before downloading, so we never dispatch with a stale epoch (which
     /// the runtime silently drops, stranding the session in `Downloading`).
     pub(crate) fn confirm_large_edit(&mut self, cx: &mut Context<Self>) {
-        let Some(mut pending) = self.large_edit_confirm.take() else {
+        let Some(mut pending) = self.modal_inputs.large_edit_confirm.take() else {
             return;
         };
         let Some(tab) = self.state.tabs.find_tab(pending.tab_id) else {
@@ -253,7 +253,7 @@ impl Workspace {
 
     /// User dismissed the large-file edit warning: drop the pending edit.
     pub(crate) fn cancel_large_edit(&mut self, cx: &mut Context<Self>) {
-        self.large_edit_confirm = None;
+        self.modal_inputs.large_edit_confirm = None;
         cx.notify();
     }
 
@@ -332,7 +332,7 @@ impl Workspace {
         &self,
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
-        let size = self.large_edit_confirm.as_ref()?.size;
+        let size = self.modal_inputs.large_edit_confirm.as_ref()?.size;
         let theme = cx.theme().clone();
         let body = match size {
             Some(size) => format!(

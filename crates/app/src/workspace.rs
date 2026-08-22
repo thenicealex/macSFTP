@@ -28,7 +28,6 @@ use crate::app_actions::{
 };
 use crate::resources::ActiveResources;
 use crate::session_coordinator::SessionCoordinator;
-use crate::workspace::file_ops::{ContextMenuState, DeleteConfirmState, InlineEditState};
 use crate::workspace::profiles::{ProfileEditorState, SettingsSection};
 use macsftp_core::{HistoryOp, RestoredTabTarget};
 
@@ -80,8 +79,6 @@ pub struct Workspace {
     profile_delete_confirm: Option<ProfileId>,
     /// Pending large-file edit confirmation. Holds the edit params until the
     /// user accepts the size warning; accepting starts the download.
-    large_edit_confirm: Option<remote_edit::PendingEdit>,
-    about_open: bool,
     transfer_drawer: view_state::TransferDrawerUi,
 
     profile_picker_scroll: gpui::ScrollHandle,
@@ -93,17 +90,7 @@ pub struct Workspace {
     log_file: LocalPath,
     connect_form_ui: view_state::ConnectFormUi,
 
-    /// Draft name for the active transfer-conflict rename decision.
-    /// It is view-local because the runtime only receives a decision
-    /// after the user submits it.
-    conflict_rename: InputState,
-    conflict_rename_error: Option<SharedString>,
-    /// Phase 1 delete confirmation modal (view-local).
-    delete_confirm: Option<DeleteConfirmState>,
-    /// Phase 1 inline rename / new-folder editor.
-    inline_edit: Option<InlineEditState>,
-    /// Phase 1 context menu for the focused file pane.
-    context_menu: Option<ContextMenuState>,
+    modal_inputs: view_state::ModalInputsUi,
     /// Go to Path modal (`cmd-shift-g`).
     go_to_path: view_state::GoToPathUi,
 
@@ -184,8 +171,6 @@ impl Workspace {
             selected_profile_id: None,
             profile_editor: None,
             profile_delete_confirm: None,
-            large_edit_confirm: None,
-            about_open: false,
             transfer_drawer: view_state::TransferDrawerUi::new(),
 
             profile_picker_scroll: gpui::ScrollHandle::new(),
@@ -197,11 +182,7 @@ impl Workspace {
             log_file,
             connect_form_ui: view_state::ConnectFormUi::new(cx.focus_handle()),
 
-            conflict_rename: InputState::new(),
-            conflict_rename_error: None,
-            delete_confirm: None,
-            inline_edit: None,
-            context_menu: None,
+            modal_inputs: view_state::ModalInputsUi::new(),
             go_to_path: view_state::GoToPathUi::new(),
             palette: view_state::CommandPaletteUi::new(),
             tab_mru: Vec::new(),
@@ -434,11 +415,12 @@ impl Workspace {
             return;
         }
         if self
+            .modal_inputs
             .large_edit_confirm
             .as_ref()
             .is_some_and(|pending| pending.tab_id == tab_id)
         {
-            self.large_edit_confirm = None;
+            self.modal_inputs.large_edit_confirm = None;
         }
         // Tear down any edit sessions on this tab and delete their temp dirs.
         // A closed tab can never advance its edit sessions, and a lingering
@@ -1202,10 +1184,10 @@ impl Render for Workspace {
                 if workspace.connect_form_ui.form.is_none()
                     && workspace.active_host_key_prompt().is_none()
                     && workspace.active_transfer_conflict_prompt().is_none()
-                    && workspace.delete_confirm.is_none()
+                    && workspace.modal_inputs.delete_confirm.is_none()
                     && !workspace.go_to_path.open
                 {
-                    workspace.about_open = false;
+                    workspace.modal_inputs.about_open = false;
                     workspace.surface = WorkspaceSurface::Settings;
                     workspace.settings_section = SettingsSection::General;
                     workspace.workspace_focus.focus(window);
@@ -1216,10 +1198,10 @@ impl Render for Workspace {
                 if workspace.connect_form_ui.form.is_none()
                     && workspace.active_host_key_prompt().is_none()
                     && workspace.active_transfer_conflict_prompt().is_none()
-                    && workspace.delete_confirm.is_none()
+                    && workspace.modal_inputs.delete_confirm.is_none()
                     && !workspace.go_to_path.open
                 {
-                    workspace.about_open = false;
+                    workspace.modal_inputs.about_open = false;
                     workspace.surface = WorkspaceSurface::Settings;
                     workspace.set_settings_section(SettingsSection::Profiles, cx);
                     workspace.workspace_focus.focus(window);
@@ -1230,10 +1212,10 @@ impl Render for Workspace {
                 if workspace.connect_form_ui.form.is_none()
                     && workspace.active_host_key_prompt().is_none()
                     && workspace.active_transfer_conflict_prompt().is_none()
-                    && workspace.delete_confirm.is_none()
+                    && workspace.modal_inputs.delete_confirm.is_none()
                     && !workspace.go_to_path.open
                 {
-                    workspace.about_open = true;
+                    workspace.modal_inputs.about_open = true;
                     cx.notify();
                 }
             }))

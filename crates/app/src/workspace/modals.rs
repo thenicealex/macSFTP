@@ -45,8 +45,8 @@ impl crate::workspace::Workspace {
             .modals
             .active
             .push(ModalRequest::TransferConflict(prompt));
-        self.conflict_rename.set_value(default_rename);
-        self.conflict_rename_error = None;
+        self.modal_inputs.conflict_rename.set_value(default_rename);
+        self.modal_inputs.conflict_rename_error = None;
         window.focus(&self.modal_focus);
         cx.notify();
     }
@@ -90,14 +90,14 @@ impl crate::workspace::Workspace {
             .active
             .retain(|modal| modal.request_id() != Some(ModalRequestId::Conflict(request_id)));
         cx.remove_transfer_conflict(request_id);
-        self.conflict_rename_error = None;
+        self.modal_inputs.conflict_rename_error = None;
         if let Some(default_name) = self
             .active_transfer_conflict_prompt()
             .map(|prompt| copy_name(&prompt.destination))
         {
-            self.conflict_rename.set_value(default_name);
+            self.modal_inputs.conflict_rename.set_value(default_name);
         } else {
-            self.conflict_rename.clear();
+            self.modal_inputs.conflict_rename.clear();
         }
     }
     pub(crate) fn resolve_transfer_conflict(
@@ -130,9 +130,9 @@ impl crate::workspace::Workspace {
         let Some(prompt) = self.active_transfer_conflict_prompt().cloned() else {
             return;
         };
-        let new_name = self.conflict_rename.value().trim().to_string();
+        let new_name = self.modal_inputs.conflict_rename.value().trim().to_string();
         if new_name.is_empty() || new_name == "." || new_name == ".." || new_name.contains('/') {
-            self.conflict_rename_error =
+            self.modal_inputs.conflict_rename_error =
                 Some("Enter a file name without path separators or parent-directory names.".into());
             cx.notify();
             return;
@@ -165,15 +165,20 @@ impl crate::workspace::Workspace {
         }
         if keystroke.modifiers.platform && keystroke.key == "v" {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                self.conflict_rename.insert(&text);
-                self.conflict_rename_error = None;
+                self.modal_inputs.conflict_rename.insert(&text);
+                self.modal_inputs.conflict_rename_error = None;
                 cx.stop_propagation();
                 cx.notify();
             }
             return;
         }
-        if self.conflict_rename.handle_keystroke(keystroke) == InputKeyResult::Handled {
-            self.conflict_rename_error = None;
+        if self
+            .modal_inputs
+            .conflict_rename
+            .handle_keystroke(keystroke)
+            == InputKeyResult::Handled
+        {
+            self.modal_inputs.conflict_rename_error = None;
             cx.stop_propagation();
             cx.notify();
         }
@@ -249,7 +254,7 @@ impl crate::workspace::Workspace {
             self.close_go_to_path(window, cx);
             return;
         }
-        if self.about_open {
+        if self.modal_inputs.about_open {
             self.close_about(window, cx);
             return;
         }
@@ -263,16 +268,16 @@ impl crate::workspace::Workspace {
             self.leave_settings(window, cx);
             return;
         }
-        if self.delete_confirm.is_some() {
+        if self.modal_inputs.delete_confirm.is_some() {
             self.cancel_delete_confirm(window, cx);
             return;
         }
-        if self.context_menu.is_some() {
+        if self.modal_inputs.context_menu.is_some() {
             self.close_context_menu(cx);
             self.focus_pane(self.focused_side, window, cx);
             return;
         }
-        if self.inline_edit.is_some() {
+        if self.modal_inputs.inline_edit.is_some() {
             self.cancel_inline_edit(cx);
             self.focus_pane(self.focused_side, window, cx);
             return;
@@ -300,12 +305,12 @@ impl crate::workspace::Workspace {
         if self.connect_form_ui.form.is_some()
             || self.active_host_key_prompt().is_some()
             || self.active_transfer_conflict_prompt().is_some()
-            || self.delete_confirm.is_some()
-            || self.inline_edit.is_some()
+            || self.modal_inputs.delete_confirm.is_some()
+            || self.modal_inputs.inline_edit.is_some()
         {
             return;
         }
-        self.about_open = false;
+        self.modal_inputs.about_open = false;
         self.go_to_path.open = true;
         self.go_to_path.input.clear();
         self.go_to_path.error = None;
@@ -323,10 +328,10 @@ impl crate::workspace::Workspace {
 
     /// Dismiss About and restore keyboard-usable pane focus.
     pub(crate) fn close_about(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.about_open {
+        if !self.modal_inputs.about_open {
             return;
         }
-        self.about_open = false;
+        self.modal_inputs.about_open = false;
         self.focus_pane(self.focused_side, window, cx);
         cx.notify();
     }
@@ -643,7 +648,7 @@ impl crate::workspace::Workspace {
                             // OpenProfiles is gated on connect_form being closed;
                             // dismiss Connect first so Settings Profiles can open.
                             workspace.close_connect_form(window, cx);
-                            workspace.about_open = false;
+                            workspace.modal_inputs.about_open = false;
                             workspace.surface = WorkspaceSurface::Settings;
                             workspace.set_settings_section(SettingsSection::Profiles, cx);
                             workspace.workspace_focus.focus(window);
@@ -1193,7 +1198,7 @@ impl crate::workspace::Workspace {
                                 .child(div().flex_1().min_w_0().child(text_field(
                                     "conflict-rename-input",
                                     TextFieldModel {
-                                        state: &self.conflict_rename,
+                                        state: &self.modal_inputs.conflict_rename,
                                         placeholder: "new file name",
                                         focused: true,
                                         masked: false,
@@ -1201,14 +1206,17 @@ impl crate::workspace::Workspace {
                                     cx,
                                 ))),
                         )
-                        .when_some(self.conflict_rename_error.clone(), |card, error| {
-                            card.child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(theme.colors.error)
-                                    .child(error),
-                            )
-                        })
+                        .when_some(
+                            self.modal_inputs.conflict_rename_error.clone(),
+                            |card, error| {
+                                card.child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .text_color(theme.colors.error)
+                                        .child(error),
+                                )
+                            },
+                        )
                         .child(
                             div()
                                 .flex()

@@ -954,10 +954,14 @@ mod tests {
         let (workspace, mut cx, _channels) = init_workspace(cx);
 
         cx.dispatch_action(ShowAbout);
-        workspace.read_with(&cx, |workspace, _| assert!(workspace.about_open));
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(workspace.modal_inputs.about_open)
+        });
 
         cx.dispatch_action(CancelActiveModal);
-        workspace.read_with(&cx, |workspace, _| assert!(!workspace.about_open));
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(!workspace.modal_inputs.about_open)
+        });
     }
 
     #[gpui::test]
@@ -966,9 +970,9 @@ mod tests {
         workspace.update_in(&mut cx, |ws, window, cx| {
             // Simulate focus having left the pane (e.g. after interacting with About).
             window.focus(&ws.modal_focus);
-            ws.about_open = true;
+            ws.modal_inputs.about_open = true;
             ws.cancel_active_modal(window, cx);
-            assert!(!ws.about_open, "Esc must close About");
+            assert!(!ws.modal_inputs.about_open, "Esc must close About");
             let pane = ws.pane_focus(ws.focused_side).clone();
             assert!(
                 pane.is_focused(window),
@@ -982,9 +986,9 @@ mod tests {
         let (workspace, mut cx, _channels) = init_workspace(cx);
         workspace.update_in(&mut cx, |ws, window, cx| {
             window.focus(&ws.modal_focus);
-            ws.about_open = true;
+            ws.modal_inputs.about_open = true;
             ws.close_about(window, cx);
-            assert!(!ws.about_open, "Close must dismiss About");
+            assert!(!ws.modal_inputs.about_open, "Close must dismiss About");
             let pane = ws.pane_focus(ws.focused_side).clone();
             assert!(
                 pane.is_focused(window),
@@ -1231,7 +1235,10 @@ mod tests {
         };
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.handle_app_event(AppEvent::TransferConflict(prompt.clone()), window, cx);
-            assert_eq!(workspace.conflict_rename.value(), "existing (copy).txt");
+            assert_eq!(
+                workspace.modal_inputs.conflict_rename.value(),
+                "existing (copy).txt"
+            );
             let pending = cx
                 .transfers()
                 .pending_conflicts
@@ -1243,12 +1250,15 @@ mod tests {
                 Some(macsftp_core::Timestamp::from_secs_since_epoch(42))
             );
 
-            workspace.conflict_rename.set_value("..");
+            workspace.modal_inputs.conflict_rename.set_value("..");
             workspace.submit_transfer_rename(false, window, cx);
-            assert!(workspace.conflict_rename_error.is_some());
+            assert!(workspace.modal_inputs.conflict_rename_error.is_some());
             assert!(workspace.active_transfer_conflict_prompt().is_some());
 
-            workspace.conflict_rename.set_value("renamed.txt");
+            workspace
+                .modal_inputs
+                .conflict_rename
+                .set_value("renamed.txt");
             workspace.submit_transfer_rename(true, window, cx);
         });
 
@@ -1270,7 +1280,7 @@ mod tests {
         );
         workspace.read_with(&cx, |workspace, _| {
             assert!(workspace.state.modals.active.is_empty());
-            assert!(workspace.conflict_rename_error.is_none());
+            assert!(workspace.modal_inputs.conflict_rename_error.is_none());
         });
     }
 
@@ -2153,7 +2163,7 @@ mod tests {
         // <edits_dir>/<run-id>/<session-id>/<filename>.
         let expected_temp = workspace.read_with(&cx, |workspace, cx| {
             assert!(
-                workspace.large_edit_confirm.is_none(),
+                workspace.modal_inputs.large_edit_confirm.is_none(),
                 "a small file must not raise the large-file confirmation"
             );
             let store = &cx.resources().edit_sessions;
@@ -2363,6 +2373,7 @@ mod tests {
         // a session yet.
         workspace.read_with(&cx, |workspace, cx| {
             let pending = workspace
+                .modal_inputs
                 .large_edit_confirm
                 .as_ref()
                 .expect("large file must arm the confirmation");
@@ -2401,7 +2412,7 @@ mod tests {
 
         workspace.read_with(&cx, |workspace, _| {
             assert!(
-                workspace.large_edit_confirm.is_none(),
+                workspace.modal_inputs.large_edit_confirm.is_none(),
                 "closing the owning tab must dismiss its large-file confirmation"
             );
         });
@@ -2427,6 +2438,7 @@ mod tests {
 
         workspace.read_with(&cx, |workspace, _| {
             let pending = workspace
+                .modal_inputs
                 .large_edit_confirm
                 .as_ref()
                 .expect("closing another tab must preserve the confirmation");
@@ -2455,7 +2467,7 @@ mod tests {
         });
         workspace.read_with(&cx, |workspace, _| {
             assert!(
-                workspace.large_edit_confirm.is_some(),
+                workspace.modal_inputs.large_edit_confirm.is_some(),
                 "large file must arm the confirmation"
             );
         });
@@ -2468,7 +2480,7 @@ mod tests {
 
         let expected_temp = workspace.read_with(&cx, |workspace, cx| {
             assert!(
-                workspace.large_edit_confirm.is_none(),
+                workspace.modal_inputs.large_edit_confirm.is_none(),
                 "confirming must clear the pending large-file edit"
             );
             let store = &cx.resources().edit_sessions;
@@ -2514,7 +2526,7 @@ mod tests {
             workspace.begin_edit(entry.path.clone(), entry.size, entry.modified_at, cx);
         });
         workspace.read_with(&cx, |workspace, _| {
-            assert!(workspace.large_edit_confirm.is_some());
+            assert!(workspace.modal_inputs.large_edit_confirm.is_some());
         });
 
         // While the modal is up, the tab reconnects → epoch bumps to 2. Complete
@@ -2594,7 +2606,7 @@ mod tests {
         // large-file confirmation).
         workspace.read_with(&cx, |workspace, cx| {
             assert!(
-                workspace.large_edit_confirm.is_none(),
+                workspace.modal_inputs.large_edit_confirm.is_none(),
                 "a small file must not raise the large-file confirmation"
             );
             let session = cx
@@ -2640,7 +2652,7 @@ mod tests {
         // A directory is not editable: no session, no command.
         workspace.read_with(&cx, |workspace, cx| {
             assert!(
-                workspace.large_edit_confirm.is_none(),
+                workspace.modal_inputs.large_edit_confirm.is_none(),
                 "a directory must not arm any edit confirmation"
             );
             assert!(
@@ -5002,6 +5014,7 @@ mod tests {
             workspace.focused_side = PaneSide::Local;
             workspace.request_delete_selection(window, cx);
             let confirm = workspace
+                .modal_inputs
                 .delete_confirm
                 .as_ref()
                 .expect("confirm modal open");
@@ -5033,7 +5046,7 @@ mod tests {
             }
             workspace.focused_side = PaneSide::Local;
             workspace.request_delete_selection(window, cx);
-            if let Some(state) = &mut workspace.delete_confirm {
+            if let Some(state) = &mut workspace.modal_inputs.delete_confirm {
                 state.dont_ask_again = true;
             }
             workspace.confirm_delete(window, cx);
@@ -5062,7 +5075,7 @@ mod tests {
                 tab.selection.selected_paths = vec![EntryPath::Local(path)];
             }
             workspace.request_delete_selection(window, cx);
-            assert!(workspace.delete_confirm.is_none());
+            assert!(workspace.modal_inputs.delete_confirm.is_none());
         });
         cx.run_until_parked();
         assert!(!fixture.join("second.txt").exists());
@@ -5078,7 +5091,7 @@ mod tests {
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.focused_side = PaneSide::Local;
             workspace.begin_new_folder(window, cx);
-            if let Some(edit) = &mut workspace.inline_edit {
+            if let Some(edit) = &mut workspace.modal_inputs.inline_edit {
                 edit.input.set_value("Created Folder");
             }
             workspace.submit_inline_edit(window, cx);
@@ -5102,7 +5115,7 @@ mod tests {
                 tab.selection.selected_paths = vec![EntryPath::Local(path)];
             }
             workspace.begin_rename_selection(window, cx);
-            if let Some(edit) = &mut workspace.inline_edit {
+            if let Some(edit) = &mut workspace.modal_inputs.inline_edit {
                 edit.input.set_value("Renamed Folder");
             }
             workspace.submit_inline_edit(window, cx);

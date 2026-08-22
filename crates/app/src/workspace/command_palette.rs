@@ -100,10 +100,10 @@ impl Workspace {
                 if self.connect_form_ui.form.is_none()
                     && self.active_host_key_prompt().is_none()
                     && self.active_transfer_conflict_prompt().is_none()
-                    && self.delete_confirm.is_none()
+                    && self.modal_inputs.delete_confirm.is_none()
                     && !self.go_to_path.open
                 {
-                    self.about_open = false;
+                    self.modal_inputs.about_open = false;
                     self.surface = WorkspaceSurface::Settings;
                     self.settings_section = crate::workspace::profiles::SettingsSection::General;
                     self.workspace_focus.focus(window);
@@ -114,10 +114,10 @@ impl Workspace {
                 if self.connect_form_ui.form.is_none()
                     && self.active_host_key_prompt().is_none()
                     && self.active_transfer_conflict_prompt().is_none()
-                    && self.delete_confirm.is_none()
+                    && self.modal_inputs.delete_confirm.is_none()
                     && !self.go_to_path.open
                 {
-                    self.about_open = false;
+                    self.modal_inputs.about_open = false;
                     self.surface = WorkspaceSurface::Settings;
                     self.set_settings_section(
                         crate::workspace::profiles::SettingsSection::Profiles,
@@ -131,10 +131,10 @@ impl Workspace {
                 if self.connect_form_ui.form.is_none()
                     && self.active_host_key_prompt().is_none()
                     && self.active_transfer_conflict_prompt().is_none()
-                    && self.delete_confirm.is_none()
+                    && self.modal_inputs.delete_confirm.is_none()
                     && !self.go_to_path.open
                 {
-                    self.about_open = true;
+                    self.modal_inputs.about_open = true;
                     cx.notify();
                 }
             }

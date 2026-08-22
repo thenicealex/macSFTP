@@ -546,11 +546,11 @@ impl crate::workspace::Workspace {
     fn filter_input_blocked(&self) -> bool {
         self.go_to_path.open
             || self.connect_form_ui.form.is_some()
-            || self.delete_confirm.is_some()
-            || self.inline_edit.is_some()
+            || self.modal_inputs.delete_confirm.is_some()
+            || self.modal_inputs.inline_edit.is_some()
             || self.active_host_key_prompt().is_some()
             || self.active_transfer_conflict_prompt().is_some()
-            || self.about_open
+            || self.modal_inputs.about_open
             || self.surface != WorkspaceSurface::Files
     }
 

@@ -228,6 +228,7 @@ impl crate::workspace::Workspace {
             .then(|| tab_state.and_then(|tab| tab.local.error.clone()))
             .flatten();
         let inline_edit_active = self
+            .modal_inputs
             .inline_edit
             .as_ref()
             .is_some_and(|edit| edit.side == side);
@@ -919,6 +920,7 @@ impl crate::workspace::Workspace {
             .track_focus(self.pane_focus(side))
             .on_key_down(cx.listener(move |workspace, event, window, cx| {
                 if workspace
+                    .modal_inputs
                     .inline_edit
                     .as_ref()
                     .is_some_and(|edit| edit.side == side)
@@ -1045,7 +1047,11 @@ impl crate::workspace::Workspace {
                 )
             })
             .when(inline_edit_active, |pane| {
-                let edit = self.inline_edit.as_ref().expect("checked active");
+                let edit = self
+                    .modal_inputs
+                    .inline_edit
+                    .as_ref()
+                    .expect("checked active");
                 let label = match &edit.kind {
                     crate::workspace::file_ops::InlineEditKind::Rename { .. } => "Rename",
                     crate::workspace::file_ops::InlineEditKind::NewFolder { .. } => "New Folder",
@@ -1135,7 +1141,7 @@ impl crate::workspace::Workspace {
             ))
     }
     pub(crate) fn render_about(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
-        if !self.about_open {
+        if !self.modal_inputs.about_open {
             return None;
         }
         let theme = cx.theme().clone();
