@@ -93,19 +93,16 @@ Stage 1/2 后 Workspace 仍有 ~50 个平铺 UI 字段，其中大量只在与�
 
 ---
 
-## Stage 4 — `workspace/mod.rs` → `workspace.rs`
+## Stage 4 — `workspace/mod.rs` → `workspace.rs`（✅ 已交付，见上方交付记录）
 
-AGENTS.md §2 明令禁止 mod.rs 路径，`crates/app/src/workspace/mod.rs` 是历史遗留违规。
-
-- 机制：`git mv crates/app/src/workspace/mod.rs crates/app/src/workspace.rs`；`main.rs` 的 `mod workspace;` 解析到平文件，子模块继续落在 `workspace/` 目录。零代码改动。
-- 搭载时机：Stage 3 第一个 commit 顺带执行（避免单独占一个 PR）。
+原执行备注（已按此完成）：`git mv` 平文件化 + 子模块目录不变；实际独立成首个 commit 而非搭载 Stage 3 首班车。
 
 ---
 
 ## 排期建议与依赖
 
 ```
-Stage 2（状态正确性，中）──► Stage 3（机械分组，分 8 个 commit）──► Stage 4（随 3 首班车）
+Stage 2（状态正确性，中）──► Stage 4（改名，先行）──► Stage 3（机械分组，分 8 个 commit）
 ```
 
 - Stage 2 先行：它是仅剩的"架构规则违规/秘密位置"议题，有真实正确性收益；Stage 3 是纯收益打磨。

@@ -1205,6 +1205,18 @@ impl Session {
                     std::mem::swap(&mut opening_cipher, &mut self.common.remote_to_local);
 
                     if buffer.buffer.len() < 5 {
+                        // macSFTP patch: the transport hit EOF — the peer (or
+                        // the network) closed it while we were still live.
+                        // Return a distinct error so the handler can classify
+                        // this as a remote/network failure instead of
+                        // conflating it with the intentional-teardown sentinel
+                        // below (both would otherwise surface as the same
+                        // `Error::Disconnect`).
+                        result = Err(crate::Error::IO(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "transport closed by peer",
+                        ))
+                        .into());
                         break
                     }
 
@@ -1246,6 +1258,10 @@ impl Session {
                         Some(msg) => self.handle_msg(msg)?,
                         None => {
                             self.common.disconnected = true;
+                            // macSFTP patch: explicit local-teardown sentinel
+                            // (all Handles dropped). Kept as `Error::Disconnect`
+                            // so macSFTP's handler can suppress it.
+                            result = Err(crate::Error::Disconnect.into());
                             break
                         }
                     };

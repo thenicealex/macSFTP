@@ -1168,10 +1168,12 @@ pub struct TabState {
     pub connection: ConnectionState,
     pub sort: FileSort,
     pub selection: SelectionState,
-    /// Cached credentials for reconnect-without-retyping on ephemeral
-    /// (unsaved-profile) connections; the persisted copy lives in the
-    /// Keychain. Zeroized on drop; Debug is fully redacted. MUST stay out of
-    /// any serialized surface (session snapshots take only host/port/user).
+    /// Cached credentials for reconnect-without-retyping. Populated for every
+    /// successful connect: for saved profiles this mirrors what was last
+    /// resolved from the Keychain, for manual entries it is the only copy and
+    /// never persists anywhere. Zeroized on drop; Debug is fully redacted.
+    /// MUST stay out of any serialized surface (session snapshots take only
+    /// host/port/user).
     /// Boxed: cold field, keeps TabSnapshot-carrying events compact.
     pub connection_settings: Option<Box<ConnectionSettings>>,
     pub nav: TabNavState,
