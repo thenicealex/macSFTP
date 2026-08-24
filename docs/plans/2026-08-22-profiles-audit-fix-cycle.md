@@ -33,17 +33,23 @@
 - **传输路由不按 profile**：`StartTransferCommand.profile_id` 只是元数据，
   runtime 按 `(tab_id, session_epoch)` 键控；manual 连接的 `ProfileId(0)`
   无混流风险。
+- **Keychain 孤儿 secret 不做自动清扫**（2026-08-22 决定）：触发条件罕见，
+  且 OS 后端 `set_generic_password` 对同 ref 是 upsert——最常见的孤儿来源
+  （profiles.json 丢失后重建同 id profile）会在新 secret 写入时自然覆盖。
+  反向代价不对称：误删的密码无副本可恢复；清扫设计必须处理
+  RecoveryRequired 时禁止扫描等边界，为一个几乎不触发的问题引入不可逆
+  删除路径不值得。若未来出现真实用户报告再重新评估。
+- **`last_local_path` 字段移除而非补全**（2026-08-22 决定，`fe2fd41`）：
+  plan §22-7 的「按 profile 记住上次本地目录」从未接线；跨会话持久化已由
+  session 快照按 tab 覆盖。实现需先解决 revision 豁免策略（自动记录路径会
+  搅动 AuthFingerprint 的池身份），边际价值不足以支撑；死字段已删除，
+  serde 双向兼容无需版本升级。
 
 ## 遗留开放项
 
 1. **交互式 GUI smoke 签字**：本周期全部 UI 改动（passphrase 策略切换等）
    仅由 gpui::test 驱动 dispatch 路径验证；需要一次人工交互式冒烟并归档到
-   `docs/release-evidence/`。
-2. **Keychain 孤儿 secret 清扫**：`KeychainStore` 目前无枚举能力；外部删除
-   profiles.json 后对应 secret 会永久残留。若立项需先给 macOS backend 加
-   枚举 API，且 store 处于 RecoveryRequired 时必须禁止清扫。
-3. **`last_local_path` 字段决策**：plan §22-7 提出按 profile 记住上次本地
-   目录，字段存在但从未被写入。需决定补全功能或移除字段。
+   `docs/release-evidence/`。这是当前唯一的开放项。
 
 ### 其他已知不一致（低优先级）
 
