@@ -5,9 +5,9 @@ use gpui::{
     Render, SharedString, Styled, Subscription, UniformListScrollHandle, Window, div, prelude::*,
 };
 use macsftp_core::{
-    AppCommand, AppState, CommandDispatchError, ConnectCommand, ConnectionPoolIdentity,
-    ConnectionSettings, ConnectionState, EntryPath, LocalPath, ProfileId, RemoteEventScope,
-    RemotePath, RemoteSnapshot, TabId, TabState, WindowSessionId,
+    AppCommand, AppState, CommandDispatchError, ConnectCommand, ConnectionKey,
+    ConnectionPoolIdentity, ConnectionSettings, ConnectionState, EntryPath, LocalPath, ProfileId,
+    RemoteEventScope, RemotePath, RemoteSnapshot, TabId, TabState, WindowSessionId,
 };
 use macsftp_sftp::RuntimeClient;
 use macsftp_storage::{
@@ -382,7 +382,7 @@ impl Workspace {
         // Tear down any edit sessions on this tab and delete their temp dirs.
         // A closed tab can never advance its edit sessions, and a lingering
         // session would block re-editing the file forever (find_active keys on
-        // profile+path, not tab).
+        // connection+path, not tab).
         cleanup_edit_sessions_for_tab(cx, tab_id);
         self.tab_mru.retain(|id| *id != tab_id);
         // Keep MRU front aligned with the newly active tab after close
@@ -733,6 +733,12 @@ impl Workspace {
             .and_then(|profile_id| cx.resources().profiles.auth_fingerprint(profile_id))
             .map(ConnectionPoolIdentity::Saved)
             .unwrap_or(ConnectionPoolIdentity::Ephemeral(session_id));
+        // The same key the pool derives from these settings for reuse
+        // decisions, captured once per attempt: remote-edit dedup must follow
+        // the physical connection as it was established, not re-derive it at
+        // edit time (a profile edited mid-connection would then change the
+        // key under a live connection).
+        let connection_key = ConnectionKey::new(&settings, pool_identity.clone());
         let sent = self.send_command(
             AppCommand::ConnectTab(ConnectCommand {
                 tab_id,
@@ -755,6 +761,7 @@ impl Workspace {
         if let Some(tab) = self.state.tabs.find_tab_mut(tab_id) {
             tab.title = settings.host.clone();
             tab.profile_id = profile_id;
+            tab.connection_key = Some(Box::new(connection_key));
             if is_reconnect {
                 tab.begin_reconnect(session_id);
             } else {

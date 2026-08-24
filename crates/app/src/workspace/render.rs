@@ -5,7 +5,7 @@ use gpui::{
 use macsftp_core::{ConnectionState, EntryPath, LocalPath, RemotePath};
 use macsftp_ui::{
     ActiveTheme, DragPreview, FileRowModel, IconName, TextFieldModel, connection_status,
-    empty_state, file_row, file_table_header, format_size, format_timestamp, icon_button,
+    empty_state, file_row, file_table_header, format_size_label, format_timestamp, icon_button,
     loading_state, tab, text_button, text_field, text_tooltip,
 };
 
@@ -323,62 +323,30 @@ impl crate::workspace::Workspace {
             } else {
                 theme.colors.border
             })
-            .child({
-                let hover_background = theme.colors.element_hover;
-                let active_background = theme.colors.element_active;
-                let label_color = if can_navigate_back {
-                    theme.colors.text_muted
-                } else {
-                    theme.colors.text_disabled
-                };
-                div()
-                    .id(back_id)
-                    .size(px(22.0))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .rounded_sm()
-                    .tooltip(text_tooltip(labeled_shortcut("Back", "NavigateBack")))
-                    .when(can_navigate_back, |button| {
-                        button
-                            .hover(|style| style.bg(hover_background))
-                            .active(|style| style.bg(active_background))
-                            .on_click(cx.listener(move |workspace, _event, window, cx| {
-                                workspace.focused_side = side;
-                                workspace.navigate_focused(HistoryOp::Back, window, cx);
-                            }))
-                    })
-                    .child(div().text_size(px(11.0)).text_color(label_color).child("◀"))
-            })
-            .child({
-                let hover_background = theme.colors.element_hover;
-                let active_background = theme.colors.element_active;
-                let label_color = if can_navigate_forward {
-                    theme.colors.text_muted
-                } else {
-                    theme.colors.text_disabled
-                };
-                div()
-                    .id(forward_id)
-                    .size(px(22.0))
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .justify_center()
-                    .rounded_sm()
-                    .tooltip(text_tooltip(labeled_shortcut("Forward", "NavigateForward")))
-                    .when(can_navigate_forward, |button| {
-                        button
-                            .hover(|style| style.bg(hover_background))
-                            .active(|style| style.bg(active_background))
-                            .on_click(cx.listener(move |workspace, _event, window, cx| {
-                                workspace.focused_side = side;
-                                workspace.navigate_focused(HistoryOp::Forward, window, cx);
-                            }))
-                    })
-                    .child(div().text_size(px(11.0)).text_color(label_color).child("▶"))
-            })
+            .child(
+                icon_button(
+                    back_id,
+                    IconName::ChevronLeft,
+                    labeled_shortcut("Back", "NavigateBack"),
+                )
+                .disabled(!can_navigate_back)
+                .on_click(cx.listener(move |workspace, _event, window, cx| {
+                    workspace.focused_side = side;
+                    workspace.navigate_focused(HistoryOp::Back, window, cx);
+                })),
+            )
+            .child(
+                icon_button(
+                    forward_id,
+                    IconName::ChevronRight,
+                    labeled_shortcut("Forward", "NavigateForward"),
+                )
+                .disabled(!can_navigate_forward)
+                .on_click(cx.listener(move |workspace, _event, window, cx| {
+                    workspace.focused_side = side;
+                    workspace.navigate_focused(HistoryOp::Forward, window, cx);
+                })),
+            )
             .child(
                 icon_button(
                     up_id,
@@ -661,19 +629,24 @@ impl crate::workspace::Workspace {
                 }
             }))
         };
+
         let recent_rows: Vec<(u64, SharedString)> = if side == PaneSide::Remote {
             cx.resources()
                 .recents
                 .entries()
                 .iter()
+                .take(6)
                 .map(|entry| (entry.id, SharedString::from(format_recent_label(entry))))
                 .collect()
         } else {
             Vec::new()
         };
+        // Keep idle/disconnected actions on a stable top-aligned axis. The
+        // unused pane height remains below the group instead of moving it.
         let remote_empty_with_recents =
-            |message: SharedString,
-             actions: Vec<macsftp_ui::TextButton>,
+            |title: Option<SharedString>,
+             detail: Option<SharedString>,
+             actions: Vec<gpui::AnyElement>,
              cx: &mut Context<Self>| {
                 let theme = cx.theme();
                 let rows = recent_rows.clone();
@@ -682,38 +655,131 @@ impl crate::workspace::Workspace {
                     .flex_col()
                     .flex_1()
                     .items_center()
-                    .justify_center()
-                    .gap_3()
-                    .child(empty_state(message, actions, cx))
-                    .when(!rows.is_empty(), |container| {
-                        container
+                    .pt(px(56.0))
+                    .px_3()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .w_full()
+                            .max_w(px(320.0))
+                            .when(title.is_some() || detail.is_some(), |container| {
+                                container.child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .items_center()
+                                        .gap_1()
+                                        .mb_4()
+                                        .when_some(title, |container, title| {
+                                            container.child(
+                                                div()
+                                                    .text_size(px(15.0))
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .text_color(theme.colors.text)
+                                                    .child(title),
+                                            )
+                                        })
+                                        .when_some(detail, |container, detail| {
+                                            container.child(
+                                                div()
+                                                    .text_size(px(13.0))
+                                                    .text_color(theme.colors.text_muted)
+                                                    .text_center()
+                                                    .child(detail),
+                                            )
+                                        }),
+                                )
+                            })
                             .child(
                                 div()
-                                    .text_size(px(12.0))
-                                    .text_color(theme.colors.text_muted)
-                                    .font_family(theme.fonts.ui_family.clone())
-                                    .child("Recent connections"),
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap_2()
+                                    .children(actions),
                             )
-                            .child(div().flex().flex_col().items_center().gap_2().children(
-                                rows.into_iter().map(|(id, label)| {
-                                    text_button(SharedString::from(format!("recent-{id}")), label)
-                                        .on_click(cx.listener(
-                                            move |workspace, _event, window, cx| {
-                                                workspace.open_recent_connection(id, window, cx);
-                                            },
-                                        ))
-                                }),
-                            ))
-                    })
+                            .when(!rows.is_empty(), |container| {
+                                container.child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .w_full()
+                                        .mt(px(26.0))
+                                        .child(
+                                            div()
+                                                .mb(px(8.0))
+                                                .text_size(px(11.0))
+                                                .text_color(theme.colors.text_muted)
+                                                .opacity(0.5)
+                                                .child("RECENT CONNECTIONS"),
+                                        )
+                                        .children(rows.into_iter().map(|(id, label)| {
+                                            div()
+                                                .id(SharedString::from(format!("recent-{id}")))
+                                                .flex()
+                                                .items_center()
+                                                .h(px(36.0))
+                                                .mb(px(2.0))
+                                                .px(px(10.0))
+                                                .rounded_md()
+                                                .cursor_pointer()
+                                                .hover(|style| style.bg(theme.colors.element_hover))
+                                                .active(|style| {
+                                                    style.bg(theme.colors.element_active)
+                                                })
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .text_size(px(13.0))
+                                                        .text_color(theme.colors.text)
+                                                        .child(label),
+                                                )
+                                                .on_click(cx.listener(
+                                                    move |workspace, _event, window, cx| {
+                                                        workspace
+                                                            .open_recent_connection(id, window, cx);
+                                                    },
+                                                ))
+                                        })),
+                                )
+                            }),
+                    )
                     .into_any_element()
             };
         let connection_placeholder: Option<gpui::AnyElement> = if side == PaneSide::Remote {
             match tab_state.map(|tab| &tab.connection) {
-                Some(ConnectionState::Empty) => Some(remote_empty_with_recents(
-                    "Not connected".into(),
-                    vec![connect_button("connect-remote", "Connect… (⌘⇧R)")],
-                    cx,
-                )),
+                Some(ConnectionState::Empty) => {
+                    let theme = cx.theme();
+                    let connect_action = div()
+                        .id("connect-remote")
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .w(px(160.0))
+                        .h(px(34.0))
+                        .px_3()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .bg(theme.colors.accent)
+                        .text_size(px(13.0))
+                        .text_color(theme.colors.background)
+                        .hover(|style| style.opacity(0.9))
+                        .child("Connect…")
+                        .child(div().opacity(0.6).child("⌘⇧R"))
+                        .on_click(cx.listener(|workspace, _event, window, cx| {
+                            workspace.request_connect(window, cx);
+                        }))
+                        .into_any_element();
+                    Some(remote_empty_with_recents(
+                        None,
+                        None,
+                        vec![connect_action],
+                        cx,
+                    ))
+                }
                 Some(ConnectionState::Connecting { .. } | ConnectionState::Reconnecting { .. }) => {
                     Some(
                         empty_state(
@@ -772,18 +838,20 @@ impl crate::workspace::Workspace {
                 Some(ConnectionState::Disconnected {
                     reason: macsftp_core::DisconnectReason::Error(error),
                 }) => Some(remote_empty_with_recents(
-                    format!("{} — {}", error.title, error.message).into(),
+                    Some(error.title.clone().into()),
+                    Some(error.message.clone().into()),
                     vec![
-                        connect_button("reconnect-remote", "Reconnect (⌘⇧R)"),
-                        edit_connection_button("edit-connection-disconnected"),
+                        connect_button("reconnect-remote", "Reconnect (⌘⇧R)").into_any_element(),
+                        edit_connection_button("edit-connection-disconnected").into_any_element(),
                     ],
                     cx,
                 )),
                 Some(ConnectionState::Disconnected { .. }) => Some(remote_empty_with_recents(
-                    "Disconnected".into(),
+                    Some("Disconnected".into()),
+                    None,
                     vec![
-                        connect_button("reconnect-remote", "Reconnect (⌘⇧R)"),
-                        edit_connection_button("edit-connection-disconnected"),
+                        connect_button("reconnect-remote", "Reconnect (⌘⇧R)").into_any_element(),
+                        edit_connection_button("edit-connection-disconnected").into_any_element(),
                     ],
                     cx,
                 )),
@@ -849,7 +917,7 @@ impl crate::workspace::Workspace {
                                             is_hidden: entry.name.starts_with('.'),
                                             selected: selected_paths
                                                 .contains(&EntryPath::Local(entry.path.clone())),
-                                            size_label: format_size(entry.size),
+                                            size_label: format_size_label(entry.kind, entry.size),
                                             modified_label: format_timestamp(entry.modified_at),
                                         },
                                         EntryPath::Local(entry.path.clone()),
@@ -864,7 +932,7 @@ impl crate::workspace::Workspace {
                                             is_hidden: entry.name.starts_with('.'),
                                             selected: selected_paths
                                                 .contains(&EntryPath::Remote(entry.path.clone())),
-                                            size_label: format_size(entry.size),
+                                            size_label: format_size_label(entry.kind, entry.size),
                                             modified_label: format_timestamp(entry.modified_at),
                                         },
                                         EntryPath::Remote(entry.path.clone()),

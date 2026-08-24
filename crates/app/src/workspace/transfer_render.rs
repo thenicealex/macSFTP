@@ -537,11 +537,11 @@ impl crate::workspace::Workspace {
         let theme = cx.theme().clone();
 
         let (status_color, status_text) = match self.active_tab() {
-            Some(tab) => {
-                let (color, label) = connection_status(&tab.connection, &theme);
-                (color, format!("{label} · {}", tab.title))
-            }
-            None => (theme.colors.text_disabled, "No connection".to_string()),
+            Some(tab) => connection_status(&tab.connection, &theme),
+            None => (
+                theme.colors.text_disabled,
+                SharedString::from("No connection"),
+            ),
         };
 
         let selected_count = self.focused_selection_count();
@@ -631,15 +631,7 @@ impl crate::workspace::Workspace {
                         } else {
                             theme.colors.text_muted
                         },
-                    ))
-                    .child(div().child(format!("{active_count} active")))
-                    .when(failed_count > 0, |row| {
-                        row.child(
-                            div()
-                                .text_color(theme.colors.error)
-                                .child(format!("· {failed_count} failed")),
-                        )
-                    }),
+                    )),
             )
     }
 }

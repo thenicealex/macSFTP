@@ -39,15 +39,15 @@ use crate::workspace::*;
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Entity, TestAppContext, VisualTestContext};
+    use gpui::{App, Entity, TestAppContext, VisualTestContext};
     use macsftp_core::{
         AppCommand, AppEvent, AuthCredential, AuthMethod, AuthMethodKind, ConflictDecision,
-        ConflictPolicy, ConflictRequestId, ConnectionPoolIdentity, ConnectionSettings,
-        ConnectionState, DisconnectReason, EditPhase, EntryPath, ErrorCode, FileKind,
-        FileSortField, HostKeyPrompt, LocalPath, MetadataPolicy, ProfileId, RemoteDirSnapshot,
-        RemoteEntry, RemoteEventScope, RemoteOperationFailure, RemotePath, RemoteScoped,
-        RestoredTabTarget, RuntimeBridgeConfig, SessionId, SortDirection, TabConnected,
-        TabDisconnected, TabId, Timestamp, TransferConflictPrompt, TransferDirection,
+        ConflictPolicy, ConflictRequestId, ConnectionKey, ConnectionPoolIdentity,
+        ConnectionSettings, ConnectionState, DisconnectReason, EditPhase, EntryPath, ErrorCode,
+        FileKind, FileSortField, HostKeyPrompt, LocalPath, MetadataPolicy, ProfileId,
+        RemoteDirSnapshot, RemoteEntry, RemoteEventScope, RemoteOperationFailure, RemotePath,
+        RemoteScoped, RestoredTabTarget, RuntimeBridgeConfig, SessionId, SortDirection,
+        TabConnected, TabDisconnected, TabId, Timestamp, TransferConflictPrompt, TransferDirection,
         TransferEndpoint, TransferId, TransferJob, TransferPlanId, TransferPlanProgress,
         TransferPlanSnapshot, TransferPlanState, TransferState, TrustRequestId, UserFacingError,
         WindowSessionId,
@@ -75,6 +75,7 @@ mod tests {
     use crate::resources::{ActiveResources, ActiveTransfers};
     use crate::session_coordinator::SessionCoordinator;
     use crate::workspace::ConflictChoice;
+    use crate::workspace::profiles::PassphrasePolicy;
     use crate::workspace::profiles::{SettingsSection, profile_matches_filter};
     use macsftp_core::HistoryOp;
     use macsftp_ui::InputState;
@@ -199,6 +200,17 @@ mod tests {
                 password: "secret".to_string(),
             },
         }
+    }
+
+    /// The connection identity a manual (`connect_with(test_settings(), None)`)
+    /// tab captures: the same key production derives in `connect_with` from
+    /// these settings and an ephemeral session id. Tests that need a different
+    /// physical connection build variants of it.
+    fn test_connection_key(session_id: SessionId) -> ConnectionKey {
+        ConnectionKey::new(
+            &test_settings(),
+            ConnectionPoolIdentity::Ephemeral(session_id),
+        )
     }
 
     #[gpui::test]
@@ -711,6 +723,76 @@ mod tests {
     }
 
     #[gpui::test]
+    fn profile_editor_passphrase_policy_round_trip_to_ask_every_time(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        workspace.update_in(&mut cx, |ws, _window, cx| {
+            let settings = ConnectionSettings {
+                host: "srv.example.com".into(),
+                port: 22,
+                username: "alex".into(),
+                auth: AuthCredential::PrivateKey {
+                    key_path: "~/.ssh/id_ed25519".into(),
+                    passphrase: Some("old-secret".into()),
+                },
+            };
+            match cx.resources_mut().profiles.save_connection_settings(
+                ProfileId(1),
+                "Keyed".into(),
+                &settings,
+            ) {
+                Ok(_) => {}
+                Err(error) => panic!("seed private-key profile: {error}"),
+            }
+
+            ws.surface = WorkspaceSurface::Settings;
+            ws.load_profile_editor(ProfileId(1), cx);
+
+            let editor = ws
+                .settings
+                .profile_editor
+                .as_mut()
+                .expect("load_profile_editor opens editor");
+            assert_eq!(editor.passphrase_policy, PassphrasePolicy::Remember);
+            assert!(editor.secret_present_hint);
+            assert!(
+                editor.passphrase.value().is_empty(),
+                "secrets are never prefilled"
+            );
+
+            // Switching to ask-every-time with an empty input drops the
+            // remembered secret while keeping the has-passphrase flag.
+            editor.passphrase_policy = PassphrasePolicy::AskEveryTime;
+            ws.save_profile_editor(cx);
+
+            let profile = cx
+                .resources()
+                .profiles
+                .find_profile(ProfileId(1))
+                .expect("profile kept after save");
+            let AuthMethod::PrivateKey {
+                has_passphrase,
+                passphrase_ref,
+                ..
+            } = &profile.auth
+            else {
+                panic!("expected private-key auth");
+            };
+            assert!(*has_passphrase, "the key still requires a passphrase");
+            assert!(
+                passphrase_ref.is_none(),
+                "remembered secret must be dropped"
+            );
+            let saved_secret = cx
+                .resources()
+                .profiles
+                .has_saved_secret(ProfileId(1))
+                .expect("keychain query succeeds");
+            assert!(!saved_secret);
+        });
+    }
+
+    #[gpui::test]
     fn settings_edit_host_keeps_keychain_secret_when_password_blank(cx: &mut TestAppContext) {
         let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -875,6 +957,80 @@ mod tests {
             assert!(
                 ws.settings.profile_editor.is_none(),
                 "editor closes when the selected profile is deleted and none remain"
+            );
+        });
+    }
+
+    /// Regression for the profiles-audit consistency risk: deleting a
+    /// profile used to leave recents entries and live tabs pointing at the
+    /// dead id. The stale recents linkage broke upsert dedupe (manual
+    /// reconnects created duplicate entries) and future session snapshots
+    /// kept propagating the dead reference.
+    #[gpui::test]
+    fn deleting_profile_decouples_recents_and_live_tabs(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        let profile_id = ProfileId(4);
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            let settings = ConnectionSettings {
+                host: "rec.example.com".into(),
+                port: 22,
+                username: "alex".into(),
+                auth: AuthCredential::Password {
+                    password: "hunter2".into(),
+                },
+            };
+            match cx.resources_mut().profiles.save_connection_settings(
+                profile_id,
+                "Prod".into(),
+                &settings,
+            ) {
+                Ok(_) => {}
+                Err(error) => panic!("seed profile: {error}"),
+            }
+            match cx
+                .resources_mut()
+                .recents
+                .upsert(macsftp_storage::RecentEntryInput {
+                    host: "rec.example.com".into(),
+                    port: 22,
+                    username: "alex".into(),
+                    profile_id: Some(profile_id.0),
+                    display_name: Some("Prod".into()),
+                    last_remote_path: Some("/home/alex".into()),
+                    last_connected_at: 100,
+                }) {
+                Ok(_) => {}
+                Err(error) => panic!("seed recent entry: {error}"),
+            }
+
+            {
+                let tab = ws.active_tab_mut().expect("default tab");
+                tab.profile_id = Some(profile_id);
+                tab.restored_target = Some(Box::new(RestoredTabTarget {
+                    host: "rec.example.com".into(),
+                    port: 22,
+                    username: "alex".into(),
+                    profile_id: Some(profile_id),
+                    remote_path: None,
+                }));
+            }
+
+            ws.request_delete_profile(profile_id, window, cx);
+            ws.confirm_delete_profile(window, cx);
+
+            // The recents entry survives as plain manual-connection history.
+            let entries = cx.resources().recents.entries();
+            assert_eq!(entries.len(), 1, "entry is kept, not removed");
+            assert_eq!(entries[0].profile_id, None, "stale link must be dropped");
+            assert_eq!(entries[0].display_name.as_deref(), Some("Prod"));
+
+            let tab = ws.active_tab_mut().expect("tab kept after delete");
+            assert_eq!(tab.profile_id, None, "live tab must lose the dead link");
+            assert_eq!(
+                tab.restored_target.as_ref().map(|target| target.profile_id),
+                Some(None),
+                "restored target must lose the dead link"
             );
         });
     }
@@ -2117,8 +2273,20 @@ mod tests {
         cx: &mut VisualTestContext,
         channels: &BridgeChannels,
     ) {
+        connect_and_drain_with(workspace, cx, channels, test_settings(), None);
+    }
+
+    /// `connect_and_drain` for an explicit settings/profile combination, e.g.
+    /// connecting through a saved profile.
+    fn connect_and_drain_with(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+        channels: &BridgeChannels,
+        settings: ConnectionSettings,
+        profile_id: Option<ProfileId>,
+    ) {
         workspace.update_in(cx, |workspace, window, cx| {
-            workspace.connect_with(test_settings(), None, window, cx);
+            workspace.connect_with(settings, profile_id, window, cx);
         });
         let _ = channels.command_rx.try_recv();
         let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
@@ -2135,6 +2303,50 @@ mod tests {
             );
         });
         while channels.command_rx.try_recv().is_ok() {}
+    }
+
+    /// Complete a pending (re)connect handshake on TabId(1) with the given
+    /// session id/epoch and drain the resulting command.
+    fn complete_connect(
+        workspace: &Entity<Workspace>,
+        cx: &mut VisualTestContext,
+        channels: &BridgeChannels,
+        session_id: SessionId,
+        epoch: u64,
+    ) {
+        let scope = RemoteEventScope::new(TabId(1), session_id, epoch);
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                AppEvent::TabConnected(RemoteScoped::new(
+                    scope,
+                    TabConnected {
+                        remote_root: RemotePath::new(TEST_REMOTE_ROOT),
+                    },
+                )),
+                window,
+                cx,
+            );
+        });
+        while channels.command_rx.try_recv().is_ok() {}
+    }
+
+    /// The connection key a tab captured at its last connect attempt, read
+    /// from inside a `read_with`/`update` closure (whose `cx` derefs to
+    /// `&App`).
+    fn tab_connection_key_in_cx(workspace: &Workspace, _cx: &App, tab_id: TabId) -> ConnectionKey {
+        workspace
+            .state
+            .tabs
+            .find_tab(tab_id)
+            .and_then(|tab| tab.connection_key.as_deref().cloned())
+            .expect("tab must hold a captured connection key")
+    }
+
+    /// The key the first manual `connect_with(test_settings(), None)` captures:
+    /// session ids are allocated from 1, so a fresh tab's first connection is
+    /// `Ephemeral(SessionId(1))`.
+    fn manual_connection_key() -> ConnectionKey {
+        test_connection_key(SessionId(1))
     }
 
     #[gpui::test]
@@ -2172,7 +2384,7 @@ mod tests {
             );
             let store = &cx.resources().edit_sessions;
             let session = store
-                .find_active(ProfileId(0), &entry.path)
+                .find_active(&manual_connection_key(), &entry.path)
                 .expect("small-file edit must register an active session");
             assert_eq!(session.phase, EditPhase::Downloading);
             assert!(session.active_transfer.is_none());
@@ -2232,6 +2444,7 @@ mod tests {
                 tab_id: TabId(1),
                 session_epoch: 1,
                 profile_id: ProfileId(0),
+                connection_key: manual_connection_key(),
                 local_temp_path: temp_path.clone(),
                 phase: EditPhase::Editing,
                 remote_snapshot: RemoteSnapshot {
@@ -2267,7 +2480,7 @@ mod tests {
             let session = cx
                 .resources()
                 .edit_sessions
-                .find_active(ProfileId(0), &remote_path)
+                .find_active(&manual_connection_key(), &remote_path)
                 .expect("the existing edit session remains active");
             assert_eq!(session.id, session_id);
             assert_eq!(session.phase, EditPhase::Editing);
@@ -2307,6 +2520,7 @@ mod tests {
                 tab_id: TabId(999),
                 session_epoch: 1,
                 profile_id: ProfileId(0),
+                connection_key: manual_connection_key(),
                 local_temp_path: stale_temp,
                 phase: EditPhase::Editing,
                 remote_snapshot: RemoteSnapshot {
@@ -2336,7 +2550,7 @@ mod tests {
             let fresh = cx
                 .resources()
                 .edit_sessions
-                .find_active(ProfileId(0), &remote_path)
+                .find_active(&manual_connection_key(), &remote_path)
                 .expect("orphaned session must be replaced by a fresh download");
             assert_ne!(fresh.id, stale_id);
             assert_eq!(fresh.phase, EditPhase::Downloading);
@@ -2386,7 +2600,7 @@ mod tests {
             assert!(
                 cx.resources()
                     .edit_sessions
-                    .find_active(ProfileId(0), &entry.path)
+                    .find_active(&manual_connection_key(), &entry.path)
                     .is_none(),
                 "no session may be registered before the user confirms"
             );
@@ -2489,7 +2703,7 @@ mod tests {
             );
             let store = &cx.resources().edit_sessions;
             let session = store
-                .find_active(ProfileId(0), &entry.path)
+                .find_active(&manual_connection_key(), &entry.path)
                 .expect("confirm must register an active download session");
             assert_eq!(session.phase, EditPhase::Downloading);
             session.local_temp_path.clone()
@@ -2616,7 +2830,7 @@ mod tests {
             let session = cx
                 .resources()
                 .edit_sessions
-                .find_active(ProfileId(0), &file_path)
+                .find_active(&manual_connection_key(), &file_path)
                 .expect("request_edit_selection on a remote file registers a session");
             assert_eq!(session.phase, EditPhase::Downloading);
         });
@@ -2662,7 +2876,7 @@ mod tests {
             assert!(
                 cx.resources()
                     .edit_sessions
-                    .find_active(ProfileId(0), &dir_path)
+                    .find_active(&manual_connection_key(), &dir_path)
                     .is_none(),
                 "selecting a directory must not register an edit session"
             );
@@ -2752,6 +2966,7 @@ mod tests {
                 tab_id: TabId(1),
                 session_epoch: 1,
                 profile_id: ProfileId(0),
+                connection_key: manual_connection_key(),
                 local_temp_path: temp_path,
                 phase: EditPhase::RemoteConflict,
                 remote_snapshot: RemoteSnapshot {
@@ -2891,7 +3106,7 @@ mod tests {
                 "discarding must remove the conflicted session"
             );
             let fresh = store
-                .find_active(ProfileId(0), &remote_path)
+                .find_active(&manual_connection_key(), &remote_path)
                 .expect("discard must re-register a fresh session");
             assert_eq!(fresh.phase, EditPhase::Downloading);
         });
@@ -2907,6 +3122,275 @@ mod tests {
         assert_eq!(
             command.sources,
             vec![TransferEndpoint::Remote(remote_path.clone())]
+        );
+    }
+
+    #[gpui::test]
+    fn edit_dedup_follows_captured_connection_key_not_profile_id(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        connect_and_drain(&workspace, &mut cx, &channels);
+
+        let remote_path = RemotePath::new("/srv/config.json");
+        workspace.update_in(&mut cx, |_workspace, _window, cx| {
+            // A live edit session opened through a DIFFERENT physical
+            // connection (another manual connection to another server) that
+            // happens to carry the same ProfileId(0) placeholder.
+            let id = cx.resources_mut().edit_sessions.next_id();
+            cx.resources_mut().edit_sessions.register(EditSession {
+                id,
+                remote_path: remote_path.clone(),
+                tab_id: TabId(99),
+                session_epoch: 1,
+                profile_id: ProfileId(0),
+                connection_key: test_connection_key(SessionId(7)),
+                local_temp_path: LocalPath::new("/tmp/edits/other/config.json"),
+                phase: EditPhase::Editing,
+                remote_snapshot: RemoteSnapshot {
+                    size: Some(10),
+                    modified_at: None,
+                },
+                local_mtime: None,
+                active_transfer: None,
+                pending_check_id: None,
+                checking_local_mtime: None,
+                missing_ticks: 0,
+            });
+        });
+        while channels.command_rx.try_recv().is_ok() {}
+
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            workspace.begin_edit(
+                remote_path.clone(),
+                Some(2_048),
+                Some(Timestamp::from_secs_since_epoch(100)),
+                cx,
+            );
+        });
+
+        // The foreign-connection session must not be reopened or block the
+        // edit; this connection downloads its own temp copy instead.
+        workspace.read_with(&cx, |_workspace, cx| {
+            let store = &cx.resources().edit_sessions;
+            assert_eq!(store.editing_sessions().count(), 1);
+            assert_eq!(
+                store
+                    .editing_sessions()
+                    .next()
+                    .map(|s| s.connection_key.clone()),
+                Some(test_connection_key(SessionId(7))),
+                "the foreign session must be untouched"
+            );
+            let fresh = store
+                .find_active(&manual_connection_key(), &remote_path)
+                .expect("this connection must start its own edit session")
+                .id;
+            assert_ne!(
+                fresh,
+                EditSessionId(1),
+                "the edit must not reuse the foreign session"
+            );
+            assert_eq!(
+                store.get(EditSessionId(1)).map(|s| s.phase.clone()),
+                Some(EditPhase::Editing)
+            );
+        });
+        assert!(
+            matches!(
+                channels.command_rx.try_recv(),
+                Ok(AppCommand::StartTransfer(_))
+            ),
+            "a different connection must dispatch a fresh download despite ProfileId(0)"
+        );
+    }
+
+    #[gpui::test]
+    fn saved_profile_host_change_does_not_hit_old_connections_edit(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+
+        // Connect through a saved profile (auth fingerprint → Saved identity).
+        workspace.update_in(&mut cx, |_workspace, _window, cx| {
+            let profile_settings = ConnectionSettings {
+                host: "old.example.com".into(),
+                port: 22,
+                username: "alex".into(),
+                auth: AuthCredential::Password {
+                    password: "profile-pass".into(),
+                },
+            };
+            match cx.resources_mut().profiles.save_connection_settings(
+                ProfileId(1),
+                "Prod".into(),
+                &profile_settings,
+            ) {
+                Ok(_) => {}
+                Err(error) => panic!("seed profile: {error}"),
+            }
+        });
+        connect_and_drain_with(
+            &workspace,
+            &mut cx,
+            &channels,
+            ConnectionSettings {
+                host: "old.example.com".into(),
+                port: 22,
+                username: "alex".into(),
+                auth: AuthCredential::Password {
+                    password: "profile-pass".into(),
+                },
+            },
+            Some(ProfileId(1)),
+        );
+
+        // A live edit from the old-host connection.
+        let remote_path = RemotePath::new("/srv/config.json");
+        let old_key = workspace.update(&mut cx, |workspace, cx| {
+            let key = tab_connection_key_in_cx(workspace, cx, TabId(1));
+            assert!(
+                matches!(key.identity, ConnectionPoolIdentity::Saved(_)),
+                "a saved-profile connection must capture a Saved identity"
+            );
+            let id = cx.resources_mut().edit_sessions.next_id();
+            cx.resources_mut().edit_sessions.register(EditSession {
+                id,
+                remote_path: remote_path.clone(),
+                tab_id: TabId(1),
+                session_epoch: 1,
+                profile_id: ProfileId(1),
+                connection_key: key.clone(),
+                local_temp_path: LocalPath::new("/tmp/edits/old/config.json"),
+                phase: EditPhase::Editing,
+                remote_snapshot: RemoteSnapshot {
+                    size: Some(10),
+                    modified_at: None,
+                },
+                local_mtime: None,
+                active_transfer: None,
+                pending_check_id: None,
+                checking_local_mtime: None,
+                missing_ticks: 0,
+            });
+            key
+        });
+        while channels.command_rx.try_recv().is_ok() {}
+
+        // The profile is re-pointed at another host mid-life; the tab then
+        // reconnects with the same profile id.
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            match cx.resources_mut().profiles.save_connection_settings(
+                ProfileId(1),
+                "Prod".into(),
+                &ConnectionSettings {
+                    host: "new.example.com".into(),
+                    port: 22,
+                    username: "alex".into(),
+                    auth: AuthCredential::Password {
+                        password: "profile-pass".into(),
+                    },
+                },
+            ) {
+                Ok(_) => {}
+                Err(error) => panic!("re-point profile: {error}"),
+            }
+            workspace.connect_with(
+                ConnectionSettings {
+                    host: "new.example.com".into(),
+                    port: 22,
+                    username: "alex".into(),
+                    auth: AuthCredential::Password {
+                        password: "profile-pass".into(),
+                    },
+                },
+                Some(ProfileId(1)),
+                window,
+                cx,
+            );
+        });
+        while channels.command_rx.try_recv().is_ok() {}
+        complete_connect(&workspace, &mut cx, &channels, SessionId(2), 2);
+
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            workspace.begin_edit(
+                remote_path.clone(),
+                Some(2_048),
+                Some(Timestamp::from_secs_since_epoch(100)),
+                cx,
+            );
+        });
+
+        workspace.read_with(&cx, |workspace, cx| {
+            let store = &cx.resources().edit_sessions;
+            let reconnected = store
+                .find_active(
+                    &tab_connection_key_in_cx(workspace, cx, TabId(1)),
+                    &remote_path,
+                )
+                .expect("the reconnected tab must open a fresh edit");
+            assert_eq!(reconnected.phase, EditPhase::Downloading);
+            assert_ne!(
+                reconnected.connection_key, old_key,
+                "the old connection's key must not match after the host change"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn reconnect_same_target_reuses_edit_session_for_upload(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        connect_and_drain(&workspace, &mut cx, &channels);
+
+        let remote_path = RemotePath::new("/home/tester/notes.txt");
+        let temp_path = LocalPath::new("/tmp/edits/notes.txt");
+        std::fs::create_dir_all(std::path::Path::new(temp_path.as_str()).parent().unwrap())
+            .unwrap();
+        std::fs::write(temp_path.as_str(), b"edited").unwrap();
+        let id =
+            register_conflict_session(&workspace, &mut cx, remote_path.clone(), temp_path.clone());
+        while channels.command_rx.try_recv().is_ok() {}
+
+        // Reconnect without changing host/user/auth: the epoch bumps but the
+        // captured ConnectionKey is identical.
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
+        });
+        while channels.command_rx.try_recv().is_ok() {}
+        complete_connect(&workspace, &mut cx, &channels, SessionId(2), 2);
+
+        workspace.update(&mut cx, |workspace, cx| {
+            assert!(workspace.owns_tab(TabId(1)));
+            let found = cx
+                .resources()
+                .edit_sessions
+                .find_active(&manual_connection_key(), &remote_path)
+                .expect("same-target reconnect must keep the session findable");
+            assert_eq!(found.id, id, "session survives the reconnect");
+            assert_eq!(
+                found.phase,
+                EditPhase::RemoteConflict,
+                "the conflict is preserved verbatim across the reconnect"
+            );
+
+            // The save-back upload path still works off the preserved session:
+            // resolve as overwrite and expect an upload command carrying the
+            // REFRESHED epoch.
+            workspace.resolve_edit_conflict(id, ConflictChoice::Overwrite, cx);
+        });
+        let command = channels
+            .command_rx
+            .try_recv()
+            .expect("overwrite must enqueue a StartTransfer upload");
+        let AppCommand::StartTransfer(command) = command else {
+            panic!("expected StartTransfer for upload, got {command:?}");
+        };
+        assert_eq!(command.direction, TransferDirection::Upload);
+        assert_eq!(command.session_epoch, 2, "upload must carry the new epoch");
+        assert_eq!(
+            command.profile_id,
+            ProfileId(0),
+            "transfer routing keeps the manual ProfileId(0) placeholder"
+        );
+        assert_eq!(
+            command.destination,
+            TransferEndpoint::Remote(remote_path.clone())
         );
     }
 
@@ -3170,6 +3654,7 @@ mod tests {
                 tab_id: TabId(1),
                 session_epoch: 1,
                 profile_id: ProfileId(1),
+                connection_key: manual_connection_key(),
                 local_temp_path: LocalPath::new("/tmp/edits/doc.txt"),
                 phase: EditPhase::Editing,
                 remote_snapshot: snapshot,
@@ -5323,6 +5808,7 @@ mod tests {
                 tab_id: TabId(2),
                 session_epoch: 1,
                 profile_id: ProfileId(1),
+                connection_key: manual_connection_key(),
                 local_temp_path: temp_path.clone(),
                 phase: EditPhase::Editing,
                 remote_snapshot: RemoteSnapshot {
@@ -5377,6 +5863,7 @@ mod tests {
                 tab_id: TabId(1),
                 session_epoch: 1,
                 profile_id: ProfileId(1),
+                connection_key: manual_connection_key(),
                 local_temp_path: temp_path,
                 phase: EditPhase::Editing,
                 remote_snapshot: RemoteSnapshot {

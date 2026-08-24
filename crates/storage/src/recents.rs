@@ -1,8 +1,9 @@
 use macsftp_core::LocalPath;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 use super::StorageError;
-use crate::write_private_file_atomically;
+use crate::{file_lock::FileLock, write_private_file_atomically};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecentEntry {
@@ -43,13 +44,10 @@ impl RecentsFile {
                     serde_json::from_str(&contents).map_err(|error| StorageError::Parse {
                         message: error.to_string(),
                     })?;
-                if parsed.version > Self::CURRENT_VERSION {
-                    return Err(StorageError::Parse {
-                        message: format!(
-                            "unsupported recents version {} (max {})",
-                            parsed.version,
-                            Self::CURRENT_VERSION
-                        ),
+                if parsed.version == 0 || parsed.version > Self::CURRENT_VERSION {
+                    return Err(StorageError::UnsupportedVersion {
+                        found: parsed.version,
+                        supported: Self::CURRENT_VERSION,
                     });
                 }
                 Ok(parsed)
@@ -149,7 +147,12 @@ impl RecentsStore {
 
     /// Upsert by `(host, port, username, profile_id)`; move to front; cap 20; save.
     pub fn upsert(&mut self, entry: RecentEntryInput) -> Result<(), StorageError> {
-        self.ensure_writable()?;
+        let _lock = self.acquire_write_lock()?;
+        // Reload under the lock so entries another app instance wrote since
+        // our last sync are merged into our view instead of being clobbered
+        // by this full-file rewrite.
+        self.file = RecentsFile::load(&self.path)?;
+        self.reconcile_next_id();
         let dedupe_matches = |existing: &RecentEntry| {
             existing.host == entry.host
                 && existing.port == entry.port
@@ -191,6 +194,55 @@ impl RecentsStore {
     pub fn save(&self) -> Result<(), StorageError> {
         self.ensure_writable()?;
         self.file.save(&self.path)
+    }
+
+    /// Start one serialized read-modify-write cycle: hold the advisory lock
+    /// until the returned guard drops, with the on-disk state freshly
+    /// loaded. Same pattern as `ProfileStore` transactions.
+    fn acquire_write_lock(&self) -> Result<FileLock, StorageError> {
+        self.ensure_writable()?;
+        FileLock::acquire(Path::new(self.path.as_str())).map_err(|error| StorageError::Io {
+            path: self.path.as_str().to_string(),
+            message: error.to_string(),
+        })
+    }
+
+    /// Another instance may have inserted entries while our snapshot was
+    /// stale; never hand out an id that collides with anything on disk.
+    fn reconcile_next_id(&mut self) {
+        let highest_on_disk = self
+            .file
+            .entries
+            .iter()
+            .map(|entry| entry.id)
+            .max()
+            .unwrap_or(0);
+        if self.next_id <= highest_on_disk {
+            self.next_id = highest_on_disk.saturating_add(1);
+        }
+    }
+
+    /// Drop the profile linkage from every entry referencing `profile_id`,
+    /// keeping the entries as plain manual-connection history (the cached
+    /// display label stays). Called when a profile is deleted: the stale
+    /// linkage would otherwise break the upsert dedupe key and turn the
+    /// next manual reconnect into a duplicate entry. Returns how many
+    /// entries were decoupled; the disk is only rewritten when something
+    /// changed.
+    pub fn forget_profile(&mut self, profile_id: u64) -> Result<usize, StorageError> {
+        let _lock = self.acquire_write_lock()?;
+        self.file = RecentsFile::load(&self.path)?;
+        let mut decoupled = 0;
+        for entry in &mut self.file.entries {
+            if entry.profile_id == Some(profile_id) {
+                entry.profile_id = None;
+                decoupled += 1;
+            }
+        }
+        if decoupled > 0 {
+            self.save()?;
+        }
+        Ok(decoupled)
     }
 }
 
@@ -303,6 +355,169 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(path.as_str()).expect("read preserved corrupt recents"),
             "{not json"
+        );
+    }
+
+    /// Deleting a profile must not leave recents entries pointing at a
+    /// dead profile id: the stale linkage breaks the upsert dedupe key, so
+    /// a later manual reconnect to the same server creates a duplicate
+    /// entry instead of updating the surviving one.
+    #[test]
+    fn forget_profile_decouples_entries_and_persists() {
+        let path = temp_path("forget-profile");
+        let mut store = RecentsStore::open_or_empty(path.clone());
+        for (host, profile_id) in [
+            ("with.example", Some(7u64)),
+            ("bare.example", None),
+            ("other.example", Some(7u64)),
+            ("another.example", Some(9u64)),
+        ] {
+            store
+                .upsert(RecentEntryInput {
+                    host: host.into(),
+                    port: 22,
+                    username: "alex".into(),
+                    profile_id,
+                    display_name: Some("Prod".into()),
+                    last_remote_path: Some("/home/alex".into()),
+                    last_connected_at: 1,
+                })
+                .expect("seed entry");
+        }
+
+        let decoupled = store.forget_profile(7).expect("forget profile 7");
+
+        assert_eq!(decoupled, 2);
+        let linked: Vec<&str> = store
+            .entries()
+            .iter()
+            .filter(|entry| entry.profile_id == Some(7))
+            .map(|entry| entry.host.as_str())
+            .collect();
+        assert!(linked.is_empty(), "no entry may keep the deleted link");
+        // The entries themselves survive as plain manual-connection history,
+        // keeping their cached display label and other metadata.
+        let former = store
+            .entries()
+            .iter()
+            .find(|entry| entry.host == "with.example")
+            .expect("decoupled entry is kept, not removed");
+        assert_eq!(former.profile_id, None);
+        assert_eq!(former.display_name.as_deref(), Some("Prod"));
+        assert_eq!(
+            store.entries()[0].profile_id,
+            Some(9),
+            "unrelated links stay untouched"
+        );
+
+        // The decoupling survives a reload.
+        let reloaded = RecentsStore::open(path.clone()).expect("reload");
+        assert!(
+            reloaded
+                .entries()
+                .iter()
+                .all(|entry| entry.profile_id != Some(7))
+        );
+    }
+
+    #[test]
+    fn forget_profile_without_matches_skips_rewrite() {
+        let path = temp_path("forget-noop");
+        let mut store = RecentsStore::open_or_empty(path.clone());
+        store
+            .upsert(sample_input("a.example", 1))
+            .expect("seed entry");
+        let before = std::fs::read_to_string(path.as_str()).expect("read before");
+
+        let decoupled = store.forget_profile(42).expect("forget absent profile");
+
+        assert_eq!(decoupled, 0);
+        assert_eq!(
+            std::fs::read_to_string(path.as_str()).expect("read after"),
+            before,
+            "nothing changed on disk"
+        );
+    }
+
+    /// Two store instances (two app processes) must not silently overwrite
+    /// each other's entries: the second writer reloads under the advisory
+    /// lock before mutating, so both upserts survive.
+    #[test]
+    fn concurrent_instances_do_not_silently_lose_recents() {
+        let path = temp_path("concurrent");
+        let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
+        let mut first = RecentsStore::open_or_empty(path.clone());
+        let mut second = RecentsStore::open_or_empty(path.clone());
+
+        first
+            .upsert(sample_input("a.example", 100))
+            .expect("first instance upsert");
+        // `second` was opened before the seed; its stale in-memory snapshot
+        // must not erase what `first` wrote.
+        second
+            .upsert(sample_input("b.example", 200))
+            .expect("second instance upsert");
+
+        let reloaded = RecentsStore::open(path.clone()).expect("reload after both writes");
+        let hosts: Vec<&str> = reloaded
+            .entries()
+            .iter()
+            .map(|entry| entry.host.as_str())
+            .collect();
+        assert!(
+            hosts.contains(&"a.example") && hosts.contains(&"b.example"),
+            "both instances' entries must survive, got {hosts:?}"
+        );
+
+        // Ids stay unique across instances even after concurrent inserts.
+        let mut ids: Vec<u64> = reloaded.entries().iter().map(|entry| entry.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), reloaded.entries().len(), "ids must not collide");
+
+        let _ = std::fs::remove_file(path.as_str());
+        let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
+    }
+
+    #[test]
+    fn newer_recents_version_reports_unsupported_version() {
+        let path = temp_path("future-version");
+        std::fs::write(
+            path.as_str(),
+            r#"{"version": 99, "entries": [], "future_field": true}"#,
+        )
+        .expect("write future recents fixture");
+        let raw_before = std::fs::read(path.as_str()).expect("read fixture before");
+
+        // A file written by a NEWER release is not "corrupt": the recovery
+        // guidance is fundamentally different (upgrade vs restore), so it
+        // must be classified as UnsupportedVersion, not Parse.
+        let error = RecentsStore::open(path.clone())
+            .err()
+            .expect("future version must be rejected");
+        assert!(matches!(
+            &error,
+            StorageError::UnsupportedVersion { found: 99, .. }
+        ));
+        assert_eq!(
+            match error {
+                StorageError::UnsupportedVersion { supported, .. } => supported,
+                _ => unreachable!("checked above"),
+            },
+            RecentsFile::CURRENT_VERSION
+        );
+
+        // The unreadable file still blocks writes instead of being replaced.
+        let mut blocked = RecentsStore::open_or_empty(path.clone());
+        assert!(blocked.initial_error().is_some());
+        assert!(matches!(
+            blocked.upsert(sample_input("x.example", 1)),
+            Err(StorageError::RecoveryRequired { .. })
+        ));
+        assert_eq!(
+            std::fs::read(path.as_str()).expect("read fixture after"),
+            raw_before,
+            "future-version bytes must be preserved"
         );
     }
 

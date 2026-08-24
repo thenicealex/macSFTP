@@ -1,7 +1,8 @@
 use macsftp_core::LocalPath;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
-use crate::write_private_file_atomically;
+use crate::{file_lock::FileLock, write_private_file_atomically};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -77,6 +78,18 @@ pub struct ConfigStore {
 
 impl ConfigStore {
     pub fn open(path: LocalPath) -> Result<Self, ConfigError> {
+        let config = Self::load_from_disk(&path)?;
+        Ok(Self {
+            path,
+            config,
+            initial_error: None,
+        })
+    }
+
+    /// Read the config file from disk, treating a missing file as defaults.
+    /// Shared by `open` and the locked write transaction so both enforce the
+    /// same version guard.
+    fn load_from_disk(path: &LocalPath) -> Result<AppConfig, ConfigError> {
         let config = match std::fs::read_to_string(path.as_str()) {
             Ok(contents) => {
                 serde_json::from_str(&contents).map_err(|error| ConfigError::Parse {
@@ -98,12 +111,7 @@ impl ConfigStore {
                 supported: AppConfig::CURRENT_VERSION,
             });
         }
-
-        Ok(Self {
-            path,
-            config,
-            initial_error: None,
-        })
+        Ok(config)
     }
 
     /// Fallback used after a read error. It keeps the original path but does
@@ -132,52 +140,55 @@ impl ConfigStore {
         self.initial_error.as_ref()
     }
 
-    pub fn set_appearance(&mut self, appearance: AppearancePreference) -> Result<(), ConfigError> {
-        let previous = self.config.appearance;
-        self.config.appearance = appearance;
-        let result = self.save();
-        if result.is_ok() {
-            self.initial_error = None;
-        } else {
-            self.config.appearance = previous;
+    /// Apply one field change through a serialized read-modify-write cycle:
+    /// hold the advisory lock, reload what other app instances wrote, apply,
+    /// save. On any failure the in-memory snapshot is rolled back so it
+    /// never claims a state that did not reach disk.
+    fn modify(&mut self, apply: impl FnOnce(&mut AppConfig)) -> Result<(), ConfigError> {
+        let previous = self.config.clone();
+        let result = self.modify_under_lock(apply);
+        match result {
+            Ok(()) => {
+                self.initial_error = None;
+                Ok(())
+            }
+            Err(error) => {
+                self.config = previous;
+                Err(error)
+            }
         }
-        result
+    }
+
+    fn modify_under_lock(&mut self, apply: impl FnOnce(&mut AppConfig)) -> Result<(), ConfigError> {
+        if self.initial_error.is_some() {
+            return Err(ConfigError::RecoveryRequired {
+                path: self.path.as_str().to_string(),
+            });
+        }
+        let _lock =
+            FileLock::acquire(Path::new(self.path.as_str())).map_err(|error| ConfigError::Io {
+                path: self.path.as_str().to_string(),
+                message: error.to_string(),
+            })?;
+        self.config = Self::load_from_disk(&self.path)?;
+        apply(&mut self.config);
+        self.save()
+    }
+
+    pub fn set_appearance(&mut self, appearance: AppearancePreference) -> Result<(), ConfigError> {
+        self.modify(|config| config.appearance = appearance)
     }
 
     pub fn set_confirm_delete(&mut self, confirm_delete: bool) -> Result<(), ConfigError> {
-        let previous = self.config.confirm_delete;
-        self.config.confirm_delete = confirm_delete;
-        let result = self.save();
-        if result.is_ok() {
-            self.initial_error = None;
-        } else {
-            self.config.confirm_delete = previous;
-        }
-        result
+        self.modify(|config| config.confirm_delete = confirm_delete)
     }
 
     pub fn set_show_hidden_files(&mut self, show_hidden_files: bool) -> Result<(), ConfigError> {
-        let previous = self.config.show_hidden_files;
-        self.config.show_hidden_files = show_hidden_files;
-        let result = self.save();
-        if result.is_ok() {
-            self.initial_error = None;
-        } else {
-            self.config.show_hidden_files = previous;
-        }
-        result
+        self.modify(|config| config.show_hidden_files = show_hidden_files)
     }
 
     pub fn set_external_editor(&mut self, editor: Option<String>) -> Result<(), ConfigError> {
-        let previous = self.config.external_editor.clone();
-        self.config.external_editor = editor;
-        let result = self.save();
-        if result.is_ok() {
-            self.initial_error = None;
-        } else {
-            self.config.external_editor = previous;
-        }
-        result
+        self.modify(|config| config.external_editor = editor)
     }
 
     fn save(&self) -> Result<(), ConfigError> {
@@ -251,6 +262,43 @@ mod tests {
         let restored = ConfigStore::open(path.clone()).expect("saved config should reload");
         assert_eq!(restored.config().appearance, AppearancePreference::Dark);
         cleanup(&path);
+    }
+
+    #[test]
+    fn concurrent_instances_do_not_silently_lose_config_toggles() {
+        let path = temp_config_path("concurrent");
+        let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
+        cleanup(&path);
+        std::fs::write(
+            path.as_str(),
+            r#"{"version":1,"appearance":"system","confirm_delete":true,"show_hidden_files":false}"#,
+        )
+        .expect("seed config");
+
+        // Both instances open before either writes: their snapshots predate
+        // each other's change.
+        let mut first = ConfigStore::open(path.clone()).expect("first instance");
+        let mut second = ConfigStore::open(path.clone()).expect("second instance");
+
+        first
+            .set_appearance(AppearancePreference::Dark)
+            .expect("first instance saves appearance");
+        second
+            .set_show_hidden_files(true)
+            .expect("second instance saves hidden files");
+
+        let final_config = ConfigStore::open(path.clone())
+            .expect("reload after both writes")
+            .config()
+            .clone();
+        assert_eq!(
+            final_config.appearance,
+            AppearancePreference::Dark,
+            "second writer must not erase the first writer's change"
+        );
+        assert!(final_config.show_hidden_files);
+        cleanup(&path);
+        let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
     }
 
     #[test]

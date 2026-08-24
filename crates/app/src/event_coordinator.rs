@@ -106,14 +106,16 @@ fn dispatch_event(event: AppEvent, cx: &mut App) {
 
     match event {
         AppEvent::ResidualTempCreated(record) => {
-            cx.resources_mut().residual_temps.add(record);
-            if let Err(error) = cx.resources_mut().residual_temps.save() {
+            if let Err(error) = cx.resources_mut().residual_temps.add_and_save(record) {
                 warn!(error = %error, "could not persist residual temp record");
             }
         }
         AppEvent::ResidualTempCleared { transfer_id, path } => {
-            cx.resources_mut().residual_temps.remove(transfer_id, &path);
-            if let Err(error) = cx.resources_mut().residual_temps.save() {
+            if let Err(error) = cx
+                .resources_mut()
+                .residual_temps
+                .remove_and_save(transfer_id, &path)
+            {
                 warn!(error = %error, "could not update residual temp store");
             }
         }
@@ -603,11 +605,12 @@ fn conflict_prompt(conflict: ConflictRequest) -> TransferConflictPrompt {
 mod tests {
     use gpui::{TestAppContext, WindowHandle};
     use macsftp_core::{
-        AppCommand, AppEvent, ConflictPolicy, ConflictRequestId, ConnectionState, EditCheckId,
-        EditPhase, EditSession, EditSessionId, ErrorCode, FileKind, LocalPath, MetadataPolicy,
-        ProfileId, RemoteEditSnapshotCheckFailed, RemoteEditSnapshotChecked,
-        RemoteEditSnapshotDispatchFailed, RemoteEntry, RemoteEventScope, RemotePath, RemoteScoped,
-        RemoteSnapshot, RuntimeBridgeConfig, SessionId, TabId, Timestamp, TransferConflictPrompt,
+        AppCommand, AppEvent, AuthCredential, ConflictPolicy, ConflictRequestId, ConnectionKey,
+        ConnectionPoolIdentity, ConnectionSettings, ConnectionState, EditCheckId, EditPhase,
+        EditSession, EditSessionId, ErrorCode, FileKind, LocalPath, MetadataPolicy, ProfileId,
+        RemoteEditSnapshotCheckFailed, RemoteEditSnapshotChecked, RemoteEditSnapshotDispatchFailed,
+        RemoteEntry, RemoteEventScope, RemotePath, RemoteScoped, RemoteSnapshot,
+        RuntimeBridgeConfig, SessionId, TabId, Timestamp, TransferConflictPrompt,
         TransferDirection, TransferEndpoint, TransferFailure, TransferId, TransferJob,
         TransferPlan, TransferPlanId, TransferPlanProgress, TransferPlanSnapshot,
         TransferPlanState, TransferSnapshot, TransferState, UserFacingError, WindowSessionId,
@@ -629,6 +632,23 @@ mod tests {
     fn mock_edit_opener(_temp: &LocalPath, _editor: Option<&str>) -> std::io::Result<()> {
         OPENER_CALLS.with(|calls| calls.set(calls.get() + 1));
         Ok(())
+    }
+
+    /// The saved-profile connection identity shared by every edit fixture in
+    /// this module; the coordinator never reads it, but `EditSession` requires
+    /// a well-formed key.
+    fn test_connection_key() -> ConnectionKey {
+        ConnectionKey::new(
+            &ConnectionSettings {
+                host: "srv.example.com".into(),
+                port: 22,
+                username: "alex".into(),
+                auth: AuthCredential::Password {
+                    password: "unused".into(),
+                },
+            },
+            ConnectionPoolIdentity::Ephemeral(SessionId(1)),
+        )
     }
 
     /// Register a `Downloading` edit session whose temp path is a real file on
@@ -662,6 +682,7 @@ mod tests {
                 tab_id: TabId(1),
                 session_epoch: 1,
                 profile_id: ProfileId(1),
+                connection_key: test_connection_key(),
                 local_temp_path: temp_path.clone(),
                 phase: EditPhase::Downloading,
                 remote_snapshot: RemoteSnapshot {
@@ -724,6 +745,7 @@ mod tests {
                 tab_id: TabId(1),
                 session_epoch: 1,
                 profile_id: ProfileId(1),
+                connection_key: test_connection_key(),
                 local_temp_path: temp_path.clone(),
                 phase: EditPhase::UploadingBack,
                 remote_snapshot: baseline,
@@ -1273,6 +1295,7 @@ mod tests {
                 tab_id: TabId(1),
                 session_epoch: 1,
                 profile_id: ProfileId(1),
+                connection_key: test_connection_key(),
                 local_temp_path: temp_path.clone(),
                 phase: EditPhase::CheckingRemote,
                 remote_snapshot: baseline,

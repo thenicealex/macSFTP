@@ -487,6 +487,27 @@ impl crate::workspace::Workspace {
                     );
                 }
                 if outcome.deleted {
+                    // Decouple cross-store references so no recents entry,
+                    // live tab, or future session snapshot keeps pointing at
+                    // the deleted id. Best-effort like the Keychain cleanup:
+                    // a failure here must not hide the successful deletion.
+                    if let Err(error) = cx.resources_mut().recents.forget_profile(profile_id.0) {
+                        warn!(
+                            ?profile_id,
+                            %error,
+                            "could not decouple recents from deleted profile"
+                        );
+                    }
+                    for tab in self.state.tabs.tabs.iter_mut() {
+                        if tab.profile_id == Some(profile_id) {
+                            tab.profile_id = None;
+                        }
+                        if let Some(target) = tab.restored_target.as_mut()
+                            && target.profile_id == Some(profile_id)
+                        {
+                            target.profile_id = None;
+                        }
+                    }
                     self.status_message = Some("Deleted profile.".into());
                 }
             }

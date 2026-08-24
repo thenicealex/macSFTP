@@ -9,7 +9,9 @@ use macsftp_ui::{
 use tracing::warn;
 
 use crate::resources::ActiveResources;
-use crate::workspace::profiles::{ProfileEditorField, SettingsSection, profile_list_label};
+use crate::workspace::profiles::{
+    PassphrasePolicy, ProfileEditorField, SettingsSection, profile_list_label,
+};
 use macsftp_storage::AppearancePreference;
 
 impl crate::workspace::Workspace {
@@ -256,6 +258,7 @@ impl crate::workspace::Workspace {
                             .font_weight(FontWeight::MEDIUM)
                             .child("Settings"),
                     )
+                    .child(div().flex_1())
                     .child(text_button("settings-done", "Done").on_click(cx.listener(
                         |workspace, _event, window, cx| {
                             workspace.leave_settings(window, cx);
@@ -549,6 +552,22 @@ impl crate::workspace::Workspace {
                 }))
         };
 
+        let passphrase_policy_toggle =
+            |label: &'static str,
+             policy: PassphrasePolicy,
+             id: &'static str,
+             active: PassphrasePolicy,
+             cx: &mut Context<Self>| {
+                text_button(id, label)
+                    .primary(active == policy)
+                    .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                        if let Some(editor) = workspace.settings.profile_editor.as_mut() {
+                            editor.set_passphrase_policy(policy);
+                            cx.notify();
+                        }
+                    }))
+            };
+
         let focused = editor.focused_field;
         let auth_method = editor.auth_method;
         let title = if editor.is_new {
@@ -669,8 +688,9 @@ impl crate::workspace::Workspace {
                 focused,
                 cx,
             )),
-            AuthMethodKind::PrivateKey => form
-                .child(field_row(
+            AuthMethodKind::PrivateKey => {
+                let policy = editor.passphrase_policy;
+                form.child(field_row(
                     "Key path",
                     ProfileEditorField::KeyPath,
                     &editor.key_path,
@@ -679,19 +699,64 @@ impl crate::workspace::Workspace {
                     focused,
                     cx,
                 ))
-                .child(field_row(
-                    "Passphrase",
-                    ProfileEditorField::Passphrase,
-                    editor.passphrase.as_input_state(),
-                    if editor.secret_present_hint {
-                        "leave blank to keep"
-                    } else {
-                        ""
-                    },
-                    true,
-                    focused,
-                    cx,
-                )),
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .w(px(120.0))
+                                .flex_none()
+                                .text_size(px(11.0))
+                                .text_color(theme.colors.text_muted)
+                                .child("Passphrase"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(passphrase_policy_toggle(
+                                    "None",
+                                    PassphrasePolicy::NoPassphrase,
+                                    "profile-pass-none",
+                                    policy,
+                                    cx,
+                                ))
+                                .child(passphrase_policy_toggle(
+                                    "Ask every time",
+                                    PassphrasePolicy::AskEveryTime,
+                                    "profile-pass-ask",
+                                    policy,
+                                    cx,
+                                ))
+                                .child(passphrase_policy_toggle(
+                                    "Remember",
+                                    PassphrasePolicy::Remember,
+                                    "profile-pass-remember",
+                                    policy,
+                                    cx,
+                                )),
+                        ),
+                )
+                .when(policy != PassphrasePolicy::NoPassphrase, |form| {
+                    let placeholder = match (policy, editor.secret_present_hint) {
+                        (PassphrasePolicy::Remember, true) => "leave blank to keep",
+                        (PassphrasePolicy::AskEveryTime, _) => "not saved — enter it each time",
+                        (PassphrasePolicy::Remember, false) => "",
+                        (PassphrasePolicy::NoPassphrase, _) => "",
+                    };
+                    form.child(field_row(
+                        "Value",
+                        ProfileEditorField::Passphrase,
+                        editor.passphrase.as_input_state(),
+                        placeholder,
+                        true,
+                        focused,
+                        cx,
+                    ))
+                })
+            }
         };
 
         form = form.child(field_row(
@@ -705,11 +770,17 @@ impl crate::workspace::Workspace {
         ));
 
         if editor.secret_present_hint {
+            let note = match (editor.auth_method, editor.passphrase_policy) {
+                (AuthMethodKind::PrivateKey, PassphrasePolicy::NoPassphrase) => {
+                    "Saving will remove the remembered passphrase from the Keychain."
+                }
+                _ => "Credentials are stored in the Keychain. Leave blank to keep.",
+            };
             form = form.child(
                 div()
                     .text_size(px(11.0))
                     .text_color(theme.colors.text_muted)
-                    .child("Credentials are stored in the Keychain. Leave blank to keep."),
+                    .child(note),
             );
         }
 

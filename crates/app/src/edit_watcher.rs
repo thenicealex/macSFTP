@@ -262,8 +262,9 @@ pub(crate) fn revert_stranded_upload(
 mod tests {
     use gpui::{TestAppContext, WindowHandle};
     use macsftp_core::{
-        AppCommand, ConnectionState, DisconnectReason, EditCheckId, EditPhase, EditSession,
-        EditSessionId, FileKind, LocalPath, ProfileId, RemoteEntry, RemotePath, RemoteSnapshot,
+        AppCommand, AuthCredential, ConnectionKey, ConnectionPoolIdentity, ConnectionSettings,
+        ConnectionState, DisconnectReason, EditCheckId, EditPhase, EditSession, EditSessionId,
+        FileKind, LocalPath, ProfileId, RemoteEntry, RemotePath, RemoteSnapshot,
         RuntimeBridgeConfig, SessionId, TabId, Timestamp, WindowSessionId,
     };
     use macsftp_platform::AppPaths;
@@ -339,6 +340,22 @@ mod tests {
         (window, channels)
     }
 
+    /// The connection identity every seeded edit session carries; the watcher
+    /// never reads it, but `EditSession` requires a well-formed key.
+    fn test_connection_key() -> ConnectionKey {
+        ConnectionKey::new(
+            &ConnectionSettings {
+                host: "srv.example.com".into(),
+                port: 22,
+                username: "alex".into(),
+                auth: AuthCredential::Password {
+                    password: "unused".into(),
+                },
+            },
+            ConnectionPoolIdentity::Ephemeral(SessionId(1)),
+        )
+    }
+
     /// Register an `Editing` session pointing at a real temp file on disk.
     fn seed_editing_session(
         cx: &mut TestAppContext,
@@ -365,6 +382,7 @@ mod tests {
                 tab_id: TabId(1),
                 session_epoch: 1,
                 profile_id: ProfileId(1),
+                connection_key: test_connection_key(),
                 local_temp_path: temp_path.clone(),
                 phase: EditPhase::Editing,
                 remote_snapshot: snapshot,

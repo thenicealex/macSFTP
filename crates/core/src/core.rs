@@ -376,7 +376,6 @@ pub struct ConnectionProfile {
     pub auth: AuthMethod,
     pub default_remote_path: Option<RemotePath>,
     pub group_id: Option<ProfileGroupId>,
-    pub last_local_path: Option<LocalPath>,
 }
 
 impl ConnectionProfile {
@@ -397,7 +396,6 @@ impl ConnectionProfile {
             auth,
             default_remote_path: None,
             group_id: None,
-            last_local_path: None,
         }
     }
 
@@ -421,10 +419,10 @@ impl ConnectionProfile {
                 ..
             } => AuthMethod::PrivateKey {
                 key_path: LocalPath::new(key_path.clone()),
+                has_passphrase: passphrase.is_some(),
                 passphrase_ref: passphrase
                     .as_ref()
                     .map(|_| SecretRef::keychain_ref(id, "passphrase")),
-                remember_passphrase: passphrase.is_some(),
             },
         };
         let mut profile =
@@ -439,10 +437,20 @@ pub enum AuthMethod {
     Password {
         secret_ref: SecretRef,
     },
+    /// Private-key auth with an explicit three-state passphrase:
+    ///
+    /// 1. `has_passphrase: false` — the key is not encrypted;
+    /// 2. `has_passphrase: true, passphrase_ref: None` — the key needs a
+    ///    passphrase but it is not remembered (entered once per session);
+    /// 3. `has_passphrase: true, passphrase_ref: Some` — the passphrase is
+    ///    remembered in the Keychain under that ref.
     PrivateKey {
         key_path: LocalPath,
+        /// Defaults to false so pre-tri-state files (which spelled this
+        /// state as `remember_passphrase`) still deserialize.
+        #[serde(default)]
+        has_passphrase: bool,
         passphrase_ref: Option<SecretRef>,
-        remember_passphrase: bool,
     },
 }
 
@@ -1176,6 +1184,13 @@ pub struct TabState {
     /// host/port/user).
     /// Boxed: cold field, keeps TabSnapshot-carrying events compact.
     pub connection_settings: Option<Box<ConnectionSettings>>,
+    /// Non-secret identity of this tab's current physical connection, built
+    /// from `connection_settings` + pool identity at connect time — the same
+    /// key the connection pool uses for reuse decisions. Remote editing reads
+    /// it so dedup follows the physical connection rather than the profile
+    /// record, which may be re-pointed at another host mid-connection.
+    /// Boxed: cold field, keeps TabSnapshot-carrying events compact.
+    pub connection_key: Option<Box<ConnectionKey>>,
     pub nav: TabNavState,
     pub pending: Vec<PendingOperation>,
     /// Non-secret connection metadata restored from `session.json` or
@@ -1197,6 +1212,7 @@ impl TabState {
             sort: FileSort::default(),
             selection: SelectionState::default(),
             connection_settings: None,
+            connection_key: None,
             nav: TabNavState::default(),
             pending: Vec::new(),
             restored_target: None,
@@ -2274,6 +2290,12 @@ pub struct EditSession {
     pub tab_id: TabId,
     pub session_epoch: u64,
     pub profile_id: ProfileId,
+    /// Non-secret identity of the physical connection this edit was opened
+    /// through, captured on the tab at connect time. Dedup keys on
+    /// `(connection_key, remote_path)` rather than `profile_id`: two manual
+    /// connections to different servers (or a saved profile re-pointed at a
+    /// new host) must never share one temp file for the same remote path.
+    pub connection_key: ConnectionKey,
     pub local_temp_path: LocalPath,
     pub phase: EditPhase,
     pub remote_snapshot: RemoteSnapshot,
@@ -2372,20 +2394,21 @@ impl EditSessionStore {
         self.sessions.iter().find(|s| &s.local_temp_path == path)
     }
 
-    /// Find an active edit session for `(profile_id, remote_path)`, used to
-    /// dedup a re-edit of the same file. Every stored session is in a live
-    /// (non-terminal) [`EditPhase`] — `Downloading`, `Editing`, `UploadingBack`,
-    /// or `RemoteConflict` — because failed downloads are removed rather than
-    /// parked in a terminal phase. So matching on `(profile_id, remote_path)`
-    /// alone never wrongly blocks a re-edit against a dead session.
+    /// Find an active edit session for `(connection_key, remote_path)`, used
+    /// to dedup a re-edit of the same file on the same physical connection.
+    /// Every stored session is in a live (non-terminal) [`EditPhase`] —
+    /// `Downloading`, `Editing`, `UploadingBack`, or `RemoteConflict` —
+    /// because failed downloads are removed rather than parked in a terminal
+    /// phase. So matching on `(connection_key, remote_path)` alone never
+    /// wrongly blocks a re-edit against a dead session.
     pub fn find_active(
         &self,
-        profile_id: ProfileId,
+        connection_key: &ConnectionKey,
         remote_path: &RemotePath,
     ) -> Option<&EditSession> {
         self.sessions
             .iter()
-            .find(|s| s.profile_id == profile_id && &s.remote_path == remote_path)
+            .find(|s| s.connection_key == *connection_key && &s.remote_path == remote_path)
     }
 
     pub fn remove(&mut self, id: EditSessionId) -> Option<EditSession> {
@@ -2880,8 +2903,8 @@ mod tests {
     fn private_key_auth_reports_kind() {
         let method = AuthMethod::PrivateKey {
             key_path: LocalPath::new("/Users/alex/.ssh/id_ed25519"),
+            has_passphrase: true,
             passphrase_ref: Some(SecretRef::new("key-passphrase")),
-            remember_passphrase: true,
         };
 
         assert_eq!(method.kind(), AuthMethodKind::PrivateKey);
@@ -3961,8 +3984,8 @@ mod tests {
             key_profile.auth,
             AuthMethod::PrivateKey {
                 key_path: LocalPath::new("/Users/alex/.ssh/id_ed25519"),
+                has_passphrase: true,
                 passphrase_ref: Some(SecretRef::keychain_ref(ProfileId(2), "passphrase")),
-                remember_passphrase: true,
             }
         );
 
@@ -3982,8 +4005,8 @@ mod tests {
             no_pass_profile.auth,
             AuthMethod::PrivateKey {
                 key_path: LocalPath::new("/Users/alex/.ssh/id_rsa"),
+                has_passphrase: false,
                 passphrase_ref: None,
-                remember_passphrase: false,
             }
         );
     }
@@ -4016,6 +4039,7 @@ mod tests {
             tab_id: crate::TabId(1),
             session_epoch: 1,
             profile_id: crate::ProfileId(1),
+            connection_key: sample_connection_key(),
             local_temp_path: crate::LocalPath::new("/tmp/edits/1/a.txt"),
             phase,
             remote_snapshot: crate::RemoteSnapshot {
@@ -4194,12 +4218,12 @@ mod tests {
         let mut session = sample_edit_session(EditPhase::CheckingRemote);
         session.id = store.next_id();
         store.register(session);
-        // find_active matches on (profile_id, remote_path) alone and every
+        // find_active matches on (connection_key, remote_path) alone and every
         // stored session is a live phase, so CheckingRemote must be returned
         // and block a re-edit of the same file.
         assert!(
             store
-                .find_active(crate::ProfileId(1), &crate::RemotePath::new("/srv/a.txt"))
+                .find_active(&sample_connection_key(), &RemotePath::new("/srv/a.txt"))
                 .is_some(),
             "a CheckingRemote session is still an active edit"
         );
@@ -4217,7 +4241,7 @@ mod tests {
         store.update_epoch_for_tab(crate::TabId(1), 2);
 
         let stored = store
-            .find_active(crate::ProfileId(1), &crate::RemotePath::new("/srv/a.txt"))
+            .find_active(&sample_connection_key(), &RemotePath::new("/srv/a.txt"))
             .expect("session survives reconnect");
         assert_eq!(
             stored.phase,
@@ -4241,6 +4265,27 @@ mod tests {
         );
     }
 
+    /// The connection identity every edit-session fixture shares; tests that
+    /// exercise dedup build variants of it (different host or session).
+    fn sample_connection_key() -> ConnectionKey {
+        ConnectionKey::new(
+            &ConnectionSettings {
+                host: "srv.example.com".into(),
+                port: 22,
+                username: "alex".into(),
+                auth: AuthCredential::Password {
+                    password: "unused".into(),
+                },
+            },
+            ConnectionPoolIdentity::Saved(AuthFingerprint {
+                method: AuthMethodKind::Password,
+                secret_ref: Some(SecretRef::keychain_ref(ProfileId(1), "password")),
+                private_key_path_hash: None,
+                profile_revision: 1,
+            }),
+        )
+    }
+
     fn store_session(
         id_hint: u64,
         profile: u64,
@@ -4248,24 +4293,13 @@ mod tests {
         phase: crate::EditPhase,
         transfer: Option<crate::TransferId>,
     ) -> crate::EditSession {
-        crate::EditSession {
-            id: crate::EditSessionId(id_hint),
-            remote_path: crate::RemotePath::new(path),
-            tab_id: crate::TabId(1),
-            session_epoch: 1,
-            profile_id: crate::ProfileId(profile),
-            local_temp_path: crate::LocalPath::new(format!("/tmp/edits/{id_hint}")),
-            phase,
-            remote_snapshot: crate::RemoteSnapshot {
-                size: None,
-                modified_at: None,
-            },
-            local_mtime: None,
-            active_transfer: transfer,
-            pending_check_id: None,
-            checking_local_mtime: None,
-            missing_ticks: 0,
-        }
+        let mut session = sample_edit_session(phase);
+        session.id = crate::EditSessionId(id_hint);
+        session.remote_path = crate::RemotePath::new(path);
+        session.profile_id = crate::ProfileId(profile);
+        session.local_temp_path = crate::LocalPath::new(format!("/tmp/edits/{id_hint}"));
+        session.active_transfer = transfer;
+        session
     }
 
     #[test]
@@ -4289,7 +4323,7 @@ mod tests {
         );
         assert!(
             store
-                .find_active(crate::ProfileId(1), &crate::RemotePath::new("/srv/a.txt"))
+                .find_active(&sample_connection_key(), &RemotePath::new("/srv/a.txt"))
                 .is_some()
         );
         assert!(store.get(id).is_some());
@@ -4299,27 +4333,82 @@ mod tests {
     }
 
     #[test]
-    fn store_dedup_by_profile_and_remote_path() {
+    fn store_dedup_by_connection_key_and_remote_path() {
         let mut store = crate::EditSessionStore::new();
         let id1 = store.next_id();
         let mut s1 = store_session(id1.0, 1, "/srv/a.txt", crate::EditPhase::Editing, None);
         s1.id = id1;
         store.register(s1);
-        // 同 profile+path 已有活跃会话可被查到；不同 path 查不到。
+        // 同 connection+path 已有活跃会话可被查到；不同 path 或不同物理连接
+        // （另一台服务器 / 另一条手工连接）查不到。
         assert!(
             store
-                .find_active(crate::ProfileId(1), &crate::RemotePath::new("/srv/a.txt"))
+                .find_active(&sample_connection_key(), &RemotePath::new("/srv/a.txt"))
                 .is_some()
         );
         assert!(
             store
-                .find_active(crate::ProfileId(1), &crate::RemotePath::new("/srv/b.txt"))
+                .find_active(&sample_connection_key(), &RemotePath::new("/srv/b.txt"))
                 .is_none()
+        );
+        // Same profile record re-pointed at another host: the old session must
+        // not be hit (its key carries the old host).
+        let other_host = ConnectionKey::new(
+            &ConnectionSettings {
+                host: "other.example.com".into(),
+                port: 22,
+                username: "alex".into(),
+                auth: AuthCredential::Password {
+                    password: "unused".into(),
+                },
+            },
+            ConnectionPoolIdentity::Ephemeral(SessionId(9)),
         );
         assert!(
             store
-                .find_active(crate::ProfileId(2), &crate::RemotePath::new("/srv/a.txt"))
-                .is_none()
+                .find_active(&other_host, &RemotePath::new("/srv/a.txt"))
+                .is_none(),
+            "a different physical connection must not reuse another connection's edit"
+        );
+        // Two manual connections to two servers share ProfileId(0), so only the
+        // Ephemeral(SessionId) half of the key can tell them apart.
+        let manual_a = ConnectionKey::new(
+            &ConnectionSettings {
+                host: "a.example.com".into(),
+                port: 22,
+                username: "alex".into(),
+                auth: AuthCredential::Password {
+                    password: "unused".into(),
+                },
+            },
+            ConnectionPoolIdentity::Ephemeral(SessionId(1)),
+        );
+        let manual_b = ConnectionKey::new(
+            &ConnectionSettings {
+                host: "b.example.com".into(),
+                port: 22,
+                username: "alex".into(),
+                auth: AuthCredential::Password {
+                    password: "unused".into(),
+                },
+            },
+            ConnectionPoolIdentity::Ephemeral(SessionId(2)),
+        );
+        let id2 = store.next_id();
+        let mut s2 = store_session(id2.0, 0, "/srv/a.txt", crate::EditPhase::Editing, None);
+        s2.id = id2;
+        s2.connection_key = manual_a.clone();
+        store.register(s2);
+        assert!(
+            store
+                .find_active(&manual_a, &RemotePath::new("/srv/a.txt"))
+                .is_some()
+        );
+        assert!(
+            store
+                .find_active(&manual_b, &RemotePath::new("/srv/a.txt"))
+                .is_none(),
+            "two manual connections to different servers must not share an edit"
         );
     }
 
@@ -4340,7 +4429,7 @@ mod tests {
             store.register(s);
             assert!(
                 store
-                    .find_active(crate::ProfileId(1), &crate::RemotePath::new("/srv/a.txt"))
+                    .find_active(&sample_connection_key(), &RemotePath::new("/srv/a.txt"))
                     .is_some(),
                 "a live {phase:?} session must block a re-edit"
             );
@@ -4349,7 +4438,7 @@ mod tests {
             store.remove(id);
             assert!(
                 store
-                    .find_active(crate::ProfileId(1), &crate::RemotePath::new("/srv/a.txt"))
+                    .find_active(&sample_connection_key(), &RemotePath::new("/srv/a.txt"))
                     .is_none(),
                 "removing the session must unblock re-editing (was {phase:?})"
             );

@@ -1,8 +1,8 @@
 use gpui::{Context, FontWeight, IntoElement, ParentElement, Styled, div, prelude::*, px};
 use macsftp_core::{
-    AppCommand, ConflictPolicy, EditPhase, EditSession, EditSessionId, EntryPath, FileKind,
-    LocalPath, MetadataPolicy, ProfileId, RemotePath, RemoteSnapshot, StartTransferCommand, TabId,
-    Timestamp, TransferDirection, TransferEndpoint,
+    AppCommand, ConflictPolicy, ConnectionKey, EditPhase, EditSession, EditSessionId, EntryPath,
+    FileKind, LocalPath, MetadataPolicy, ProfileId, RemotePath, RemoteSnapshot,
+    StartTransferCommand, TabId, Timestamp, TransferDirection, TransferEndpoint,
 };
 use macsftp_ui::{ActiveTheme, format_size, text_button};
 use tracing::warn;
@@ -10,7 +10,7 @@ use tracing::warn;
 use crate::event_coordinator::{open_edit_temp, workspace_windows};
 use crate::resources::ActiveResources;
 use crate::workspace::Workspace;
-use crate::workspace::helpers::connected_transfer_session;
+use crate::workspace::helpers::connected_edit_session;
 
 pub(crate) const EDIT_SIZE_WARN_THRESHOLD: u64 = 100 * 1024 * 1024;
 
@@ -33,7 +33,10 @@ pub(crate) struct PendingEdit {
     pub size: Option<u64>,
     pub modified_at: Option<Timestamp>,
     pub session_epoch: u64,
-    pub profile_id: ProfileId,
+    /// Identity of the physical connection the edit was opened through; used
+    /// for dedup only. The transfer commands keep carrying `ProfileId` (the
+    /// tab's own value, `ProfileId(0)` when manual).
+    pub connection_key: ConnectionKey,
     pub tab_id: TabId,
 }
 
@@ -90,7 +93,7 @@ impl Workspace {
         let Some(tab) = self.active_tab() else {
             return;
         };
-        let Some((session_epoch, profile_id)) = connected_transfer_session(tab) else {
+        let Some((session_epoch, connection_key)) = connected_edit_session(tab) else {
             self.status_message = Some("Connect before editing".into());
             cx.notify();
             return;
@@ -104,7 +107,7 @@ impl Workspace {
         if let Some((existing_tab_id, existing_phase, existing_temp_path)) = cx
             .resources()
             .edit_sessions
-            .find_active(profile_id, &remote_path)
+            .find_active(&connection_key, &remote_path)
             .map(|session| {
                 (
                     session.tab_id,
@@ -147,7 +150,7 @@ impl Workspace {
             size,
             modified_at,
             session_epoch,
-            profile_id,
+            connection_key,
             tab_id,
         };
         if pending.size.unwrap_or(0) > EDIT_SIZE_WARN_THRESHOLD {
@@ -159,6 +162,16 @@ impl Workspace {
     }
 
     pub(crate) fn start_edit_download(&mut self, pending: PendingEdit, cx: &mut Context<Self>) {
+        // StartTransferCommand carries the profile id as metadata only —
+        // runtime routing keys transfers by (tab_id, session_epoch); only
+        // edit dedup uses `connection_key`. Read it from the live tab so a
+        // reconnect between arming and confirming the large-file modal
+        // refreshes both values.
+        let transfer_profile_id = self
+            .state
+            .tabs
+            .find_tab(pending.tab_id)
+            .map(|tab| tab.profile_id.unwrap_or(ProfileId(0)));
         let edits_dir = cx.resources().app_paths.edits_dir.clone();
         let edit_run_id = cx.resources().edit_run_id.clone();
         let id = cx.resources_mut().edit_sessions.next_id();
@@ -181,7 +194,8 @@ impl Workspace {
             remote_path: pending.remote_path.clone(),
             tab_id: pending.tab_id,
             session_epoch: pending.session_epoch,
-            profile_id: pending.profile_id,
+            profile_id: transfer_profile_id.unwrap_or_default(),
+            connection_key: pending.connection_key.clone(),
             local_temp_path: local_temp_path.clone(),
             phase: EditPhase::Downloading,
             remote_snapshot: RemoteSnapshot {
@@ -198,7 +212,7 @@ impl Workspace {
         let command = AppCommand::StartTransfer(StartTransferCommand {
             tab_id: pending.tab_id,
             session_epoch: pending.session_epoch,
-            profile_id: pending.profile_id,
+            profile_id: transfer_profile_id.unwrap_or(ProfileId(0)),
             direction: TransferDirection::Download,
             sources: vec![TransferEndpoint::Remote(pending.remote_path)],
             destination: TransferEndpoint::Local(local_temp_path),
@@ -240,14 +254,15 @@ impl Workspace {
             cx.notify();
             return;
         };
-        let Some((session_epoch, profile_id)) = connected_transfer_session(tab) else {
+        let Some((session_epoch, connection_key)) = connected_edit_session(tab) else {
             self.status_message = Some("Connect before editing".into());
             cx.notify();
             return;
         };
-        // Adopt the live epoch/profile; the captured ones may predate a reconnect.
+        // Adopt the live epoch/connection identity; the captured ones may
+        // predate a reconnect.
         pending.session_epoch = session_epoch;
-        pending.profile_id = profile_id;
+        pending.connection_key = connection_key;
         self.start_edit_download(pending, cx);
     }
 
@@ -309,7 +324,7 @@ impl Workspace {
                     size: session.remote_snapshot.size,
                     modified_at: session.remote_snapshot.modified_at,
                     session_epoch: session.session_epoch,
-                    profile_id: session.profile_id,
+                    connection_key: session.connection_key.clone(),
                     tab_id: session.tab_id,
                 };
                 cx.resources_mut().edit_sessions.remove(id);
@@ -496,7 +511,7 @@ impl Workspace {
 /// on-disk temp directory. Called when a tab or its window closes (and on
 /// disconnect): the session can no longer make progress once its owning tab is
 /// gone, and leaving it registered would strand its temp files and — because
-/// [`find_active`] keys on `(profile_id, remote_path)` regardless of tab —
+/// [`find_active`] keys on `(connection_key, remote_path)` regardless of tab —
 /// permanently block re-editing the same file. Best-effort on the filesystem;
 /// a temp dir that was never created is ignored.
 ///

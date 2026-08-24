@@ -14,7 +14,7 @@ pub use components::{
 };
 pub use file_list::{
     FileRowModel, MODIFIED_COLUMN_WIDTH, SIZE_COLUMN_WIDTH, file_row, file_table_header,
-    format_size, format_timestamp,
+    format_size, format_size_label, format_timestamp,
 };
 pub use icon::{ICON_SIZE, IconName, icon};
 pub use input::{InputKeyResult, InputState, SecretInputState, TextFieldModel, text_field};
