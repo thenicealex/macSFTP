@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use macsftp_core::{ConnectionState, LocalPath, ProfileId, RemotePath, TabState};
+use macsftp_core::{ConnectionKey, ConnectionState, LocalPath, ProfileId, RemotePath, TabState};
 use macsftp_storage::RecentEntry;
 
 /// Row label for a recent connection: `Name · user@host:port` or `user@host:port`.
@@ -36,6 +36,20 @@ pub(crate) fn connected_transfer_session(tab: &TabState) -> Option<(u64, Profile
     match tab.connection {
         ConnectionState::Connected { session_epoch, .. } => {
             Some((session_epoch, tab.profile_id.unwrap_or(ProfileId(0))))
+        }
+        _ => None,
+    }
+}
+
+/// `(session_epoch, connection_key)` of a connected tab. The key is the one
+/// captured at connect time — the same identity the connection pool used for
+/// this physical connection. Remote-edit dedup keys on it rather than
+/// `profile_id`, so two manual connections to different servers (or a saved
+/// profile re-pointed at another host) never share one edit temp file.
+pub(crate) fn connected_edit_session(tab: &TabState) -> Option<(u64, ConnectionKey)> {
+    match (&tab.connection, tab.connection_key.as_deref()) {
+        (ConnectionState::Connected { session_epoch, .. }, Some(connection_key)) => {
+            Some((*session_epoch, connection_key.clone()))
         }
         _ => None,
     }
