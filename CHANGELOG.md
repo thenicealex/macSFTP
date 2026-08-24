@@ -5,6 +5,8 @@ based on Keep a Changelog, and releases use semantic versioning.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-24
+
 ### Changed
 
 - Mid-session disconnects now show the classified cause in the remote pane —
@@ -16,6 +18,19 @@ based on Keep a Changelog, and releases use semantic versioning.
   profile editor offers the matching policy toggle; previously any typed
   passphrase was always remembered and a saved one could never be removed.
   Existing profiles.json files migrate automatically.
+
+### Fixed
+
+- Hardened profile storage end to end: phased atomic-write failures keep new
+  secrets when a rename lands, unsupported file versions enter read-only
+  recovery instead of being overwritten, schema violations are reported as
+  corrupt rather than silently repaired, deleted profile ids are never
+  reused, and concurrent app instances serialize writes through an advisory
+  lock instead of clobbering each other's recents and settings.
+- Deleting a profile no longer leaves stale links in recent connections or
+  restored tabs; remote-edit sessions follow the live connection identity,
+  so re-pointing a profile at another host cannot hit an old server's edit
+  session.
 
 ## [0.1.1] - 2026-08-05
 
