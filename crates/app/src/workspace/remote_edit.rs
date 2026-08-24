@@ -162,10 +162,11 @@ impl Workspace {
     }
 
     pub(crate) fn start_edit_download(&mut self, pending: PendingEdit, cx: &mut Context<Self>) {
-        // StartTransferCommand still routes transfers by the tab's profile
-        // record (ProfileId(0) when manual); only edit dedup uses
-        // `connection_key`. Read it from the live tab so a reconnect between
-        // arming and confirming the large-file modal refreshes both values.
+        // StartTransferCommand carries the profile id as metadata only —
+        // runtime routing keys transfers by (tab_id, session_epoch); only
+        // edit dedup uses `connection_key`. Read it from the live tab so a
+        // reconnect between arming and confirming the large-file modal
+        // refreshes both values.
         let transfer_profile_id = self
             .state
             .tabs
