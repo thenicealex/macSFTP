@@ -961,6 +961,80 @@ mod tests {
         });
     }
 
+    /// Regression for the profiles-audit consistency risk: deleting a
+    /// profile used to leave recents entries and live tabs pointing at the
+    /// dead id. The stale recents linkage broke upsert dedupe (manual
+    /// reconnects created duplicate entries) and future session snapshots
+    /// kept propagating the dead reference.
+    #[gpui::test]
+    fn deleting_profile_decouples_recents_and_live_tabs(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        let profile_id = ProfileId(4);
+        workspace.update_in(&mut cx, |ws, window, cx| {
+            let settings = ConnectionSettings {
+                host: "rec.example.com".into(),
+                port: 22,
+                username: "alex".into(),
+                auth: AuthCredential::Password {
+                    password: "hunter2".into(),
+                },
+            };
+            match cx.resources_mut().profiles.save_connection_settings(
+                profile_id,
+                "Prod".into(),
+                &settings,
+            ) {
+                Ok(_) => {}
+                Err(error) => panic!("seed profile: {error}"),
+            }
+            match cx
+                .resources_mut()
+                .recents
+                .upsert(macsftp_storage::RecentEntryInput {
+                    host: "rec.example.com".into(),
+                    port: 22,
+                    username: "alex".into(),
+                    profile_id: Some(profile_id.0),
+                    display_name: Some("Prod".into()),
+                    last_remote_path: Some("/home/alex".into()),
+                    last_connected_at: 100,
+                }) {
+                Ok(_) => {}
+                Err(error) => panic!("seed recent entry: {error}"),
+            }
+
+            {
+                let tab = ws.active_tab_mut().expect("default tab");
+                tab.profile_id = Some(profile_id);
+                tab.restored_target = Some(Box::new(RestoredTabTarget {
+                    host: "rec.example.com".into(),
+                    port: 22,
+                    username: "alex".into(),
+                    profile_id: Some(profile_id),
+                    remote_path: None,
+                }));
+            }
+
+            ws.request_delete_profile(profile_id, window, cx);
+            ws.confirm_delete_profile(window, cx);
+
+            // The recents entry survives as plain manual-connection history.
+            let entries = cx.resources().recents.entries();
+            assert_eq!(entries.len(), 1, "entry is kept, not removed");
+            assert_eq!(entries[0].profile_id, None, "stale link must be dropped");
+            assert_eq!(entries[0].display_name.as_deref(), Some("Prod"));
+
+            let tab = ws.active_tab_mut().expect("tab kept after delete");
+            assert_eq!(tab.profile_id, None, "live tab must lose the dead link");
+            assert_eq!(
+                tab.restored_target.as_ref().map(|target| target.profile_id),
+                Some(None),
+                "restored target must lose the dead link"
+            );
+        });
+    }
+
     #[test]
     fn profile_matches_filter_name_host_user() {
         let profile = macsftp_core::ConnectionProfile::new(

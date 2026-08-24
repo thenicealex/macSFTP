@@ -192,6 +192,28 @@ impl RecentsStore {
         self.ensure_writable()?;
         self.file.save(&self.path)
     }
+
+    /// Drop the profile linkage from every entry referencing `profile_id`,
+    /// keeping the entries as plain manual-connection history (the cached
+    /// display label stays). Called when a profile is deleted: the stale
+    /// linkage would otherwise break the upsert dedupe key and turn the
+    /// next manual reconnect into a duplicate entry. Returns how many
+    /// entries were decoupled; the disk is only rewritten when something
+    /// changed.
+    pub fn forget_profile(&mut self, profile_id: u64) -> Result<usize, StorageError> {
+        self.ensure_writable()?;
+        let mut decoupled = 0;
+        for entry in &mut self.file.entries {
+            if entry.profile_id == Some(profile_id) {
+                entry.profile_id = None;
+                decoupled += 1;
+            }
+        }
+        if decoupled > 0 {
+            self.save()?;
+        }
+        Ok(decoupled)
+    }
 }
 
 #[cfg(test)]
@@ -303,6 +325,85 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(path.as_str()).expect("read preserved corrupt recents"),
             "{not json"
+        );
+    }
+
+    /// Deleting a profile must not leave recents entries pointing at a
+    /// dead profile id: the stale linkage breaks the upsert dedupe key, so
+    /// a later manual reconnect to the same server creates a duplicate
+    /// entry instead of updating the surviving one.
+    #[test]
+    fn forget_profile_decouples_entries_and_persists() {
+        let path = temp_path("forget-profile");
+        let mut store = RecentsStore::open_or_empty(path.clone());
+        for (host, profile_id) in [
+            ("with.example", Some(7u64)),
+            ("bare.example", None),
+            ("other.example", Some(7u64)),
+            ("another.example", Some(9u64)),
+        ] {
+            store
+                .upsert(RecentEntryInput {
+                    host: host.into(),
+                    port: 22,
+                    username: "alex".into(),
+                    profile_id,
+                    display_name: Some("Prod".into()),
+                    last_remote_path: Some("/home/alex".into()),
+                    last_connected_at: 1,
+                })
+                .expect("seed entry");
+        }
+
+        let decoupled = store.forget_profile(7).expect("forget profile 7");
+
+        assert_eq!(decoupled, 2);
+        let linked: Vec<&str> = store
+            .entries()
+            .iter()
+            .filter(|entry| entry.profile_id == Some(7))
+            .map(|entry| entry.host.as_str())
+            .collect();
+        assert!(linked.is_empty(), "no entry may keep the deleted link");
+        // The entries themselves survive as plain manual-connection history,
+        // keeping their cached display label and other metadata.
+        let former = store
+            .entries()
+            .iter()
+            .find(|entry| entry.host == "with.example")
+            .expect("decoupled entry is kept, not removed");
+        assert_eq!(former.profile_id, None);
+        assert_eq!(former.display_name.as_deref(), Some("Prod"));
+        assert_eq!(
+            store.entries()[0].profile_id,
+            Some(9),
+            "unrelated links stay untouched"
+        );
+
+        // The decoupling survives a reload.
+        let reloaded = RecentsStore::open(path.clone()).expect("reload");
+        assert!(reloaded
+            .entries()
+            .iter()
+            .all(|entry| entry.profile_id != Some(7)));
+    }
+
+    #[test]
+    fn forget_profile_without_matches_skips_rewrite() {
+        let path = temp_path("forget-noop");
+        let mut store = RecentsStore::open_or_empty(path.clone());
+        store
+            .upsert(sample_input("a.example", 1))
+            .expect("seed entry");
+        let before = std::fs::read_to_string(path.as_str()).expect("read before");
+
+        let decoupled = store.forget_profile(42).expect("forget absent profile");
+
+        assert_eq!(decoupled, 0);
+        assert_eq!(
+            std::fs::read_to_string(path.as_str()).expect("read after"),
+            before,
+            "nothing changed on disk"
         );
     }
 
