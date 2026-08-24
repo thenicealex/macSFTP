@@ -5,8 +5,11 @@ use macsftp_core::{
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::file_lock::FileLock;
 use crate::keychain::{KeychainError, KeychainStore};
-use crate::profile_file::{ProfilesFile, StorageError};
+use crate::profile_file::{
+    PhasedSaveError, ProfilesFile, StorageError, TransactionPhase,
+};
 
 /// Disk-backed profile store: owns the `profiles.json` path and the
 /// in-memory `ProfilesFile`, keeping them in sync on every write.
@@ -15,7 +18,15 @@ pub struct ProfileStore {
     profiles: ProfilesFile,
     keychain: KeychainStore,
     initial_error: Option<StorageError>,
+    /// Test-only injection point for the commit step, letting tests
+    /// simulate a commit that lands without proving durability.
+    #[cfg(test)]
+    commit_save_override: Option<CommitSaveOverride>,
 }
+
+#[cfg(test)]
+type CommitSaveOverride =
+    Box<dyn FnMut(&ProfilesFile, &LocalPath) -> Result<(), PhasedSaveError>>;
 
 /// Credential update requested by a profile editor. `None` means "keep the
 /// existing credential" when the profile already uses the same auth method.
@@ -121,9 +132,11 @@ impl From<KeychainError> for ProfileMutationError {
 
 pub struct ProfileSaveOutcome {
     pub profile: ConnectionProfile,
-    /// The profile and its active credential were committed, but an obsolete
-    /// credential could not be removed. Callers should log these warnings.
-    pub cleanup_warnings: Vec<KeychainError>,
+    /// The profile and its active credential were committed, but follow-up
+    /// work failed: an obsolete Keychain credential could not be removed or
+    /// the disk write committed without proving durability. Callers should
+    /// log these warnings.
+    pub cleanup_warnings: Vec<StorageWarning>,
 }
 
 pub struct ProfileDeleteOutcome {
@@ -131,6 +144,19 @@ pub struct ProfileDeleteOutcome {
     /// The disk entry was deleted, but a now-unreferenced Keychain item could
     /// not be removed. Callers should log these warnings.
     pub cleanup_warnings: Vec<KeychainError>,
+}
+
+/// Non-fatal problem surfaced after a successful commit.
+#[derive(Debug, Clone)]
+pub enum StorageWarning {
+    /// The replacement landed on disk but the parent directory could not be
+    /// synced, so durability is unproven (data survives process death but
+    /// possibly not power loss).
+    DurabilityNotProven(String),
+    /// A leftover temporary file could not be removed.
+    TempCleanup { path: String, message: String },
+    /// An obsolete Keychain credential could not be removed.
+    Keychain(KeychainError),
 }
 
 struct ResolvedProfileAuth<'a> {
@@ -143,6 +169,39 @@ struct SecretUpdate<'a> {
     secret: &'a str,
 }
 
+enum TransactionKind {
+    Save { profile: Box<ConnectionProfile> },
+    Delete { profile_id: ProfileId },
+}
+
+enum TransactionOutcome {
+    /// The change was applied and the file committed. `warnings` carries
+    /// non-fatal follow-up problems (temp cleanup, unproven durability).
+    Committed { warnings: Vec<StorageWarning> },
+    /// Delete found nothing to remove (idempotent no-op).
+    Unchanged,
+}
+
+impl std::fmt::Display for StorageWarning {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DurabilityNotProven(message) => {
+                write!(
+                    formatter,
+                    "profile committed without durability proof: {message}"
+                )
+            }
+            Self::TempCleanup { path, message } => {
+                write!(
+                    formatter,
+                    "could not remove temporary file {path}: {message}"
+                )
+            }
+            Self::Keychain(error) => error.fmt(formatter),
+        }
+    }
+}
+
 impl ProfileStore {
     /// Open the store at `path`, creating the backing file on first save.
     /// A missing file starts with an empty profile set.
@@ -153,6 +212,8 @@ impl ProfileStore {
             profiles,
             keychain: KeychainStore::new_os(),
             initial_error: None,
+            #[cfg(test)]
+            commit_save_override: None,
         })
     }
 
@@ -168,6 +229,8 @@ impl ProfileStore {
                 profiles: ProfilesFile::new(),
                 keychain: KeychainStore::new_os(),
                 initial_error: Some(error),
+                #[cfg(test)]
+                commit_save_override: None,
             },
         }
     }
@@ -182,12 +245,16 @@ impl ProfileStore {
                 profiles,
                 keychain: KeychainStore::new_memory(),
                 initial_error: None,
+                #[cfg(test)]
+                commit_save_override: None,
             },
             Err(error) => Self {
                 path,
                 profiles: ProfilesFile::new(),
                 keychain: KeychainStore::new_memory(),
                 initial_error: Some(error),
+                #[cfg(test)]
+                commit_save_override: None,
             },
         }
     }
@@ -242,16 +309,12 @@ impl ProfileStore {
         }
     }
 
+    /// Allocate a fresh profile id from the persisted high-water mark. The
+    /// mark only ever moves forward — deleting the highest-id profile (or all
+    /// profiles) never causes ids to be reused, because recents and session
+    /// state hold `profile_id` as a stable identity.
     pub fn next_profile_id(&self) -> Result<ProfileId, ProfileMutationError> {
-        self.profiles
-            .profiles
-            .iter()
-            .map(|profile| profile.id.0)
-            .max()
-            .unwrap_or(0)
-            .checked_add(1)
-            .map(ProfileId)
-            .ok_or(ProfileMutationError::ProfileIdOverflow)
+        Ok(ProfileId(self.profiles.next_profile_high_water()))
     }
 
     /// Insert or update a profile and flush the whole store to disk.
@@ -260,28 +323,157 @@ impl ProfileStore {
         profile: ConnectionProfile,
     ) -> Result<ConnectionProfile, StorageError> {
         self.ensure_writable()?;
-        let mut next_profiles = self.profiles.clone();
-        let saved = next_profiles.save_profile(profile)?;
-        next_profiles.save(&self.path)?;
-        self.profiles = next_profiles;
-        Ok(saved)
+        let profile_id = profile.id;
+        match self.commit_transaction(TransactionKind::Save {
+            profile: Box::new(profile),
+        }) {
+            Ok(TransactionOutcome::Committed { .. }) => Ok(self
+                .find_profile(profile_id)
+                .expect("just-saved profile is present")
+                .clone()),
+            Ok(TransactionOutcome::Unchanged) => {
+                unreachable!("save transactions always produce a saved profile")
+            }
+            Err((error, _warnings)) => Err(error),
+        }
     }
 
     /// Remove a profile by id and flush. Removing a non-existent id is a
     /// no-op that still succeeds (idempotent).
     pub fn delete_profile(&mut self, profile_id: ProfileId) -> Result<(), StorageError> {
         self.ensure_writable()?;
-        let mut next_profiles = self.profiles.clone();
-        let before = next_profiles.profiles.len();
-        next_profiles
-            .profiles
-            .retain(|profile| profile.id != profile_id);
-        if next_profiles.profiles.len() == before {
-            return Ok(());
+        match self.commit_transaction(TransactionKind::Delete { profile_id }) {
+            Ok(TransactionOutcome::Committed { .. }) | Ok(TransactionOutcome::Unchanged) => Ok(()),
+            Err((error, _warnings)) => Err(error),
         }
-        next_profiles.save(&self.path)?;
-        self.profiles = next_profiles;
-        Ok(())
+    }
+
+    /// Hold an advisory lock beside `profiles.json` for one write
+    /// transaction so concurrent store instances cannot silently overwrite
+    /// each other's changes.
+    fn acquire_transaction_lock(&self) -> Result<FileLock, StorageError> {
+        FileLock::acquire(std::path::Path::new(self.path.as_str())).map_err(|error| {
+            StorageError::Io {
+                path: format!("{}.lock", self.path.as_str()),
+                message: error.to_string(),
+            }
+        })
+    }
+
+    /// One full write transaction: acquire the advisory lock, re-read the
+    /// authoritative on-disk state, apply the change to that fresh state,
+    /// and commit. The in-memory snapshot is only replaced once the commit
+    /// landed. A commit whose durability is unproven still counts as
+    /// committed — only its warnings say so — because compensating actions
+    /// (such as rolling back a Keychain secret) would desynchronize disk and
+    /// credentials.
+    fn commit_transaction(
+        &mut self,
+        transaction: TransactionKind,
+    ) -> Result<TransactionOutcome, (StorageError, Vec<StorageWarning>)> {
+        let _lock = self
+            .acquire_transaction_lock()
+            .map_err(|error| (error, Vec::new()))?;
+        let mut next_profiles =
+            ProfilesFile::load(&self.path).map_err(|error| (error, Vec::new()))?;
+        let warnings = cleanup_stale_temp_files(&self.path);
+        // Apply the change to the freshly reloaded state.
+        match &transaction {
+            TransactionKind::Save { profile } => {
+                // `self.profiles` is the caller's snapshot; the freshly
+                // reloaded file is the authoritative state. An id that was
+                // absent from the snapshot but present on disk means another
+                // store instance created it in between: a save assuming
+                // "new" must conflict instead of silently overwriting.
+                if self.profiles.find_profile(profile.id).is_none()
+                    && next_profiles.find_profile(profile.id).is_some()
+                {
+                    return Err((
+                        StorageError::ConcurrentModification {
+                            message: format!(
+                                "profile {} was created by another store instance; reload and retry",
+                                profile.id.0
+                            ),
+                        },
+                        warnings,
+                    ));
+                }
+                if next_profiles.find_profile(profile.id).is_none() {
+                    if profile.id.0 < next_profiles.next_profile_high_water() {
+                        return Err((
+                            StorageError::ConcurrentModification {
+                                message: format!(
+                                    "profile id {} was already handed out by another store instance; reload and retry",
+                                    profile.id.0
+                                ),
+                            },
+                            warnings,
+                        ));
+                    }
+                    // Adopting a brand-new id moves the high-water mark past
+                    // it; ids already handed out stay reserved even before
+                    // the profile itself exists on disk.
+                    next_profiles.next_profile_id = Some(profile.id.0 + 1);
+                }
+                next_profiles
+                    .save_profile((**profile).clone())
+                    .map_err(|error| (error, warnings.clone()))?;
+            }
+            TransactionKind::Delete { profile_id } => {
+                if next_profiles.find_profile(*profile_id).is_none() {
+                    return Ok(TransactionOutcome::Unchanged);
+                }
+                next_profiles
+                    .profiles
+                    .retain(|profile| profile.id != *profile_id);
+            }
+        }
+        match self.commit_save(&next_profiles, warnings) {
+            Ok(warnings) => {
+                self.profiles = next_profiles;
+                Ok(TransactionOutcome::Committed { warnings })
+            }
+            Err(failure) => Err(failure),
+        }
+    }
+
+    /// Commit the already-mutated file state. Split from
+    /// `commit_transaction` so tests can inject a failing parent-directory
+    /// sync and exercise the durability-degraded commit path.
+    fn commit_save(
+        &mut self,
+        next_profiles: &ProfilesFile,
+        warnings: Vec<StorageWarning>,
+    ) -> Result<Vec<StorageWarning>, (StorageError, Vec<StorageWarning>)> {
+        #[cfg(test)]
+        if self.commit_save_override.is_some() {
+            let mut save = self.commit_save_override.take().expect("override checked");
+            let result =
+                self.commit_save_with_sync(next_profiles, warnings, |file, path| save(file, path));
+            self.commit_save_override = Some(save);
+            return result;
+        }
+        self.commit_save_with_sync(next_profiles, warnings, ProfilesFile::save_phased)
+    }
+
+    fn commit_save_with_sync(
+        &self,
+        next_profiles: &ProfilesFile,
+        warnings: Vec<StorageWarning>,
+        save: impl FnOnce(&ProfilesFile, &LocalPath) -> Result<(), PhasedSaveError>,
+    ) -> Result<Vec<StorageWarning>, (StorageError, Vec<StorageWarning>)> {
+        match save(next_profiles, &self.path) {
+            Ok(()) => Ok(warnings),
+            Err(save_error) => match save_error.phase() {
+                TransactionPhase::NotCommitted => Err((save_error.into_storage_error(), warnings)),
+                TransactionPhase::ReplacedButNotDurable => {
+                    let mut degraded_warnings = Vec::with_capacity(warnings.len() + 1);
+                    degraded_warnings.extend(warnings);
+                    degraded_warnings.push(save_error.into_durability_warning());
+                    Ok(degraded_warnings)
+                }
+            },
+        }
     }
 
     /// Save a complete connect-form value. Existing UI-only profile metadata
@@ -319,9 +511,12 @@ impl ProfileStore {
         self.save_request(request)
     }
 
-    /// Coordinate Keychain and profiles.json with a compensating rollback. A
-    /// failed disk write restores the prior Keychain value; obsolete
-    /// credentials are only removed after the disk commit succeeds.
+    /// Coordinate Keychain and profiles.json with a compensating rollback.
+    /// A disk write that never committed (failed before the rename) restores
+    /// the prior Keychain value; a write that replaced the file but could
+    /// not prove durability keeps the new secret in sync with what is now on
+    /// disk and only reports a durability warning. Obsolete credentials are
+    /// only removed after the disk commit succeeds.
     pub fn save_request(
         &mut self,
         request: ProfileSaveRequest,
@@ -343,7 +538,7 @@ impl ProfileStore {
             request.name.clone(),
             request.host.clone(),
             request.username.clone(),
-            resolved.auth,
+            resolved.auth.clone(),
         );
         profile.port = request.port;
         profile.default_remote_path = request.default_remote_path.clone();
@@ -352,36 +547,56 @@ impl ProfileStore {
             profile.last_local_path = previous.last_local_path.clone();
         }
 
-        let saved = match self.save_profile(profile) {
-            Ok(saved) => saved,
-            Err(storage) => {
+        let saved = match self.commit_transaction(TransactionKind::Save {
+            profile: Box::new(profile),
+        }) {
+            Ok(TransactionOutcome::Committed { warnings }) => {
+                // The commit landed (possibly without proven durability, in
+                // which case the transaction already attached a warning).
+                // Rolling back the Keychain here would leave disk and
+                // credentials permanently inconsistent.
+                let committed_profile = self
+                    .find_profile(request.profile_id)
+                    .expect("just-committed profile is present")
+                    .clone();
+                (committed_profile, warnings)
+            }
+            Ok(TransactionOutcome::Unchanged) => {
+                return Err(ProfileMutationError::ProfileNotFound(request.profile_id));
+            }
+            Err((storage_error, _warnings)) => {
+                // The rename never landed: disk still holds the previous
+                // contents, so the new secret must not outlive them.
                 if let Some(update) = &resolved.secret_update {
                     let rollback = match previous_secret.as_deref() {
                         Some(secret) => self.keychain.store(&update.secret_ref, secret),
                         None => self.keychain.delete(&update.secret_ref),
                     };
                     if let Err(rollback) = rollback {
-                        return Err(ProfileMutationError::StorageRollback { storage, rollback });
+                        return Err(ProfileMutationError::StorageRollback {
+                            storage: storage_error,
+                            rollback,
+                        });
                     }
                 }
-                return Err(ProfileMutationError::Storage(storage));
+                return Err(ProfileMutationError::Storage(storage_error));
             }
         };
 
-        let current_refs = secret_refs_for_auth(&saved.auth);
-        let mut cleanup_warnings = Vec::new();
+        let current_refs = secret_refs_for_auth(&saved.0.auth);
+        let mut cleanup_warnings = saved.1;
         if let Some(previous) = previous {
             for orphan in secret_refs_for_auth(&previous.auth) {
                 if !current_refs.contains(&orphan)
                     && let Err(error) = self.keychain.delete(&orphan)
                 {
-                    cleanup_warnings.push(error);
+                    cleanup_warnings.push(StorageWarning::Keychain(error));
                 }
             }
         }
 
         Ok(ProfileSaveOutcome {
-            profile: saved,
+            profile: saved.0,
             cleanup_warnings,
         })
     }
@@ -550,6 +765,38 @@ fn secret_refs_for_auth(auth: &AuthMethod) -> Vec<SecretRef> {
     }
 }
 
+/// Best-effort removal of this store's leftover atomic-write temp files
+/// (named `.{file}.tmp-{pid}-{sequence}`, see `temp_path_for`). Removal
+/// failures are reported as warnings instead of being silently dropped.
+fn cleanup_stale_temp_files(path: &LocalPath) -> Vec<StorageWarning> {
+    let mut warnings = Vec::new();
+    let Some(file_name) = std::path::Path::new(path.as_str()).file_name() else {
+        return warnings;
+    };
+    let prefix = format!(".{}.tmp-", file_name.to_string_lossy());
+    let entries = match std::fs::read_dir(
+        std::path::Path::new(path.as_str())
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(".")),
+    ) {
+        Ok(entries) => entries,
+        Err(_) => return warnings,
+    };
+    for entry in entries.flatten() {
+        let candidate = entry.file_name().to_string_lossy().into_owned();
+        if !candidate.starts_with(&prefix) {
+            continue;
+        }
+        if let Err(error) = std::fs::remove_file(entry.path()) {
+            warnings.push(StorageWarning::TempCleanup {
+                path: entry.path().display().to_string(),
+                message: error.to_string(),
+            });
+        }
+    }
+    warnings
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -561,7 +808,9 @@ mod tests {
 
     use crate::{ProfilesFile, StorageError, core_crate_name, crate_name};
 
-    use super::{ProfileAuthUpdate, ProfileMutationError, ProfileSaveRequest, ProfileStore};
+    use super::{
+        ProfileAuthUpdate, ProfileMutationError, ProfileSaveRequest, ProfileStore, StorageWarning,
+    };
 
     // Unique temp path per call so concurrent tests never clobber each
     // other's profiles.json (plan §9: parallel tests must not share paths).
@@ -590,7 +839,7 @@ mod tests {
             "example.com",
             "alex",
             AuthMethod::Password {
-                secret_ref: SecretRef::new(format!("profile-{id}-password")),
+                secret_ref: SecretRef::keychain_ref(ProfileId(id), "password"),
             },
         )
     }
@@ -738,6 +987,7 @@ mod tests {
                 revision: u64::MAX,
                 ..password_profile(1, "Production")
             }],
+            next_profile_id: None,
         };
 
         let result = profiles.save_profile(password_profile(1, "Production Updated"));
@@ -979,5 +1229,436 @@ mod tests {
             matches!(result, Err(StorageError::Io { .. })),
             "expected Io error, got {result:?}"
         );
+    }
+
+    // --- Batch A regression tests ---
+
+    /// Build a v1 profiles.json body (no high-water mark field) with the
+    /// given profile entries.
+    fn v1_file_body(profiles_json: &str) -> String {
+        format!(r#"{{"version": 1, "profiles": [{profiles_json}]}}"#)
+    }
+
+    fn v2_password_profile_json(id: u64, name: &str) -> String {
+        format!(
+            r#"{{"id": {id}, "revision": 1, "name": "{name}", "host": "example.com", "port": 22,
+                "username": "alex",
+                "auth": {{"Password": {{"secret_ref": "keychain:macsftp:{id}:password"}}}},
+                "default_remote_path": null, "group_id": null, "last_local_path": null}}"#
+        )
+    }
+
+    #[test]
+    fn unsupported_version_blocks_writes_and_preserves_bytes() {
+        let path = temp_profiles_path("unsupported-version");
+        cleanup(&path);
+        // Version 999 plus an unknown field: valid JSON that a future
+        // release might write.
+        let future_body = r#"{"version": 999, "profiles": [], "future_field": {"a": 1}}"#;
+        std::fs::write(path.as_str(), future_body).expect("write future version fixture");
+        let raw_before = std::fs::read(path.as_str()).expect("read fixture bytes before opening");
+
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
+
+        assert!(
+            matches!(
+                store.initial_error(),
+                Some(StorageError::UnsupportedVersion {
+                    found: 999,
+                    supported: 2
+                })
+            ),
+            "initial error must name the unsupported version, got {:?}",
+            store.initial_error()
+        );
+        assert!(
+            store.profiles().is_empty(),
+            "unsupported file must load as empty"
+        );
+        assert!(matches!(
+            store.save_profile(password_profile(1, "Replacement")),
+            Err(StorageError::RecoveryRequired { .. })
+        ));
+        let raw_after = std::fs::read(path.as_str()).expect("read fixture bytes after writes");
+        assert_eq!(
+            raw_before, raw_after,
+            "the original bytes must never be rewritten"
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn duplicate_profile_ids_block_writes_and_preserve_bytes() {
+        let path = temp_profiles_path("duplicate-ids");
+        cleanup(&path);
+        let body = v1_file_body(&format!(
+            "{}, {}",
+            v2_password_profile_json(1, "First"),
+            v2_password_profile_json(1, "Second")
+        ));
+        std::fs::write(path.as_str(), body.clone()).expect("write duplicate id fixture");
+
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
+        assert!(store.initial_error().is_some());
+        assert!(matches!(
+            store.save_profile(password_profile(3, "Replacement")),
+            Err(StorageError::RecoveryRequired { .. })
+        ));
+        assert_eq!(
+            std::fs::read_to_string(path.as_str()).expect("reread fixture"),
+            body,
+            "corrupt input must be preserved verbatim"
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn zero_revision_blocks_writes_and_preserve_bytes() {
+        let path = temp_profiles_path("zero-revision");
+        cleanup(&path);
+        let body = v1_file_body(
+            &v2_password_profile_json(4, "Zero").replace("\"revision\": 1", "\"revision\": 0"),
+        );
+        std::fs::write(path.as_str(), body.clone()).expect("write zero revision fixture");
+
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
+        assert!(store.initial_error().is_some());
+        assert!(matches!(
+            store.save_profile(password_profile(5, "Replacement")),
+            Err(StorageError::RecoveryRequired { .. })
+        ));
+        assert_eq!(
+            std::fs::read_to_string(path.as_str()).expect("reread fixture"),
+            body
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn mismatched_secret_ref_blocks_writes() {
+        let path = temp_profiles_path("mismatched-ref");
+        cleanup(&path);
+        // Password ref points at another profile's Keychain entry.
+        let body = v1_file_body(
+            &v2_password_profile_json(6, "Borrowed")
+                .replace("keychain:macsftp:6:password", "keychain:macsftp:7:password"),
+        );
+        std::fs::write(path.as_str(), body.clone()).expect("write mismatched ref fixture");
+
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
+        assert!(store.initial_error().is_some());
+        assert!(matches!(
+            store.save_profile(password_profile(8, "Replacement")),
+            Err(StorageError::RecoveryRequired { .. })
+        ));
+        assert_eq!(
+            std::fs::read_to_string(path.as_str()).expect("reread fixture"),
+            body
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn inconsistent_remember_flag_blocks_writes() {
+        let path = temp_profiles_path("remember-flag");
+        cleanup(&path);
+        // remember_passphrase=true but no passphrase_ref stored.
+        let key_auth = r#"{"PrivateKey": {"key_path": "~/.ssh/id_ed25519",
+            "passphrase_ref": null, "remember_passphrase": true}}"#;
+        let profile_json = format!(
+            r#"{{"id": 9, "revision": 1, "name": "Flagged", "host": "example.com", "port": 22,
+                "username": "alex", "auth": {key_auth},
+                "default_remote_path": null, "group_id": null, "last_local_path": null}}"#
+        );
+        let body = v1_file_body(&profile_json);
+        std::fs::write(path.as_str(), body.clone()).expect("write remember flag fixture");
+
+        let store = ProfileStore::open_or_empty_memory(path.clone());
+        assert!(store.initial_error().is_some());
+        assert_eq!(
+            std::fs::read_to_string(path.as_str()).expect("reread fixture"),
+            body
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn deleting_highest_id_keeps_next_id_above_water_mark() {
+        let path = temp_profiles_path("high-water-delete");
+        cleanup(&path);
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
+        store
+            .save_profile(password_profile(1, "One"))
+            .expect("save profile one");
+        store
+            .save_profile(password_profile(2, "Two"))
+            .expect("save profile two");
+        assert_eq!(
+            store.next_profile_id().expect("allocate next id"),
+            ProfileId(3)
+        );
+
+        store.delete_profile(ProfileId(2)).expect("delete highest");
+        assert_eq!(
+            store.next_profile_id().expect("allocate after delete"),
+            ProfileId(3),
+            "deleting the highest profile must not recycle its id"
+        );
+
+        // Reload from disk: the high-water mark must have been persisted.
+        let mut reloaded = ProfileStore::open_or_empty_memory(path.clone());
+        assert_eq!(
+            reloaded.next_profile_id().expect("allocate after reload"),
+            ProfileId(3),
+            "high-water mark must survive a reload"
+        );
+
+        reloaded.delete_profile(ProfileId(1)).expect("delete last");
+        assert_eq!(
+            reloaded.next_profile_id().expect("allocate after emptying"),
+            ProfileId(3),
+            "emptying the store must not restart ids at 1"
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn v1_file_migrates_in_memory_and_saves_as_v2() {
+        let path = temp_profiles_path("v1-migration");
+        cleanup(&path);
+        let body = v1_file_body(&v2_password_profile_json(5, "Legacy"));
+        std::fs::write(path.as_str(), body).expect("write v1 fixture");
+
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
+        assert!(
+            store.initial_error().is_none(),
+            "v1 must still open cleanly"
+        );
+        assert_eq!(store.profiles().len(), 1);
+        assert_eq!(
+            store.next_profile_id().expect("allocate after migration"),
+            ProfileId(6),
+            "in-memory migration must derive max+1"
+        );
+
+        store
+            .save_profile(password_profile(6, "Added"))
+            .expect("save into migrated store");
+
+        let raw = std::fs::read_to_string(path.as_str()).expect("read saved store");
+        assert!(
+            raw.contains("\"version\": 2"),
+            "first save must persist as v2, got: {raw}"
+        );
+        assert!(
+            raw.contains("\"next_profile_id\": 7"),
+            "high-water mark must be persisted, got: {raw}"
+        );
+
+        let reloaded = ProfilesFile::load(&path).expect("reload migrated file");
+        assert_eq!(reloaded.version, ProfilesFile::CURRENT_VERSION);
+        assert_eq!(reloaded.profiles.len(), 2);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn concurrent_stores_do_not_silently_lose_updates() {
+        let path = temp_profiles_path("two-stores");
+        let lock_cleanup = path.as_str().to_string() + ".lock";
+        cleanup(&path);
+        let _ = std::fs::remove_file(&lock_cleanup);
+
+        // Two stores over the same file, both opened before either saves.
+        let mut first = ProfileStore::open_or_empty_memory(path.clone());
+        let mut second = ProfileStore::open_or_empty_memory(path.clone());
+
+        first
+            .save_profile(password_profile(1, "FromFirst"))
+            .expect("first store saves");
+        second
+            .save_profile(password_profile(2, "FromSecond"))
+            .expect("second store saves");
+
+        let reloaded = ProfileStore::open_or_empty_memory(path.clone());
+        assert_eq!(
+            reloaded.profiles().len(),
+            2,
+            "both stores' profiles must survive; no silent whole-file overwrite"
+        );
+
+        // A third store whose in-memory snapshot predates both writes still
+        // believes id 1 is free. Inserting id 1 through it must conflict
+        // instead of silently overwriting the other store's profile.
+        let mut stale = ProfileStore::open_or_empty_memory(path.clone());
+        stale.profiles = ProfilesFile {
+            version: ProfilesFile::CURRENT_VERSION,
+            profiles: Vec::new(),
+            next_profile_id: None,
+        };
+        let conflict = stale.save_profile(ConnectionProfile::new(
+            ProfileId(1),
+            "StaleInsert",
+            "example.com",
+            "alex",
+            AuthMethod::Password {
+                secret_ref: SecretRef::keychain_ref(ProfileId(1), "password"),
+            },
+        ));
+        assert!(
+            matches!(conflict, Err(StorageError::ConcurrentModification { .. })),
+            "stale new-profile save must surface a conflict, got {conflict:?}"
+        );
+        cleanup(&path);
+        std::fs::remove_file(&lock_cleanup).expect("remove lock sidecar");
+    }
+
+    #[test]
+    fn update_of_missing_profile_reports_conflict_after_reload() {
+        let path = temp_profiles_path("stale-update");
+        let lock_cleanup = path.as_str().to_string() + ".lock";
+        cleanup(&path);
+        let _ = std::fs::remove_file(&lock_cleanup);
+
+        let mut first = ProfileStore::open_or_empty_memory(path.clone());
+        let mut second = ProfileStore::open_or_empty_memory(path.clone());
+        first
+            .save_profile(password_profile(1, "Live"))
+            .expect("seed profile in first store");
+        // Second store was opened before the seed; delete through it sees
+        // the fresh disk state and removes the profile.
+        second
+            .delete_profile(ProfileId(1))
+            .expect("delete via second store");
+        // A stale new-profile save through a store whose snapshot predates
+        // everything (never saw id 1 at all) must fail instead of silently
+        // recreating or colliding with an id another instance handed out.
+        let mut stale = ProfileStore::open_or_empty_memory(path.clone());
+        stale.profiles = ProfilesFile {
+            version: ProfilesFile::CURRENT_VERSION,
+            profiles: Vec::new(),
+            next_profile_id: None,
+        };
+        let result = stale.save_profile(password_profile(1, "Stale"));
+        assert!(matches!(
+            result,
+            Err(StorageError::ConcurrentModification { .. })
+        ));
+        assert!(
+            ProfileStore::open_or_empty_memory(path.clone())
+                .find_profile(ProfileId(1))
+                .is_none()
+        );
+        cleanup(&path);
+        std::fs::remove_file(&lock_cleanup).expect("remove lock sidecar");
+    }
+
+    #[test]
+    fn cleanup_removes_stale_temp_files_with_real_prefix() {
+        let path = temp_profiles_path("temp-cleanup");
+        cleanup(&path);
+        let dir = std::env::temp_dir();
+        let file_name = std::path::Path::new(path.as_str())
+            .file_name()
+            .expect("fixture has a file name")
+            .to_string_lossy()
+            .into_owned();
+        let stale = dir.join(format!(".{file_name}.tmp-12345-0"));
+        std::fs::write(&stale, b"leftover").expect("write stale temp fixture");
+        // An unrelated dot-file must not be touched.
+        let unrelated = dir.join(format!(".{file_name}.other"));
+        std::fs::write(&unrelated, b"keep me").expect("write unrelated fixture");
+
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
+        store
+            .save_profile(password_profile(1, "Trigger"))
+            .expect("save triggers temp sweep");
+
+        assert!(
+            !stale.exists(),
+            "stale temp file with the real prefix must be removed"
+        );
+        assert!(unrelated.exists(), "unrelated files must survive the sweep");
+        std::fs::remove_file(&unrelated).expect("remove unrelated fixture");
+        cleanup(&path);
+        let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
+    }
+
+    /// A rename that landed but whose parent-directory sync failed must NOT
+    /// roll the new secret back: disk already holds the new profile, so a
+    /// rollback would leave credentials permanently inconsistent. The
+    /// degraded durability is surfaced as a warning instead.
+    #[test]
+    fn replaced_but_not_durable_save_keeps_new_secret_and_warns() {
+        use crate::profile_file::PhasedSaveError;
+
+        fn failing_parent_sync_save(
+            file: &ProfilesFile,
+            path: &LocalPath,
+        ) -> Result<(), PhasedSaveError> {
+            // Real staged write + rename so the destination genuinely holds
+            // the new contents; only the parent sync is reported as failed.
+            file.save_phased_with_failing_parent_sync(path)
+        }
+
+        let path = temp_profiles_path("not-durable-secret");
+        cleanup(&path);
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
+        store
+            .save_connection_settings(
+                ProfileId(1),
+                "Before".into(),
+                &password_settings("before.example.com", "old-secret"),
+            )
+            .expect("seed profile and credential");
+
+        // Swap in the injected commit and re-run an update through the full
+        // save_request flow.
+        let outcome = {
+            let request_profile_id = ProfileId(1);
+            let previous = store.find_profile(request_profile_id).cloned();
+            assert!(previous.is_some(), "seeded profile exists");
+
+            // Drive save_request manually with the failing sync seam.
+            store.commit_save_override = Some(Box::new(failing_parent_sync_save));
+            let result = store.save_connection_settings(
+                ProfileId(1),
+                "After".into(),
+                &password_settings("after.example.com", "new-secret"),
+            );
+            store.commit_save_override = None;
+            result.expect("degraded-durability commit still succeeds")
+        };
+
+        assert!(
+            outcome
+                .cleanup_warnings
+                .iter()
+                .any(|warning| matches!(
+                    warning,
+                    StorageWarning::DurabilityNotProven(_)
+                )),
+            "a degraded commit must surface a durability warning"
+        );
+
+        // Memory keeps the new state...
+        let retained = store.find_profile(ProfileId(1)).expect("profile kept");
+        assert_eq!(retained.name, "After");
+        let settings = store
+            .load_connection_settings(ProfileId(1))
+            .expect("load updated credential");
+        let AuthCredential::Password { password } = &settings.auth else {
+            panic!("expected password auth");
+        };
+        assert_eq!(
+            password, "new-secret",
+            "the new secret must not be rolled back after a landed rename"
+        );
+
+        // ...and so does disk.
+        let reloaded = ProfileStore::open_or_empty_memory(path.clone());
+        let found = reloaded.find_profile(ProfileId(1)).expect("on disk");
+        assert_eq!(found.name, "After");
+        cleanup(&path);
+        let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
     }
 }
