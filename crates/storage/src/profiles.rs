@@ -582,7 +582,6 @@ impl ProfileStore {
         profile.default_remote_path = request.default_remote_path.clone();
         if let Some(previous) = &previous {
             profile.group_id = previous.group_id;
-            profile.last_local_path = previous.last_local_path.clone();
         }
 
         let saved = match self.commit_transaction(TransactionKind::Save {

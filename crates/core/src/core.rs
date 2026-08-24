@@ -376,7 +376,6 @@ pub struct ConnectionProfile {
     pub auth: AuthMethod,
     pub default_remote_path: Option<RemotePath>,
     pub group_id: Option<ProfileGroupId>,
-    pub last_local_path: Option<LocalPath>,
 }
 
 impl ConnectionProfile {
@@ -397,7 +396,6 @@ impl ConnectionProfile {
             auth,
             default_remote_path: None,
             group_id: None,
-            last_local_path: None,
         }
     }
 
