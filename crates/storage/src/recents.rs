@@ -44,13 +44,10 @@ impl RecentsFile {
                     serde_json::from_str(&contents).map_err(|error| StorageError::Parse {
                         message: error.to_string(),
                     })?;
-                if parsed.version > Self::CURRENT_VERSION {
-                    return Err(StorageError::Parse {
-                        message: format!(
-                            "unsupported recents version {} (max {})",
-                            parsed.version,
-                            Self::CURRENT_VERSION
-                        ),
+                if parsed.version == 0 || parsed.version > Self::CURRENT_VERSION {
+                    return Err(StorageError::UnsupportedVersion {
+                        found: parsed.version,
+                        supported: Self::CURRENT_VERSION,
                     });
                 }
                 Ok(parsed)
@@ -480,6 +477,48 @@ mod tests {
 
         let _ = std::fs::remove_file(path.as_str());
         let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
+    }
+
+    #[test]
+    fn newer_recents_version_reports_unsupported_version() {
+        let path = temp_path("future-version");
+        std::fs::write(
+            path.as_str(),
+            r#"{"version": 99, "entries": [], "future_field": true}"#,
+        )
+        .expect("write future recents fixture");
+        let raw_before = std::fs::read(path.as_str()).expect("read fixture before");
+
+        // A file written by a NEWER release is not "corrupt": the recovery
+        // guidance is fundamentally different (upgrade vs restore), so it
+        // must be classified as UnsupportedVersion, not Parse.
+        let error = RecentsStore::open(path.clone())
+            .err()
+            .expect("future version must be rejected");
+        assert!(matches!(
+            &error,
+            StorageError::UnsupportedVersion { found: 99, .. }
+        ));
+        assert_eq!(
+            match error {
+                StorageError::UnsupportedVersion { supported, .. } => supported,
+                _ => unreachable!("checked above"),
+            },
+            RecentsFile::CURRENT_VERSION
+        );
+
+        // The unreadable file still blocks writes instead of being replaced.
+        let mut blocked = RecentsStore::open_or_empty(path.clone());
+        assert!(blocked.initial_error().is_some());
+        assert!(matches!(
+            blocked.upsert(sample_input("x.example", 1)),
+            Err(StorageError::RecoveryRequired { .. })
+        ));
+        assert_eq!(
+            std::fs::read(path.as_str()).expect("read fixture after"),
+            raw_before,
+            "future-version bytes must be preserved"
+        );
     }
 
     #[test]

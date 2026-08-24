@@ -1,8 +1,9 @@
 use macsftp_core::ResidualTempRecord;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 use super::StorageError;
-use crate::write_private_file_atomically;
+use crate::{file_lock::FileLock, write_private_file_atomically};
 
 /// On-disk envelope for residual temporary-transfer files (plan M5/M6
 /// residual). The versioned wrapper lets the record format evolve without
@@ -25,7 +26,9 @@ impl ResidualTempFile {
 
     /// Read the residual-temp file from `path`. A missing file is an empty
     /// store (first launch); other IO or parse failures surface as
-    /// `StorageError`.
+    /// `StorageError`. A file written by a newer release is rejected as
+    /// `UnsupportedVersion` instead of being silently read and rewritten
+    /// lossily.
     pub fn load(path: &macsftp_core::LocalPath) -> Result<Self, StorageError> {
         match std::fs::read_to_string(path.as_str()) {
             Ok(contents) => {
@@ -33,6 +36,12 @@ impl ResidualTempFile {
                     serde_json::from_str(&contents).map_err(|error| StorageError::Parse {
                         message: error.to_string(),
                     })?;
+                if parsed.version == 0 || parsed.version > Self::CURRENT_VERSION {
+                    return Err(StorageError::UnsupportedVersion {
+                        found: parsed.version,
+                        supported: Self::CURRENT_VERSION,
+                    });
+                }
                 Ok(parsed)
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -133,6 +142,9 @@ impl ResidualTempStore {
     }
 
     /// Append a freshly created residual temp record.
+    ///
+    /// In-memory only; pair with [`Self::save`] or prefer
+    /// [`Self::add_and_save`], which also survives concurrent instances.
     pub fn add(&mut self, record: ResidualTempRecord) {
         // De-dupe by full identity; a re-created temp for the same
         // transfer+path just refreshes the existing record.
@@ -145,8 +157,10 @@ impl ResidualTempStore {
         }
     }
 
-    /// Remove the record matching `(transfer_id, path)`. Returns true if a
-    /// record was removed.
+    /// Remove the record matching `(transfer_id, path)`.
+    ///
+    /// In-memory only; pair with [`Self::save`] or prefer
+    /// [`Self::remove_and_save`]. Returns true if a record was removed.
     pub fn remove(&mut self, transfer_id: macsftp_core::TransferId, path: &str) -> bool {
         let before = self.records.len();
         self.records
@@ -167,6 +181,44 @@ impl ResidualTempStore {
         }
         .save(&self.path)
     }
+
+    /// Register a record and persist it through a serialized read-modify-
+    /// write cycle: hold the advisory lock, reload what other app instances
+    /// wrote, apply, save. Losing a registration would leave a
+    /// `.macsftp-part` file that launch cleanup can never identify.
+    pub fn add_and_save(&mut self, record: ResidualTempRecord) -> Result<(), StorageError> {
+        self.modify(|store| store.add(record))
+    }
+
+    /// Drop a registration and persist under the advisory lock. Returns
+    /// whether a record was removed.
+    pub fn remove_and_save(
+        &mut self,
+        transfer_id: macsftp_core::TransferId,
+        path: &str,
+    ) -> Result<bool, StorageError> {
+        let mut removed = false;
+        self.modify(|store| removed = store.remove(transfer_id, path))?;
+        Ok(removed)
+    }
+
+    fn modify(&mut self, apply: impl FnOnce(&mut Self)) -> Result<(), StorageError> {
+        if self.initial_error.is_some() {
+            return Err(StorageError::RecoveryRequired {
+                path: self.path.as_str().to_string(),
+            });
+        }
+        let _lock =
+            FileLock::acquire(Path::new(self.path.as_str())).map_err(|error| StorageError::Io {
+                path: self.path.as_str().to_string(),
+                message: error.to_string(),
+            })?;
+        // Reload so registrations another instance made since our last sync
+        // survive this write instead of being clobbered by a stale snapshot.
+        self.records = ResidualTempFile::load(&self.path)?.records;
+        apply(self);
+        self.save()
+    }
 }
 
 #[cfg(test)]
@@ -175,7 +227,7 @@ mod tests {
 
     use macsftp_core::{LocalPath, ResidualTempRecord, Timestamp, TransferDirection, TransferId};
 
-    use super::ResidualTempStore;
+    use super::{ResidualTempFile, ResidualTempStore, StorageError};
 
     // Unique temp path per call so concurrent tests never clobber each
     // other's residual_temp.json (plan §9).
@@ -216,6 +268,73 @@ mod tests {
 
         let reopened = ResidualTempStore::open_or_empty(path);
         assert_eq!(reopened.records().len(), 2);
+    }
+
+    /// A residual file written by a NEWER release must not be silently read
+    /// and rewritten with lossy contents; it is version-incompatible input,
+    /// classified as UnsupportedVersion like the other stores.
+    #[test]
+    fn newer_residual_file_version_is_rejected() {
+        let path = temp_path();
+        std::fs::write(
+            path.as_str(),
+            r#"{"version": 99, "records": [], "future_field": true}"#,
+        )
+        .expect("write future residual fixture");
+        let raw_before = std::fs::read(path.as_str()).expect("read fixture before");
+
+        let error = ResidualTempStore::open(path.clone())
+            .err()
+            .expect("future version must be rejected");
+        assert!(matches!(
+            error,
+            StorageError::UnsupportedVersion { found: 99, .. }
+        ));
+        assert_eq!(
+            match error {
+                StorageError::UnsupportedVersion { supported, .. } => supported,
+                _ => unreachable!("checked above"),
+            },
+            ResidualTempFile::CURRENT_VERSION
+        );
+
+        // Writes stay blocked so recovery data is never overwritten.
+        let mut blocked = ResidualTempStore::open_or_empty(path.clone());
+        assert!(blocked.initial_error().is_some());
+        assert!(matches!(
+            blocked.add_and_save(sample(true, 1, "/srv/.a.txt.macsftp-part-1")),
+            Err(StorageError::RecoveryRequired { .. })
+        ));
+        assert_eq!(
+            std::fs::read(path.as_str()).expect("read fixture after"),
+            raw_before
+        );
+    }
+
+    /// Two app instances must not erase each other's registrations: the
+    /// second writer reloads under the advisory lock first. Losing a record
+    /// would leave a `.macsftp-part` file that cleanup can never identify.
+    #[test]
+    fn concurrent_instances_do_not_lose_residual_records() {
+        let path = temp_path();
+        let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
+        let mut first = ResidualTempStore::open_or_empty(path.clone());
+        let mut second = ResidualTempStore::open_or_empty(path.clone());
+
+        first
+            .add_and_save(sample(true, 1, "/srv/.a.txt.macsftp-part-1"))
+            .expect("first instance registers");
+        // `second` opened before the seed; its stale snapshot must not wipe
+        // what `first` recorded.
+        second
+            .add_and_save(sample(false, 2, "/tmp/.b.txt.macsftp-part-2"))
+            .expect("second instance registers");
+
+        let reloaded = ResidualTempStore::open_or_empty(path.clone());
+        assert_eq!(reloaded.records().len(), 2, "both records must survive");
+
+        let _ = std::fs::remove_file(path.as_str());
+        let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
     }
 
     #[test]

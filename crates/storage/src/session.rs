@@ -90,12 +90,9 @@ impl SessionFile {
                             message: error.to_string(),
                         })
                     }
-                    unsupported => Err(StorageError::Parse {
-                        message: format!(
-                            "unsupported session version {} (max {})",
-                            unsupported,
-                            Self::CURRENT_VERSION
-                        ),
+                    unsupported => Err(StorageError::UnsupportedVersion {
+                        found: unsupported,
+                        supported: Self::CURRENT_VERSION,
                     }),
                 }
             }
@@ -416,5 +413,34 @@ mod tests {
         let reloaded = SessionFile::load(&path).expect("original session should remain readable");
         assert_eq!(reloaded.active_window_index, 3);
         std::fs::remove_dir_all(directory).expect("remove protected session directory");
+    }
+
+    /// A session file written by a NEWER release is not "corrupt": the
+    /// recovery guidance differs (upgrade vs restore), so it must be
+    /// classified as UnsupportedVersion rather than Parse.
+    #[test]
+    fn newer_session_version_reports_unsupported_version() {
+        let path = temp_path("future-version");
+        std::fs::write(path.as_str(), r#"{"version": 99}"#).expect("write future fixture");
+
+        let error = SessionStore::open(path.clone())
+            .err()
+            .expect("future version must be rejected");
+        assert!(matches!(
+            &error,
+            StorageError::UnsupportedVersion { found: 99, .. }
+        ));
+        assert_eq!(
+            match error {
+                StorageError::UnsupportedVersion { supported, .. } => supported,
+                _ => unreachable!("checked above"),
+            },
+            SessionFile::CURRENT_VERSION
+        );
+        // The future-version bytes are preserved untouched.
+        assert_eq!(
+            std::fs::read_to_string(path.as_str()).expect("reread fixture"),
+            r#"{"version": 99}"#
+        );
     }
 }

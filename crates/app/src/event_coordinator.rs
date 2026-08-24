@@ -106,14 +106,16 @@ fn dispatch_event(event: AppEvent, cx: &mut App) {
 
     match event {
         AppEvent::ResidualTempCreated(record) => {
-            cx.resources_mut().residual_temps.add(record);
-            if let Err(error) = cx.resources_mut().residual_temps.save() {
+            if let Err(error) = cx.resources_mut().residual_temps.add_and_save(record) {
                 warn!(error = %error, "could not persist residual temp record");
             }
         }
         AppEvent::ResidualTempCleared { transfer_id, path } => {
-            cx.resources_mut().residual_temps.remove(transfer_id, &path);
-            if let Err(error) = cx.resources_mut().residual_temps.save() {
+            if let Err(error) = cx
+                .resources_mut()
+                .residual_temps
+                .remove_and_save(transfer_id, &path)
+            {
                 warn!(error = %error, "could not update residual temp store");
             }
         }
