@@ -11,6 +11,11 @@ based on Keep a Changelog, and releases use semantic versioning.
   "Server closed the connection" or "Connection lost" with a network-timeout
   hint — instead of a generic "Disconnected" message, with the same Reconnect
   and Edit actions as before.
+- Private-key profiles now express three passphrase states: no passphrase,
+  ask every time without storing it, or remember it in the Keychain. The
+  profile editor offers the matching policy toggle; previously any typed
+  passphrase was always remembered and a saved one could never be removed.
+  Existing profiles.json files migrate automatically.
 
 ## [0.1.1] - 2026-08-05
 

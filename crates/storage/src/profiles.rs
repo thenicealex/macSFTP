@@ -7,9 +7,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::file_lock::FileLock;
 use crate::keychain::{KeychainError, KeychainStore};
-use crate::profile_file::{
-    PhasedSaveError, ProfilesFile, StorageError, TransactionPhase,
-};
+use crate::profile_file::{PhasedSaveError, ProfilesFile, StorageError, TransactionPhase};
 
 /// Disk-backed profile store: owns the `profiles.json` path and the
 /// in-memory `ProfilesFile`, keeping them in sync on every write.
@@ -25,8 +23,44 @@ pub struct ProfileStore {
 }
 
 #[cfg(test)]
-type CommitSaveOverride =
-    Box<dyn FnMut(&ProfilesFile, &LocalPath) -> Result<(), PhasedSaveError>>;
+type CommitSaveOverride = Box<dyn FnMut(&ProfilesFile, &LocalPath) -> Result<(), PhasedSaveError>>;
+
+/// Passphrase portion of a private-key profile update. Replaces an older
+/// `Option<String>` that could only express "set and remember" or "keep
+/// existing" — clearing a saved passphrase or choosing not to remember one
+/// was inexpressible, so a mistyped passphrase stayed in the Keychain
+/// forever.
+pub enum PrivateKeyPassphraseUpdate {
+    /// Leave the profile's current passphrase state untouched.
+    KeepExisting,
+    /// The key is not encrypted; drop any remembered passphrase.
+    NoPassphrase,
+    /// The key needs a passphrase, but it must not be persisted. The typed
+    /// value is discarded here — it is never written anywhere.
+    NotRemembered(String),
+    /// Remember the passphrase in the Keychain.
+    Remember(String),
+}
+
+impl std::fmt::Debug for PrivateKeyPassphraseUpdate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::KeepExisting => formatter.write_str("KeepExisting"),
+            Self::NoPassphrase => formatter.write_str("NoPassphrase"),
+            Self::NotRemembered(_) => formatter.write_str("NotRemembered([REDACTED])"),
+            Self::Remember(_) => formatter.write_str("Remember([REDACTED])"),
+        }
+    }
+}
+
+impl Drop for PrivateKeyPassphraseUpdate {
+    fn drop(&mut self) {
+        match self {
+            Self::NotRemembered(secret) | Self::Remember(secret) => secret.zeroize(),
+            Self::KeepExisting | Self::NoPassphrase => {}
+        }
+    }
+}
 
 /// Credential update requested by a profile editor. `None` means "keep the
 /// existing credential" when the profile already uses the same auth method.
@@ -37,7 +71,7 @@ pub enum ProfileAuthUpdate {
     },
     PrivateKey {
         key_path: LocalPath,
-        passphrase: Option<String>,
+        passphrase: PrivateKeyPassphraseUpdate,
     },
 }
 
@@ -54,7 +88,7 @@ impl std::fmt::Debug for ProfileAuthUpdate {
             } => formatter
                 .debug_struct("PrivateKey")
                 .field("key_path", &"[REDACTED]")
-                .field("passphrase", &passphrase.as_ref().map(|_| "[REDACTED]"))
+                .field("passphrase", passphrase)
                 .finish(),
         }
     }
@@ -64,7 +98,8 @@ impl Drop for ProfileAuthUpdate {
     fn drop(&mut self) {
         match self {
             Self::Password { password } => password.zeroize(),
-            Self::PrivateKey { passphrase, .. } => passphrase.zeroize(),
+            // The nested update zeroizes its own secret values.
+            Self::PrivateKey { .. } => {}
         }
     }
 }
@@ -494,7 +529,10 @@ impl ProfileStore {
                 passphrase,
             } => ProfileAuthUpdate::PrivateKey {
                 key_path: LocalPath::new(key_path.clone()),
-                passphrase: passphrase.clone(),
+                passphrase: match &passphrase {
+                    Some(passphrase) => PrivateKeyPassphraseUpdate::Remember(passphrase.clone()),
+                    None => PrivateKeyPassphraseUpdate::KeepExisting,
+                },
             },
         };
         let request = ProfileSaveRequest {
@@ -727,28 +765,40 @@ impl ProfileStore {
                 key_path,
                 passphrase,
             } => {
-                let (passphrase_ref, secret_update) = match passphrase.as_deref() {
-                    Some(passphrase) => {
+                let previous_passphrase = match previous.map(|profile| &profile.auth) {
+                    Some(AuthMethod::PrivateKey {
+                        has_passphrase,
+                        passphrase_ref,
+                        ..
+                    }) => Some((*has_passphrase, passphrase_ref.clone())),
+                    // No previous private-key state to keep.
+                    _ => None,
+                };
+                let (has_passphrase, passphrase_ref, secret_update) = match passphrase {
+                    PrivateKeyPassphraseUpdate::KeepExisting => match previous_passphrase {
+                        Some((kept_has_passphrase, kept_ref)) => {
+                            (kept_has_passphrase, kept_ref, None)
+                        }
+                        None => (false, None, None),
+                    },
+                    // Dropping the ref orphans any remembered Keychain item;
+                    // post-commit orphan cleanup removes it.
+                    PrivateKeyPassphraseUpdate::NoPassphrase => (false, None, None),
+                    // The typed value is deliberately discarded here.
+                    PrivateKeyPassphraseUpdate::NotRemembered(_) => (true, None, None),
+                    PrivateKeyPassphraseUpdate::Remember(secret) => {
                         let secret_ref = SecretRef::keychain_ref(request.profile_id, "passphrase");
                         (
+                            true,
                             Some(secret_ref.clone()),
-                            Some(SecretUpdate {
-                                secret_ref,
-                                secret: passphrase,
-                            }),
+                            Some(SecretUpdate { secret_ref, secret }),
                         )
                     }
-                    None => match previous.map(|profile| &profile.auth) {
-                        Some(AuthMethod::PrivateKey { passphrase_ref, .. }) => {
-                            (passphrase_ref.clone(), None)
-                        }
-                        _ => (None, None),
-                    },
                 };
                 Ok(ResolvedProfileAuth {
                     auth: AuthMethod::PrivateKey {
                         key_path: key_path.clone(),
-                        remember_passphrase: passphrase_ref.is_some(),
+                        has_passphrase,
                         passphrase_ref,
                     },
                     secret_update,
@@ -809,7 +859,8 @@ mod tests {
     use crate::{ProfilesFile, StorageError, core_crate_name, crate_name};
 
     use super::{
-        ProfileAuthUpdate, ProfileMutationError, ProfileSaveRequest, ProfileStore, StorageWarning,
+        PrivateKeyPassphraseUpdate, ProfileAuthUpdate, ProfileMutationError, ProfileSaveRequest,
+        ProfileStore, StorageWarning,
     };
 
     // Unique temp path per call so concurrent tests never clobber each
@@ -852,6 +903,39 @@ mod tests {
             auth: AuthCredential::Password {
                 password: password.into(),
             },
+        }
+    }
+
+    fn private_key_save_request(
+        id: u64,
+        passphrase: PrivateKeyPassphraseUpdate,
+    ) -> ProfileSaveRequest {
+        ProfileSaveRequest {
+            profile_id: ProfileId(id),
+            name: "Keyed".into(),
+            host: "example.com".into(),
+            port: 22,
+            username: "alex".into(),
+            auth: ProfileAuthUpdate::PrivateKey {
+                key_path: LocalPath::new("~/.ssh/id_ed25519"),
+                passphrase,
+            },
+            default_remote_path: None,
+        }
+    }
+
+    fn stored_private_key_state(store: &ProfileStore, id: u64) -> (bool, Option<SecretRef>) {
+        match &store
+            .find_profile(ProfileId(id))
+            .expect("profile exists")
+            .auth
+        {
+            AuthMethod::PrivateKey {
+                has_passphrase,
+                passphrase_ref,
+                ..
+            } => (*has_passphrase, passphrase_ref.clone()),
+            other => panic!("expected private-key auth, got {other:?}"),
         }
     }
 
@@ -946,8 +1030,8 @@ mod tests {
                 "alex",
                 AuthMethod::PrivateKey {
                     key_path: LocalPath::new(first_path),
+                    has_passphrase: false,
                     passphrase_ref: None,
-                    remember_passphrase: false,
                 },
             ))
             .expect("save first key profile");
@@ -959,8 +1043,8 @@ mod tests {
                 "alex",
                 AuthMethod::PrivateKey {
                     key_path: LocalPath::new(second_path),
+                    has_passphrase: false,
                     passphrase_ref: None,
-                    remember_passphrase: false,
                 },
             ))
             .expect("save second key profile");
@@ -1150,7 +1234,7 @@ mod tests {
                 username: "alex".into(),
                 auth: ProfileAuthUpdate::PrivateKey {
                     key_path: LocalPath::new("~/.ssh/id_ed25519"),
-                    passphrase: None,
+                    passphrase: PrivateKeyPassphraseUpdate::KeepExisting,
                 },
                 default_remote_path: None,
             })
@@ -1265,7 +1349,7 @@ mod tests {
                 store.initial_error(),
                 Some(StorageError::UnsupportedVersion {
                     found: 999,
-                    supported: 2
+                    supported: ProfilesFile::CURRENT_VERSION
                 })
             ),
             "initial error must name the unsupported version, got {:?}",
@@ -1358,28 +1442,238 @@ mod tests {
         cleanup(&path);
     }
 
-    #[test]
-    fn inconsistent_remember_flag_blocks_writes() {
-        let path = temp_profiles_path("remember-flag");
-        cleanup(&path);
-        // remember_passphrase=true but no passphrase_ref stored.
-        let key_auth = r#"{"PrivateKey": {"key_path": "~/.ssh/id_ed25519",
-            "passphrase_ref": null, "remember_passphrase": true}}"#;
-        let profile_json = format!(
+    fn legacy_private_key_profile_json(auth_json: &str) -> String {
+        format!(
             r#"{{"id": 9, "revision": 1, "name": "Flagged", "host": "example.com", "port": 22,
-                "username": "alex", "auth": {key_auth},
+                "username": "alex", "auth": {auth_json},
                 "default_remote_path": null, "group_id": null, "last_local_path": null}}"#
+        )
+    }
+
+    /// A remembered passphrase in a pre-tri-state file migrates in memory:
+    /// the flag that used to be spelled `remember_passphrase: true` becomes
+    /// `has_passphrase: true`, and the Keychain ref is kept untouched.
+    #[test]
+    fn legacy_remembered_passphrase_migrates_to_has_passphrase() {
+        let path = temp_profiles_path("legacy-remember-migrates");
+        cleanup(&path);
+        let auth = r#"{"PrivateKey": {"key_path": "~/.ssh/id_ed25519",
+            "passphrase_ref": "keychain:macsftp:9:passphrase", "remember_passphrase": true}}"#;
+        let body = format!(
+            r#"{{"version": 2, "profiles": [{}]}}"#,
+            legacy_private_key_profile_json(auth)
         );
-        let body = v1_file_body(&profile_json);
-        std::fs::write(path.as_str(), body.clone()).expect("write remember flag fixture");
+        std::fs::write(path.as_str(), body.clone()).expect("write legacy fixture");
+
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
+        assert!(store.initial_error().is_none(), "legacy file must load");
+        match &store.find_profile(ProfileId(9)).expect("loaded").auth {
+            AuthMethod::PrivateKey {
+                has_passphrase,
+                passphrase_ref,
+                ..
+            } => {
+                assert!(*has_passphrase);
+                assert_eq!(
+                    passphrase_ref.as_ref().map(SecretRef::as_str),
+                    Some("keychain:macsftp:9:passphrase")
+                );
+            }
+            other => panic!("expected private-key auth, got {other:?}"),
+        }
+
+        // The next save rewrites the file in the current format.
+        store
+            .save_profile(password_profile(10, "Trigger Rewrite"))
+            .expect("rewrite triggers format upgrade");
+        let rewritten = std::fs::read_to_string(path.as_str()).expect("reread rewritten file");
+        assert!(rewritten.contains(r#""version": 3"#));
+        assert!(rewritten.contains(r#""has_passphrase": true"#));
+        assert!(!rewritten.contains("remember_passphrase"));
+        cleanup(&path);
+        let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
+    }
+
+    /// A pre-tri-state file whose remember flag contradicted its refs used
+    /// to be rejected as Corrupt. The tri-state model can represent every
+    /// state that flag combination could mean, and the contradictory state
+    /// carries no recoverable data (the ref was already absent), so loading
+    /// it as "no passphrase" beats bricking the store over it.
+    #[test]
+    fn legacy_contradictory_remember_flag_loads_as_no_passphrase() {
+        let path = temp_profiles_path("legacy-contradictory-flag");
+        cleanup(&path);
+        let auth = r#"{"PrivateKey": {"key_path": "~/.ssh/id_ed25519",
+            "passphrase_ref": null, "remember_passphrase": true}}"#;
+        let body = format!(
+            r#"{{"version": 2, "profiles": [{}]}}"#,
+            legacy_private_key_profile_json(auth)
+        );
+        std::fs::write(path.as_str(), body.clone()).expect("write legacy fixture");
 
         let store = ProfileStore::open_or_empty_memory(path.clone());
+        assert!(
+            store.initial_error().is_none(),
+            "contradiction must not brick"
+        );
+        assert_eq!(stored_private_key_state(&store, 9), (false, None));
+        cleanup(&path);
+        let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
+    }
+
+    /// Current-format files must still uphold the invariant the old flag
+    /// check guaranteed: a Keychain ref without `has_passphrase` is corrupt
+    /// and blocks writes instead of being silently repaired.
+    #[test]
+    fn v3_ref_without_has_passphrase_blocks_writes() {
+        let path = temp_profiles_path("v3-ref-without-flag");
+        cleanup(&path);
+        let auth = r#"{"PrivateKey": {"key_path": "~/.ssh/id_ed25519",
+            "has_passphrase": false,
+            "passphrase_ref": "keychain:macsftp:9:passphrase"}}"#;
+        let body = format!(
+            r#"{{"version": 3, "profiles": [{}]}}"#,
+            legacy_private_key_profile_json(auth)
+        );
+        std::fs::write(path.as_str(), body.clone()).expect("write v3 fixture");
+
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
         assert!(store.initial_error().is_some());
+        assert!(matches!(
+            store.save_profile(password_profile(11, "Replacement")),
+            Err(StorageError::RecoveryRequired { .. })
+        ));
         assert_eq!(
             std::fs::read_to_string(path.as_str()).expect("reread fixture"),
             body
         );
         cleanup(&path);
+        let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
+    }
+
+    /// Regression for the profiles-audit tri-state defect: a saved
+    /// passphrase could never be un-remembered because the update API only
+    /// expressed "set and remember" or "keep existing".
+    #[test]
+    fn private_key_passphrase_not_remembered_drops_secret_and_keeps_flag() {
+        let path = temp_profiles_path("passphrase-not-remembered");
+        cleanup(&path);
+        let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
+
+        store
+            .save_request(private_key_save_request(
+                1,
+                PrivateKeyPassphraseUpdate::Remember("old-secret".into()),
+            ))
+            .expect("seed remembered passphrase");
+        assert!(
+            store
+                .has_saved_secret(ProfileId(1))
+                .expect("keychain query")
+        );
+
+        store
+            .save_request(private_key_save_request(
+                1,
+                PrivateKeyPassphraseUpdate::NotRemembered("typed-secret".into()),
+            ))
+            .expect("switch to ask-every-time");
+
+        // The profile keeps the fact that the key needs a passphrase, but no
+        // secret may remain in the Keychain — including the newly typed one.
+        assert_eq!(stored_private_key_state(&store, 1), (true, None));
+        assert!(
+            !store
+                .has_saved_secret(ProfileId(1))
+                .expect("keychain query")
+        );
+        let settings = store
+            .load_connection_settings(ProfileId(1))
+            .expect("settings load without a stored secret");
+        let AuthCredential::PrivateKey { passphrase, .. } = &settings.auth else {
+            panic!("expected private-key credential")
+        };
+        assert!(passphrase.is_none());
+
+        // Disk agrees with memory.
+        let reloaded = ProfileStore::open_or_empty_memory(path.clone());
+        assert_eq!(stored_private_key_state(&reloaded, 1), (true, None));
+        cleanup(&path);
+        let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
+    }
+
+    #[test]
+    fn private_key_no_passphrase_update_clears_remembered_secret() {
+        let path = temp_profiles_path("passphrase-none");
+        cleanup(&path);
+        let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
+
+        store
+            .save_request(private_key_save_request(
+                1,
+                PrivateKeyPassphraseUpdate::Remember("old-secret".into()),
+            ))
+            .expect("seed remembered passphrase");
+
+        store
+            .save_request(private_key_save_request(
+                1,
+                PrivateKeyPassphraseUpdate::NoPassphrase,
+            ))
+            .expect("declare key passphrase-less");
+
+        assert_eq!(stored_private_key_state(&store, 1), (false, None));
+        assert!(
+            !store
+                .has_saved_secret(ProfileId(1))
+                .expect("keychain query")
+        );
+        let reloaded = ProfileStore::open_or_empty_memory(path.clone());
+        assert_eq!(stored_private_key_state(&reloaded, 1), (false, None));
+        cleanup(&path);
+        let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
+    }
+
+    #[test]
+    fn keep_existing_preserves_not_remembered_passphrase_state() {
+        let path = temp_profiles_path("passphrase-keep");
+        cleanup(&path);
+        let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
+
+        store
+            .save_request(private_key_save_request(
+                1,
+                PrivateKeyPassphraseUpdate::NotRemembered("typed-secret".into()),
+            ))
+            .expect("seed ask-every-time state");
+
+        // An unrelated rename must not resurrect a Keychain ref or drop the
+        // has-passphrase flag.
+        store
+            .save_request(ProfileSaveRequest {
+                profile_id: ProfileId(1),
+                name: "Renamed".into(),
+                host: "example.com".into(),
+                port: 22,
+                username: "alex".into(),
+                auth: ProfileAuthUpdate::PrivateKey {
+                    key_path: LocalPath::new("~/.ssh/id_ed25519"),
+                    passphrase: PrivateKeyPassphraseUpdate::KeepExisting,
+                },
+                default_remote_path: None,
+            })
+            .expect("rename with untouched passphrase policy");
+
+        assert_eq!(stored_private_key_state(&store, 1), (true, None));
+        assert_eq!(
+            store.find_profile(ProfileId(1)).expect("kept").name,
+            "Renamed"
+        );
+        cleanup(&path);
+        let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
     }
 
     #[test]
@@ -1423,7 +1717,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_file_migrates_in_memory_and_saves_as_v2() {
+    fn v1_file_migrates_in_memory_and_saves_as_current_format() {
         let path = temp_profiles_path("v1-migration");
         cleanup(&path);
         let body = v1_file_body(&v2_password_profile_json(5, "Legacy"));
@@ -1447,8 +1741,8 @@ mod tests {
 
         let raw = std::fs::read_to_string(path.as_str()).expect("read saved store");
         assert!(
-            raw.contains("\"version\": 2"),
-            "first save must persist as v2, got: {raw}"
+            raw.contains(r#""version": 3"#),
+            "first save must persist as the current format, got: {raw}"
         );
         assert!(
             raw.contains("\"next_profile_id\": 7"),
@@ -1633,10 +1927,7 @@ mod tests {
             outcome
                 .cleanup_warnings
                 .iter()
-                .any(|warning| matches!(
-                    warning,
-                    StorageWarning::DurabilityNotProven(_)
-                )),
+                .any(|warning| matches!(warning, StorageWarning::DurabilityNotProven(_))),
             "a degraded commit must surface a durability warning"
         );
 

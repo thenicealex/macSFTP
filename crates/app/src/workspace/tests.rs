@@ -75,6 +75,7 @@ mod tests {
     use crate::resources::{ActiveResources, ActiveTransfers};
     use crate::session_coordinator::SessionCoordinator;
     use crate::workspace::ConflictChoice;
+    use crate::workspace::profiles::PassphrasePolicy;
     use crate::workspace::profiles::{SettingsSection, profile_matches_filter};
     use macsftp_core::HistoryOp;
     use macsftp_ui::InputState;
@@ -718,6 +719,76 @@ mod tests {
             assert!(editor.secret_present_hint);
             assert!(editor.error.is_none());
             assert_eq!(ws.settings.selected_profile_id, Some(profile.id));
+        });
+    }
+
+    #[gpui::test]
+    fn profile_editor_passphrase_policy_round_trip_to_ask_every_time(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+
+        workspace.update_in(&mut cx, |ws, _window, cx| {
+            let settings = ConnectionSettings {
+                host: "srv.example.com".into(),
+                port: 22,
+                username: "alex".into(),
+                auth: AuthCredential::PrivateKey {
+                    key_path: "~/.ssh/id_ed25519".into(),
+                    passphrase: Some("old-secret".into()),
+                },
+            };
+            match cx.resources_mut().profiles.save_connection_settings(
+                ProfileId(1),
+                "Keyed".into(),
+                &settings,
+            ) {
+                Ok(_) => {}
+                Err(error) => panic!("seed private-key profile: {error}"),
+            }
+
+            ws.surface = WorkspaceSurface::Settings;
+            ws.load_profile_editor(ProfileId(1), cx);
+
+            let editor = ws
+                .settings
+                .profile_editor
+                .as_mut()
+                .expect("load_profile_editor opens editor");
+            assert_eq!(editor.passphrase_policy, PassphrasePolicy::Remember);
+            assert!(editor.secret_present_hint);
+            assert!(
+                editor.passphrase.value().is_empty(),
+                "secrets are never prefilled"
+            );
+
+            // Switching to ask-every-time with an empty input drops the
+            // remembered secret while keeping the has-passphrase flag.
+            editor.passphrase_policy = PassphrasePolicy::AskEveryTime;
+            ws.save_profile_editor(cx);
+
+            let profile = cx
+                .resources()
+                .profiles
+                .find_profile(ProfileId(1))
+                .expect("profile kept after save");
+            let AuthMethod::PrivateKey {
+                has_passphrase,
+                passphrase_ref,
+                ..
+            } = &profile.auth
+            else {
+                panic!("expected private-key auth");
+            };
+            assert!(*has_passphrase, "the key still requires a passphrase");
+            assert!(
+                passphrase_ref.is_none(),
+                "remembered secret must be dropped"
+            );
+            let saved_secret = cx
+                .resources()
+                .profiles
+                .has_saved_secret(ProfileId(1))
+                .expect("keychain query succeeds");
+            assert!(!saved_secret);
         });
     }
 
@@ -3028,7 +3099,10 @@ mod tests {
             let store = &cx.resources().edit_sessions;
             assert_eq!(store.editing_sessions().count(), 1);
             assert_eq!(
-                store.editing_sessions().next().map(|s| s.connection_key.clone()),
+                store
+                    .editing_sessions()
+                    .next()
+                    .map(|s| s.connection_key.clone()),
                 Some(test_connection_key(SessionId(7))),
                 "the foreign session must be untouched"
             );
@@ -3036,7 +3110,11 @@ mod tests {
                 .find_active(&manual_connection_key(), &remote_path)
                 .expect("this connection must start its own edit session")
                 .id;
-            assert_ne!(fresh, EditSessionId(1), "the edit must not reuse the foreign session");
+            assert_ne!(
+                fresh,
+                EditSessionId(1),
+                "the edit must not reuse the foreign session"
+            );
             assert_eq!(
                 store.get(EditSessionId(1)).map(|s| s.phase.clone()),
                 Some(EditPhase::Editing)

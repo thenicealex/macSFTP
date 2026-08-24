@@ -2,7 +2,9 @@ use gpui::{App, Context, KeyDownEvent, SharedString, Window};
 use macsftp_core::{
     AuthMethod, AuthMethodKind, ConnectionProfile, LocalPath, ProfileId, RemotePath,
 };
-use macsftp_storage::{ProfileAuthUpdate, ProfileMutationError, ProfileSaveRequest};
+use macsftp_storage::{
+    PrivateKeyPassphraseUpdate, ProfileAuthUpdate, ProfileMutationError, ProfileSaveRequest,
+};
 use macsftp_ui::{InputKeyResult, InputState, SecretInputState};
 use tracing::warn;
 
@@ -31,6 +33,19 @@ pub(crate) enum ProfileEditorField {
     DefaultRemotePath,
 }
 
+/// Which passphrase state the profile editor is editing toward. Mirrors the
+/// three states `AuthMethod::PrivateKey` can hold; replaces the old model
+/// where typing a passphrase always remembered it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PassphrasePolicy {
+    /// The key is not encrypted.
+    NoPassphrase,
+    /// The key needs a passphrase that is never persisted.
+    AskEveryTime,
+    /// The passphrase is remembered in the Keychain.
+    Remember,
+}
+
 /// Editable profile draft shown in Settings → Profiles (right pane).
 /// Secrets are never prefilled from Keychain; leave password blank on edit to keep.
 pub(crate) struct ProfileEditorState {
@@ -44,6 +59,7 @@ pub(crate) struct ProfileEditorState {
     pub password: SecretInputState,
     pub key_path: InputState,
     pub passphrase: SecretInputState,
+    pub passphrase_policy: PassphrasePolicy,
     pub default_remote_path: InputState,
     pub error: Option<SharedString>,
     pub secret_present_hint: bool,
@@ -63,6 +79,7 @@ impl ProfileEditorState {
             password: SecretInputState::new(),
             key_path: InputState::new(),
             passphrase: SecretInputState::new(),
+            passphrase_policy: PassphrasePolicy::Remember,
             default_remote_path: InputState::new(),
             error: None,
             secret_present_hint: false,
@@ -87,9 +104,18 @@ impl ProfileEditorState {
             AuthMethod::Password { .. } => {
                 editor.auth_method = AuthMethodKind::Password;
             }
-            AuthMethod::PrivateKey { key_path, .. } => {
+            AuthMethod::PrivateKey {
+                key_path,
+                has_passphrase,
+                passphrase_ref,
+            } => {
                 editor.auth_method = AuthMethodKind::PrivateKey;
                 editor.key_path = InputState::with_value(key_path.as_str().to_string());
+                editor.passphrase_policy = match (has_passphrase, passphrase_ref) {
+                    (_, Some(_)) => PassphrasePolicy::Remember,
+                    (true, None) => PassphrasePolicy::AskEveryTime,
+                    (false, None) => PassphrasePolicy::NoPassphrase,
+                };
             }
         }
         editor
@@ -138,6 +164,12 @@ impl ProfileEditorState {
                 AuthMethodKind::PrivateKey => ProfileEditorField::KeyPath,
             };
         }
+    }
+
+    /// Switch the passphrase state this editor will save. The typed value is
+    /// kept as-is so switching back to Remember restores what was entered.
+    pub(crate) fn set_passphrase_policy(&mut self, policy: PassphrasePolicy) {
+        self.passphrase_policy = policy;
     }
 
     fn cycle_focus(&mut self, backwards: bool) {
@@ -261,6 +293,7 @@ impl crate::workspace::Workspace {
             password,
             key_path_raw,
             passphrase,
+            passphrase_policy,
         ) = {
             let Some(editor) = self.settings.profile_editor.as_ref() else {
                 return;
@@ -277,6 +310,7 @@ impl crate::workspace::Workspace {
                 editor.password.value().to_string(),
                 editor.key_path.value().trim().to_string(),
                 editor.passphrase.value().to_string(),
+                editor.passphrase_policy,
             )
         };
 
@@ -346,7 +380,28 @@ impl crate::workspace::Workspace {
                 }
                 ProfileAuthUpdate::PrivateKey {
                     key_path: LocalPath::new(key_path),
-                    passphrase: (!passphrase.is_empty()).then_some(passphrase),
+                    passphrase: match passphrase_policy {
+                        // The policy wins over typed text: choosing "no
+                        // passphrase" clears whatever is saved.
+                        PassphrasePolicy::NoPassphrase => PrivateKeyPassphraseUpdate::NoPassphrase,
+                        PassphrasePolicy::AskEveryTime => {
+                            if passphrase.is_empty() {
+                                // Dropping a remembered secret without
+                                // retyping it still leaves the has-passphrase
+                                // flag set; storage discards this value.
+                                PrivateKeyPassphraseUpdate::NotRemembered(String::new())
+                            } else {
+                                PrivateKeyPassphraseUpdate::NotRemembered(passphrase)
+                            }
+                        }
+                        PassphrasePolicy::Remember => {
+                            if passphrase.is_empty() {
+                                PrivateKeyPassphraseUpdate::KeepExisting
+                            } else {
+                                PrivateKeyPassphraseUpdate::Remember(passphrase)
+                            }
+                        }
+                    },
                 }
             }
         };

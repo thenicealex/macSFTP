@@ -17,8 +17,8 @@ pub use profile_file::{ProfilesFile, StorageError};
 
 mod profiles;
 pub use profiles::{
-    ProfileAuthUpdate, ProfileDeleteOutcome, ProfileMutationError, ProfileSaveOutcome,
-    ProfileSaveRequest, ProfileStore,
+    PrivateKeyPassphraseUpdate, ProfileAuthUpdate, ProfileDeleteOutcome, ProfileMutationError,
+    ProfileSaveOutcome, ProfileSaveRequest, ProfileStore,
 };
 
 /// Recent successful connections (plan §18 / Phase 5): `recents.json`.

@@ -16,7 +16,7 @@ pub struct ProfilesFile {
 }
 
 impl ProfilesFile {
-    pub const CURRENT_VERSION: u32 = 2;
+    pub const CURRENT_VERSION: u32 = 3;
 
     pub fn new() -> Self {
         Self {
@@ -85,8 +85,24 @@ impl ProfilesFile {
                 supported: Self::CURRENT_VERSION,
             });
         }
-        parsed.validate()?;
         let mut file = parsed;
+        if file.version < Self::CURRENT_VERSION {
+            // Pre-tri-state files spelled the passphrase state as
+            // `remember_passphrase == passphrase_ref.is_some()`. The ref
+            // implies the key needs a passphrase; serde already dropped the
+            // legacy flag and defaulted `has_passphrase` to false.
+            for profile in &mut file.profiles {
+                if let AuthMethod::PrivateKey {
+                    has_passphrase,
+                    passphrase_ref: Some(_),
+                    ..
+                } = &mut profile.auth
+                {
+                    *has_passphrase = true;
+                }
+            }
+        }
+        file.validate()?;
         if file.next_profile_id.is_none() {
             // v1 files carry no high-water mark; derive one so existing ids
             // stay stable. The value is written out on the next save.
@@ -161,7 +177,9 @@ impl ProfilesFile {
         crate::atomic_file::write_phased_with_parent_sync(
             std::path::Path::new(path.as_str()),
             json.as_bytes(),
-            |_parent_directory| std::io::Result::Err(std::io::Error::other("injected fsync failure")),
+            |_parent_directory| {
+                std::io::Result::Err(std::io::Error::other("injected fsync failure"))
+            },
         )
         .map_err(|error| phased_error(path, error))
     }
@@ -217,20 +235,18 @@ fn validate_auth(auth: &AuthMethod, profile_id: ProfileId) -> Result<(), Storage
     match auth {
         AuthMethod::Password { secret_ref } => check(secret_ref, "password"),
         AuthMethod::PrivateKey {
+            has_passphrase,
             passphrase_ref,
-            remember_passphrase,
             ..
         } => {
             if let Some(secret_ref) = passphrase_ref {
                 check(secret_ref, "passphrase")?;
             }
-            if *remember_passphrase != passphrase_ref.is_some() {
+            if !has_passphrase && passphrase_ref.is_some() {
                 return Err(StorageError::Corrupt {
                     message: format!(
-                        "profile {} remember_passphrase={} but passphrase_ref present={}",
+                        "profile {} has a passphrase ref but has_passphrase=false",
                         profile_id.0,
-                        remember_passphrase,
-                        passphrase_ref.is_some()
                     ),
                 });
             }

@@ -421,10 +421,10 @@ impl ConnectionProfile {
                 ..
             } => AuthMethod::PrivateKey {
                 key_path: LocalPath::new(key_path.clone()),
+                has_passphrase: passphrase.is_some(),
                 passphrase_ref: passphrase
                     .as_ref()
                     .map(|_| SecretRef::keychain_ref(id, "passphrase")),
-                remember_passphrase: passphrase.is_some(),
             },
         };
         let mut profile =
@@ -439,10 +439,20 @@ pub enum AuthMethod {
     Password {
         secret_ref: SecretRef,
     },
+    /// Private-key auth with an explicit three-state passphrase:
+    ///
+    /// 1. `has_passphrase: false` — the key is not encrypted;
+    /// 2. `has_passphrase: true, passphrase_ref: None` — the key needs a
+    ///    passphrase but it is not remembered (entered once per session);
+    /// 3. `has_passphrase: true, passphrase_ref: Some` — the passphrase is
+    ///    remembered in the Keychain under that ref.
     PrivateKey {
         key_path: LocalPath,
+        /// Defaults to false so pre-tri-state files (which spelled this
+        /// state as `remember_passphrase`) still deserialize.
+        #[serde(default)]
+        has_passphrase: bool,
         passphrase_ref: Option<SecretRef>,
-        remember_passphrase: bool,
     },
 }
 
@@ -2895,8 +2905,8 @@ mod tests {
     fn private_key_auth_reports_kind() {
         let method = AuthMethod::PrivateKey {
             key_path: LocalPath::new("/Users/alex/.ssh/id_ed25519"),
+            has_passphrase: true,
             passphrase_ref: Some(SecretRef::new("key-passphrase")),
-            remember_passphrase: true,
         };
 
         assert_eq!(method.kind(), AuthMethodKind::PrivateKey);
@@ -3976,8 +3986,8 @@ mod tests {
             key_profile.auth,
             AuthMethod::PrivateKey {
                 key_path: LocalPath::new("/Users/alex/.ssh/id_ed25519"),
+                has_passphrase: true,
                 passphrase_ref: Some(SecretRef::keychain_ref(ProfileId(2), "passphrase")),
-                remember_passphrase: true,
             }
         );
 
@@ -3997,8 +4007,8 @@ mod tests {
             no_pass_profile.auth,
             AuthMethod::PrivateKey {
                 key_path: LocalPath::new("/Users/alex/.ssh/id_rsa"),
+                has_passphrase: false,
                 passphrase_ref: None,
-                remember_passphrase: false,
             }
         );
     }

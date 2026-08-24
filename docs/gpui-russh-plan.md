@@ -968,11 +968,21 @@ pub enum AuthMethod {
     },
     PrivateKey {
         key_path: LocalPath,
+        has_passphrase: bool,
         passphrase_ref: Option<SecretRef>,
-        remember_passphrase: bool,
     },
 }
 ```
+
+`has_passphrase` + `passphrase_ref` 组成三态（2026-08-22 起）：
+
+1. `false, None`：key 未加密，无需 passphrase；
+2. `true, None`：key 需要 passphrase 但不记住（每次连接输入）；
+3. `true, Some(ref)`：passphrase 已记住到 Keychain。
+
+不变量 `ref.is_some() ⇒ has_passphrase`；违反即 Corrupt。v1/v2 文件的
+`remember_passphrase` 字段由 storage 在内存中迁移（ref 存在则置
+`has_passphrase = true`），下次保存写为 v3。
 
 `revision` 规则：
 
@@ -998,7 +1008,8 @@ pub enum AuthMethod {
   memory backend，调用 OS Keychain 必须返回 platform-unavailable，禁止静默降级；
 - secret value 在内存中使用可清零容器，例如 `zeroize`；
 - log 和 error 里只能出现 `SecretRef`，不能出现 secret value；
-- passphrase 默认可记住到 Keychain，但 profile 里必须保存 `remember_passphrase`，用户可关闭。
+- passphrase 默认可记住到 Keychain；profile 用三态表达：无 passphrase /
+  有但不记住 / 已记住（2026-08-22 更新，取代旧的 `remember_passphrase` 布尔）。
 
 **2026-07-14 边界收口：** `ProfileStore` 是 profile 文件与 Keychain 生命周期的
 唯一协调者，`app` 不持有或调用 `KeychainStore`。Connect 与 Settings 分别通过
@@ -2149,7 +2160,8 @@ M7 ≈ 100%；MVP ≈ 100%。
 2. 同 profile 多 tab：允许。`TabState` 与 `ProfileId` 是多对一。
 3. 关闭 app 时运行中 transfer：随进程结束；**不**跨启动展示未完成 history（会话清空）。
 4. 远端删除：SFTP 无 trash 概念。MVP 直接 confirm 删除，批量删除必须显示不可撤销提示。
-5. private key passphrase：默认可记住到 Keychain，但 profile 必须有 `remember_passphrase` 开关。
+5. private key passphrase：默认可记住到 Keychain；profile 必须能表达三态
+   （无 passphrase / 每次询问 / 已记住），编辑器提供对应策略切换。
 6. `~/.ssh/config` Host alias：不进 MVP。profile 字段保持与 ssh config 概念接近，方便后续导入。
 7. 默认本地起始目录：首次为 home；之后可按 profile 记住上次路径。
 8. transfer history：无跨会话目录；drawer 只显示进程内 `TransferStore` 分组。
