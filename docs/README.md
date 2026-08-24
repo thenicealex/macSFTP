@@ -6,7 +6,9 @@
 
 | 文档 | 用途 |
 | --- | --- |
-| [`progress-analysis-2026-08-01.md`](progress-analysis-2026-08-01.md) | **最新进展总览**（推荐从这里读起）：07-14 之后的功能、修复、验证现状、遗留项 |
+| [`progress-analysis-2026-08-24.md`](progress-analysis-2026-08-24.md) | **最新进展总览**（推荐从这里读起）：08-01 之后的功能、修复、验证现状、遗留项 |
+| [`release-evidence/v0.2.0.md`](release-evidence/v0.2.0.md) | 0.2.0 发布证据（已签字，Status: PASS） |
+| [`release-evidence/v0.1.1.md`](release-evidence/v0.1.1.md) | 0.1.1 发布证据 |
 | [`release-evidence/v0.1.0.md`](release-evidence/v0.1.0.md) | 0.1.0 发布证据（已签字，Status: PASS） |
 
 ## 架构与设计
@@ -20,13 +22,14 @@
 
 ## 计划（docs/plans/）
 
-按日期命名的设计/实现计划。已完成阶段的计划保留作历史参考：
+按日期命名的设计/实现计划。全部阶段均已交付，计划保留作历史参考：
 
-- **进行中/近期**：`2026-07-29-detailed-code-implementation-plan.md`（三项高严重度缺陷修复合同）、`2026-07-28-*`（传输终态 / host-key scope / 编辑校验）、`2026-07-29-scrollbar*.md`
+- **2026-08 收口**：`2026-08-21-workspace-decentralization-roadmap.md`（Workspace 去中心化 Stage 1–4）、`2026-08-21-stage3-stage4-plan.md`、`2026-08-22-profiles-audit-fix-cycle.md`（批次 A–F）
+- **2026-07 收口**：`2026-07-29-detailed-code-implementation-plan.md`（三项高严重度缺陷修复合同）、`2026-07-28-*`（传输终态 / host-key scope / 编辑校验）、`2026-07-29-scrollbar*.md`
 - **已完成阶段**：`2026-07-13/14-phase*-*.md`（UX 六阶段）、profile management、connect picker、transfer drawer
 - 完整列表见 [`docs/plans/`](plans/)
 
-## 进度分析（历史快照）
+## 进度分析（按时间快照）
 
 按时间排序，每篇是当时的项目总览：
 
@@ -36,14 +39,15 @@
 | 2026-07-13 | [`progress-analysis-2026-07-13.md`](progress-analysis-2026-07-13.md) |
 | 2026-07-13（多窗口） | [`progress-analysis-2026-07-13-multiwindow.md`](progress-analysis-2026-07-13-multiwindow.md) |
 | 2026-07-14 | [`progress-analysis-2026-07-14.md`](progress-analysis-2026-07-14.md) |
-| 2026-08-01 | [`progress-analysis-2026-08-01.md`](progress-analysis-2026-08-01.md)（最新） |
+| 2026-08-01 | [`progress-analysis-2026-08-01.md`](progress-analysis-2026-08-01.md) |
+| 2026-08-24 | [`progress-analysis-2026-08-24.md`](progress-analysis-2026-08-24.md)（最新） |
 
 ## UX 规范与计划
 
 | 文档 | 用途 |
 | --- | --- |
 | [`ui-ux-guidelines.md`](ui-ux-guidelines.md) | **强制 UX 规范**（所有界面改动必须遵守） |
-| [`ux-improvement-plan.md`](ux-improvement-plan.md) | UX 提升分阶段计划（阶段 1–6 已完成，见 status update） |
+| [`ux-improvement-plan.md`](ux-improvement-plan.md) | UX 提升分阶段计划（阶段 1–6 已完成，历史参考） |
 
 ## 发布
 
@@ -58,12 +62,6 @@
 | --- | --- |
 | [`m7-test-matrix.md`](m7-test-matrix.md) | M7 手动测试矩阵（全部通过） |
 | [`m7-visual-polish.md`](m7-visual-polish.md) | M7 Zed-style 视觉打磨验证（12/12） |
-
-## 专项分析
-
-| 文档 | 用途 |
-| --- | --- |
-| [`remote-editing-bug-analysis-2026-07-16.md`](remote-editing-bug-analysis-2026-07-16.md) | 远程编辑 post-merge 11 bug 分析（已修复） |
 
 ## 目录结构
 
@@ -81,7 +79,5 @@ docs/
   release-evidence/              发布证据
   m7-test-matrix.md              M7 验收
   m7-visual-polish.md
-  remote-editing-bug-analysis-*.md
-  superpowers/                   SDD 工作流产物
   archive/                       归档的历史文档
 ```

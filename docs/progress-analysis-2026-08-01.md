@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-01
 
-**基准：** `docs/progress-analysis-2026-07-14.md`（上次总览）、`docs/plans/2026-07-29-detailed-code-implementation-plan.md`、`outputs/macsftp-bug-audit-2026-07-28.md`、当前 `master` 提交历史与今日实测验证。
+**基准：** `docs/progress-analysis-2026-07-14.md`（上次总览）、`docs/plans/2026-07-29-detailed-code-implementation-plan.md`、07-28 全项目 Bug 审计（报告已按项目惯例删除，见 `3f4692f`）、当前 `master` 提交历史与今日实测验证。
 
 **范围：** 07-14 之后的专项交付、三个高严重度缺陷修复、工程验证现状（本机首次全绿）、审计遗留台账、已知缺口与建议。
 
@@ -18,7 +18,7 @@ macSFTP 在「可日常使用」的基础上又收口了三件大事：**远程�
 | --- | --- | --- |
 | 07-15 ~ 07-16 | **远程编辑** 设计 + 实现：下载→外部编辑→mtime 轮询回传、冲突快照、100MB 大文件确认、自定义编辑器、会话复用 | `127854a`、`5b140d6`、`47658bc` … `0d04394` |
 | 07-16 ~ 07-28 | 远程编辑 **post-merge 审计 11 个 bug + Phase 2 修复**：run_id 命名空间、自愈清理、编辑基线重同步、编辑中断恢复、OverwriteAll 去重弹窗 | `f5db0af`、`69f847e`、`4fd9ceb`、`e4d579d` |
-| 07-28 | **全项目 Bug 审计** → `outputs/macsftp-bug-audit-2026-07-28.md`（确认 7 项缺陷：3 高、1 中、3 低） | `8637e2b` |
+| 07-28 | **全项目 Bug 审计**（确认 7 项缺陷：3 高、1 中、3 低；报告后于 `3f4692f` 删除） | `8637e2b` |
 | 07-28 | **Transfer drawer：Cancel All / Clear Records** | `f1fcdca` … `737a11b`，`7fe57ca` 合入 master |
 | 07-29 | **PR 1 传输终态保证**（SFTP-TRANSFER-001） | `6914960` |
 | 07-29 | **PR 2 host-key mismatch 会话作用域**（CORE-SFTP-001） | `c242c93` … `c6680f9` |
@@ -116,6 +116,6 @@ CI（`.github/workflows/ci.yml`）在 `macos-15` 上以 `MACSFTP_REQUIRE_SSHD=1`
 | `docs/plans/2026-07-28-host-key-mismatch-scope.md` | PR 2 分解 |
 | `docs/plans/2026-07-28-authoritative-remote-edit-check.md` | PR 3 分解 |
 | `docs/plans/2026-07-29-scrollbar.md` + `scrollbar-design.md` | 自定义滚动条 |
-| `outputs/macsftp-bug-audit-2026-07-28.md` | 审计报告（含遗留 4 项） |
+| ~~`outputs/macsftp-bug-audit-2026-07-28.md`~~ | 审计报告（已于 `3f4692f` 删除；遗留 4 项状态见本文 §4） |
 | `docs/release-evidence/v0.1.0.md` | 发布证据（IN PROGRESS） |
 | `docs/gpui-russh-plan.md` | 架构主文档 |

@@ -27,7 +27,7 @@
   - `crates/sftp/src/session_actor.rs`
   - `crates/sftp/tests/real_session.rs`
   - `docs/gpui-russh-plan.md`
-- Do not hash file contents in this PR. SFTP metadata is whole-second `(size, mtime)`, so same-size writes within the same second remain an accepted limitation documented in `docs/remote-editing-bug-analysis-2026-07-16.md`.
+- Do not hash file contents in this PR. SFTP metadata is whole-second `(size, mtime)`, so same-size writes within the same second remain an accepted limitation (documented in §2 of `docs/progress-analysis-2026-08-01.md`).
 - Use `symlink_metadata`, not metadata that follows links; remote editing must continue treating a symlink as a link rather than silently changing file semantics.
 
 ## Rejected alternatives
@@ -534,7 +534,7 @@ git commit -m "Apply authoritative edit conflict checks"
 
 **Files:**
 - Modify: `docs/gpui-russh-plan.md`
-- Verify: `docs/remote-editing-bug-analysis-2026-07-16.md`
+- Verify: `docs/progress-analysis-2026-08-01.md`（缺陷修复验收与已知限制）
 
 **Step 1: Document the protocol and limitation**
 
@@ -547,7 +547,9 @@ In the remote-edit/runtime sections, record:
 - failure preserves local edits and retries later;
 - comparison remains `(size, whole-second mtime)`, so same-size/same-second writes are not detectable without hashing/versioning.
 
-Do not rewrite the historical bug report; link to it if helpful.
+The historical post-merge bug report was deleted per project convention
+(`3f4692f`); the accepted `(size, mtime)` limitation is documented in
+`docs/progress-analysis-2026-08-01.md` §2.
 
 **Step 2: Run focused non-GPUI checks**
 
