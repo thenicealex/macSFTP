@@ -1,8 +1,9 @@
 use macsftp_core::LocalPath;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 use super::StorageError;
-use crate::write_private_file_atomically;
+use crate::{file_lock::FileLock, write_private_file_atomically};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecentEntry {
@@ -149,7 +150,12 @@ impl RecentsStore {
 
     /// Upsert by `(host, port, username, profile_id)`; move to front; cap 20; save.
     pub fn upsert(&mut self, entry: RecentEntryInput) -> Result<(), StorageError> {
-        self.ensure_writable()?;
+        let _lock = self.acquire_write_lock()?;
+        // Reload under the lock so entries another app instance wrote since
+        // our last sync are merged into our view instead of being clobbered
+        // by this full-file rewrite.
+        self.file = RecentsFile::load(&self.path)?;
+        self.reconcile_next_id();
         let dedupe_matches = |existing: &RecentEntry| {
             existing.host == entry.host
                 && existing.port == entry.port
@@ -193,6 +199,32 @@ impl RecentsStore {
         self.file.save(&self.path)
     }
 
+    /// Start one serialized read-modify-write cycle: hold the advisory lock
+    /// until the returned guard drops, with the on-disk state freshly
+    /// loaded. Same pattern as `ProfileStore` transactions.
+    fn acquire_write_lock(&self) -> Result<FileLock, StorageError> {
+        self.ensure_writable()?;
+        FileLock::acquire(Path::new(self.path.as_str())).map_err(|error| StorageError::Io {
+            path: self.path.as_str().to_string(),
+            message: error.to_string(),
+        })
+    }
+
+    /// Another instance may have inserted entries while our snapshot was
+    /// stale; never hand out an id that collides with anything on disk.
+    fn reconcile_next_id(&mut self) {
+        let highest_on_disk = self
+            .file
+            .entries
+            .iter()
+            .map(|entry| entry.id)
+            .max()
+            .unwrap_or(0);
+        if self.next_id <= highest_on_disk {
+            self.next_id = highest_on_disk.saturating_add(1);
+        }
+    }
+
     /// Drop the profile linkage from every entry referencing `profile_id`,
     /// keeping the entries as plain manual-connection history (the cached
     /// display label stays). Called when a profile is deleted: the stale
@@ -201,7 +233,8 @@ impl RecentsStore {
     /// entries were decoupled; the disk is only rewritten when something
     /// changed.
     pub fn forget_profile(&mut self, profile_id: u64) -> Result<usize, StorageError> {
-        self.ensure_writable()?;
+        let _lock = self.acquire_write_lock()?;
+        self.file = RecentsFile::load(&self.path)?;
         let mut decoupled = 0;
         for entry in &mut self.file.entries {
             if entry.profile_id == Some(profile_id) {
@@ -382,10 +415,12 @@ mod tests {
 
         // The decoupling survives a reload.
         let reloaded = RecentsStore::open(path.clone()).expect("reload");
-        assert!(reloaded
-            .entries()
-            .iter()
-            .all(|entry| entry.profile_id != Some(7)));
+        assert!(
+            reloaded
+                .entries()
+                .iter()
+                .all(|entry| entry.profile_id != Some(7))
+        );
     }
 
     #[test]
@@ -405,6 +440,46 @@ mod tests {
             before,
             "nothing changed on disk"
         );
+    }
+
+    /// Two store instances (two app processes) must not silently overwrite
+    /// each other's entries: the second writer reloads under the advisory
+    /// lock before mutating, so both upserts survive.
+    #[test]
+    fn concurrent_instances_do_not_silently_lose_recents() {
+        let path = temp_path("concurrent");
+        let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
+        let mut first = RecentsStore::open_or_empty(path.clone());
+        let mut second = RecentsStore::open_or_empty(path.clone());
+
+        first
+            .upsert(sample_input("a.example", 100))
+            .expect("first instance upsert");
+        // `second` was opened before the seed; its stale in-memory snapshot
+        // must not erase what `first` wrote.
+        second
+            .upsert(sample_input("b.example", 200))
+            .expect("second instance upsert");
+
+        let reloaded = RecentsStore::open(path.clone()).expect("reload after both writes");
+        let hosts: Vec<&str> = reloaded
+            .entries()
+            .iter()
+            .map(|entry| entry.host.as_str())
+            .collect();
+        assert!(
+            hosts.contains(&"a.example") && hosts.contains(&"b.example"),
+            "both instances' entries must survive, got {hosts:?}"
+        );
+
+        // Ids stay unique across instances even after concurrent inserts.
+        let mut ids: Vec<u64> = reloaded.entries().iter().map(|entry| entry.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), reloaded.entries().len(), "ids must not collide");
+
+        let _ = std::fs::remove_file(path.as_str());
+        let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
     }
 
     #[test]
