@@ -5,6 +5,15 @@ based on Keep a Changelog, and releases use semantic versioning.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-13
+
+### Fixed
+
+- Avoid repeated full-directory scans when selecting all files, extending a
+  selection, or shrinking a selection in large local and remote directories.
+- Replace selection anchors hidden by filtering so later Shift selection does
+  not reselect files from the old range.
+
 ## [0.2.0] - 2026-08-24
 
 ### Changed
