@@ -479,6 +479,44 @@ mod tests {
     }
 
     #[gpui::test]
+    fn shift_selection_preserves_visible_range_when_anchor_is_filtered(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            let tab = workspace
+                .active_tab_mut()
+                .expect("workspace has an active tab");
+            tab.local.entries = ["a.txt", "b-match.txt", "c-match.txt"]
+                .into_iter()
+                .map(|name| macsftp_core::LocalEntry {
+                    name: name.into(),
+                    path: LocalPath::new(format!("/selection/{name}")),
+                    kind: FileKind::File,
+                    size: None,
+                    permissions: None,
+                    modified_at: None,
+                    link_target: None,
+                })
+                .collect();
+            workspace.select_index(PaneSide::Local, 0, cx);
+            workspace.extend_selection_to(PaneSide::Local, 2, cx);
+            workspace.local.filter.query = "match".into();
+            workspace.move_selection_extend(PaneSide::Local, 1, cx);
+            assert_eq!(
+                workspace
+                    .active_tab()
+                    .expect("active tab survives filtering")
+                    .selection
+                    .selected_paths,
+                vec![
+                    EntryPath::Local(LocalPath::new("/selection/b-match.txt")),
+                    EntryPath::Local(LocalPath::new("/selection/c-match.txt")),
+                ],
+                "a hidden anchor must not discard the remaining visible selection"
+            );
+        });
+    }
+
+    #[gpui::test]
     fn large_directory_selection_smoke(cx: &mut TestAppContext) {
         let (workspace, mut cx, _channels) = init_workspace(cx);
         workspace.update_in(&mut cx, |workspace, _window, cx| {

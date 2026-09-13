@@ -146,8 +146,7 @@ impl crate::workspace::Workspace {
         }
     }
 
-    /// Active end of a multi-select range (the selected visible index away from the anchor).
-    fn selection_edge_visible_index(&self, side: PaneSide, cx: &App) -> Option<usize> {
+    fn selection_visible_bounds(&self, side: PaneSide, cx: &App) -> Option<(usize, usize)> {
         let tab = self.active_tab()?;
         let selected: std::collections::HashSet<_> = tab.selection.selected_paths.iter().collect();
         let visible = self.visible_indices(side, cx);
@@ -160,6 +159,12 @@ impl crate::workspace::Workspace {
             });
         let lo = selected_visible.next()?;
         let hi = selected_visible.next_back().unwrap_or(lo);
+        Some((lo, hi))
+    }
+
+    /// Active end of a multi-select range (the selected visible index away from the anchor).
+    fn selection_edge_visible_index(&self, side: PaneSide, cx: &App) -> Option<usize> {
+        let (lo, hi) = self.selection_visible_bounds(side, cx)?;
         let anchor_index = self
             .selection_anchor
             .as_ref()
@@ -219,7 +224,10 @@ impl crate::workspace::Workspace {
             .selection_anchor
             .as_ref()
             .and_then(|path| self.visible_index_of_path(side, path, cx))
-            .or_else(|| self.selected_index(side, cx))
+            .or_else(|| {
+                self.selection_visible_bounds(side, cx)
+                    .map(|(first, _)| first)
+            })
             .unwrap_or(if self.selection_anchor.is_none() {
                 0
             } else {

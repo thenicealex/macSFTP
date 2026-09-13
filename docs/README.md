@@ -7,6 +7,7 @@
 | 文档 | 用途 |
 | --- | --- |
 | [`progress-analysis-2026-08-24.md`](progress-analysis-2026-08-24.md) | **最新进展总览**（推荐从这里读起）：08-01 之后的功能、修复、验证现状、遗留项 |
+| [`release-evidence/v0.2.1.md`](release-evidence/v0.2.1.md) | 0.2.1 自动化发布证据；原生 GUI 人工验收不再作为发布门禁 |
 | [`release-evidence/v0.2.0.md`](release-evidence/v0.2.0.md) | 0.2.0 发布证据（已签字，Status: PASS） |
 | [`release-evidence/v0.1.1.md`](release-evidence/v0.1.1.md) | 0.1.1 发布证据 |
 | [`release-evidence/v0.1.0.md`](release-evidence/v0.1.0.md) | 0.1.0 发布证据（已签字，Status: PASS） |
