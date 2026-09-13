@@ -90,6 +90,10 @@ impl crate::workspace::Workspace {
         cx: &App,
     ) -> Option<EntryPath> {
         let real_index = *self.visible_indices(side, cx).get(visible_index)?;
+        self.entry_path_at_stored_index(side, real_index)
+    }
+
+    fn entry_path_at_stored_index(&self, side: PaneSide, real_index: usize) -> Option<EntryPath> {
         let tab = self.active_tab()?;
         match side {
             PaneSide::Local => tab
@@ -145,17 +149,17 @@ impl crate::workspace::Workspace {
     /// Active end of a multi-select range (the selected visible index away from the anchor).
     fn selection_edge_visible_index(&self, side: PaneSide, cx: &App) -> Option<usize> {
         let tab = self.active_tab()?;
-        let mut selected_visible = Vec::new();
-        for path in &tab.selection.selected_paths {
-            if let Some(index) = self.visible_index_of_path(side, path, cx) {
-                selected_visible.push(index);
-            }
-        }
-        if selected_visible.is_empty() {
-            return None;
-        }
-        let lo = *selected_visible.iter().min()?;
-        let hi = *selected_visible.iter().max()?;
+        let selected: std::collections::HashSet<_> = tab.selection.selected_paths.iter().collect();
+        let visible = self.visible_indices(side, cx);
+        let mut selected_visible = visible
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &real_index)| {
+                let path = self.entry_path_at_stored_index(side, real_index)?;
+                selected.contains(&path).then_some(index)
+            });
+        let lo = selected_visible.next()?;
+        let hi = selected_visible.next_back().unwrap_or(lo);
         let anchor_index = self
             .selection_anchor
             .as_ref()
@@ -211,30 +215,26 @@ impl crate::workspace::Workspace {
             return;
         }
         let end = visible_index.min(visible.len() - 1);
-        let anchor_path = self
-            .selection_anchor
-            .clone()
-            .or_else(|| self.entry_path_at(side, self.selected_index(side, cx).unwrap_or(0), cx));
-        let Some(anchor_path) = anchor_path else {
-            return;
-        };
-        if self.selection_anchor.is_none() {
-            self.selection_anchor = Some(anchor_path.clone());
-        }
         let start = self
-            .visible_index_of_path(side, &anchor_path, cx)
-            .unwrap_or(end);
+            .selection_anchor
+            .as_ref()
+            .and_then(|path| self.visible_index_of_path(side, path, cx))
+            .or_else(|| self.selected_index(side, cx))
+            .unwrap_or(if self.selection_anchor.is_none() {
+                0
+            } else {
+                end
+            });
+        self.selection_anchor = self.entry_path_at_stored_index(side, visible[start]);
         let (lo, hi) = if start <= end {
             (start, end)
         } else {
             (end, start)
         };
-        let mut paths = Vec::new();
-        for vi in lo..=hi {
-            if let Some(path) = self.entry_path_at(side, vi, cx) {
-                paths.push(path);
-            }
-        }
+        let paths = visible[lo..=hi]
+            .iter()
+            .filter_map(|&real_index| self.entry_path_at_stored_index(side, real_index))
+            .collect();
         if let Some(tab) = self.active_tab_mut() {
             tab.selection.selected_paths = paths;
         }
@@ -262,16 +262,12 @@ impl crate::workspace::Workspace {
     }
 
     pub(crate) fn select_all_visible(&mut self, side: PaneSide, cx: &mut Context<Self>) {
-        let n = self.entry_count(side, cx);
-        let mut paths = Vec::new();
-        for i in 0..n {
-            if let Some(path) = self.entry_path_at(side, i, cx) {
-                paths.push(path);
-            }
-        }
-        if let Some(first) = paths.first() {
-            self.selection_anchor = Some(first.clone());
-        }
+        let paths: Vec<_> = self
+            .visible_indices(side, cx)
+            .into_iter()
+            .filter_map(|real_index| self.entry_path_at_stored_index(side, real_index))
+            .collect();
+        self.selection_anchor = paths.first().cloned();
         if let Some(tab) = self.active_tab_mut() {
             tab.selection.selected_paths = paths;
         }
