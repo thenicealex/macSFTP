@@ -73,5 +73,5 @@
 
 - [x] 旧平铺字段名在 app crate 内零独立命中（编译器穷举验证；新组内路径如 `.settings.profile_filter` 合法保留）
 - [x] Workspace 顶层字段收敛到 25（16 个标量/管道字段 + 9 个组实例，含 local/remote 两个 PaneUi）；各组字段数与本计划表一致
-- [ ] 全量门禁绿；`cargo test --workspace` 数量不少于 478
-- [ ] 路线图文档标记 Stage 3/4 交付，附实际 commit 列表
+- [x] 全量门禁绿；`cargo test --workspace` 数量不少于 478（2026-08-22 全绿；2026-08-24 复测 508 passed）
+- [x] 路线图文档标记 Stage 3/4 交付，附实际 commit 列表（`5988718`）

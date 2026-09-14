@@ -439,6 +439,131 @@ mod tests {
     }
 
     #[gpui::test]
+    fn shift_selection_replaces_filtered_out_anchor(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            let tab = workspace
+                .active_tab_mut()
+                .expect("workspace has an active tab");
+            tab.local.entries = ["a.txt", "b.txt", "c.txt", "d.txt"]
+                .into_iter()
+                .map(|name| macsftp_core::LocalEntry {
+                    name: name.into(),
+                    path: LocalPath::new(format!("/selection/{name}")),
+                    kind: FileKind::File,
+                    size: None,
+                    permissions: None,
+                    modified_at: None,
+                    link_target: None,
+                })
+                .collect();
+            workspace.select_index(PaneSide::Local, 0, cx);
+            workspace.local.filter.query = "b".into();
+            workspace.extend_selection_to(PaneSide::Local, 0, cx);
+            workspace.local.filter.query.clear();
+            workspace.move_selection_extend(PaneSide::Local, 1, cx);
+            let selected = &workspace
+                .active_tab()
+                .expect("active tab survives selection")
+                .selection
+                .selected_paths;
+            assert_eq!(
+                selected,
+                &vec![
+                    EntryPath::Local(LocalPath::new("/selection/b.txt")),
+                    EntryPath::Local(LocalPath::new("/selection/c.txt")),
+                ],
+                "extending after filtering must use the replacement anchor"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn shift_selection_preserves_visible_range_when_anchor_is_filtered(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            let tab = workspace
+                .active_tab_mut()
+                .expect("workspace has an active tab");
+            tab.local.entries = ["a.txt", "b-match.txt", "c-match.txt"]
+                .into_iter()
+                .map(|name| macsftp_core::LocalEntry {
+                    name: name.into(),
+                    path: LocalPath::new(format!("/selection/{name}")),
+                    kind: FileKind::File,
+                    size: None,
+                    permissions: None,
+                    modified_at: None,
+                    link_target: None,
+                })
+                .collect();
+            workspace.select_index(PaneSide::Local, 0, cx);
+            workspace.extend_selection_to(PaneSide::Local, 2, cx);
+            workspace.local.filter.query = "match".into();
+            workspace.move_selection_extend(PaneSide::Local, 1, cx);
+            assert_eq!(
+                workspace
+                    .active_tab()
+                    .expect("active tab survives filtering")
+                    .selection
+                    .selected_paths,
+                vec![
+                    EntryPath::Local(LocalPath::new("/selection/b-match.txt")),
+                    EntryPath::Local(LocalPath::new("/selection/c-match.txt")),
+                ],
+                "a hidden anchor must not discard the remaining visible selection"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn large_directory_selection_smoke(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            let tab = workspace.active_tab_mut().expect("workspace has an active tab");
+            tab.local.entries = (0..10_000)
+                .map(|index| macsftp_core::LocalEntry {
+                    name: format!("entry-{index:05}.txt"),
+                    path: LocalPath::new(format!("/selection/entry-{index:05}.txt")),
+                    kind: FileKind::File,
+                    size: None,
+                    permissions: None,
+                    modified_at: None,
+                    link_target: None,
+                })
+                .collect();
+            tab.remote.entries = tab.local.entries.iter().map(|entry| RemoteEntry {
+                name: entry.name.clone(),
+                path: RemotePath::new(entry.path.as_str()),
+                kind: entry.kind,
+                size: None,
+                permissions: None,
+                modified_at: None,
+                link_target: None,
+            }).collect();
+            for side in [PaneSide::Local, PaneSide::Remote] {
+                workspace.pane_filter_mut(side).query = "ENTRY".into();
+                let started = std::time::Instant::now();
+                workspace.select_all_visible(side, cx);
+                assert_eq!(workspace.active_tab().expect("active tab").selection.selected_paths.len(), 10_000);
+                let select_all_elapsed = started.elapsed();
+                workspace.select_index(side, 0, cx);
+                let started = std::time::Instant::now();
+                workspace.extend_selection_to(side, 9_999, cx);
+                assert_eq!(workspace.active_tab().expect("active tab").selection.selected_paths.len(), 10_000);
+                let range_elapsed = started.elapsed();
+                let started = std::time::Instant::now();
+                workspace.move_selection_extend(side, -1, cx);
+                assert_eq!(workspace.active_tab().expect("active tab").selection.selected_paths.len(), 9_999);
+                eprintln!("10k {side:?}: select-all={select_all_elapsed:?}, range={range_elapsed:?}, shrink={:?}", started.elapsed());
+                workspace.pane_filter_mut(side).query = "absent".into();
+                workspace.select_all_visible(side, cx);
+                assert!(workspace.active_tab().expect("active tab").selection.selected_paths.is_empty());
+            }
+        });
+    }
+
+    #[gpui::test]
     fn select_all_selects_all_visible(cx: &mut TestAppContext) {
         let (workspace, mut cx, _channels) = init_workspace(cx);
         let (fixture, base) = temp_local_fixture("select-all");

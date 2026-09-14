@@ -26,7 +26,9 @@ gates passed; it does not make the bundle suitable for public distribution.
 3. Copy `docs/release-evidence/template.md` to
    `docs/release-evidence/vX.Y.Z.md`, complete every check, and set
    `Status: PASS`.
-4. Run the full automated and native GUI gates documented in the evidence.
+4. Run the automated gates documented in the evidence. Native GUI manual
+   acceptance is not a release gate; optional manual checks may be recorded
+   separately and must not be reported as performed when skipped.
 5. Run `bash scripts/check_release.sh vX.Y.Z` (or the release-candidate tag).
 6. Commit the release metadata, then create an annotated tag.
 

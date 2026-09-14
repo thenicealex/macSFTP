@@ -34,4 +34,4 @@ if grep -qE ': TBD$|^- TBD$' "$evidence"; then
     exit 1
 fi
 
-echo "Native release evidence valid for v$version"
+echo "Automated release evidence valid for v$version"
