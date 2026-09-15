@@ -1,51 +1,51 @@
 # Phase 6 Polish & Guidelines Compliance Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan one task at a time. Checkbox syntax (`- [ ]`) records implementation progress.
 
-**Goal:** Close out the UX improvement track against guidelines §11–§15: maintainable audit checklist, icon-only tooltips + modal focus restoration, user-facing copy without internal jargon, narrow-window overflow fixes, and light 10k list smoke tests — without new features or animations.
+**Goal:** Complete the UX improvements required by guidelines §11–§15. The result includes a maintainable audit checklist, tooltips for icon-only controls, modal focus restoration, user-facing text without internal terminology, narrow-window overflow corrections, and lightweight smoke tests for lists with 10k entries. This phase does not add features or animations.
 
-**Architecture:** Audit-driven polish. No new crates. Document gaps in `docs/plans/…-phase6-polish-audit.md`, then fix by theme (a11y → copy → narrow → perf). Prefer surgical edits in `app`/`ui` and pure tests in `visible_entries`.
+**Architecture:** The audit determines the required refinements, and no new crates are introduced. Record deficiencies in `docs/plans/…-phase6-polish-audit.md`, and then address them by theme in this order: a11y → copy → narrow → perf. Changes in `app`/`ui` should remain limited to the identified requirements, whereas `visible_entries` should use pure tests.
 
-**Tech Stack:** Rust, GPUI (`FocusHandle`, `icon_button`, `text_tooltip`, `min_w_0`/`truncate`), existing workspace modals/render, `visible_entries` pure helpers.
+**Tech Stack:** Rust, GPUI (`FocusHandle`, `icon_button`, `text_tooltip`, `min_w_0`/`truncate`), existing workspace modals and rendering, and pure `visible_entries` helpers.
 
 **Spec:** `docs/plans/2026-07-14-phase6-polish-design.md`
 
 ## Global Constraints
 
-- **No new animations** — keep existing hover opacity only; no drawer/tab/modal transitions.
-- **No new product features** — no transfer policy, multi-window session redesign, i18n framework, SFTP changes.
-- **Keychain** may appear in user UI; ban **runtime / actor / channel / session epoch / crate / AppCommand** in user-visible strings.
-- **Performance:** light correctness smoke only — no flaky CI millisecond gates.
-- **Tooltip:** every **clickable** icon-only control must have tooltip/label; decorative icons exempt.
-- Modal focus: open focuses a sensible control; close/Esc restores **pane** focus (not a full focus stack).
-- No `unwrap`/`expect` on recoverable paths (AGENTS.md §5). Prefer `src/foo.rs` over `mod.rs`.
+- **No new animations:** Retain only the existing hover opacity, and do not add drawer, tab, or modal transitions.
+- **No new product features:** Do not add transfer policies, redesign multi-window sessions, introduce an i18n framework, or modify SFTP behavior.
+- **Keychain** can appear in the user UI. However, user-visible strings cannot contain **runtime / actor / channel / session epoch / crate / AppCommand**.
+- **Performance:** Use lightweight correctness smoke tests, but do not add millisecond thresholds that can make CI tests unstable.
+- **Tooltip:** Every interactive icon-only control must have a tooltip or label, whereas decorative icons are exempt.
+- Modal focus: displaying a modal focuses a suitable control, and closing it or using Esc restores **pane** focus. A complete focus stack is outside this scope.
+- Recoverable paths cannot use `unwrap` or `expect` according to AGENTS.md §5. Prefer `src/foo.rs` to `mod.rs`.
 - Do **not** modify `crates/sftp/**` behavior or core transfer/session protocols.
-- Surgical diffs only — no drive-by refactors.
+- Changes must remain limited to the identified requirements, and unrelated refactoring is prohibited.
 
 ## File Map
 
 | File | Responsibility |
 | --- | --- |
-| **Create** `docs/plans/2026-07-14-phase6-polish-audit.md` | §15 checklist + region matrix; updated as tasks complete |
+| **Create** `docs/plans/2026-07-14-phase6-polish-audit.md` | §15 checklist and region matrix; update them as tasks complete |
 | **Modify** `crates/app/src/workspace/modals.rs` | `cancel_active_modal` focus gaps (About, etc.) |
-| **Modify** `crates/app/src/workspace/render.rs` | tooltip labels, narrow flex/`truncate`, status bar chip |
+| **Modify** `crates/app/src/workspace/render.rs` | Tooltip labels, narrow flex/`truncate`, and status bar chip |
 | **Modify** `crates/app/src/workspace/mod.rs` | user-facing status strings (`Runtime is…`) |
-| **Modify** `crates/app/src/workspace/connect_form.rs` / `transfers.rs` / `file_ops.rs` / `panes.rs` / `event_handling.rs` | copy sweep if jargon found |
+| **Modify** `crates/app/src/workspace/connect_form.rs` / `transfers.rs` / `file_ops.rs` / `panes.rs` / `event_handling.rs` | Revise user-visible text if it contains internal terminology |
 | **Modify** `crates/ui/src/tab.rs` / `transfer_row.rs` / `components.rs` | tooltip completeness; narrow layout if gaps |
 | **Modify** `crates/app/src/workspace/visible_entries.rs` | 10k filter smoke tests |
 | **Modify** `crates/app/src/workspace/tests.rs` | modal Esc → pane focus tests |
-| **Modify** `docs/plans/2026-07-14-phase6-polish-audit.md` (again) | mark pass after each theme |
+| **Modify** `docs/plans/2026-07-14-phase6-polish-audit.md` (again) | Record pass status after each theme |
 | **Do not modify** | `crates/sftp/**` production paths; session/recents storage (phase 5 done) |
 
 ## Suggested PR mapping
 
 | PR | Tasks | Notes |
 | --- | --- | --- |
-| PR0+A | Task 1–2 | Audit doc + a11y/focus |
+| PR0+A | Task 1–2 | Audit document and a11y/focus |
 | PR-B | Task 3 | Copy |
 | PR-C | Task 4 | Narrow |
-| PR-D | Task 5 | Perf smoke + hand-test section in audit |
-| Closeout | Task 6 | Checklist all green + full regression |
+| PR-D | Task 5 | Performance smoke test and manual-test section in the audit |
+| Completion | Task 6 | All checklist items resolved and full regression completed |
 
 ---
 
@@ -55,9 +55,9 @@
 - Create: `docs/plans/2026-07-14-phase6-polish-audit.md`
 
 **Interfaces:**
-- Produces: living checklist consumed by later tasks (status cells updated in Tasks 2–6)
+- Produces: a maintained checklist for later tasks; Tasks 2–6 update its status cells.
 
-- [ ] **Step 1: Create the audit file** with the following structure (fill initial **Status** honestly from code inspection; use `unknown` until Task 2–5 verify):
+- [ ] **Step 1: Create the audit file** with the following structure. Determine the initial **Status** from code inspection, and use `unknown` until Tasks 2–5 provide verification.
 
 ```markdown
 # Phase 6 Polish Audit
@@ -111,7 +111,7 @@ Forbidden substrings (case-insensitive) in UI labels/status: `runtime`, `actor`,
 Allowed: `Keychain`, host/port/profile/transfer/permission.
 ```
 
-- [ ] **Step 2: Spot-check code once** and set any cells you already know (e.g. `icon_button` call sites exist; About Esc path in `cancel_active_modal` does not call `focus_pane`).
+- [ ] **Step 2: Inspect the relevant code** and set every status that current evidence establishes. For example, `icon_button` call sites exist, and the About Esc path in `cancel_active_modal` does not call `focus_pane`.
 
 From `modals.rs` today:
 
@@ -132,22 +132,22 @@ git commit -m "docs: add Phase 6 polish audit checklist"
 
 ---
 
-### Task 2: A11y — tooltips + modal focus (PR-A)
+### Task 2: A11y — tooltips and modal focus (PR-A)
 
 **Files:**
 - Modify: `crates/app/src/workspace/modals.rs` (`cancel_active_modal`, any close helpers)
 - Modify: `crates/app/src/workspace/render.rs` (tooltip labels if incomplete/inaccurate)
 - Modify: `crates/ui/src/tab.rs`, `crates/ui/src/transfer_row.rs` if labels weak
 - Test: `crates/app/src/workspace/tests.rs`
-- Update: `docs/plans/2026-07-14-phase6-polish-audit.md` region matrix + §15 #3/#8
+- Update: `docs/plans/2026-07-14-phase6-polish-audit.md` region matrix and §15 #3/#8
 
 **Interfaces:**
 - Consumes: existing `focus_pane`, `close_connect_form`, `close_command_palette`, `close_go_to_path`, `cancel_delete_confirm`
 - Produces:
-  - Every Esc/close path for overlays restores keyboard-usable focus
+  - Every Esc/close path for overlays restores focus to a keyboard-usable control
   - Test(s): `about_escape_restores_pane_focus`, `go_to_path_escape_restores_pane_focus` (or one parameterized pair)
 
-**Known gap to fix (required):**
+**Required correction for a known deficiency:**
 
 ```rust
 // cancel_active_modal — About branch
@@ -159,31 +159,31 @@ if self.about_open {
 }
 ```
 
-Audit **all** branches of `cancel_active_modal` and dedicated close helpers:
+Inspect **all** branches of `cancel_active_modal` and every dedicated close helper:
 
 | Overlay | Expected close focus |
 | --- | --- |
-| palette | `close_command_palette` → `focus_pane` (already) |
+| palette | `close_command_palette` → `focus_pane` (already implemented) |
 | tab switcher | must restore pane |
-| go_to_path | `close_go_to_path` → pane (already) |
-| about | **fix** → add pane |
+| go_to_path | `close_go_to_path` → pane (already implemented) |
+| about | **required correction** → pane |
 | settings surface | `workspace_focus` OK if keyboard still works; prefer pane if Files |
 | delete_confirm | `cancel_delete_confirm` → pane |
 | context_menu / inline_edit | pane or list |
 | connect_form | `close_connect_form` → pane |
-| host key / conflict | reject/resolve paths already call `focus_pane` in places — verify |
+| host key / conflict | Some reject/resolve paths already call `focus_pane`; verify every path |
 
-**Tooltip audit procedure (do in this task):**
+**Tooltip audit procedure for this task:**
 
 ```bash
-# List every icon_button call — each must pass a non-empty user string as tooltip
+# List every icon_button call; each must pass a non-empty user string as tooltip
 rg -n "icon_button\(" crates/app/src crates/ui/src --type rust
 
-# Clickable icons that are NOT icon_button (must gain tooltip or convert)
+# Interactive icons that are not icon_button; add a tooltip or convert the control
 rg -n "\.on_click\(" crates/app/src/workspace/render.rs -A2 | head -80
 ```
 
-For each path-bar button, prefer `labeled_shortcut("Label", "ActionId")` when a palette action exists (phase 4 pattern).
+For each path-bar button, use `labeled_shortcut("Label", "ActionId")` when a corresponding palette action exists, consistent with the phase 4 pattern.
 
 - [ ] **Step 1: Failing tests for focus restoration**
 
@@ -221,15 +221,15 @@ fn go_to_path_escape_restores_pane_focus(cx: &mut TestAppContext) {
 }
 ```
 
-Adjust `is_focused` API to whatever GPUI version exposes (`FocusHandle::is_focused` / window focus query). If test harness cannot read focus, assert behavioral proxy: after Esc, `SelectNextEntry` action still moves selection (keyboard path works).
+Adapt the `is_focused` API to the interface provided by the current GPUI version, such as `FocusHandle::is_focused` or a window focus query. If the test harness cannot inspect focus, then verify a behavioral proxy: after Esc, the `SelectNextEntry` action still changes the selection, which demonstrates that the keyboard path remains functional.
 
-- [ ] **Step 2: Run — expect FAIL on About (and pass/fail on go_to_path depending on current code)**
+- [ ] **Step 2: Execute the tests.** Expect the About test to fail; the go_to_path result depends on the current implementation.
 
 ```bash
 cargo test -p macsftp-app --bin macsftp about_escape go_to_path_escape -- --nocapture
 ```
 
-- [ ] **Step 3: Implement focus fixes + tooltip label fixes**
+- [ ] **Step 3: Correct focus behavior and tooltip labels**
 
 ```rust
 // modals.rs — About
@@ -241,15 +241,15 @@ if self.about_open {
 }
 ```
 
-Walk `rg icon_button` results; fix empty/wrong labels; convert clickable bare icons if any.
+Inspect every `rg icon_button` result. Correct empty or inaccurate labels, and convert any interactive bare icon to an appropriate control.
 
-- [ ] **Step 4: Re-run tests — PASS**
+- [ ] **Step 4: Execute the tests again; all listed tests must pass**
 
 ```bash
 cargo test -p macsftp-app --bin macsftp about_escape go_to_path_escape -- --nocapture
 ```
 
-- [ ] **Step 5: Update audit matrix** (§15 #8 pass if complete; About focus row pass)
+- [ ] **Step 5: Update the audit matrix.** Set §15 #8 to pass if the audit is complete, and set the About focus row to pass.
 
 - [ ] **Step 6: Commit**
 
@@ -262,16 +262,16 @@ git commit -m "fix(app): restore pane focus from About and complete icon tooltip
 
 ---
 
-### Task 3: User-facing copy sweep (PR-B)
+### Task 3: Review user-facing text (PR-B)
 
 **Files:**
 - Modify: `crates/app/src/workspace/mod.rs` (status messages)
-- Modify: other app modules if banlist hits (grep-driven)
+- Modify: other app modules if the banlist identifies user-visible text
 - Test: optional unit test for message constants; or assert via existing status tests
 - Update: audit §15 #9
 
 **Interfaces:**
-- Produces: banlist strings absent from user-visible UI paths
+- Produces: user-visible UI paths that do not contain banlist strings
 
 **Required renames (minimum):**
 
@@ -280,17 +280,18 @@ git commit -m "fix(app): restore pane focus from About and complete icon tooltip
 | `Runtime is unavailable` | `Connection service is unavailable.` |
 | `Runtime is busy — action dropped, try again` | `Busy — try again in a moment.` |
 
-- [ ] **Step 1: Grep banlist in app UI sources**
+- [ ] **Step 1: Inspect banlist occurrences in app UI sources**
 
 ```bash
 rg -n -i "runtime|actor|channel|session.epoch|AppCommand" \
   crates/app/src --type rust -g '!**/tests.rs'
 ```
 
-Classify each hit:
-- **User-visible** (`status_message`, button labels, empty_state, modal body) → rewrite
-- **Comment / log / tracing** → leave
-- **Code identifiers** → leave
+Classify each result:
+
+- Revise **user-visible** content, including `status_message`, button labels, empty_state, and modal body.
+- Preserve comments, logs, and tracing output.
+- Preserve code identifiers.
 
 - [ ] **Step 2: Apply renames**
 
@@ -301,7 +302,7 @@ self.status_message = Some("Busy — try again in a moment.".into());
 self.status_message = Some("Connection service is unavailable.".into());
 ```
 
-Do **not** change: `Keychain` strings, host-key technical fingerprint display (user-needed), file paths shown as paths.
+Do **not** change `Keychain` strings, the host-key fingerprint display required by users, or file paths presented as paths.
 
 - [ ] **Step 3: Guard test (optional but preferred)**
 
@@ -315,17 +316,17 @@ fn user_status_strings_avoid_internal_jargon() {
 }
 ```
 
-If not extracting constants, record in audit: `rg` clean on 2026-07-14 for user paths.
+If constants are not extracted, record in the audit that the `rg` review on 2026-07-14 found no prohibited terms in user-visible paths.
 
-- [ ] **Step 4: Run app tests that might assert old strings**
+- [ ] **Step 4: Execute app tests that might assert the previous strings**
 
 ```bash
 cargo test -p macsftp-app --bin macsftp -- --nocapture
 ```
 
-Fix any test that expected old copy.
+Update every test that expected the previous text.
 
-- [ ] **Step 5: Update audit §15 #9 → pass; commit**
+- [ ] **Step 5: Set audit §15 #9 to pass, and then commit**
 
 ```bash
 git add crates/app/src docs/plans/2026-07-14-phase6-polish-audit.md
@@ -343,25 +344,25 @@ git commit -m "fix(app): replace internal jargon in user-facing status strings"
 - Update: audit §15 #4 + region Truncate column
 
 **Interfaces:**
-- Produces: flex children that must shrink use `.min_w_0()`; long text uses `.truncate()`
+- Produces: flex children that must shrink use `.min_w_0()`, whereas long text uses `.truncate()`.
 
-**Baseline:** `window_min_size: size(px(720.0), px(480.0))` in `main.rs` — **do not lower** without design change.
+**Baseline:** `main.rs` defines `window_min_size: size(px(720.0), px(480.0))`. Do **not** reduce this value without a design change.
 
-- [ ] **Step 1: Inventory overflow risks**
+- [ ] **Step 1: Identify overflow risks**
 
 ```bash
 rg -n "min_w_0|truncate" crates/app/src/workspace/render.rs crates/ui/src
 ```
 
-Hand-check (document in audit Notes):
+Perform the following manual checks, and record the results in the audit Notes:
 
-1. Launch app, resize to ~720×480.
+1. Start the app and resize the window to approximately 720×480.
 2. Long tab title (connect to host with long name or rename title).
 3. Deep path in path bar.
-4. Open transfer drawer with long path job.
-5. Open Connect + Delete modals.
+4. Display the transfer drawer with a job that has a long path.
+5. Display the Connect and Delete modals.
 
-- [ ] **Step 2: Fix concrete overflow sites found**
+- [ ] **Step 2: Correct each confirmed overflow site**
 
 Patterns:
 
@@ -375,9 +376,9 @@ div().flex().min_w_0().flex_1().child(
 div().flex().flex_wrap().gap_2().justify_end().children(buttons)
 ```
 
-Do not invent responsive breakpoints; only shrink/truncate/wrap.
+Do not introduce responsive breakpoints. Use only shrink, truncate, or wrap behavior.
 
-- [ ] **Step 3: No automated pixel test** — note hand-test result in audit §15 #4 → `pass` or `accepted risk` with remaining issues.
+- [ ] **Step 3: Do not add an automated pixel test.** Record the manual-test result in audit §15 #4 as `pass`, or as `accepted risk` with the remaining issues.
 
 - [ ] **Step 4: Commit**
 
@@ -387,7 +388,7 @@ git add crates/app/src/workspace/render.rs crates/app/src/workspace/modals.rs \
 git commit -m "fix(ui): tighten narrow-window truncation and flex shrink"
 ```
 
-If hand-test finds zero code changes needed, still update audit to `pass` and commit **docs only**:
+If the manual test shows that no code change is required, update the audit to `pass` and commit **only the documentation**:
 
 ```bash
 git commit -m "docs: mark Phase 6 narrow-window audit pass"
@@ -395,17 +396,17 @@ git commit -m "docs: mark Phase 6 narrow-window audit pass"
 
 ---
 
-### Task 5: Performance smoke — tests + hand-test section (PR-D)
+### Task 5: Performance smoke tests and manual-test section (PR-D)
 
 **Files:**
 - Modify: `crates/app/src/workspace/visible_entries.rs` (tests module)
-- Update: `docs/plans/2026-07-14-phase6-polish-audit.md` (hand-test procedure + §15 #7)
+- Update: `docs/plans/2026-07-14-phase6-polish-audit.md` (manual-test procedure and §15 #7)
 
 **Interfaces:**
 - Consumes: `visible_local_indices`, `visible_remote_indices`
-- Produces: unit tests with 10_000 synthetic entries; **no** strict duration assert in CI
+- Produces: unit tests with 10_000 synthetic entries. These tests use **no** strict duration assertion in CI.
 
-- [ ] **Step 1: Write 10k smoke tests**
+- [ ] **Step 1: Add smoke tests with 10k entries**
 
 ```rust
 // visible_entries.rs tests
@@ -456,37 +457,37 @@ fn visible_remote_indices_handle_ten_thousand_with_hidden() {
 }
 ```
 
-Match real `LocalEntry` / `RemoteEntry` field sets from `macsftp_core` if the sketch drifts.
+If the example no longer matches `macsftp_core`, adjust it to the actual `LocalEntry` and `RemoteEntry` field sets.
 
-- [ ] **Step 2: Run**
+- [ ] **Step 2: Execute the tests**
 
 ```bash
 cargo test -p macsftp-app --bin macsftp visible_indices_handle_ten_thousand visible_remote_indices_handle_ten_thousand -- --nocapture
 ```
 
-Expected: PASS.
+Expected result: PASS.
 
-- [ ] **Step 3: Fill hand-test section in audit**
+- [ ] **Step 3: Complete the manual-test section in the audit**
 
 ```markdown
 ## Hand performance smoke
 
 **Setup**
-1. Generate local dir: `mkdir -p /tmp/macsftp-10k && seq -w 1 10000 | xargs -I{} touch /tmp/macsftp-10k/f{}`
-2. Open macSFTP, navigate local pane to that dir (or symlink).
+1. Generate a local directory: `mkdir -p /tmp/macsftp-10k && seq -w 1 10000 | xargs -I{} touch /tmp/macsftp-10k/f{}`
+2. Start macSFTP and navigate the local pane to that directory or a symlink to it.
 3. Connect remote with large listing if available (or mock backend).
-4. Start up to 4 transfers; keep 3 tabs.
+4. Start up to 4 transfers and retain 3 tabs.
 
 **Observe**
-- Scroll file list: no multi-second freezes
-- Type-to-filter: filter updates without clearing selection incorrectly
-- Switch tabs / toggle drawer: responsive
-- Progress updates remain throttled (phase 2)
+- Scroll the file list; no operation should become unresponsive for multiple seconds.
+- Use type-to-filter; the filter must update without incorrectly clearing the selection.
+- Switch tabs and toggle the drawer; both interactions must remain responsive.
+- Verify that progress updates remain throttled according to phase 2.
 
-**Result:** _fill after hand run_ — pass / issues
+**Result:** _complete after manual verification_ — pass / issues
 ```
 
-- [ ] **Step 4: Update §15 #7** to `pass` (automation) + hand result note
+- [ ] **Step 4: Set §15 #7 to `pass` for automation**, and include the manual-test result.
 
 - [ ] **Step 5: Commit**
 
@@ -497,26 +498,26 @@ git commit -m "test(app): add 10k visible-entry smoke tests for phase 6"
 
 ---
 
-### Task 6: Closeout — full regression + checklist completion
+### Task 6: Completion — full regression and checklist completion
 
 **Files:**
-- Modify: `docs/plans/2026-07-14-phase6-polish-audit.md` only (unless last-minute Critical fixes)
+- Modify: only `docs/plans/2026-07-14-phase6-polish-audit.md`, unless final verification identifies a Critical defect
 
-- [ ] **Step 1: Run regression**
+- [ ] **Step 1: Execute the regression tests**
 
 ```bash
 cargo test -p macsftp-platform -p macsftp-storage -p macsftp-app --bin macsftp 2>&1 | tail -40
 ```
 
-Expected: all pass (app ≥ 101 tests + new ones).
+Expected result: all tests pass, including at least 101 app tests and the new tests.
 
-- [ ] **Step 2: Finalize audit**
+- [ ] **Step 2: Finalize the audit**
 
-- Every §15 row is `pass` or `accepted risk` with reason (no `unknown` left).
-- Region matrix complete.
-- Hand smoke Result filled (or `accepted risk: no large remote available` with local-only note).
+- Every §15 row is `pass` or `accepted risk` with a reason; therefore no `unknown` value remains.
+- Complete the region matrix.
+- Record the manual smoke-test result. If no large remote is available, use `accepted risk: no large remote available` and include a local-only note.
 
-- [ ] **Step 3: Self-scan for residual banlist**
+- [ ] **Step 3: Verify that no prohibited user-visible term remains**
 
 ```bash
 rg -n -i "runtime is|actor|session epoch" crates/app/src --type rust -g '!**/tests.rs' || true
@@ -529,7 +530,7 @@ git add docs/plans/2026-07-14-phase6-polish-audit.md
 git commit -m "docs: complete Phase 6 polish audit checklist"
 ```
 
-If Step 1 finds regressions, fix in a separate commit first (`fix(app): …`), then finalize audit.
+If Step 1 identifies regressions, correct them in a separate `fix(app): …` commit before finalizing the audit.
 
 ---
 
@@ -537,29 +538,29 @@ If Step 1 finds regressions, fix in a separate commit first (`fix(app): …`), t
 
 | Design requirement | Task |
 | --- | --- |
-| Audit checklist §15 + region matrix | Task 1, updated 2–6 |
+| Audit checklist §15 and region matrix | Task 1, updated by Tasks 2–6 |
 | No new animations | Global Constraints |
 | Tooltip completeness | Task 2 |
 | Modal focus restore | Task 2 |
-| Copy banlist + Runtime strings | Task 3 |
+| Copy banlist and Runtime strings | Task 3 |
 | Narrow window | Task 4 |
-| 10k smoke + hand test doc | Task 5 |
-| PR split A–D | PR mapping + Tasks |
+| 10k smoke test and manual-test documentation | Task 5 |
+| PR division A–D | PR mapping and Tasks |
 | No sftp changes | File Map / Constraints |
 
-**Placeholder scan:** no TBD steps; concrete strings, paths, commands.
+**Placeholder review:** No TBD steps remain; all strings, paths, and commands are concrete.
 
-**Type consistency:** `focus_pane` / `cancel_active_modal` / `visible_*_indices` match existing crate APIs; test focus API may need GPUI-specific adjustment noted in Task 2.
+**Type consistency:** `focus_pane`, `cancel_active_modal`, and `visible_*_indices` match existing crate APIs. However, the test focus API may require the GPUI-specific adjustment described in Task 2.
 
 ---
 
 ## Execution Handoff
 
-Plan saved to `docs/plans/2026-07-14-phase6-polish-impl.md` (project convention).
+The plan is stored at `docs/plans/2026-07-14-phase6-polish-impl.md` according to project convention.
 
-**Two execution options:**
+Two execution options are available:
 
-1. **Subagent-Driven (recommended)** — fresh subagent per task, review between tasks  
-2. **Inline Execution** — this session with executing-plans checkpoints  
+1. **Subagent-Driven (recommended):** Assign each task to a new subagent, and review the result before the next task.
+2. **Inline Execution:** Use this session with executing-plans checkpoints.
 
-Which approach?
+Select one execution option before implementation begins.

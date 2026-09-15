@@ -1,20 +1,20 @@
-# Workspace 去中心化路线图（Stage 2–4）
+# Workspace 职责分解路线图（Stage 2–4）
 
-**Date:** 2026-08-21
-**前置:** Stage 1 已交付（`962c230`）——`local_read_epochs` 守卫与 `tab_nav` 导航历史移入 core `TabState`，删除 view 层两张 per-tab 边表及其手动清理。
-**目标:** 把 `Workspace`（app crate，~21k 行）从"64 字段平铺 god object"收敛为"少量核心字段 + 职责内聚的状态组"，全程不改行为、不引入新 GPUI Entity。
+**日期：** 2026-08-21
+**前置条件：** Stage 1 已交付（`962c230`）。`local_read_epochs` 守卫与 `tab_nav` 导航历史已经归属于 core `TabState`，因此 view 层的两张 per-tab 边表及其手动清理逻辑已经删除。
+**目标：** 将 `Workspace`（app crate，约 21k 行）顶层定义的 64 个字段调整为少量核心字段与按职责组织的状态组，但是不改变行为，也不引入新的 GPUI Entity。
 
-## 不变量（每个 Stage 都必须保持）
+## 不变量（每个 Stage 均须满足）
 
-- 单一 `WorkspaceView` 决策不变（plan §4：按 surface 分文件渲染，不引入额外 view state 或跨层抽象）。
-- 零行为变化：全部既有测试语义保持；门禁全绿（fmt / clippy -D warnings / test --workspace / 架构检查 / 敏感日志）。
-- 秘密卫生：`ConnectionSettings` 永不进入日志、序列化快照或 `Debug` 明文（现有 zeroize/脱敏机制原样保留）。
+- 继续使用单一 `WorkspaceView`（plan §4）：按照 surface 将渲染实现分布在不同文件中，并且不增加额外的 view state 或跨层抽象。
+- 不得改变行为：所有既有测试的语义保持不变，并且 fmt、clippy `-D warnings`、`test --workspace`、架构检查和敏感日志检查均须通过。
+- 必须保证 secret 安全：`ConnectionSettings` 不得以明文形式出现在日志、序列化快照或 `Debug` 输出中。因此，现有 zeroize 和脱敏机制必须保持不变。
 
 ---
 
-## Stage 2 — 剩余两张 per-tab 边表回归 core（✅ 已交付，2026-08-21）
+## Stage 2 — 将剩余两张 per-tab 边表归入 core（✅ 已交付，2026-08-21）
 
-> 实施注记：字段命名为 `TabState.connection_settings` / `TabState.restored_target`（比原计划的 `settings` 更明确）；两者均为 `Option<Box<_>>`——冷字段加间接层，避免 `AppEvent::TabOpened(TabSnapshot)` 内嵌的 `TabState` 撑爆 clippy `large_enum_variant` 阈值。快照守卫沿用既有 `session_snapshot_never_persists_credentials` 测试（端到端断言 session.json 无密码），未新增冗余用例。
+> 实施注记：字段命名为 `TabState.connection_settings` 和 `TabState.restored_target`，因此比原计划中的 `settings` 更明确。两者均使用 `Option<Box<_>>`，为低频字段增加间接存储，从而避免 `AppEvent::TabOpened(TabSnapshot)` 内嵌的 `TabState` 超过 clippy `large_enum_variant` 阈值。快照保护继续使用既有的 `session_snapshot_never_persists_credentials` 测试；该测试通过端到端断言确认 session.json 不含密码，因此没有增加重复用例。
 
 ### 现状（实施前）
 
@@ -23,47 +23,47 @@
 | `restored_targets: HashMap<TabId, RestoredTabTarget>` | session.json 恢复元数据（host/port/username/profile_id/remote_path），无秘密 | mod.rs（写入 351/1031，读取 390/961）、connect_form.rs:262、event_handling.rs:95–135 |
 | `tab_settings: HashMap<TabId, ConnectionSettings>` | **含秘密的连接凭据缓存**（zeroize 类型），供断线重连免重输 | mod.rs（写入 910，读取 843/960/389）、connect_form.rs:258、event_handling.rs:135 |
 
-两者与 Stage 1 的 epoch/nav 同构：生命周期 = tab 生命周期，却用需要手动 `remove()` 的边表表达。
+这两个边表与 Stage 1 的 epoch/nav 具有相同的生命周期关系：其生命周期等于 tab 生命周期，但是当前实现使用需要手动调用 `remove()` 的边表表示该关系。
 
 ### 方案
 
-1. `RestoredTabTarget`（纯数据）移入 core，挂 `TabState.restored_target: Option<RestoredTabTarget>`。
-2. `TabState.settings: Option<ConnectionSettings>` —— 推荐此方案（方案 A）：
+1. 在 core 中定义纯数据类型 `RestoredTabTarget`，并通过 `TabState.restored_target: Option<RestoredTabTarget>` 保存其状态。
+2. 使用 `TabState.settings: Option<ConnectionSettings>`，即推荐的方案 A：
    - `ConnectionSettings` 本就是 core 类型且已派生 ZeroizeOnDrop、手写 Debug 全量脱敏；
-   - 生命周期随 tab 自动终结；符合 plan §15 "长期状态进 core 模型"。
-   - 备选方案 B（进程级 SecretStore global）：否决——重新引入我们正在消灭的 side-table 手动生命周期问题。
-   - **已知残余风险与缓解**：`TabState` 若未来被加 `Serialize` 会把秘密写进 session.json。缓解：(a) 在字段上写禁止序列化的 doc comment；(b) 新增守卫测试断言 `SessionTabSnapshot` 只取 host/port 且构建路径不触碰 secret 字段（现有 build_session_snapshot 改造后天然满足，测试固化它）。
-3. 删除 close_tab 中两行手动清理；connect_form / event_handling / snapshot 构建改走 `find_tab(tab_id)?.restored_target` / `.settings`。
+   - 其生命周期会随 tab 自动终止，因此符合 plan §15 中“长期状态进入 core 模型”的要求。
+   - 备选方案 B 是进程级全局 `SecretStore`，但是该方案会重新引入 side-table 的手动生命周期问题，因此不采用。
+   - **已知残余风险与缓解措施：** 如果未来为 `TabState` 增加 `Serialize`，secret 可能被写入 session.json。因此需要：(a) 在字段的 doc comment 中明确禁止序列化；(b) 增加保护测试，断言 `SessionTabSnapshot` 仅获取 host/port，并且构建路径不访问 secret 字段。修改后的现有 `build_session_snapshot` 已经满足此条件，而测试用于固定该约束。
+3. 删除 `close_tab` 中的两行手动清理逻辑；同时，connect_form、event_handling 和 snapshot 构建统一通过 `find_tab(tab_id)?.restored_target` 或 `.settings` 访问状态。
 
 ### 验收
 
-- app 内不再存在任何 `HashMap<TabId, _>` 边表（`rg 'HashMap<TabId' crates/app/src/workspace/mod.rs` 仅剩 0 处业务边表）。
-- 新增 core 测试：settings/restored_target 随 TabState 默认值安全（None 起步）；snapshot 守卫测试。
-- 断线→重连不丢凭据、session 快照内容不变的既有测试保持绿。
+- app 中不再存在任何 `HashMap<TabId, _>` 边表；因此，`rg 'HashMap<TabId' crates/app/src/workspace/mod.rs` 的结果中没有业务边表。
+- 增加 core 测试，验证 settings/restored_target 在 `TabState` 默认状态下均为 `None`，并增加 snapshot 保护测试。
+- 既有测试继续通过，并验证断线后重新连接不会丢失凭据，而且 session 快照内容保持不变。
 
 ### 规模与风险
 
-中等。触及 core.rs + workspace 5 文件 + tests。风险集中在凭据流回归——靠既有 reconnect/prefill/snapshot 测试兜底。
+规模为中等，需要修改 core.rs、workspace 中的 5 个文件以及 tests。主要风险是凭据流程出现回归，因此使用既有 reconnect、prefill 和 snapshot 测试进行验证。
 
 ---
 
-## Stage 3 — 平铺 UI 字段按 feature 分组（✅ 已交付，2026-08-21）
+## Stage 3 — 将 UI 字段按照 feature 分组（✅ 已交付，2026-08-21）
 
-> **详细执行计划见 `2026-08-21-stage3-stage4-plan.md`**（含逐字段映射表、访问点实测、commit 序列）。
+> **详细执行计划见 `2026-08-21-stage3-stage4-plan.md`**，其中包含逐字段映射表、访问点实测和 commit 序列。
 >
-> **交付记录：** 8 组全部落地，状态组集中定义于 `workspace/view_state.rs`。Workspace 顶层字段 60 → 25（其中 10 个为组实例）。提交序列：S3-1 PaneUi `2f026ae`、S3-2 CommandPaletteUi `1e71423`、S3-3 TabSwitcherUi `a0f00e1`、S3-4 GoToPathUi `9d1660f`、S3-5 TransferDrawerUi `4a02d5f`、S3-6 ConnectFormUi `31dab1e`、S3-7 ModalInputsUi `8ef4950`、S3-8 SettingsUi `eb094db`。
+> **交付记录：** 8 个状态组均已实现，并且集中定义于 `workspace/view_state.rs`。Workspace 顶层字段数量由 60 个减少至 25 个，其中 10 个是状态组实例。提交序列：S3-1 PaneUi `2f026ae`、S3-2 CommandPaletteUi `1e71423`、S3-3 TabSwitcherUi `a0f00e1`、S3-4 GoToPathUi `9d1660f`、S3-5 TransferDrawerUi `4a02d5f`、S3-6 ConnectFormUi `31dab1e`、S3-7 ModalInputsUi `8ef4950`、S3-8 SettingsUi `eb094db`。
 
-## Stage 4 — mod.rs → workspace.rs（✅ 已交付，2026-08-21，随计划先行）
+## Stage 4 — 将 mod.rs 改为 workspace.rs（✅ 已交付，2026-08-21，早于 Stage 3 实施）
 
-交付于 `b6d6591`（含 Stage 3/4 计划文档）；AGENTS.md §2 的 mod.rs 违规清零。
+此阶段通过 `b6d6591` 交付，其中也包含 Stage 3/4 计划文档。因此，代码已经完全符合 AGENTS.md §2 中禁止使用 mod.rs 路径的要求。
 
 ### 现状
 
-Stage 1/2 后 Workspace 仍有 ~50 个平铺 UI 字段，其中大量只在与同组字段组合时才有意义。
+Stage 1/2 完成后，Workspace 顶层仍定义约 50 个 UI 字段。其中许多字段只有与同一功能的其他字段组合时才具有完整语义。
 
 ### 分组清单（8 组，约 45 个字段）
 
-| 子结构 | 收编字段 |
+| 子结构 | 包含的字段 |
 | --- | --- |
 | `ConnectFormUi { connect_form, connect_form_focus }` | 2 |
 | `CommandPaletteUi { open, input, selected, scroll, scrollbar }` | 5 |
@@ -74,42 +74,42 @@ Stage 1/2 后 Workspace 仍有 ~50 个平铺 UI 字段，其中大量只在与�
 | `ModalInputsUi { conflict_rename, conflict_rename_error, delete_confirm, inline_edit, context_menu, large_edit_confirm, about_open }` | 7 |
 | `PaneFilterUi`×2（local/remote 各含 filter+scroll+scrollbar）+ `selection_anchor` | 7 |
 
-结果：Workspace 顶层剩 ~15 个字段（state/runtime_client/focus handles×5/surface/focused_side/default_local_path/status_message/config_error/log_file/window_session_id/_subscription）+ 8 个命名组。
+完成后，Workspace 顶层保留约 15 个字段（state/runtime_client/focus handles×5/surface/focused_side/default_local_path/status_message/config_error/log_file/window_session_id/_subscription）以及 8 个命名状态组。
 
 ### 执行策略
 
-- 纯机械重命名（`self.palette_open` → `self.palette.open`），无逻辑改动；每组一个独立 commit，组间可独立验证、独立回滚。
-- 顺序建议：先小后大——GoToPath → ConnectForm → CommandPalette → TabSwitcher → ModalInputs → PaneFilter → TransferDrawer → Settings（最大最后）。
-- tests.rs（~5.7k 行）随各组同步改访问路径；不允许借机改断言语义。
-- Stage 4 的模块改名搭第一班车一起做（见下）。
+- 仅执行字段访问路径重命名（`self.palette_open` → `self.palette.open`），不修改逻辑。每个状态组使用一个独立 commit，因此各组可以独立验证和回滚。
+- 建议按照字段数量由少到多实施：GoToPath → ConnectForm → CommandPalette → TabSwitcher → ModalInputs → PaneFilter → TransferDrawer → Settings，其中 Settings 最后实施。
+- tests.rs 约有 5.7k 行，需要随各状态组同步修改访问路径，但是不得同时修改断言语义。
+- Stage 4 的模块改名与 Stage 3 的第一个状态组一并实施，具体说明见下文。
 
 ### 验收（每组相同）
 
-该组字段的全部访问点收编完成（`rg` 组内字段名零散落）；全量门禁绿；diff 中不含任何非常量表达式变化。
+该状态组的全部访问点均通过组实例访问，因此 `rg` 结果中不再存在独立访问的组内字段名。所有检查必须通过，并且 diff 不得包含任何非常量表达式变化。
 
 ### 规模与风险
 
-大而纯机械。主要风险是漏改/拼写——由编译器穷举兜底，不需要新测试；价值在于字段所有权可见化与后续功能开发的爆炸半径收缩。
+规模较大，但是修改仅涉及字段访问路径。主要风险是遗漏访问点或拼写错误，而编译器可以完整识别这些问题，因此不需要增加测试。完成后，字段所有权会更加明确，并且后续功能修改所影响的范围会减小。
 
 ---
 
-## Stage 4 — `workspace/mod.rs` → `workspace.rs`（✅ 已交付，见上方交付记录）
+## Stage 4 — 将 `workspace/mod.rs` 改为 `workspace.rs`（✅ 已交付，见上方交付记录）
 
-原执行备注（已按此完成）：`git mv` 平文件化 + 子模块目录不变；实际独立成首个 commit 而非搭载 Stage 3 首班车。
+原执行备注已经完成：使用 `git mv` 将模块定义改为普通文件，同时保持子模块目录不变。实际实施时，该修改使用独立的首个 commit，而没有与 Stage 3 的第一个状态组合并。
 
 ---
 
-## 排期建议与依赖
+## 实施顺序建议与依赖关系
 
 ```
-Stage 2（状态正确性，中）──► Stage 4（改名，先行）──► Stage 3（机械分组，分 8 个 commit）
+Stage 2（状态正确性，中）──► Stage 4（模块改名）──► Stage 3（字段分组，共 8 个 commit）
 ```
 
-- Stage 2 先行：它是仅剩的"架构规则违规/秘密位置"议题，有真实正确性收益；Stage 3 是纯收益打磨。
-- 每个 Stage 独立可交付、可中止；中止不留半成品状态。
+- Stage 2 优先实施，因为它处理仅剩的架构规则违规和 secret 存储位置问题，并且能够直接改善正确性。Stage 3 只改善代码组织。
+- 每个 Stage 均可独立交付或中止；如果在 Stage 边界中止，那么 repository 不会处于部分完成状态。
 
 ## 显式非目标
 
-- 不拆分 Workspace 为多个 GPUI View/Entity（违背 plan §4 既定决策）。
-- 不动 event_coordinator / resources / session_coordinator（已解耦良好的进程级组件）。
-- 不做 core.rs 拆文件（等下一个业务域加入时顺势进行，避免为拆而拆）。
+- 不将 Workspace 拆分为多个 GPUI View/Entity，因为这会违反 plan §4 的既定决策。
+- 不修改 event_coordinator、resources 或 session_coordinator，因为这些进程级组件已经具有清晰的职责边界。
+- 不拆分 core.rs。后续增加新的业务域时再评估文件划分，因此本阶段不进行缺少业务需求的文件拆分。

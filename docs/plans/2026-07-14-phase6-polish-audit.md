@@ -1,110 +1,110 @@
-# Phase 6 Polish Audit
+# Phase 6 完善审计
 
-**Date:** 2026-07-14  
-**Design:** `docs/plans/2026-07-14-phase6-polish-design.md`  
-**Window min size:** 720×480 (`crates/app/src/main.rs`)
+**日期：** 2026-07-14
+**设计文档：** `docs/plans/2026-07-14-phase6-polish-design.md`
+**窗口最小尺寸：** 720×480（`crates/app/src/main.rs`）
 
-## §15 Review Questions
+## §15 评审问题
 
-| # | Question | Status | Notes |
+| # | 问题 | 状态 | 说明 |
 | --- | --- | --- | --- |
-| 1 | Single-window work context? | pass | No marketing landing; Files surface first |
-| 2 | Palette or shortcut path? | pass | Phase 4 palette + bindings |
-| 3 | loading/empty/error/disabled/focused/hover/selected? | pass | Focus states via pane/path-bar borders; disabled tool buttons; empty/loading/error surfaces exist |
-| 4 | Narrow window no overflow? | pass | Task 4: inventory + surgical `min_w_0`/`truncate`/`flex_wrap`; window_min_size stays 720×480. Hand-test notes below |
-| 5 | No decorative cards/gradients? | pass | Theme tokens only |
-| 6 | No main-thread block on network? | pass | Runtime bridge; residual risk accepted |
-| 7 | 10k entries + multi transfer? | pass | Task 5+6: unit smoke on 10k `visible_*_indices` (no timing assert) **pass**. Interactive multi-transfer GUI: **accepted risk: interactive GUI smoke deferred; 10k unit smoke pass** |
-| 8 | Icon-only tooltips? | pass | Task 2: all `icon_button` sites + path-bar back/forward + status transfer chip carry labels (`labeled_shortcut` where applicable) |
-| 9 | No secrets / internal jargon in UI? | pass | Task 3: `Runtime is…` status strings → user copy; constants + banlist unit test; `rg` clean on user-visible string literals 2026-07-14 |
-| 10 | Modal expiry / session_epoch safety? | pass | Phase 1+ core guards; reaffirm |
+| 1 | 是否保持单窗口工作上下文？ | pass | 不显示营销 landing page，并且首先显示 Files 界面 |
+| 2 | 是否提供 command palette 或快捷键入口？ | pass | Phase 4 已提供 palette 和 bindings |
+| 3 | 是否包含 loading/empty/error/disabled/focused/hover/selected 状态？ | pass | pane/path-bar 边框表示 focus 状态；工具按钮具有 disabled 状态；empty/loading/error 界面均已存在 |
+| 4 | 窄窗口中是否不存在内容溢出？ | pass | Task 4 已完成布局清单，并且只在必要位置使用 `min_w_0`/`truncate`/`flex_wrap`；`window_min_size` 保持 720×480。人工测试记录见下文 |
+| 5 | 是否不存在装饰性卡片或渐变？ | pass | 只使用 theme token |
+| 6 | 网络操作是否不阻塞主线程？ | pass | 使用 runtime bridge；剩余风险已经接受 |
+| 7 | 是否支持 10k entries 和多个 transfer？ | pass | Task 5 和 Task 6 已对 10k `visible_*_indices` 执行 unit smoke，并且未设置计时断言，结果为 **pass**。交互式多 transfer GUI 的结论为：**accepted risk: interactive GUI smoke deferred; 10k unit smoke pass** |
+| 8 | icon-only 控件是否具有 tooltip？ | pass | Task 2 已确认所有 `icon_button`、path bar 的 back/forward 和 status transfer chip 均具有 label；适用位置使用 `labeled_shortcut` |
+| 9 | UI 中是否不存在 secret 或内部术语？ | pass | Task 3 已将 `Runtime is…` 状态字符串改为用户文案，并且增加常量和 banlist unit test；2026-07-14 使用 `rg` 检查 user-visible string literal，结果无违规内容 |
+| 10 | modal 过期和 session_epoch 是否安全？ | pass | Phase 1 及后续阶段已经提供 core guard，本次审计再次确认 |
 
-Status values: `pass` | `fail` | `unknown` | `accepted risk` (with reason).
+状态值为 `pass`、`fail`、`unknown` 或 `accepted risk`；使用 `accepted risk` 时必须说明原因。
 
-## Region matrix
+## 区域检查矩阵
 
-| Region | Tooltip | Focus open | Focus close | Truncate | Notes |
+| 区域 | Tooltip | 打开时的 focus | 关闭时的 focus | Truncate | 说明 |
 | --- | --- | --- | --- | --- | --- |
-| Tab bar + close | pass | n/a | n/a | pass | Tab title `min_w_0`+`truncate`+`max_w(220)`; strip `flex_1`+`min_w_0`+`overflow_x_scroll` |
-| Path bar (back/up/refresh/copy/…) | pass | n/a | n/a | pass | Breadcrumb trail `flex_1`+`min_w_0`+`overflow_x_hidden`; deep paths clip, not horizontal window overflow |
-| Filter clear | pass | n/a | pass | pass | Query cell `flex_1`+`min_w_0`+`truncate` when inactive |
-| Transfer drawer cancel/retry | pass | n/a | n/a | pass | Title truncates; detail `max_w(160)`+truncate; drawer header agg label truncates |
-| Status bar transfer chip | pass | n/a | n/a | pass | Left cluster `flex_1`+`min_w_0`; status/message truncate; chip `flex_none` |
-| Connect form | n/a | pass | pass | pass | Field/profile rows `min_w_0`; profile name/summary truncate; footer `flex_wrap` |
-| Host key modal | n/a | pass | pass | pass | Value cells truncate; footer `flex_wrap` |
-| Conflict modal | n/a | pass | pass | pass | Paths truncate; action rows `flex_wrap` |
-| Delete confirm | n/a | pass | pass | pass | Name preview truncate; footer `flex_wrap` |
-| Go to Path | n/a | pass | pass | pass | Footer `flex_wrap`; fixed 460 card fits min width |
-| Command palette | n/a | pass | pass | pass | Existing fixed-width card; out of Task 4 layout rework |
-| Tab switcher | n/a | pass | pass | pass | Title `flex_1`+`min_w_0`+`truncate` |
-| Context menu / inline edit | n/a | n/a | pass | n/a | Esc closes then `focus_pane` |
-| About | n/a | n/a | pass | n/a | Esc + Close → `close_about` → `focus_pane` (tested) |
-| Settings surface | n/a | pass | pass | pass | Existing `min_w_0` on content column |
+| Tab bar + close | pass | n/a | n/a | pass | Tab title 使用 `min_w_0`、`truncate` 和 `max_w(220)`；tab strip 使用 `flex_1`、`min_w_0` 和 `overflow_x_scroll` |
+| Path bar（back/up/refresh/copy/…） | pass | n/a | n/a | pass | Breadcrumb trail 使用 `flex_1`、`min_w_0` 和 `overflow_x_hidden`；因此，深层路径会被裁剪，但是不会导致窗口横向溢出 |
+| Filter clear | pass | n/a | pass | pass | inactive 状态下，query cell 使用 `flex_1`、`min_w_0` 和 `truncate` |
+| Transfer drawer cancel/retry | pass | n/a | n/a | pass | title 会截断；detail 使用 `max_w(160)` 和 truncate；drawer header 的汇总 label 也会截断 |
+| Status bar transfer chip | pass | n/a | n/a | pass | 左侧区域使用 `flex_1` 和 `min_w_0`；status/message 会截断；chip 使用 `flex_none` |
+| Connect form | n/a | pass | pass | pass | field/profile 行使用 `min_w_0`；profile name/summary 会截断；footer 使用 `flex_wrap` |
+| Host key modal | n/a | pass | pass | pass | value cell 会截断；footer 使用 `flex_wrap` |
+| Conflict modal | n/a | pass | pass | pass | path 会截断；action row 使用 `flex_wrap` |
+| Delete confirm | n/a | pass | pass | pass | name preview 会截断；footer 使用 `flex_wrap` |
+| Go to Path | n/a | pass | pass | pass | footer 使用 `flex_wrap`；固定宽度为 460 的 card 符合最小窗口宽度 |
+| Command palette | n/a | pass | pass | pass | 沿用现有固定宽度 card，因此不属于 Task 4 的布局修改范围 |
+| Tab switcher | n/a | pass | pass | pass | title 使用 `flex_1`、`min_w_0` 和 `truncate` |
+| Context menu / inline edit | n/a | n/a | pass | n/a | Esc 先关闭当前界面，然后执行 `focus_pane` |
+| About | n/a | n/a | pass | n/a | Esc + Close → `close_about` → `focus_pane`，并且已经测试 |
+| Settings surface | n/a | pass | pass | pass | content column 已经使用 `min_w_0` |
 
-## Narrow-window hand-test notes (Task 4)
+## 窄窗口人工测试记录（Task 4）
 
-**Baseline:** `window_min_size` 720×480 unchanged. No pixel CI — code review + layout inventory.
+**基准：** `window_min_size` 保持 720×480。项目没有 pixel CI，因此本项通过代码评审和布局清单验证。
 
-| Check | Result |
+| 检查项 | 结果 |
 | --- | --- |
-| Min size 720×480 | Confirmed in `main.rs`; not lowered |
-| Long tab title | Tab max width + truncate; strip scrolls horizontally |
-| Deep path bar | Breadcrumb shrinks/`overflow_x_hidden` inside pane |
-| Transfer drawer long path | `transfer_title` truncates; detail capped |
-| Connect + Delete modals | Fixed card ≤460/420; footers wrap; long names truncate |
+| 最小尺寸 720×480 | 已在 `main.rs` 中确认，并且没有降低该值 |
+| 较长的 tab title | tab 使用最大宽度和 truncate；tab strip 可以横向滚动 |
+| 较深的 path bar | breadcrumb 在 pane 内缩小，并且使用 `overflow_x_hidden` |
+| Transfer drawer 中的长路径 | `transfer_title` 会截断，并且 detail 具有最大宽度限制 |
+| Connect + Delete modals | 固定 card 宽度不超过 460/420；footer 可以换行；较长名称会截断 |
 
-Residual: single ultra-long breadcrumb segment clips without ellipsis (acceptable); dual-pane path bars stay tight (~110px trail) at 720 but do not force window overflow.
+剩余问题：单个超长 breadcrumb segment 会被裁剪，但是没有省略号，该结果可以接受。在 720 宽度下，双 pane path bar 的 trail 宽度约为 110px；虽然空间有限，但是不会导致窗口溢出。
 
-## Hand performance smoke (Task 5)
+## 人工性能 smoke test（Task 5）
 
-**Automation:** `visible_indices_handle_ten_thousand_entries` and
-`visible_remote_indices_handle_ten_thousand_with_hidden` in
-`crates/app/src/workspace/visible_entries.rs` — correctness only (10k filter/hide).
+**自动测试：** `crates/app/src/workspace/visible_entries.rs` 中的
+`visible_indices_handle_ten_thousand_entries` 和
+`visible_remote_indices_handle_ten_thousand_with_hidden` 只验证 10k entries 的 filter/hide 正确性。
 
-**Setup**
-1. Generate local dir: `mkdir -p /tmp/macsftp-10k && seq -w 1 10000 | xargs -I{} touch /tmp/macsftp-10k/f{}`
-2. Open macSFTP, navigate local pane to that dir (or symlink).
-3. Connect remote with large listing if available (or mock backend).
-4. Start up to 4 transfers; keep 3 tabs.
+**准备步骤**
+1. 生成本地目录：`mkdir -p /tmp/macsftp-10k && seq -w 1 10000 | xargs -I{} touch /tmp/macsftp-10k/f{}`
+2. 打开 macSFTP，并且在 local pane 中进入该目录或对应 symlink。
+3. 如果存在较大的远端目录，则连接该远端；否则使用 mock backend。
+4. 启动最多 4 个 transfer，并且保留 3 个 tab。
 
-**Observe**
-- Scroll file list: no multi-second freezes
-- Type-to-filter: filter updates without clearing selection incorrectly
-- Switch tabs / toggle drawer: responsive
-- Progress updates remain throttled (phase 2)
+**观察项**
+- 滚动文件列表：不得出现持续数秒的界面冻结。
+- 输入 filter：filter 更新时不得错误清除 selection。
+- 切换 tab 或切换 drawer 状态：界面应及时响应。
+- progress 更新：继续采用 Phase 2 中的节流处理。
 
-**Result:** **accepted risk: interactive GUI smoke deferred; 10k unit smoke pass** (agent environment has no interactive GUI session; local 10k unit tests pass).
+**结果：** **accepted risk: interactive GUI smoke deferred; 10k unit smoke pass**。agent 环境没有交互式 GUI session，但是本地 10k unit test 已经通过。
 
-## Copy banlist (user-visible)
+## 用户可见文案禁用词
 
-Forbidden substrings (case-insensitive) in UI labels/status: `runtime`, `actor`, `channel`, `session epoch`, `AppCommand`, `crate`.
-Allowed: `Keychain`, host/port/profile/transfer/permission.
+UI label/status 中禁止出现以下 substring，并且检查不区分大小写：`runtime`、`actor`、`channel`、`session epoch`、`AppCommand`、`crate`。
+允许使用：`Keychain`、host、port、profile、transfer、permission。
 
-**Task 3 (2026-07-14):** Grepped `crates/app/src` (`runtime|actor|channel|session.epoch|AppCommand`); only user-visible hits were `send_command` status strings in `workspace/mod.rs` — rewritten to `STATUS_BUSY_TRY_AGAIN` / `STATUS_CONNECTION_SERVICE_UNAVAILABLE`. Remaining hits are identifiers, comments, or logs. Guard: `user_status_strings_avoid_internal_jargon`.
+**Task 3（2026-07-14）：** 使用 `runtime|actor|channel|session.epoch|AppCommand` 检查 `crates/app/src`。用户可见内容中只有 `workspace/mod.rs` 的 `send_command` 状态字符串符合条件，因此已将其改为 `STATUS_BUSY_TRY_AGAIN` / `STATUS_CONNECTION_SERVICE_UNAVAILABLE`。其余结果均为标识符、注释或日志。对应 guard 为 `user_status_strings_avoid_internal_jargon`。
 
-**Task 6 closeout re-scan (2026-07-14):**
+**Task 6 完成检查（2026-07-14）：**
 ```bash
 rg -n -i "runtime is|actor|session epoch" crates/app/src --type rust -g '!**/tests.rs'
 ```
-Hits are comments/identifiers only (`main.rs` doc, `modals`/`mod`/`panes`/`event_handling`/`file_ops` comments). No user-visible string regressions.
+结果只包含注释或标识符，包括 `main.rs` 文档以及 `modals`/`mod`/`panes`/`event_handling`/`file_ops` 注释。因此，用户可见字符串没有回归问题。
 
-## Closeout (Task 6)
+## 完成检查（Task 6）
 
-| Check | Result |
+| 检查项 | 结果 |
 | --- | --- |
-| Regression `cargo test -p macsftp-platform -p macsftp-storage -p macsftp-app --bin macsftp` | **pass** — platform 9, storage 34 (+1 ignored), app bin 107; all green |
-| §15 rows | All `pass` (row 7 notes accepted risk for interactive GUI only) — no `unknown` |
-| Region matrix | Complete |
-| Hand performance smoke | accepted risk: interactive GUI smoke deferred; 10k unit smoke pass |
-| Banlist residual | Clean for UI copy |
+| 回归测试 `cargo test -p macsftp-platform -p macsftp-storage -p macsftp-app --bin macsftp` | **pass**：platform 9，storage 34（另有 1 个 ignored），app bin 107；全部通过 |
+| §15 各项 | 全部为 `pass`；第 7 项只对交互式 GUI 标记 accepted risk；不存在 `unknown` |
+| 区域检查矩阵 | 已完成 |
+| 人工性能 smoke test | accepted risk: interactive GUI smoke deferred; 10k unit smoke pass |
+| Banlist 剩余内容 | UI 文案中不存在违规内容 |
 
-## Spot-check log (PR0 / Task 1)
+## 抽查记录（PR0 / Task 1）
 
-| Check | Result |
+| 检查项 | 结果 |
 | --- | --- |
-| `window_min_size` | Confirmed 720×480 in `crates/app/src/main.rs` |
-| `icon_button` API | Exists in `crates/ui/src/components.rs`; **requires** `tooltip_label`; call sites in tab bar, path bar, filter clear, transfer rows |
-| About Esc path | **Fixed (Task 2):** `cancel_active_modal` → `close_about` → `focus_pane` |
-| About Close button | **Fixed (Task 2):** Close click → `close_about` → `focus_pane` |
-| About open | `ShowAbout` sets `about_open = true`; Esc is workspace-level `CancelActiveModal` (no modal focus required) |
-| Tooltip audit | All `icon_button` sites have non-empty labels; bare clickable icons (back/forward/status chip) use `text_tooltip` |
+| `window_min_size` | 已在 `crates/app/src/main.rs` 中确认值为 720×480 |
+| `icon_button` API | 位于 `crates/ui/src/components.rs`，并且**要求**提供 `tooltip_label`；调用位置包括 tab bar、path bar、filter clear 和 transfer rows |
+| About Esc 路径 | **已在 Task 2 修正：** `cancel_active_modal` → `close_about` → `focus_pane` |
+| About Close button | **已在 Task 2 修正：** 点击 Close → `close_about` → `focus_pane` |
+| About 打开行为 | `ShowAbout` 设置 `about_open = true`；Esc 使用 workspace 级别的 `CancelActiveModal`，因此不要求 modal focus |
+| Tooltip 审计 | 所有 `icon_button` 调用位置均具有非空 label；back/forward/status chip 等直接点击的 icon 使用 `text_tooltip` |

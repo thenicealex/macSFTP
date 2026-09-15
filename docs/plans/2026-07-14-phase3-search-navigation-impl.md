@@ -1,10 +1,10 @@
 # Phase 3 Search & Directory Navigation Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Agent 执行要求：** 必须使用 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans`，并且按任务实施本计划。各步骤使用复选框（`- [ ]`）记录状态。
 
-**Goal:** Add type-to-filter, per-pane back/forward history, clickable breadcrumbs, Go to Path, hidden-files toggle, and clickable column sort so large directories are usable.
+**目标：** 增加 type-to-filter、每个 pane 独立的前进/后退历史、可单击的面包屑、Go to Path、隐藏文件切换和可单击的列排序，因此大型目录也能保持可用。
 
-**Architecture:** View-layer filter + nav history on `Workspace`; all path changes go through `navigate_pane(..., HistoryOp)`. Hidden files and filter derive a **visible** list without mutating stored entries. Sort uses existing `tab.sort` + `sort_entries`; header becomes interactive.
+**架构：** View 层 filter 和 nav history 存储在 `Workspace` 中，并且所有路径变更都通过 `navigate_pane(..., HistoryOp)` 完成。隐藏文件设置和 filter 从已有条目派生**可见**列表，但是不修改已存储的条目。排序继续使用现有的 `tab.sort` 和 `sort_entries`，同时 header 增加交互能力。
 
 **Tech Stack:** Rust, GPUI, `macsftp_core::{FileSort, FileSortField, sort_entries, LocalPath, RemotePath}`, `macsftp_storage::AppConfig`, existing `InputState` / `uniform_list`.
 
@@ -15,12 +15,12 @@
 - Filter only already-loaded entries (no remote recursive search).
 - Case-insensitive **substring** match on basename only (no regex).
 - Hidden = `name.starts_with('.')`; default `show_hidden_files = false` in config.
-- Nav history is **session-only** (max 50 per stack); not persisted.
-- Sort is session-only on `tab.sort`; do not write sort to config.
+- Nav history 仅在当前 session 有效（每个 stack 最多 50 条），因此不持久化。
+- Sort 仅在当前 session 的 `tab.sort` 中有效，因此不能将排序状态写入 config。
 - `cmd-[` / `cmd-]` = NavigateBack/Forward; tab switch stays `cmd-shift-[` / `]`.
-- Refresh same path must **not** push history.
+- 刷新相同路径时不能向 history 增加记录。
 - No `unwrap`/`expect` on recoverable paths (AGENTS.md §5).
-- Prefer `src/foo.rs` over `mod.rs`; match existing workspace style.
+- 优先使用 `src/foo.rs`，而不使用 `mod.rs`，并且遵循现有 workspace 风格。
 - Do not change SFTP listing protocol or `AppCommand` read shapes.
 
 ## File Map
@@ -32,7 +32,7 @@
 | **Modify** `crates/storage/src/config.rs` | `show_hidden_files` + setter + tests |
 | **Modify** `crates/ui/src/file_list.rs` + `ui.rs` | Clickable `file_table_header` |
 | **Modify** `crates/app/src/app_actions.rs` | New actions + keybindings |
-| **Modify** `crates/app/src/workspace/mod.rs` | Fields: nav map, filter map, go_to_path state; wire actions |
+| **Modify** `crates/app/src/workspace/mod.rs` | Fields: nav map, filter map, go_to_path state；注册 actions |
 | **Modify** `crates/app/src/workspace/panes.rs` | `navigate_pane`, sort apply, visible list helpers, open_entry/up use navigate |
 | **Modify** `crates/app/src/workspace/render.rs` | Path bar back/forward, breadcrumb, filter bar, sort clicks, hidden toggle |
 | **Modify** `crates/app/src/workspace/modals.rs` | Go to Path UI + cancel_active_modal |
@@ -41,22 +41,22 @@
 
 ---
 
-### Task 1: Clickable column sort + local `tab.sort` fix
+### Task 1：可单击的列排序和 local `tab.sort` 修复
 
-**Files:**
+**文件：**
 - Modify: `crates/ui/src/file_list.rs`
 - Modify: `crates/ui/src/ui.rs` (re-export if signature changes)
 - Modify: `crates/app/src/workspace/panes.rs` (`load_local_directory`)
 - Modify: `crates/app/src/workspace/render.rs` (header callback + `cycle_sort`)
 - Test: `crates/app/src/workspace/tests.rs`
 
-**Interfaces:**
-- Produces:
-  - `file_table_header(sort, cx, on_click: impl Fn(FileSortField, &mut Window, &mut App))` **or** keep pure header and attach clicks in app by rebuilding header columns in render — prefer extending `file_table_header` with optional click handlers.
+**接口：**
+- 产出以下接口：
+  - `file_table_header(sort, cx, on_click: impl Fn(FileSortField, &mut Window, &mut App))`；也可以保留纯 header，并在 app 的 render 中重新构建 header columns 以增加单击行为。但是，优先为 `file_table_header` 增加可选 click handlers。
   - `Workspace::apply_sort_field(&mut self, field: FileSortField, cx)`
   - `load_local_directory` sorts with `&tab.sort`
 
-- [ ] **Step 1: Failing test — local load uses tab sort**
+- [ ] **Step 1：编写失败测试，验证 local load 使用 tab sort**
 
 In `tests.rs`:
 
@@ -105,26 +105,26 @@ fn local_directory_respects_tab_sort_by_size(cx: &mut TestAppContext) {
 
 Import `FileSortField`, `SortDirection` from `macsftp_core`.
 
-- [ ] **Step 2: Run test — expect FAIL**
+- [ ] **Step 2：执行测试，预期结果为 FAIL**
 
 ```bash
 cargo test -p macsftp-app --bin macsftp local_directory_respects_tab_sort -- --nocapture
 ```
 
-Expected: FAIL (both files sorted by name default → alphabetical `big` before `small`).
+预期结果：FAIL，因为两个文件默认按名称排序，所以 `big` 在字母顺序上位于 `small` 之前。
 
-- [ ] **Step 3: Fix `load_local_directory`**
+- [ ] **Step 3：修复 `load_local_directory`**
 
 ```rust
 // panes.rs
 macsftp_core::sort_entries(&mut entries, &tab.sort);
 ```
 
-instead of `&Default::default()`.
+使用该调用替代 `&Default::default()`。
 
-- [ ] **Step 4: Make header clickable**
+- [ ] **Step 4：让 header 支持单击操作**
 
-Change `file_table_header` to accept clicks. Practical approach:
+修改 `file_table_header` 以接收单击回调。建议采用以下方式：
 
 ```rust
 pub fn file_table_header(
@@ -134,9 +134,9 @@ pub fn file_table_header(
 ) -> impl IntoElement
 ```
 
-Wrap each column label `div` with `.id(...).on_click` calling `on_field(FileSortField::Name|Size|ModifiedAt, ...)`.
+为每个 column label 的 `div` 增加 `.id(...).on_click`，并且调用 `on_field(FileSortField::Name|Size|ModifiedAt, ...)`。
 
-Update all call sites (`render.rs` and any test/helpers) — typically only `render.rs`:
+更新所有调用点，包括 `render.rs` 以及相关 test/helper；通常只有 `render.rs`：
 
 ```rust
 .child(file_table_header(&sort, cx, {
@@ -170,7 +170,7 @@ pub(crate) fn apply_sort_field(&mut self, field: FileSortField, cx: &mut Context
 }
 ```
 
-- [ ] **Step 5: Test apply_sort_field toggle**
+- [ ] **Step 5：测试 apply_sort_field toggle**
 
 ```rust
 #[gpui::test]
@@ -191,17 +191,17 @@ fn apply_sort_field_toggles_direction_on_same_column(cx: &mut TestAppContext) {
 }
 ```
 
-Note: `apply_sort_field` takes `cx: &mut Context` only if no window needed — match existing methods (`cx.notify()` only).
+注意：如果 `apply_sort_field` 不需要 window，则只接收 `cx: &mut Context`，因此与只调用 `cx.notify()` 的现有方法保持一致。
 
-- [ ] **Step 6: Run tests**
+- [ ] **Step 6：执行测试**
 
 ```bash
 cargo test -p macsftp-app --bin macsftp local_directory_respects_tab_sort apply_sort_field -- --nocapture
 ```
 
-Expected: PASS.
+预期结果：PASS。
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 7：提交变更**
 
 ```bash
 git add crates/ui/src/file_list.rs crates/ui/src/ui.rs \
@@ -212,7 +212,7 @@ git commit -m "feat(app): clickable column sort and fix local tab.sort"
 
 ---
 
-### Task 2: `show_hidden_files` config + visible-list filtering
+### Task 2：`show_hidden_files` config 和 visible-list filtering
 
 **Files:**
 - Modify: `crates/storage/src/config.rs`
@@ -223,14 +223,14 @@ git commit -m "feat(app): clickable column sort and fix local tab.sort"
 - Test: config unit test + workspace test
 
 **Interfaces:**
-- Produces:
+- 产出以下接口：
   - `AppConfig.show_hidden_files: bool` default **false**
   - `ConfigStore::set_show_hidden_files(bool) -> Result<(), ConfigError>`
   - `fn entry_is_hidden(name: &str) -> bool { name.starts_with('.') }`
   - `fn filter_hidden<E: HasName>(entries: &[E], show_hidden: bool) -> impl Iterator`
   - Action `ToggleHiddenFiles` + `cmd-shift-.`
 
-- [ ] **Step 1: Config test (TDD)**
+- [ ] **Step 1：编写 config 测试（TDD）**
 
 ```rust
 #[test]
@@ -249,7 +249,7 @@ fn show_hidden_files_defaults_false_and_round_trips() {
 }
 ```
 
-- [ ] **Step 2: Implement config field**
+- [ ] **Step 2：实现 config 字段**
 
 ```rust
 pub struct AppConfig {
@@ -262,15 +262,15 @@ pub struct AppConfig {
 // set_show_hidden_files like set_confirm_delete
 ```
 
-- [ ] **Step 3: Run storage tests**
+- [ ] **Step 3：执行 storage 测试**
 
 ```bash
 cargo test -p macsftp-storage show_hidden -- --nocapture
 ```
 
-Expected: PASS.
+预期结果：PASS。
 
-- [ ] **Step 4: Visible list helper + workspace toggle**
+- [ ] **Step 4：实现 visible list helper 和 workspace toggle**
 
 ```rust
 // panes.rs or visible.rs
@@ -290,9 +290,9 @@ pub(crate) fn visible_local_indices(entries: &[LocalEntry], show_hidden: bool, q
 // same for RemoteEntry
 ```
 
-For Task 2 only, pass `query: ""` always (filter is Task 5). Still implement the dual filter signature so Task 5 only fills query.
+Task 2 始终传入 `query: ""`，因为 filter 属于 Task 5。但是，仍需实现包含两个过滤条件的函数签名，因此 Task 5 只需要提供 query。
 
-Wire `ToggleHiddenFiles`:
+注册 `ToggleHiddenFiles`：
 
 ```rust
 pub(crate) fn toggle_hidden_files(&mut self, cx: &mut Context<Self>) {
@@ -308,17 +308,17 @@ pub(crate) fn toggle_hidden_files(&mut self, cx: &mut Context<Self>) {
 }
 ```
 
-Register action in `mod.rs` + `app_actions.rs`.
+在 `mod.rs` 和 `app_actions.rs` 中注册 action。
 
-- [ ] **Step 5: Render uses visible indices**
+- [ ] **Step 5：让 render 使用 visible indices**
 
-In file list `uniform_list` / `entry_count` / `entry_path_at` / `selected_index` / `move_selection` / `open_entry_at`: operate on **visible** index space.
+file list 中的 `uniform_list`、`entry_count`、`entry_path_at`、`selected_index`、`move_selection` 和 `open_entry_at` 必须基于**可见**索引空间执行。
 
-Critical: `entry_count(side)` must return visible count; `entry_path_at` maps visible index → real entry.
+关键要求：`entry_count(side)` 必须返回可见条目数，而 `entry_path_at` 必须将可见索引映射到实际条目。
 
-Path bar: add toggle (text or icon) with tooltip `Show Hidden Files (⌘⇧.)` reflecting checked state.
+在 path bar 中增加 toggle（文本或图标），tooltip 为 `Show Hidden Files (⌘⇧.)`，并且显示当前选中状态。
 
-- [ ] **Step 6: Workspace test**
+- [ ] **Step 6：编写 Workspace 测试**
 
 ```rust
 #[gpui::test]
@@ -331,7 +331,7 @@ fn hidden_files_filtered_by_default(cx: &mut TestAppContext) {
 }
 ```
 
-- [ ] **Step 7: Full app tests + commit**
+- [ ] **Step 7：执行完整 app 测试并提交**
 
 ```bash
 cargo test -p macsftp-app --bin macsftp
@@ -342,7 +342,7 @@ git commit -m "feat(app): hide dotfiles by default with config toggle"
 
 ---
 
-### Task 3: `navigate_pane` + NavHistory + back/forward
+### Task 3：`navigate_pane`、NavHistory 和 back/forward
 
 **Files:**
 - Create: `crates/app/src/workspace/nav.rs`
@@ -385,11 +385,13 @@ pub struct TabNavState {
 }
 ```
 
-`push_navigating_from`: if `from` is `Some(f)` and `f != to`, push `f` to back, clear forward, trim MAX.  
-`go_back`: push `current` to forward, pop back.  
-Same path / empty from: no-op push.
+`push_navigating_from`：如果 `from` 是 `Some(f)` 且 `f != to`，则将 `f` 加入 back，清空 forward，并将长度限制为 MAX。
 
-- [ ] **Step 1: Unit tests in `nav.rs` (TDD)**
+`go_back`：将 `current` 加入 forward，然后从 back 中移除并返回最后一项。
+
+如果路径相同或 from 为空，则不修改 history。
+
+- [ ] **Step 1：在 `nav.rs` 中编写 unit tests（TDD）**
 
 ```rust
 #[test]
@@ -421,9 +423,9 @@ fn push_same_path_is_noop() {
 }
 ```
 
-- [ ] **Step 2: Implement `nav.rs` + `mod nav`**
+- [ ] **Step 2：实现 `nav.rs` 和 `mod nav`**
 
-- [ ] **Step 3: `navigate_pane`**
+- [ ] **Step 3：实现 `navigate_pane`**
 
 ```rust
 pub(crate) fn navigate_pane_local(
@@ -463,14 +465,14 @@ pub(crate) fn navigate_pane_local(
 // navigate_pane_remote similar → request_remote_directory
 ```
 
-Refactor:
+调整现有调用：
 - `open_entry_at` directory → `navigate_* (Push)`
 - `go_to_parent_directory` → `navigate_* (Push)` with parent
 - `refresh_focused_pane` → **keep** `set_local_path` / `request_remote_directory` **without** Push (same path)
 
 On `close_tab_by_id`: `self.tab_nav.remove(&tab_id)`.
 
-- [ ] **Step 4: UI + actions**
+- [ ] **Step 4：实现 UI 和 actions**
 
 ```rust
 // app_actions
@@ -478,9 +480,9 @@ NavigateBack, NavigateForward,
 // keys: cmd-[ , cmd-] on Workspace
 ```
 
-Path bar: back/forward icon buttons (disabled when `!can_back/forward`). Use text `◀`/`▶` or existing icons if any.
+Path bar 提供 back/forward icon buttons；当 `!can_back/forward` 时禁用相应按钮。可以使用文本 `◀`/`▶`，如果已有合适图标则使用现有图标。
 
-- [ ] **Step 5: Integration test**
+- [ ] **Step 5：编写 integration test**
 
 ```rust
 #[gpui::test]
@@ -500,21 +502,21 @@ git commit -m "feat(app): per-pane navigation history with back and forward"
 
 ---
 
-### Task 4: Breadcrumbs + Go to Path
+### Task 4：Breadcrumbs 和 Go to Path
 
 **Files:**
 - Modify: `crates/app/src/workspace/render.rs` (breadcrumb segments)
 - Modify: `crates/app/src/workspace/modals.rs` or panes (Go to Path state + modal)
 - Modify: `crates/app/src/app_actions.rs` (`GoToPath`)
 - Modify: `crates/app/src/workspace/mod.rs`
-- Optional: pure `split_path_segments(path: &str) -> Vec<(label, absolute)>` in `nav.rs` or `helpers.rs` with unit tests
+- 可选：在 `nav.rs` 或 `helpers.rs` 中实现纯函数 `split_path_segments(path: &str) -> Vec<(label, absolute)>`，并增加 unit tests
 
 **Interfaces:**
 - `fn breadcrumb_segments(path: &str) -> Vec<(String /*label*/, String /*absolute*/)>`
 - `go_to_path_open: bool` + `go_to_path_input: InputState` on Workspace
 - `submit_go_to_path` → `navigate_* (Push)` after validation
 
-- [ ] **Step 1: Unit tests for segments**
+- [ ] **Step 1：编写 segments 的 unit tests**
 
 ```rust
 #[test]
@@ -547,11 +549,11 @@ pub fn breadcrumb_segments(path: &str) -> Vec<(String, String)> {
 }
 ```
 
-- [ ] **Step 2: Render breadcrumbs**
+- [ ] **Step 2：渲染 breadcrumbs**
 
-Replace single truncated path label with horizontal segment buttons (click → navigate Push). MVP collapse: if `segments.len() > 5`, show first + `…` (not clickable) + last two.
+使用水平 segment buttons 替换单个截断的 path label，并且在单击后以 Push 方式导航。MVP 的折叠规则为：如果 `segments.len() > 5`，则显示第一个 segment、不可单击的 `…` 和最后两个 segment。
 
-- [ ] **Step 3: Go to Path modal**
+- [ ] **Step 3：实现 Go to Path modal**
 
 ```rust
 // open
@@ -578,11 +580,13 @@ match self.focused_side {
 self.go_to_path_open = false;
 ```
 
-`cancel_active_modal` closes go_to_path first.  
-Key: `cmd-shift-g` → `GoToPath`.  
-Escape binding: add `GoToPath` key context if separate.
+`cancel_active_modal` 优先关闭 go_to_path。
 
-- [ ] **Step 4: Tests + commit**
+快捷键：`cmd-shift-g` → `GoToPath`。
+
+Escape 绑定：如果使用独立 context，则增加 `GoToPath` key context。
+
+- [ ] **Step 4：执行测试并提交**
 
 ```bash
 cargo test -p macsftp-app --bin macsftp breadcrumb go_to_path
@@ -591,7 +595,7 @@ git commit -m "feat(app): path breadcrumbs and Go to Path"
 
 ---
 
-### Task 5: type-to-filter + `cmd-f`
+### Task 5：type-to-filter 和 `cmd-f`
 
 **Files:**
 - Modify: `crates/app/src/workspace/mod.rs` (filter map fields)
@@ -613,9 +617,9 @@ pub struct PaneFilter {
 // or active-tab only: local_filter + remote_filter fields (simpler for MVP)
 ```
 
-MVP recommendation: **two fields on Workspace** `local_filter` / `remote_filter` cleared on tab switch (`activate_tab` / `open_new_tab`), instead of full HashMap — still matches design intent.
+MVP 建议：在 Workspace 上设置 `local_filter` 和 `remote_filter` 两个字段，并在 tab 切换时通过 `activate_tab` 或 `open_new_tab` 清空。无需使用完整 HashMap，而且该方案仍符合设计意图。
 
-- [ ] **Step 1: Pure match helper tests**
+- [ ] **Step 1：编写纯 match helper 测试**
 
 ```rust
 #[test]
@@ -629,11 +633,11 @@ fn name_matches(name: &str, query: &str) -> bool {
 }
 ```
 
-- [ ] **Step 2: Wire visible indices with query** (Task 2 helper already takes query)
+- [ ] **Step 2：将 query 应用于 visible indices**（Task 2 helper 已经接收 query）
 
-- [ ] **Step 3: Key handling on FilePane**
+- [ ] **Step 3：处理 FilePane 键盘事件**
 
-In `render_pane` `.on_key_down` (compose with inline_edit handler):
+在 `render_pane` 的 `.on_key_down` 中处理以下逻辑，并且与 inline_edit handler 组合：
 
 ```rust
 // if go_to_path / delete_confirm / connect / inline_edit: return
@@ -643,19 +647,19 @@ In `render_pane` `.on_key_down` (compose with inline_edit handler):
 // Escape: clear filter (also via CancelActiveModal if preferred)
 ```
 
-`cmd-f`: set `explicit_focus = true`, show bar, focus pane.
+`cmd-f`：设置 `explicit_focus = true`，显示 filter bar，并将焦点置于 pane。
 
-Filter bar UI when `!query.is_empty() || explicit_focus`:
+当 `!query.is_empty() || explicit_focus` 时，显示以下 filter bar UI：
 
 ```text
 Filter: {query} · {matched}/{total_after_hidden}
 ```
 
-- [ ] **Step 4: Clear filter on navigate / tab change**
+- [ ] **Step 4：在导航或 tab 切换时清空 filter**
 
-Already called from `navigate_pane_*`. On `activate_tab`, clear both filters.
+`navigate_pane_*` 已经调用清空逻辑。此外，`activate_tab` 必须清空两个 filter。
 
-- [ ] **Step 5: Tests**
+- [ ] **Step 5：编写测试**
 
 ```rust
 #[gpui::test]
@@ -668,7 +672,7 @@ fn type_to_filter_reduces_visible_local_entries(cx: &mut TestAppContext) {
 }
 ```
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6：提交变更**
 
 ```bash
 git commit -m "feat(app): type-to-filter and cmd-f for file panes"
@@ -676,9 +680,9 @@ git commit -m "feat(app): type-to-filter and cmd-f for file panes"
 
 ---
 
-### Task 6: Final verification
+### Task 6：最终验证
 
-- [ ] **Step 1: Automated**
+- [ ] **Step 1：执行自动化验证**
 
 ```bash
 cargo test -p macsftp-storage --lib
@@ -686,18 +690,18 @@ cargo test -p macsftp-app --bin macsftp
 rg "Default::default\(\)" crates/app/src/workspace/panes.rs  # load_local_directory must use tab.sort
 ```
 
-- [ ] **Step 2: Manual smoke checklist** (document in PR/report)
+- [ ] **Step 2：执行手动 smoke checklist**（在 PR 或报告中记录）
 
-1. Local 万级 dir: type-to-filter snappy  
-2. Back/forward across 3 folders; refresh does not break stack wrongly  
-3. Breadcrumb jump to ancestor  
-4. `cmd-shift-g` local + remote  
-5. Hidden off by default; `cmd-shift-.` shows `.git`  
-6. Click Size header; directories stay first  
+1. 在包含万级条目的 local dir 中，type-to-filter 响应迅速
+2. 在 3 个目录之间执行 Back/forward；刷新不会错误修改 stack
+3. 使用 Breadcrumb 导航到祖先目录
+4. 分别在 local 和 remote pane 中验证 `cmd-shift-g`
+5. Hidden 默认关闭；`cmd-shift-.` 可以显示 `.git`
+6. 单击 Size header 后，directories 仍位于最前
 
-- [ ] **Step 3: Spec coverage self-check**
+- [ ] **Step 3：检查 Spec 覆盖情况**
 
-Map each design §2–§5 success criterion to a test or manual item; fix gaps.
+将 design §2–§5 的每项成功标准映射到测试或手动检查项。如果存在缺失，则增加相应验证。
 
 ---
 
@@ -721,11 +725,11 @@ Map each design §2–§5 success criterion to a test or manual item; fix gaps.
 
 ## Execution Handoff
 
-Plan complete and saved to `docs/plans/2026-07-14-phase3-search-navigation-impl.md`.
+计划已完成，并且保存在 `docs/plans/2026-07-14-phase3-search-navigation-impl.md`。
 
-**Two execution options:**
+**执行方式：**
 
-1. **Subagent-Driven (recommended)** — fresh subagent per task, review between tasks  
-2. **Inline Execution** — this session with checkpoints  
+1. **Subagent-Driven（推荐）**：每个任务使用新的 subagent，并且在任务之间进行 review
+2. **Inline Execution**：在当前 session 中执行，并设置 checkpoints
 
-Which approach?
+请选择执行方式。

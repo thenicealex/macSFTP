@@ -1,40 +1,40 @@
 # Phase 4 Keyboard & Command Palette Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan one task at a time. Checkbox syntax (`- [ ]`) records implementation progress.
 
-**Goal:** Ship command palette (`cmd-shift-p`), complete file-list keyboard multi-select/paging, MRU tab switcher (`ctrl-tab`), and shortcut discoverability (palette keys + tooltips).
+**Goal:** Implement the command palette (`cmd-shift-p`), complete keyboard multi-selection and paging for the file list, implement the MRU tab switcher (`ctrl-tab`), and expose shortcuts through palette keys and tooltips.
 
-**Architecture:** Explicit `PaletteCommand` registry dispatches stable GPUI actions. List selection keeps path-based `selected_paths` plus a view-side anchor for shift-range. Workspace maintains `tab_mru: Vec<TabId>`; creation-order tab keys stay on `cmd-shift-[/]`; MRU only drives the ctrl-tab switcher UI.
+**Architecture:** An explicit `PaletteCommand` registry dispatches stable GPUI actions. List selection retains the path-based `selected_paths` and adds a view-side anchor for shift-range selection. Workspace maintains `tab_mru: Vec<TabId>`. The `cmd-shift-[/]` tab shortcuts continue to use creation order, whereas MRU only determines the ctrl-tab switcher UI order.
 
-**Tech Stack:** Rust, GPUI (`actions!`, `KeyBinding`, `InputState`, modal-style overlays), existing `Workspace` / `PaneSide` / visible indices from phase 3.
+**Tech Stack:** Rust, GPUI (`actions!`, `KeyBinding`, `InputState`, modal-style overlays), and the existing `Workspace`, `PaneSide`, and visible indices from phase 3.
 
 **Spec:** `docs/plans/2026-07-14-phase4-keyboard-palette-design.md`
 
 ## Global Constraints
 
-- Explicit palette registry only — do **not** reflect all `actions!` symbols.
-- Palette titles: user-facing verb phrases; never runtime/channel/actor jargon.
-- Selection remains path-based (no row index as long-term selection id).
-- `PAGE_SIZE = 10` for page up/down on **visible** list indices.
-- `cmd-shift-[` / `]` stay **creation order**; MRU only for `ctrl-tab` switcher.
-- No custom keybinding editor; no SFTP/core protocol changes.
-- No `unwrap` on recoverable paths (AGENTS.md §5).
-- Match existing workspace style; prefer `src/foo.rs` over `mod.rs`.
+- The palette uses only the explicit registry; therefore it must **not** reflect all `actions!` symbols.
+- Palette titles use user-facing verb phrases and exclude runtime/channel/actor terminology.
+- Selection remains path-based; therefore row indices cannot serve as long-term selection IDs.
+- Page up/down uses `PAGE_SIZE = 10` and operates on **visible** list indices.
+- `cmd-shift-[` / `]` retain **creation order**, whereas MRU applies only to the `ctrl-tab` switcher.
+- Do not add a custom keybinding editor, and do not modify SFTP/core protocols.
+- Recoverable paths cannot use `unwrap` according to AGENTS.md §5.
+- Follow the existing workspace style, and prefer `src/foo.rs` to `mod.rs`.
 
 ## File Map
 
 | File | Responsibility |
 | --- | --- |
-| **Create** `crates/app/src/palette_commands.rs` | `PaletteCommand`, `PaletteWhen`, static registry, filter helper + unit tests |
-| **Create** `crates/app/src/workspace/command_palette.rs` | open/close/filter/execute UI helpers on Workspace |
-| **Modify** `crates/app/src/app_actions.rs` | new actions + keybindings |
+| **Create** `crates/app/src/palette_commands.rs` | `PaletteCommand`, `PaletteWhen`, static registry, filter helper, and unit tests |
+| **Create** `crates/app/src/workspace/command_palette.rs` | Workspace UI helpers for open/close/filter/execute |
+| **Modify** `crates/app/src/app_actions.rs` | New actions and keybindings |
 | **Modify** `crates/app/src/main.rs` | `mod palette_commands` |
-| **Modify** `crates/app/src/workspace/mod.rs` | palette / mru / switcher / anchor state; action wiring |
+| **Modify** `crates/app/src/workspace/mod.rs` | Palette, MRU, switcher, and anchor state; action wiring |
 | **Modify** `crates/app/src/workspace/panes.rs` | selection extend, page/home/end, select all, anchor updates |
 | **Modify** `crates/app/src/workspace/modals.rs` | `cancel_active_modal` palette first |
 | **Modify** `crates/app/src/workspace/render.rs` | palette overlay, tab switcher overlay, tooltip key text |
 | **Modify** `crates/app/src/workspace/tests.rs` | gpui tests |
-| **Do not modify** | `crates/sftp`, core transfer/session protocols |
+| **Do not modify** | `crates/sftp` or core transfer/session protocols |
 
 ---
 
@@ -42,7 +42,7 @@
 
 **Files:**
 - Modify: `crates/app/src/app_actions.rs`
-- Modify: `crates/app/src/workspace/mod.rs` (fields + on_action)
+- Modify: `crates/app/src/workspace/mod.rs` (fields and on_action)
 - Modify: `crates/app/src/workspace/panes.rs`
 - Test: `crates/app/src/workspace/tests.rs`
 
@@ -50,12 +50,12 @@
 - Produces:
   - `Workspace.selection_anchor: Option<EntryPath>` (or `(PaneSide, EntryPath)`)
   - `pub const PAGE_SIZE: usize = 10;`
-  - `select_index` sets single selection **and** updates anchor
+  - `select_index` sets a single selection **and** updates the anchor
   - `extend_selection_to(side, visible_index, cx)`
   - `select_all_visible(side, cx)`
   - Actions: `SelectNextEntryExtend`, `SelectPrevEntryExtend`, `PageDown`, `PageUp`, `SelectFirstEntry`, `SelectLastEntry`, `SelectAllEntries`
 
-- [ ] **Step 1: Failing tests**
+- [ ] **Step 1: Add failing tests**
 
 ```rust
 #[gpui::test]
@@ -75,7 +75,7 @@ fn select_all_selects_all_visible(cx: &mut TestAppContext) {
 }
 ```
 
-- [ ] **Step 2: Run — expect FAIL / missing methods**
+- [ ] **Step 2: Execute the tests; expect failure because methods are missing**
 
 ```bash
 cargo test -p macsftp-app --bin macsftp page_down_moves shift_down_extends select_all -- --nocapture
@@ -147,9 +147,9 @@ pub(crate) fn select_all_visible(&mut self, side: PaneSide, cx: &mut Context<Sel
 }
 ```
 
-Wire `move_selection` to reset anchor via `select_index`.
+`move_selection` must reset the anchor through `select_index`.
 
-Page/home/end:
+Implement page/home/end as follows:
 
 ```rust
 pub(crate) fn page_selection(&mut self, side: PaneSide, direction: isize, cx: &mut Context<Self>) {
@@ -161,7 +161,7 @@ pub(crate) fn page_selection(&mut self, side: PaneSide, direction: isize, cx: &m
 }
 ```
 
-- [ ] **Step 4: Actions + keybindings**
+- [ ] **Step 4: Add actions and keybindings**
 
 ```rust
 // app_actions.rs — add to actions! and bind_keys:
@@ -177,9 +177,9 @@ KeyBinding::new("end", SelectLastEntry, Some("FilePane")),
 KeyBinding::new("cmd-a", SelectAllEntries, Some("FilePane")),
 ```
 
-Wire in `mod.rs` `on_action` handlers calling the pane methods for `focused_side`.
+Add `on_action` handlers in `mod.rs`. Each handler calls the corresponding pane method for `focused_side`.
 
-- [ ] **Step 5: Tests PASS + commit**
+- [ ] **Step 5: Verify that tests pass, and then commit**
 
 ```bash
 cargo test -p macsftp-app --bin macsftp page_down shift_down select_all
@@ -246,7 +246,7 @@ fn filter_hides_when_predicate_fails() {
 }
 ```
 
-- [ ] **Step 2: Implement registry** — include at least:
+- [ ] **Step 2: Implement the registry**, which must include at least the following commands:
 
 | id | title | key | when |
 | --- | --- | --- | --- |
@@ -273,9 +273,9 @@ fn filter_hides_when_predicate_fails() {
 | OpenLogFolder | Open Log Folder | — | Always |
 | OpenCommandPalette | Command Palette | ⌘⇧P | Always |
 
-Filtering: lowercase `query` empty → all matching `when`; else title/keywords substring.
+Filtering converts `query` to lowercase. If the query is empty, return all commands that satisfy `when`; otherwise match a substring in title or keywords.
 
-- [ ] **Step 3: `cargo test -p macsftp-app --bin macsftp filter_matches filter_hides`**
+- [ ] **Step 3: Execute `cargo test -p macsftp-app --bin macsftp filter_matches filter_hides`**
 
 - [ ] **Step 4: Commit**
 
@@ -285,12 +285,12 @@ git commit -m "feat(app): add explicit command palette registry"
 
 ---
 
-### Task 3: Command palette UI + dispatch
+### Task 3: Command palette UI and dispatch
 
 **Files:**
 - Create: `crates/app/src/workspace/command_palette.rs`
-- Modify: `mod.rs` (state, actions, cancel order, render children)
-- Modify: `modals.rs` (`cancel_active_modal` palette first)
+- Modify: `mod.rs` (state, actions, cancellation order, and rendered children)
+- Modify: `modals.rs` (`cancel_active_modal` processes the palette first)
 - Modify: `app_actions.rs` bind `cmd-shift-p`
 - Test: `tests.rs`
 
@@ -300,7 +300,7 @@ git commit -m "feat(app): add explicit command palette registry"
 - `palette_context(&self) -> PaletteContext`
 - `dispatch_palette_id(&mut self, id: &str, window, cx)` match on id → existing methods / `cx.dispatch_action`
 
-- [ ] **Step 1: Test open + filter + execute NewTab**
+- [ ] **Step 1: Test palette display, filtering, and NewTab execution**
 
 ```rust
 #[gpui::test]
@@ -320,16 +320,16 @@ fn command_palette_filters_and_runs_new_tab(cx: &mut TestAppContext) {
 }
 ```
 
-- [ ] **Step 2: Implement UI** (pattern from `render_go_to_path_modal` / About)
+- [ ] **Step 2: Implement the UI** by following the `render_go_to_path_modal` / About pattern
 
-- Scrim + card `key_context("CommandPalette")`
-- Text field bound to `palette_input`
-- List filtered commands: title left, keybinding right (muted)
-- Highlight `palette_selected`
-- Keys: up/down move selection; enter execute; escape → cancel_active_modal
-- Click row → execute that command
+- Render a scrim and card with `key_context("CommandPalette")`.
+- Bind the text field to `palette_input`.
+- Render filtered commands with the title on the left and a muted keybinding on the right.
+- Highlight `palette_selected`.
+- Up/down changes the selection, Enter executes the command, and Escape invokes `cancel_active_modal`.
+- Selecting a row executes its command.
 
-`dispatch_palette_id` example:
+Use the following structure for `dispatch_palette_id`:
 
 ```rust
 match id {
@@ -342,7 +342,7 @@ match id {
 }
 ```
 
-- [ ] **Step 3: cancel_active_modal**
+- [ ] **Step 3: Update `cancel_active_modal`**
 
 ```rust
 if self.palette_open {
@@ -352,9 +352,9 @@ if self.palette_open {
 // existing...
 ```
 
-- [ ] **Step 4: Bind `cmd-shift-p`** to `OpenCommandPalette`
+- [ ] **Step 4: Bind `cmd-shift-p` to `OpenCommandPalette`**
 
-- [ ] **Step 5: Tests + commit**
+- [ ] **Step 5: Execute tests, and then commit**
 
 ```bash
 cargo test -p macsftp-app --bin macsftp command_palette
@@ -363,10 +363,10 @@ git commit -m "feat(app): command palette UI and cmd-shift-p"
 
 ---
 
-### Task 4: Tab MRU + ctrl-tab switcher
+### Task 4: Tab MRU and ctrl-tab switcher
 
 **Files:**
-- Modify: `mod.rs`, `panes`/`mod` activate_tab, `render.rs`, `app_actions.rs`
+- Modify: `mod.rs`, `panes`/`mod` activate_tab, `render.rs`, and `app_actions.rs`
 - Test: `tests.rs`
 
 **Interfaces:**
@@ -394,7 +394,7 @@ fn cmd_shift_tab_still_creation_order(cx: &mut TestAppContext) {
 }
 ```
 
-- [ ] **Step 2: Maintain MRU**
+- [ ] **Step 2: Maintain MRU state**
 
 ```rust
 fn touch_mru(&mut self, tab_id: TabId) {
@@ -407,13 +407,13 @@ fn touch_mru(&mut self, tab_id: TabId) {
 // Workspace::new after first tab: tab_mru = vec![first_id]
 ```
 
-Keep `activate_tab_in_direction` on **creation order** (`tabs` vec) — do not use MRU.
+`activate_tab_in_direction` must continue to use **creation order** from the `tabs` vector; therefore it must not use MRU.
 
-- [ ] **Step 3: Tab switcher**
+- [ ] **Step 3: Implement the tab switcher**
 
-Actions: `TabSwitcherNext`, `TabSwitcherPrev` (or reuse with modifiers).
+Define the `TabSwitcherNext` and `TabSwitcherPrev` actions, or reuse existing actions with modifiers.
 
-Bindings (GPUI key names — verify against gpui docs; common patterns):
+Use the following bindings. The GPUI key names require confirmation against the GPUI documentation:
 
 ```rust
 KeyBinding::new("ctrl-tab", TabSwitcherNext, Some("Workspace")),
@@ -437,20 +437,20 @@ fn tab_switcher_next(&mut self, cx: &mut Context<Self>) {
 }
 ```
 
-**Confirm on Enter** (reliable without key-up):
+**Use Enter for confirmation**, because this behavior does not depend on key-up:
 
 ```rust
 // Enter while switcher open → activate tab_mru[index], close switcher
 // Esc → close without change
 ```
 
-Also attempt modifiers-changed / key-up if easy in GPUI; document Enter as primary confirm in tooltips.
+If GPUI supports modifiers-changed / key-up without substantial complexity, implement that behavior as an enhancement. However, tooltips must identify Enter as the primary confirmation method.
 
-UI: elevated list of MRU tabs (title + status color).
+The UI renders an elevated list of MRU tabs, including each tab title and status color.
 
-- [ ] **Step 4: cancel_active_modal** closes switcher before other modals (after palette).
+- [ ] **Step 4: Update `cancel_active_modal`** so that it closes the switcher before other modals, but after the palette.
 
-- [ ] **Step 5: Tests + commit**
+- [ ] **Step 5: Execute tests, and then commit**
 
 ```bash
 git commit -m "feat(app): MRU tab order and ctrl-tab switcher"
@@ -458,16 +458,16 @@ git commit -m "feat(app): MRU tab order and ctrl-tab switcher"
 
 ---
 
-### Task 5: Tooltip discoverability + palette polish
+### Task 5: Tooltip discoverability and palette refinement
 
 **Files:**
-- Modify: `render.rs` (path bar / toolbar tooltips)
+- Modify: `render.rs` (path bar and toolbar tooltips)
 - Modify: `command_palette` / palette row layout if needed
-- Grep for `icon_button(` and ensure key chords in labels for Refresh, Parent, Transfers, Hidden, New Folder, Delete, Back, Forward
+- Inspect each `icon_button(` call, and ensure that labels for Refresh, Parent, Transfers, Hidden, New Folder, Delete, Back, and Forward include key chords.
 
-- [ ] **Step 1:** Audit and update strings to match registry (`⌘R`, `⌘↑`, `⌘J`, etc.)
-- [ ] **Step 2:** Ensure palette rows show `keybinding` on the right (if not already in Task 3)
-- [ ] **Step 3:** Smoke test tooltips don't break layout (narrow path bar)
+- [ ] **Step 1:** Review and update strings so that they match the registry, including `⌘R`, `⌘↑`, and `⌘J`.
+- [ ] **Step 2:** Ensure that palette rows display `keybinding` on the right if Task 3 has not already implemented this behavior.
+- [ ] **Step 3:** Perform a smoke test with a narrow path bar, and verify that tooltips do not affect layout.
 - [ ] **Step 4: Commit**
 
 ```bash
@@ -478,22 +478,22 @@ git commit -m "feat(app): show shortcut hints in tooltips and palette rows"
 
 ### Task 6: Final verification
 
-- [ ] **Step 1: Automated**
+- [ ] **Step 1: Execute automated verification**
 
 ```bash
 cargo test -p macsftp-app --bin macsftp
 ```
 
-Expected: all pass (including new phase 4 tests).
+Expected result: all tests pass, including the new phase 4 tests.
 
-- [ ] **Step 2: Manual checklist**
+- [ ] **Step 2: Complete the manual checklist**
 
-1. `⌘⇧P` → type "refresh" → Enter refreshes  
-2. File pane: page down, home/end, shift multi-select, `⌘A` then delete modal counts  
-3. Three tabs: `ctrl-tab` cycles MRU; `⌘⇧]` still creation order  
-4. Icon tooltips show keys  
+1. Use `⌘⇧P`, enter “refresh”, and press Enter; the active pane refreshes.
+2. In the file pane, verify page down, home/end, shift multi-selection, and the delete modal count after `⌘A`.
+3. With three tabs, verify that `ctrl-tab` traverses MRU order, whereas `⌘⇧]` retains creation order.
+4. Verify that icon tooltips display key chords.
 
-- [ ] **Step 3: Spec coverage map** — each design success row has test or manual note
+- [ ] **Step 3: Create the spec coverage map** so that each design success row references a test or manual verification note.
 
 ---
 
@@ -505,22 +505,22 @@ Expected: all pass (including new phase 4 tests).
 | §3 List keyboard | Task 1 |
 | §4 MRU + ctrl-tab | Task 4 |
 | §5 Discoverability | Task 5 |
-| cmd-shift creation order | Task 4 (explicit non-goal for MRU keys) |
+| cmd-shift creation order | Task 4; these shortcuts explicitly exclude MRU order |
 | PAGE_SIZE=10 | Task 1 |
 | Tests | Each task + Task 6 |
 
-**Placeholder scan:** none intentional.  
-**Type consistency:** `PaletteCommand`, `PaletteWhen`, `PaletteContext`, `PAGE_SIZE`, `tab_mru`, `selection_anchor` used uniformly.
+**Placeholder review:** The plan contains no intentional placeholders.
+**Type consistency:** The plan uses `PaletteCommand`, `PaletteWhen`, `PaletteContext`, `PAGE_SIZE`, `tab_mru`, and `selection_anchor` consistently.
 
 ---
 
 ## Execution Handoff
 
-Plan complete and saved to `docs/plans/2026-07-14-phase4-keyboard-palette-impl.md`.
+The plan is complete and is stored at `docs/plans/2026-07-14-phase4-keyboard-palette-impl.md`.
 
-**Two execution options:**
+Two execution options are available:
 
-1. **Subagent-Driven (recommended)** — fresh subagent per task + review  
-2. **Inline Execution** — this session with checkpoints  
+1. **Subagent-Driven (recommended):** Assign each task to a new subagent, and review the result.
+2. **Inline Execution:** Use this session and verify the result at each checkpoint.
 
-Which approach?
+Select one execution option before implementation begins.
