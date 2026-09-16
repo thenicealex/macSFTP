@@ -121,7 +121,7 @@ save_as_expanded: bool              // 默认 false
 
 | 入口 | 职责 |
 | --- | --- |
-| Connect picker | 选择档案并预填字段，然后执行连接 |
+| Connect picker | 选择档案并预填字段；用户仍需提交 Connect 才会连接 |
 | Settings Profiles | 新建、编辑和删除档案库内容 |
 | Empty remote Recents | 预填字段或执行连接；该入口已经存在，因此本期不修改，除非需要统一交叉文案 |
 
