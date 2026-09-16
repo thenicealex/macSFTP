@@ -1,50 +1,50 @@
-# Phase 2 Feedback & Observability Implementation Plan
+# 阶段 2 实施计划：反馈与可观测性
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Agent 实施要求：** 必须使用 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans`，并按任务实施本计划。各步骤使用复选框（`- [ ]`）记录状态。
 
-**Goal:** Replace transfer speed/ETA placeholders with real view-side sampling, make remote loading/connecting/errors in-place and recoverable, and finish status-bar transfer discoverability.
+**目标：** 使用视图侧的实际采样结果替代传输速度和 ETA 占位内容；同时在当前位置显示远程加载、连接和错误状态，并允许用户恢复操作；此外，完善状态栏中的传输状态提示。
 
-**Architecture:** Pure view-side `TransferRateBook` (sliding-window samplers keyed by `TransferId`) lives next to shared transfers. Progress events update samples; render derives MB/s, ETA, and Stalled. Loading uses a centered spinner; connect Cancel reuses `DisconnectTab`; directory errors keep pane Retry via existing `request_remote_directory`.
+**架构：** 纯视图侧的 `TransferRateBook` 与共享传输状态位于同一层，其中滑动窗口采样器以 `TransferId` 为键。进度事件更新采样数据，因此渲染层可以计算 MB/s、ETA 和 Stalled 状态。加载状态使用居中的 spinner；连接取消操作复用 `DisconnectTab`；目录错误继续在 pane 中提供 Retry，并复用现有的 `request_remote_directory`。
 
-**Tech Stack:** Rust, GPUI (`crates/app`, `crates/ui`), existing `macsftp_core::{TransferId, TransferState, TransferProgress}`, no new crates.
+**技术栈：** Rust、GPUI（`crates/app`、`crates/ui`）以及现有的 `macsftp_core::{TransferId, TransferState, TransferProgress}`，并且不增加新 crate。
 
-**Spec:** `docs/plans/2026-07-13-phase2-feedback-observability-design.md`
+**规格文档：** `docs/plans/2026-07-13-phase2-feedback-observability-design.md`
 
-## Global Constraints
+## 全局约束
 
-- Do **not** add rate/ETA fields to `core` `TransferProgress` / `TransferState` (design decision 1).
-- Do **not** implement skeleton rows, Fs command replay, or command palette.
-- No `unwrap`/`expect` on recoverable paths; no silent `let _ =` on fallible ops (AGENTS.md §5).
-- Progress remains throttled at runtime source; UI only aggregates received samples.
-- Stalled transfers must show plain "Stalled" text — never fake progress animation (guidelines §7).
-- Match existing workspace style: `crates/app/src/workspace/*.rs`, `#[cfg(test)]` colocated or in `tests.rs`.
-- Prefer `src/foo.rs` over `mod.rs` (AGENTS.md).
+- 不得向 `core` 的 `TransferProgress` / `TransferState` 增加 rate/ETA 字段，这是设计决策 1 的要求。
+- 不得实现 skeleton rows、Fs 命令重放或 command palette。
+- 可恢复路径不得使用 `unwrap`/`expect`，而且 fallible operation 不得通过 `let _ =` 静默忽略结果，详情见 AGENTS.md §5。
+- 进度事件继续由 runtime 源头节流，因此 UI 仅聚合已经收到的采样数据。
+- 停滞的传输必须显示纯文本 "Stalled"，不得使用虚假进度动画，详情见 guidelines §7。
+- 实现应符合现有 workspace 风格：文件位于 `crates/app/src/workspace/*.rs`，而 `#[cfg(test)]` 测试与实现同文件或位于 `tests.rs`。
+- 根据 AGENTS.md，优先使用 `src/foo.rs`，而不是 `mod.rs`。
 
-## File Map
+## 文件清单
 
-| File | Responsibility |
+| 文件 | 职责 |
 | --- | --- |
-| **Create** `crates/app/src/workspace/rate_sampler.rs` | `RateSample`, `RateSampler`, `TransferRateBook`, formatters, pure unit tests |
-| **Modify** `crates/app/src/workspace/mod.rs` | `mod rate_sampler;` |
-| **Modify** `crates/app/src/resources.rs` | `SharedTransfers` holds `TransferRateBook`; accessors for rates |
-| **Modify** `crates/app/src/workspace/event_handling.rs` | On progress/terminal transfer events, update/clear rates |
-| **Modify** `crates/app/src/workspace/render.rs` | Running detail, drawer aggregate, first-load spinner, Cancel connect, status selected count + failed color |
-| **Modify** `crates/app/src/workspace/panes.rs` or **modals** / **helpers** | `cancel_connect` helper if not inlined in render listeners |
-| **Modify** `crates/ui/src/components.rs` (+ `ui.rs` re-export) | Optional `loading_indicator` / spinner-friendly empty_state helper |
-| **Modify** `crates/app/src/workspace/tests.rs` | Cancel connect, rate wiring smoke, status selection |
-| **Do not modify** | `crates/core` progress types, `session_actor` progress payload, phase-1 Fs command path |
+| **新建** `crates/app/src/workspace/rate_sampler.rs` | 定义 `RateSample`、`RateSampler`、`TransferRateBook`、格式化函数和纯单元测试 |
+| **修改** `crates/app/src/workspace/mod.rs` | 增加 `mod rate_sampler;` |
+| **修改** `crates/app/src/resources.rs` | 由 `SharedTransfers` 保存 `TransferRateBook`，并提供 rate 访问方法 |
+| **修改** `crates/app/src/workspace/event_handling.rs` | 在进度和终态传输事件中更新或清除 rate |
+| **修改** `crates/app/src/workspace/render.rs` | 实现 Running 详情、drawer 聚合、首次加载 spinner、连接取消、状态栏选中数量和失败颜色 |
+| **修改** `crates/app/src/workspace/panes.rs` 或 **modals** / **helpers** | 如果 render listener 不内联逻辑，则提供 `cancel_connect` 辅助方法 |
+| **修改** `crates/ui/src/components.rs`（并从 `ui.rs` 重新导出） | 可选的 `loading_indicator` 或适合 spinner 的 empty_state 辅助方法 |
+| **修改** `crates/app/src/workspace/tests.rs` | 验证连接取消、rate 连接关系和状态栏选择状态 |
+| **不得修改** | `crates/core` 进度类型、`session_actor` 进度 payload、阶段 1 Fs 命令路径 |
 
 ---
 
-### Task 1: RateSampler pure module (TDD)
+### 任务 1：RateSampler 纯模块（TDD）
 
-**Files:**
-- Create: `crates/app/src/workspace/rate_sampler.rs`
-- Modify: `crates/app/src/workspace/mod.rs` (add `mod rate_sampler;`)
-- Test: unit tests inside `rate_sampler.rs`
+**文件：**
+- 新建：`crates/app/src/workspace/rate_sampler.rs`
+- 修改：`crates/app/src/workspace/mod.rs`，增加 `mod rate_sampler;`
+- 测试：在 `rate_sampler.rs` 中编写单元测试
 
-**Interfaces:**
-- Produces:
+**接口：**
+- 提供：
   - `pub struct TransferRateBook` with `Default`
   - `pub fn observe(&mut self, id: TransferId, bytes_done: u64, now: Instant)`
   - `pub fn clear(&mut self, id: TransferId)`
@@ -55,9 +55,9 @@
   - `pub fn format_speed(bps: Option<f64>) -> String`
   - `pub fn format_eta(secs: Option<f64>) -> String`
   - `pub fn format_running_detail(done: u64, total: Option<u64>, snap: &RateSnapshot) -> String`
-- Consumes: `macsftp_core::TransferId`, `std::time::Instant`, `std::collections::{HashMap, VecDeque}`
+- 使用：`macsftp_core::TransferId`、`std::time::Instant`、`std::collections::{HashMap, VecDeque}`
 
-**Constants (export for tests):**
+**常量（为了测试而导出）：**
 
 ```rust
 pub const WINDOW_SECS: f64 = 4.0;
@@ -65,15 +65,15 @@ pub const WARMUP_SECS: f64 = 0.5;
 pub const STALL_SECS: f64 = 3.0;
 ```
 
-- [ ] **Step 1: Create module skeleton and failing tests**
+- [ ] **步骤 1：创建模块框架和预期失败的测试**
 
-Add to `crates/app/src/workspace/mod.rs` near other `mod` lines:
+在 `crates/app/src/workspace/mod.rs` 的其他 `mod` 声明附近增加：
 
 ```rust
 mod rate_sampler;
 ```
 
-Create `rate_sampler.rs` with tests first (types can be minimal stubs that fail assertions until implemented):
+创建 `rate_sampler.rs`，并且先编写测试。在实现完成前，类型可以使用能够通过编译但无法通过断言的最小存根：
 
 ```rust
 //! View-side sliding-window transfer rate / ETA (phase 2).
@@ -188,17 +188,17 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run tests — expect compile failure or FAIL**
+- [ ] **步骤 2：运行测试，并确认出现编译错误或测试失败**
 
 ```bash
 cargo test -p macsftp-app --bin macsftp rate_sampler -- --nocapture
 ```
 
-Expected: compile error (`TransferRateBook` not found) or test FAIL.
+预期结果：出现编译错误（未找到 `TransferRateBook`）或测试失败。
 
-- [ ] **Step 3: Implement `rate_sampler.rs`**
+- [ ] **步骤 3：实现 `rate_sampler.rs`**
 
-Implement at least:
+实现至少应包含以下内容：
 
 ```rust
 #[derive(Debug, Clone, Copy)]
@@ -399,19 +399,19 @@ pub fn format_running_detail(done: u64, total: Option<u64>, snap: &RateSnapshot)
 }
 ```
 
-**Note:** `format_size` lives in `macsftp_ui`. If linking `macsftp_ui` from unit tests in app is fine (app already depends on ui). If `format_size` needs `&App` — check; current `format_size` is pure in `file_list.rs`. Use that.
+**说明：** `format_size` 位于 `macsftp_ui`。app 已经依赖 ui，因此单元测试可以链接 `macsftp_ui`。但是仍需确认 `format_size` 是否需要 `&App`；当前 `file_list.rs` 中的 `format_size` 是纯函数，因此应使用该函数。
 
-If `format_size` returns `SharedString`, convert with `.to_string()` or `as_ref()`.
+如果 `format_size` 返回 `SharedString`，那么使用 `.to_string()` 或 `as_ref()` 转换。
 
-- [ ] **Step 4: Run tests — expect PASS**
+- [ ] **步骤 4：运行测试，并确认测试通过**
 
 ```bash
 cargo test -p macsftp-app --bin macsftp rate_sampler -- --nocapture
 ```
 
-Expected: all `rate_sampler::tests::*` PASS.
+预期结果：所有 `rate_sampler::tests::*` 测试均通过。
 
-- [ ] **Step 5: Commit**
+- [ ] **步骤 5：提交**
 
 ```bash
 git add crates/app/src/workspace/rate_sampler.rs crates/app/src/workspace/mod.rs
@@ -420,24 +420,24 @@ git commit -m "feat(app): add view-side transfer rate sampler"
 
 ---
 
-### Task 2: Store rates on SharedTransfers + event hooks
+### 任务 2：在 SharedTransfers 中保存 rate，并处理相关事件
 
-**Files:**
-- Modify: `crates/app/src/resources.rs`
-- Modify: `crates/app/src/workspace/event_handling.rs`
-- Modify: any call sites that construct `SharedTransfers(…)` or access `.0` if API changes
-- Test: extend `rate_sampler` usage via a small app-level test or keep coverage in unit tests + manual event_handling paths
+**文件：**
+- 修改：`crates/app/src/resources.rs`
+- 修改：`crates/app/src/workspace/event_handling.rs`
+- 修改：如果 API 发生变化，则修改所有创建 `SharedTransfers(…)` 或访问 `.0` 的调用位置
+- 测试：通过小型 app 层测试扩展 `rate_sampler` 使用场景，或者保留单元测试覆盖并人工检查 event_handling 路径
 
-**Interfaces:**
-- Consumes: `TransferRateBook` from Task 1
-- Produces:
+**接口：**
+- 使用：任务 1 中的 `TransferRateBook`
+- 提供：
   - `SharedTransfers { store: TransferStore, rates: TransferRateBook }`
-  - `ActiveTransfers::transfers` / `transfers_mut` still return `TransferStore`
+  - `ActiveTransfers::transfers` / `transfers_mut` 继续返回 `TransferStore`
   - `ActiveTransfers::rates` / `rates_mut` → `&TransferRateBook` / `&mut TransferRateBook`
 
-- [ ] **Step 1: Expand `SharedTransfers`**
+- [ ] **步骤 1：扩展 `SharedTransfers`**
 
-In `resources.rs`:
+在 `resources.rs` 中增加：
 
 ```rust
 use crate::workspace::rate_sampler::TransferRateBook;
@@ -450,13 +450,13 @@ use crate::workspace::rate_sampler::TransferRateBook;
 // if workspace↔resources cycle appears.
 ```
 
-**If `resources` cannot import `workspace`:** relocate module to `crates/app/src/rate_sampler.rs` and `mod rate_sampler;` in `main.rs` / `lib`-less bin root. Prefer that to avoid cycles:
+**如果 `resources` 无法导入 `workspace`：** 将模块移至 `crates/app/src/rate_sampler.rs`，并且在 `main.rs` 或没有 lib 的二进制 crate root 中声明 `mod rate_sampler;`。该位置可以避免循环依赖，因此应优先采用：
 
-- Create `crates/app/src/rate_sampler.rs` (move from workspace if needed)
-- `main.rs`: `mod rate_sampler;`
-- `resources.rs` and `workspace` both `use crate::rate_sampler::…`
+- 创建 `crates/app/src/rate_sampler.rs`；如有必要，从 workspace 移动现有文件
+- 在 `main.rs` 中声明 `mod rate_sampler;`
+- `resources.rs` 和 `workspace` 均使用 `use crate::rate_sampler::…`
 
-**Recommended layout for this task:** move Task 1 file to `crates/app/src/rate_sampler.rs` if not already crate-root. Update `mod` declarations.
+**本任务推荐的文件位置：** 如果任务 1 的文件尚未位于 crate root，则将其移至 `crates/app/src/rate_sampler.rs`，并且更新 `mod` 声明。
 
 ```rust
 #[derive(Default)]
@@ -481,11 +481,11 @@ impl ActiveTransfers for App {
 }
 ```
 
-Update trait definition accordingly. Fix compile errors from tuple field `.0` access.
+同时更新 trait 定义。如果 tuple 字段 `.0` 的访问方式引发编译错误，那么修改对应调用位置。
 
-- [ ] **Step 2: Hook events in `event_handling.rs`**
+- [ ] **步骤 2：在 `event_handling.rs` 中处理事件**
 
-On `TransferProgress`:
+收到 `TransferProgress` 时执行：
 
 ```rust
 AppEvent::TransferProgress(progress) => {
@@ -498,9 +498,9 @@ AppEvent::TransferProgress(progress) => {
 }
 ```
 
-Also `observe` when applying `TransferRunning` snapshot if state is `Running { bytes_done, .. }`.
+应用 `TransferRunning` 快照时，如果状态为 `Running { bytes_done, .. }`，那么也需要调用 `observe`。
 
-On terminal events:
+收到终态事件时执行：
 
 ```rust
 AppEvent::TransferCompleted { transfer_id }
@@ -514,25 +514,25 @@ AppEvent::TransferFailed(failure) => {
 }
 ```
 
-When setting `Cancelling`, optional: leave sampler (display uses Cancelling label, not rate).
+状态设置为 `Cancelling` 时，可以保留 sampler，因为界面显示 Cancelling 标签，而不显示 rate。
 
-- [ ] **Step 3: Compile**
+- [ ] **步骤 3：编译检查**
 
 ```bash
 cargo check -p macsftp-app 2>&1
 ```
 
-Expected: success.
+预期结果：检查成功。
 
-- [ ] **Step 4: Run existing app tests**
+- [ ] **步骤 4：运行现有 app 测试**
 
 ```bash
 cargo test -p macsftp-app --bin macsftp 2>&1
 ```
 
-Expected: all prior tests PASS (fix any `.0` / `SharedTransfers` breakage).
+预期结果：此前的所有测试均通过。如果 `.0` / `SharedTransfers` 变化导致失败，则修改对应代码。
 
-- [ ] **Step 5: Commit**
+- [ ] **步骤 5：提交**
 
 ```bash
 git add crates/app/src/resources.rs crates/app/src/workspace/event_handling.rs crates/app/src/rate_sampler.rs crates/app/src/main.rs crates/app/src/workspace/mod.rs
@@ -541,18 +541,18 @@ git commit -m "feat(app): wire transfer rate book into shared transfers"
 
 ---
 
-### Task 3: Render real speed/ETA on transfer rows
+### 任务 3：在传输行中显示实际速度和 ETA
 
-**Files:**
-- Modify: `crates/app/src/workspace/render.rs` (`render_transfer_job`, ~lines 807–832)
+**文件：**
+- 修改：`crates/app/src/workspace/render.rs`（`render_transfer_job`，约第 807–832 行）
 
-**Interfaces:**
-- Consumes: `cx.rates().snapshot(...)`, `format_running_detail`
-- Produces: Running `detail` string without permanent placeholder
+**接口：**
+- 使用：`cx.rates().snapshot(...)`、`format_running_detail`
+- 提供：不含永久占位内容的 Running `detail` 字符串
 
-- [ ] **Step 1: Replace Running detail branch**
+- [ ] **步骤 1：替换 Running 详情分支**
 
-Replace:
+替换以下代码：
 
 ```rust
 TransferState::Running {
@@ -565,7 +565,7 @@ TransferState::Running {
 )
 ```
 
-With:
+替换为：
 
 ```rust
 TransferState::Running {
@@ -583,15 +583,15 @@ TransferState::Running {
 }
 ```
 
-Ensure imports for `ActiveTransfers` rates if needed.
+如果访问 rate 需要 `ActiveTransfers`，那么增加对应 import。
 
-- [ ] **Step 2: Build**
+- [ ] **步骤 2：编译检查**
 
 ```bash
 cargo check -p macsftp-app
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **步骤 3：提交**
 
 ```bash
 git add crates/app/src/workspace/render.rs
@@ -600,17 +600,17 @@ git commit -m "feat(app): show live transfer speed and ETA on rows"
 
 ---
 
-### Task 4: Drawer aggregate header
+### 任务 4：Drawer 聚合标题区
 
-**Files:**
-- Modify: `crates/app/src/workspace/render.rs` (`render_transfer_drawer`)
+**文件：**
+- 修改：`crates/app/src/workspace/render.rs`（`render_transfer_drawer`）
 
-**Interfaces:**
-- Consumes: `TransferRateBook::aggregate`, list of running jobs from `cx.transfers().jobs`
+**接口：**
+- 使用：`TransferRateBook::aggregate`，以及来自 `cx.transfers().jobs` 的 running job 列表
 
-- [ ] **Step 1: Collect running jobs and aggregate**
+- [ ] **步骤 1：汇总 running job 并计算聚合数据**
 
-Near top of `render_transfer_drawer`, after cloning jobs:
+在 `render_transfer_drawer` 前部复制 jobs 后，增加以下代码：
 
 ```rust
 let now = std::time::Instant::now();
@@ -642,11 +642,11 @@ let agg_label = {
 };
 ```
 
-- [ ] **Step 2: Show `agg_label` in drawer chrome**
+- [ ] **步骤 2：在 drawer 顶部区域显示 `agg_label`**
 
-Place next to existing drawer title / section header (top of drawer, one muted line). Do not change row height tokens.
+将其置于现有 drawer 标题或 section header 附近，并在 drawer 顶部使用一行弱化文本显示。但是不得修改行高 token。
 
-- [ ] **Step 3: Commit**
+- [ ] **步骤 3：提交**
 
 ```bash
 git add crates/app/src/workspace/render.rs
@@ -655,24 +655,24 @@ git commit -m "feat(app): aggregate transfer speed and ETA in drawer header"
 
 ---
 
-### Task 5: First-load spinner (remote)
+### 任务 5：远程目录首次加载 spinner
 
-**Files:**
-- Modify: `crates/app/src/workspace/render.rs` (list placeholder branch ~entry_count == 0 && is_remote_refreshing)
-- Optional: `crates/ui/src/components.rs` + re-export in `ui.rs`
+**文件：**
+- 修改：`crates/app/src/workspace/render.rs`（约位于 `entry_count == 0 && is_remote_refreshing` 的列表占位分支）
+- 可选修改：`crates/ui/src/components.rs`，并且在 `ui.rs` 中重新导出
 
-**Interfaces:**
-- Produces: first load shows centered spinner + "Loading…"; refresh with entries keeps list + path bar "Refreshing…"
+**接口：**
+- 提供：首次加载显示居中的 spinner 和 "Loading…"；已有条目时刷新仍显示列表，并在 path bar 中显示 "Refreshing…"
 
-- [ ] **Step 1: Optional UI helper**
+- [ ] **步骤 1：按需增加 UI 辅助函数**
 
-If `empty_state` is enough:
+如果 `empty_state` 已经满足要求，则使用：
 
 ```rust
 empty_state("Loading…", vec![], cx)
 ```
 
-Prefer adding a small visual spinner only if cheap — e.g. text `"Loading…"` is acceptable per design decision 2 (spinner + short text). Minimal:
+仅当实现成本较低时，才增加小型可视 spinner。根据设计决策 2（spinner 和简短文本），仅显示 `"Loading…"` 文本也可以接受。最小实现如下：
 
 ```rust
 // crates/ui/src/components.rs
@@ -681,11 +681,11 @@ pub fn loading_state(message: impl Into<SharedString>, cx: &App) -> impl IntoEle
 }
 ```
 
-Or animate later; **required** copy: **"Loading…"** (not only "Loading directory…").
+动画可以在后续阶段实现；但是文案必须包含 **"Loading…"**，不能仅使用 "Loading directory…"。
 
-- [ ] **Step 2: Branch first load vs empty directory**
+- [ ] **步骤 2：区分首次加载与空目录**
 
-In `render_pane` list selection logic:
+在 `render_pane` 的列表选择逻辑中增加：
 
 ```rust
 } else if entry_count == 0 && is_remote_refreshing {
@@ -694,9 +694,9 @@ In `render_pane` list selection logic:
     empty_state("Empty directory", vec![], cx).into_any_element()
 ```
 
-Keep path bar `Refreshing…` when `is_remote_refreshing && entry_count > 0` (already present).
+当 `is_remote_refreshing && entry_count > 0` 时，继续在 path bar 中显示 `Refreshing…`，现有代码已经提供该行为。
 
-- [ ] **Step 3: Commit**
+- [ ] **步骤 3：提交**
 
 ```bash
 git add crates/app/src/workspace/render.rs crates/ui/src/components.rs crates/ui/src/ui.rs
@@ -705,21 +705,21 @@ git commit -m "feat(app): show Loading state for first remote directory fetch"
 
 ---
 
-### Task 6: Cancel connect
+### 任务 6：取消连接
 
-**Files:**
-- Modify: `crates/app/src/workspace/render.rs` (Connecting / AwaitingHostKey empty_state)
-- Modify: `crates/app/src/workspace/mod.rs` or new method on `Workspace` in `panes.rs` / `helpers`
-- Modify: `crates/app/src/workspace/tests.rs`
+**文件：**
+- 修改：`crates/app/src/workspace/render.rs`（Connecting / AwaitingHostKey empty_state）
+- 修改：`crates/app/src/workspace/mod.rs`，或者在 `panes.rs` / `helpers` 中为 `Workspace` 增加新方法
+- 修改：`crates/app/src/workspace/tests.rs`
 
-**Interfaces:**
-- Produces: `Workspace::cancel_connect(&mut self, window, cx)`
-- Behavior:
-  1. If `AwaitingHostKey { request_id, .. }` → `RejectHostKey { request_id }` **and** local disconnect (existing `reject_host_key` path may suffice)
-  2. Else → `AppCommand::DisconnectTab { tab_id }` + `tab.disconnect(UserRequested)` + clear remote pane fields
-  3. `drain_expired_modals`; focus pane
+**接口：**
+- 提供：`Workspace::cancel_connect(&mut self, window, cx)`
+- 行为：
+  1. 如果状态为 `AwaitingHostKey { request_id, .. }`，则执行 `RejectHostKey { request_id }` 和本地 disconnect；现有 `reject_host_key` 路径可能已经满足要求。
+  2. 否则，执行 `AppCommand::DisconnectTab { tab_id }` 和 `tab.disconnect(UserRequested)`，并清除 remote pane 字段。
+  3. 执行 `drain_expired_modals`，然后将焦点设置到 pane。
 
-- [ ] **Step 1: Implement `cancel_connect`**
+- [ ] **步骤 1：实现 `cancel_connect`**
 
 ```rust
 // panes.rs or modals.rs
@@ -750,9 +750,9 @@ pub(crate) fn cancel_connect(&mut self, window: &mut Window, cx: &mut Context<Se
 }
 ```
 
-Import `DisconnectReason`, `AppCommand` as needed.
+根据需要导入 `DisconnectReason` 和 `AppCommand`。
 
-- [ ] **Step 2: Wire empty_state buttons**
+- [ ] **步骤 2：为 empty_state 按钮配置事件**
 
 ```rust
 Some(ConnectionState::Connecting { .. } | ConnectionState::Reconnecting { .. }) => {
@@ -783,9 +783,9 @@ Some(ConnectionState::AwaitingHostKey { .. }) => Some(
 ),
 ```
 
-- [ ] **Step 3: Test — cancel while connecting**
+- [ ] **步骤 3：测试连接过程中的取消操作**
 
-In `tests.rs`:
+在 `tests.rs` 中增加：
 
 ```rust
 #[gpui::test]
@@ -819,17 +819,17 @@ fn cancel_connect_sends_disconnect_and_clears_connecting(cx: &mut TestAppContext
 }
 ```
 
-Adjust to match actual `BridgeChannels` API used in existing tests (`channels.command_rx`).
+根据现有测试使用的实际 `BridgeChannels` API（`channels.command_rx`）调整代码。
 
-- [ ] **Step 4: Run tests**
+- [ ] **步骤 4：运行测试**
 
 ```bash
 cargo test -p macsftp-app --bin macsftp cancel_connect -- --nocapture
 ```
 
-Expected: PASS.
+预期结果：测试通过。
 
-- [ ] **Step 5: Commit**
+- [ ] **步骤 5：提交**
 
 ```bash
 git add crates/app/src/workspace/render.rs crates/app/src/workspace/panes.rs crates/app/src/workspace/tests.rs
@@ -838,19 +838,19 @@ git commit -m "feat(app): cancel in-flight connect from remote pane"
 
 ---
 
-### Task 7: Directory Retry polish + status bar selection / failed color
+### 任务 7：完善目录 Retry、状态栏选择数量和失败颜色
 
-**Files:**
-- Modify: `crates/app/src/workspace/render.rs` (`retry_directory_button`, `render_status_bar`)
-- Modify: `crates/app/src/workspace/tests.rs` if new assertions needed
+**文件：**
+- 修改：`crates/app/src/workspace/render.rs`（`retry_directory_button`、`render_status_bar`）
+- 修改：如果需要新增断言，则修改 `crates/app/src/workspace/tests.rs`
 
-**Interfaces:**
-- Retry already calls `refresh_focused_pane` — ensure it clears error / uses `request_remote_directory` for current path when focused side is Remote.
-- Status bar: `N selected` when count > 0; failed segment uses error color.
+**接口：**
+- Retry 已经调用 `refresh_focused_pane`。因此需要确认 focused side 为 Remote 时，该操作会清除错误，并通过 `request_remote_directory` 请求当前路径。
+- 状态栏：数量大于 0 时显示 `N selected`，并且失败信息区域使用错误颜色。
 
-- [ ] **Step 1: Harden Retry**
+- [ ] **步骤 1：完善 Retry 行为**
 
-Change retry button to always target remote path when remote error is shown:
+当界面显示远程错误时，修改 retry 按钮，使其始终以远程路径为目标：
 
 ```rust
 let retry_directory_button = |id: &'static str| {
@@ -867,13 +867,13 @@ let retry_directory_button = |id: &'static str| {
 };
 ```
 
-Label: **"Retry"** (design) — keep short. Optional secondary still possible later.
+按照设计要求，标签使用简短的 **"Retry"**。后续仍可以增加可选的次要操作。
 
-On `request_remote_directory`, ensure `remote.error = None` when starting refresh (already sets error None in panes.rs — verify).
+调用 `request_remote_directory` 并开始刷新时，需要确认 `remote.error = None`。`panes.rs` 中的现有代码已经设置 error None，但是仍需验证。
 
-- [ ] **Step 2: Status bar selected count**
+- [ ] **步骤 2：在状态栏显示选中数量**
 
-In `render_status_bar`:
+在 `render_status_bar` 中增加：
 
 ```rust
 let selected_count = self.active_tab().map(|tab| {
@@ -890,13 +890,13 @@ let selected_count = self.active_tab().map(|tab| {
 })
 ```
 
-- [ ] **Step 3: Failed count color**
+- [ ] **步骤 3：设置失败数量的颜色**
 
-When building transfer summary child, if `failed_count > 0` render failed portion with `.text_color(theme.colors.error)` (split active/failed into two `div` children).
+创建 transfer summary 子元素时，如果 `failed_count > 0`，则使用 `.text_color(theme.colors.error)` 渲染失败信息区域，并将 active 与 failed 分为两个 `div` 子元素。
 
-Keep click toggle + tooltip as today.
+保留现有的单击切换行为和 tooltip。
 
-- [ ] **Step 4: Test selection label (optional lightweight)**
+- [ ] **步骤 4：测试选择数量标签（可选的轻量测试）**
 
 ```rust
 #[gpui::test]
@@ -907,24 +907,24 @@ fn status_bar_selection_count_tracks_focused_pane(cx: &mut TestAppContext) {
 }
 ```
 
-If rendering is hard to assert, add:
+如果难以断言渲染结果，那么增加：
 
 ```rust
 pub(crate) fn focused_selection_count(&self) -> usize { ... }
 ```
 
-and unit-test that.
+并且为该方法编写单元测试。
 
-- [ ] **Step 5: Full app test suite**
+- [ ] **步骤 5：运行完整 app 测试套件**
 
 ```bash
 cargo test -p macsftp-app --bin macsftp 2>&1
 cargo test -p macsftp-app --bin macsftp rate_sampler 2>&1
 ```
 
-Expected: all PASS.
+预期结果：所有测试均通过。
 
-- [ ] **Step 6: Commit**
+- [ ] **步骤 6：提交**
 
 ```bash
 git add crates/app/src/workspace/render.rs crates/app/src/workspace/panes.rs crates/app/src/workspace/tests.rs
@@ -933,64 +933,64 @@ git commit -m "feat(app): polish directory Retry and status bar selection"
 
 ---
 
-### Task 8: Final verification checklist
+### 任务 8：最终验证清单
 
-- [ ] **Step 1: Automated**
+- [ ] **步骤 1：自动验证**
 
 ```bash
 cargo test -p macsftp-app --bin macsftp 2>&1
 cargo clippy -p macsftp-app -- -D warnings 2>&1 || cargo clippy -p macsftp-app 2>&1 | tail -40
 ```
 
-- [ ] **Step 2: Manual smoke (document results in PR if opening one)**
+- [ ] **步骤 2：人工冒烟验证（如果创建 PR，则在 PR 中记录结果）**
 
-1. Upload/download multi-MB file → row shows non-placeholder speed/ETA  
-2. Pause network or stall transfer → **Stalled**  
-3. First open remote dir → **Loading…**  
-4. Refresh populated dir → list stays, path bar Refreshing…  
-5. Connect then Cancel → disconnect, can reconnect  
-6. Force bad remote path / permission → Retry reloads  
-7. Collapse drawer → status shows active/failed; click opens drawer; select files → "N selected"
+1. 上传或下载数 MB 的文件 → 传输行显示非占位的 speed/ETA
+2. 暂停网络或使传输停滞 → 显示 **Stalled**
+3. 首次访问远程目录 → 显示 **Loading…**
+4. 刷新已有条目的目录 → 列表保持显示，并且 path bar 显示 Refreshing…
+5. 开始连接后选择 Cancel → 连接终止，并且可以重新连接
+6. 使用无效的远程路径或不足的权限 → Retry 重新加载目录
+7. 折叠 drawer → 状态栏显示 active/failed；单击后显示 drawer；选择文件后显示 "N selected"
 
-- [ ] **Step 3: No leftover permanent placeholder**
+- [ ] **步骤 3：确认不存在遗留的永久占位内容**
 
 ```bash
 rg "— MB/s · ETA —" crates/app
 ```
 
-Expected: no matches in non-test production paths (warmup may still produce `— MB/s` via `format_speed(None)` alone — that is OK; the combined permanent placeholder string must not appear as a hard-coded format in `render_transfer_job`).
+预期结果：非测试生产路径中没有匹配项。warmup 期间仍可由 `format_speed(None)` 单独生成 `— MB/s`，该结果符合要求；但是组合后的永久占位字符串不得以硬编码格式存在于 `render_transfer_job` 中。
 
 ---
 
-## Self-Review (plan vs spec)
+## 自审（实施计划与规格文档对照）
 
-| Spec section | Task |
+| 规格章节 | 对应任务 |
 | --- | --- |
-| 2a RateSampler + algorithm + format | Task 1 |
-| 2a event observe/clear | Task 2 |
-| 2a row detail | Task 3 |
-| 2a drawer aggregate | Task 4 |
-| 2b first-load spinner/Loading | Task 5 |
-| 2b connect Cancel | Task 6 |
-| 2c Retry ReadDir | Task 7 (existing + harden) |
-| 2d status selected + failed color + click | Task 7 (click already exists) |
-| Tests pure + app | Tasks 1, 6, 7, 8 |
-| Non-goals (no core rate, no Fs replay, no skeleton) | Global Constraints |
+| 2a RateSampler、算法和格式 | 任务 1 |
+| 2a 事件 observe/clear | 任务 2 |
+| 2a 传输行详情 | 任务 3 |
+| 2a drawer 聚合 | 任务 4 |
+| 2b 首次加载 spinner/Loading | 任务 5 |
+| 2b 连接 Cancel | 任务 6 |
+| 2c Retry ReadDir | 任务 7（验证并完善现有实现） |
+| 2d 状态栏选择数量、失败颜色和单击行为 | 任务 7（单击行为已经存在） |
+| 纯测试和 app 测试 | 任务 1、6、7、8 |
+| 非目标（不修改 core rate、不实现 Fs 重放、不实现 skeleton） | 全局约束 |
 
-**Placeholder scan:** none intentional.  
-**Type consistency:** `TransferRateBook`, `RateSnapshot`, `AggregateRate`, `observe/clear/snapshot/aggregate`, `format_running_detail` used uniformly.
+**占位内容检查：** 不保留任何有意设置的永久占位内容。
+**类型一致性：** 统一使用 `TransferRateBook`、`RateSnapshot`、`AggregateRate`、`observe/clear/snapshot/aggregate` 和 `format_running_detail`。
 
-**Layout note:** If `resources` ↔ `workspace` cycle appears, keep `rate_sampler` at `crates/app/src/rate_sampler.rs` (crate root) — Task 2 spells this out.
+**文件位置说明：** 如果出现 `resources` ↔ `workspace` 循环依赖，那么将 `rate_sampler` 保留在 `crates/app/src/rate_sampler.rs`（crate root）。任务 2 已经说明该处理方式。
 
 ---
 
-## Execution Handoff
+## 实施交接
 
-Plan saved to `docs/plans/2026-07-13-phase2-feedback-observability-impl.md`.
+本计划保存于 `docs/plans/2026-07-13-phase2-feedback-observability-impl.md`。
 
-**Two execution options:**
+**实施方式有以下两种：**
 
-1. **Subagent-Driven (recommended)** — fresh subagent per task, review between tasks  
-2. **Inline Execution** — this session, `executing-plans`, batch with checkpoints  
+1. **Subagent-Driven（推荐）**：每个任务使用新的 subagent，并且在任务之间进行审查
+2. **Inline Execution**：在当前会话中使用 `executing-plans`，并按检查点分批实施
 
-Which approach?
+实施时需要选择其中一种方式。

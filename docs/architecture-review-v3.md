@@ -2,47 +2,48 @@
 
 > 评审对象：`docs/gpui-russh-plan.md`（第三版）
 > 对比基线：`docs/architecture-review-v2.md`
-> 评审立场：深层一致性审视。前两轮的架构缺口和实现陷阱已闭合，本轮只挖数据模型不一致与语义模糊。
+> 评审立场：深入审查一致性。前两轮指出的架构问题和实现风险均已解决，因此本轮仅审查数据模型不一致和语义不明确的问题。
 
 ---
 
 ## 0. 评审结论
 
-**v2 的 4 个实现陷阱 + 5 个新模糊全部显式闭合，落实率 100%。文档已从"架构闭合，剩实现陷阱"升级到"实现陷阱闭合，剩一个数据模型小不一致"。**
+**v2 指出的 4 个实现风险和 5 个新增语义问题均已明确解决，完成率为 100%。文档状态已经由“架构完整，但仍有实现风险”更新为“实现风险已解决，但仍有一项轻微的数据模型不一致”。**
 
-**可以开工。** 本轮只发现 1 个需要在 M0 类型草案阶段修正的真洞，和 4 个 10 分钟级的语义澄清。**不建议再来第四轮架构评审**——剩余不确定性已经降到实现期 spike 能覆盖的水平，继续在文档层迭代是 diminishing returns。
+**可以开始实现。** 本轮仅发现 1 个需要在 M0 类型草案阶段修正的实质问题，以及 4 个预计可在 10 分钟内完成的语义说明。**不建议进行第四轮架构评审**，因为剩余不确定性已经降低至实现阶段的 spike 可以验证的程度，因此继续修改架构文档的边际收益有限。
 
 ---
 
-## 1. v2 闭合确认（逐条）
+## 1. v2 问题解决情况（逐项）
 
-| v2 编号 | 项 | 闭合 | 位置 |
+| v2 编号 | 项 | 已解决 | 位置 |
 |---------|-----|------|------|
-| 陷阱1 | flume try_send vs send | ✅ | 第 285-286 行，显式 `try_send`（GPUI 侧）+ `send_async`（Tokio 侧） |
-| 陷阱2 | Runtime shutdown_timeout | ✅ | 第 327-330 行，显式 `shutdown_timeout(3s)` + pending request 统一 reject |
-| 陷阱3 | AuthFingerprint 未定义 | ✅ | 第 687-706 行，完整结构 + 规则 |
-| 陷阱4 | russh-sftp 单 channel 并发 | ✅ | 第 723-727 行 + spike 表 + M5 验收 |
-| N1 | StartTransferCommand 结构 | ✅ | 第 364-383 行，完整字段 + 规则 |
-| N2 | TransferSession 认证复用 | ✅ | 第 716-721 行，Dedicated/Borrow 路径分离 |
-| N3 | event drain Send 约束 | ✅ | 第 289 行，"只允许 await recv_async" |
-| N4 | 无 Docker 测试策略 | ✅ | 第 1570-1576 行 + 决策第 10 条 |
-| N5 | M0 类型草案边界 | ✅ | 第 1637-1638 行 + 决策第 11 条 |
-| 附 | planning 不做 conflict | ✅ | 第 1041-1043 行 |
-| 附 | Plan vs Job conflict_policy | ✅ | 第 1044-1046 行 |
-| 附 | known_hosts 子集外 entry | ✅ | 第 837-842 行 + 决策第 9 条 |
-| 附 | DomainError timeout vs cancel | ✅ | 第 1439-1440 行 |
+| 风险 1 | flume try_send vs send | ✅ | 第 285-286 行，明确使用 `try_send`（GPUI 侧）和 `send_async`（Tokio 侧） |
+| 风险 2 | Runtime shutdown_timeout | ✅ | 第 327-330 行，明确使用 `shutdown_timeout(3s)`，并统一 reject pending request |
+| 风险 3 | AuthFingerprint 未定义 | ✅ | 第 687-706 行，包含完整结构和规则 |
+| 风险 4 | russh-sftp 单 channel 并发 | ✅ | 第 723-727 行、spike 表和 M5 验收标准 |
+| N1 | StartTransferCommand 结构 | ✅ | 第 364-383 行，包含完整字段和规则 |
+| N2 | TransferSession 认证复用 | ✅ | 第 716-721 行，区分 Dedicated 和 Borrow 两条路径 |
+| N3 | event drain Send 约束 | ✅ | 第 289 行，规定“只允许 await recv_async” |
+| N4 | 无 Docker 测试策略 | ✅ | 第 1570-1576 行和决策第 10 条 |
+| N5 | M0 类型草案边界 | ✅ | 第 1637-1638 行和决策第 11 条 |
+| 附 | planning 不处理 conflict | ✅ | 第 1041-1043 行 |
+| 附 | Plan 与 Job 的 conflict_policy | ✅ | 第 1044-1046 行 |
+| 附 | known_hosts 子集以外的 entry | ✅ | 第 837-842 行和决策第 9 条 |
+| 附 | DomainError timeout 与 cancel | ✅ | 第 1439-1440 行 |
 
-**特别肯定两点**：
-- `AuthFingerprint` 用 `profile_revision` 而非 secret hash——既不泄露 secret，又能感知配置变化。这是正确的安全建模。
-- borrow 模式新增"优先开独立 SFTP channel 而非复用单个 channel"（第 727 行）——这把 fallback 的可用性从"依赖单 channel 并发"拓宽到"依赖同连接多 channel"，spike 失败的后果被降低了。
+其中两项设计尤其合理：
+
+- `AuthFingerprint` 使用 `profile_revision`，而不是 secret hash。因此，这项设计既不会泄露 secret，又可以识别配置变化，符合安全建模要求。
+- borrow 模式规定“优先创建独立 SFTP channel，而不是复用单个 channel”（第 727 行）。因此，fallback 的可用条件由“单 channel 支持并发”扩展为“同一连接支持多个 channel”，从而减小 russh-sftp 并发 spike 失败的影响。
 
 ---
 
-## 2. 本轮新发现
+## 2. 本轮新增问题
 
-### V3-1 — `ConnectionProfile` 缺少 `revision` 字段（真洞，需 M0 修正）
+### V3-1 — `ConnectionProfile` 缺少 `revision` 字段（实质问题，需要在 M0 修正）
 
-`AuthFingerprint` 依赖 `profile_revision: u64`（第 696 行），规则明确"用户修改 profile 时 `profile_revision` 递增"（第 704 行）。但 `ConnectionProfile` 结构（第 866-875 行）**没有 `revision` 字段**：
+`AuthFingerprint` 依赖 `profile_revision: u64`（第 696 行），而且规则明确规定“用户修改 profile 时 `profile_revision` 递增”（第 704 行）。但是，`ConnectionProfile` 结构（第 866-875 行）**没有 `revision` 字段**：
 
 ```rust
 pub struct ConnectionProfile {
@@ -57,85 +58,88 @@ pub struct ConnectionProfile {
 }
 ```
 
-`profile_revision` 从哪来？三个候选：
-- **`ConnectionProfile` 加 `pub revision: u64`**（推荐）—— storage 在每次 profile 写入时递增。
-- `ProfilesFile` 维护 `Map<ProfileId, u64>` —— 多一层间接，不必要。
-- 从 profile 内容 hash 推导 —— 违背"不依赖 secret hash"原则，且 secret 不在 profile 里。
+因此，文档还需要说明 `profile_revision` 的来源。候选方案有三个：
 
-**建议**：`ConnectionProfile` 加 `pub revision: u64`，storage 层在 `save_profile` 时自动递增。这是 M0 类型草案就要修的——否则 `AuthFingerprint` 的 `profile_revision` 字段无来源。
+- **为 `ConnectionProfile` 增加 `pub revision: u64`**（推荐）。storage 在每次写入 profile 时递增该值。
+- 由 `ProfilesFile` 维护 `Map<ProfileId, u64>`。但是，这个方案增加了一层不必要的间接关系。
+- 根据 profile 内容计算 hash。但是，这个方案违反“不依赖 secret hash”的原则，而且 secret 不在 profile 中。
 
-这是本轮唯一需要在开工前修的真洞。
+**建议**：为 `ConnectionProfile` 增加 `pub revision: u64`，并由 storage 层在 `save_profile` 时自动递增。这个问题应在 M0 类型草案阶段修正，否则 `AuthFingerprint` 的 `profile_revision` 字段没有明确来源。
 
-### V3-2 — planning"失败"与"取消"的语义未区分（低-中）
+这是本轮唯一需要在开始实现之前修正的实质问题。
 
-第 1048 行："planning 失败时保留已发现 child job，但默认暂停并提示用户是否继续部分传输"。
-第 1185 行取消语义："Planning：取消 planning task"。
+### V3-2 — planning 的“失败”和“取消”语义未区分（低至中等）
 
-这两条对"planning 中途停止后已发现 child job 的处理"不一致：
-- **planning 因错误失败**（如远端目录 stat 权限不足）→ 保留 child job，提示部分传输。合理。
-- **planning 被用户取消** → 取消 planning task。已发现 child job 保留还是丢弃？文档没说。
+第 1048 行规定：“planning 失败时保留已发现 child job，但默认暂停并提示用户是否继续部分传输”。第 1185 行的取消语义规定：“Planning：取消 planning task”。
 
-如果用户取消 planning 是"我不想传了"，保留 child job 反而是负担。如果用户取消是"planning 太慢我想换个目录"，保留也没意义。
+但是，这两项规定对“planning 中途停止后如何处理已发现的 child job”没有形成一致定义：
 
-**建议明确**：用户取消 planning = 整个 plan 进入 `Cancelled`，child job 全部丢弃；planning 因错误中断 = plan 进入 `Failed`，已发现 child job 保留并暂停，提示部分传输。两种停止，两种语义。
+- **planning 因错误而失败**（例如远端目录 stat 权限不足）时，保留 child job 并提示用户是否执行部分传输。这项行为合理。
+- **planning 被用户取消**时，文档仅规定取消 planning task，却没有说明保留还是丢弃已发现的 child job。
 
-### V3-3 — borrow 回退 dedicated 的语义用"或"模糊（低）
+如果用户取消 planning 表示不再执行传输，那么保留 child job 会增加无效状态。如果用户因为 planning 时间过长而选择其他目录，那么保留这些 child job 也没有实际用途。
 
-第 721 行："如果 borrow tab 已关闭或 epoch 不匹配，borrow transfer 立即失败或回退到 dedicated"。
+**建议明确规定**：用户取消 planning 时，整个 plan 进入 `Cancelled`，并丢弃全部 child job；planning 因错误而中断时，plan 进入 `Failed`，保留并暂停已发现的 child job，同时提示用户是否执行部分传输。因此，两种停止原因应对应两种不同语义。
 
-"立即失败**或**回退到 dedicated"——什么时候失败，什么时候回退？应该总是优先回退 dedicated（因为 dedicated 不依赖 tab），只有 dedicated 也不可行（如 credential 读取失败）才 failed。
+### V3-3 — borrow 转为 dedicated 的条件表述不明确（低）
 
-**建议改为**："borrow tab 已关闭或 epoch 不匹配时，回退到 dedicated；dedicated 也不可行时才进入 failed。"
+第 721 行规定：borrow tab 已关闭或 epoch 不匹配时，borrow transfer 立即失败或改用 dedicated。
 
-### V3-4 — TransferProgress 节流的实现位置未显式（低）
+但是，“立即失败或改用 dedicated”没有说明两种结果各自适用的条件。建议始终优先使用 dedicated，因为 dedicated 不依赖 tab；只有 dedicated 也不可用时，例如 credential 读取失败，transfer 才应进入 `Failed`。
 
-第 311 行："TransferProgress 必须节流，例如每个 transfer 最多 10 Hz 进入 UI"。但节流在哪做？
+**建议改为**：“borrow tab 已关闭或 epoch 不匹配时，改用 dedicated；dedicated 也不可用时才进入 `Failed`。”
 
-三个候选位置：
-- TransferManager 发 event 前（源头节流）—— **推荐**
-- event drain task 收到后节流
-- AppModel update 前节流
+### V3-4 — TransferProgress 节流位置未明确（低）
 
-如果不在源头节流，progress event 会塞满 event channel（容量 1024），挤掉状态转换 event。第 310 行"event channel 满时 progress event 可以合并"是 drain 侧兜底，但那是 reactive 不是 proactive。
+第 311 行规定：“TransferProgress 必须节流，例如每个 transfer 最多以 10 Hz 的频率进入 UI”。但是，文档没有说明执行节流的位置。
 
-**建议显式**：节流在 TransferManager 发 event 前做（源头），drain 侧合并是兜底。
+候选位置有三个：
+
+- TransferManager 发送 event 之前，即在源头节流。**推荐此方案。**
+- event drain task 接收 event 之后。
+- AppModel update 之前。
+
+如果不在源头节流，progress event 可能占用 event channel（容量为 1024）的大部分空间，并影响状态转换 event 的传递。第 310 行规定“event channel 满时 progress event 可以合并”，但是 drain 侧合并仅属于事后保护，不能替代源头节流。
+
+**建议明确规定**：TransferManager 在发送 event 前执行源头节流，drain 侧合并仅用于异常流量下的保护。
 
 ### V3-5 — dedicated session 的引用计数未说明（低）
 
-多个 transfer 复用同一 dedicated session 时，第 1 个完成后 session 不能关（还有其他 transfer 在跑）。TransferManager 需要引用计数。
+多个 transfer 复用同一个 dedicated session 时，第一个 transfer 完成后不能关闭 session，因为其他 transfer 可能仍在执行。因此，TransferManager 需要维护引用计数。
 
-文档第 656 行列了"transfer session lifecycle"职责，但没说机制。**建议一行**：dedicated session 用引用计数，最后一个 transfer 完成或取消时关闭 session。这是实现细节，但 M5 设计时明确能避免 session 泄漏或过早关闭。
+文档第 656 行列出了“transfer session lifecycle”职责，但是没有说明相应机制。**建议增加一项规定**：dedicated session 使用引用计数，并在最后一个 transfer 完成或取消时关闭 session。这属于实现细节，但是在 M5 设计阶段明确该要求，可以避免 session 泄漏或提前关闭。
 
 ---
 
 ## 3. 剩余待确认问题评估
 
-第 23 节只剩 2 个待确认：
+第 23 节仅剩 2 个待确认事项：
 
-1. **UI 默认语言**：不阻塞架构。建议中文（作者在深圳，目标用户大概率中文），但 error code 体系已支持后续切换。M1 定即可。
-2. **metadata warning 显示位置**：建议 transfer drawer 默认显示 warning 图标，details 展开看完整信息。不阻塞。
+1. **UI 默认语言**：该事项不影响架构。建议使用中文，因为作者位于深圳，而且目标用户可能以中文用户为主；但是，error code 体系已经支持后续切换。因此，可以在 M1 阶段确定。
+2. **metadata warning 显示位置**：建议在 transfer drawer 中默认显示 warning 图标，并在 details 展开后显示完整信息。该事项同样不影响架构。
 
-这两个都是产品决策，不是架构决策。可以不阻塞地进 M0。
+这两项均属于产品决策，因此无需延迟 M0。
 
 ---
 
-## 4. 三轮评审演化
+## 4. 三轮评审的变化
 
-| 轮次 | 状态 | 主要发现 | 闭合率 |
+| 轮次 | 状态 | 主要发现 | 解决率 |
 |------|------|----------|--------|
-| v1 | 架构有缺口 | C1-C7 七个关键关切 + C8-C15 八个次要 | — |
-| v2 | 架构闭合，剩实现陷阱 | 4 个实现陷阱 + 5 个新模糊 | v1 闭合 100% |
-| v3 | 实现陷阱闭合，剩数据模型小不一致 | 1 个真洞 + 4 个语义澄清 | v2 闭合 100% |
+| v1 | 架构存在问题 | C1-C7 七项关键关切和 C8-C15 八项次要关切 | — |
+| v2 | 架构完整，但仍有实现风险 | 4 个实现风险和 5 个新增语义问题 | v1 问题解决率 100% |
+| v3 | 实现风险已解决，但仍有轻微的数据模型不一致 | 1 个实质问题和 4 个语义说明问题 | v2 问题解决率 100% |
 
-**演化曲线**：每轮发现的问题严重度递减，数量递减。v1 是"会不会失败"，v2 是"实现会不会踩坑"，v3 是"类型定义完不完整"。这表明文档已经收敛到可以支撑实现的水平。
+每轮发现的问题均比上一轮严重程度更低、数量更少。v1 关注系统能否正确实现，v2 关注实现阶段的具体风险，v3 关注类型定义是否完整。因此，文档已经达到可以指导实现的程度。
 
 ---
 
 ## 5. 最终判断
 
-**修掉 V3-1（ConnectionProfile 加 revision），其余 4 项是 10 分钟级文档修订。然后进 M0。**
+**修正 V3-1，即为 ConnectionProfile 增加 revision；其余 4 项属于预计可在 10 分钟内完成的文档修订。完成这些修改后即可进入 M0。**
 
-不建议第四轮架构评审。剩余风险全部落在实现期 spike 能覆盖的范围内：
+不建议进行第四轮架构评审。剩余风险均可由实现阶段的 spike 验证：
+
 - GPUI list API（M1 前）
 - flume recv on GPUI executor（M2a 前）
 - shutdown_timeout 行为（M2a 前）
@@ -143,6 +147,6 @@ pub struct ConnectionProfile {
 - check_server_key 签名（M3 前）
 - russh-sftp 并发（M5 前）
 
-这 6 个 spike 的结果决定具体实现细节，但不改变架构。架构层已经稳定。
+这 6 个 spike 的结果会决定具体实现细节，但是不会改变架构。因此，架构已经稳定。
 
-**一句话**：从架构师角度，这份规划已经过三轮严格评审，所有架构级风险已识别并有缓解策略。继续在文档层迭代的边际收益已经低于直接写代码的边际收益。开工。
+**最终结论**：从架构评审角度看，这份规划已经完成三轮严格评审，所有架构级风险均已识别，并且已有相应的缓解策略。继续修改架构文档的边际收益已经低于直接开始实现的边际收益，因此可以开始实现。

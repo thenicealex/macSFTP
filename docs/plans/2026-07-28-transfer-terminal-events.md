@@ -1,39 +1,39 @@
-# Transfer Terminal Lifecycle Implementation Plan
+# 传输终态生命周期实施计划
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **Agent 实施要求：** 必须使用 `superpowers:executing-plans`，并按任务实施本计划。
 
-**Goal:** Guarantee that every transfer child published to the global store reaches a terminal state when planning later fails/cancels or when a completed plan cannot reach `TransferManager`.
+**目标：** 如果规划后续失败或取消，或者已完成的计划无法传递至 `TransferManager`，那么必须保证全局 store 中已发布的每个传输子任务均进入终态。
 
-**Architecture:** Split ownership at the existing event boundary. `TransferStore` already knows every child accepted through `TransferPlanProgress`, so `TransferPlanFailed` and `TransferPlanCancelled` terminalize those published children atomically with the plan/root. After `TransferPlanCompleted`, the runtime owns the returned jobs until `TransferManagerRequest::Enqueue` succeeds; any earlier handoff failure emits one non-retryable `TransferFailed` per child. Planning retry remains attached to the root command, while child rows only expose Retry when a real retry route exists.
+**架构：** 以现有事件边界划分所有权。`TransferStore` 已经记录通过 `TransferPlanProgress` 接受的每个子任务，因此 `TransferPlanFailed` 和 `TransferPlanCancelled` 会同时将计划、根任务以及这些已发布子任务转换为终态。`TransferPlanCompleted` 发生后，runtime 负责管理返回的 jobs，直至 `TransferManagerRequest::Enqueue` 成功；如果此前的传递过程失败，则为每个子任务发送一个不可重试的 `TransferFailed`。规划重试仍与根命令关联，而子任务行仅在实际存在重试路径时显示 Retry。
 
-**Tech Stack:** Rust, Tokio, flume bounded channels, `macsftp-core` reducers, GPUI transfer drawer, Cargo tests.
+**技术栈：** Rust、Tokio、flume bounded channel、`macsftp-core` reducer、GPUI transfer drawer 和 Cargo tests。
 
 ---
 
-## Scope and invariants
+## 范围与不变量
 
-- PR title: `Guarantee transfer terminal lifecycle`
-- Primary defect: `SFTP-TRANSFER-001`
-- Files expected to change:
+- PR 标题：`Guarantee transfer terminal lifecycle`
+- 主要缺陷：`SFTP-TRANSFER-001`
+- 预计修改以下文件：
   - `crates/core/src/core.rs`
   - `crates/sftp/src/runtime.rs`
-  - `crates/sftp/src/transfer_planner.rs` tests only if a deterministic local partial-plan fixture is needed
-  - `crates/sftp/src/session_actor.rs` tests only if a deterministic remote partial-plan fixture is needed
+  - 仅在需要确定性的本地部分规划 fixture 时修改 `crates/sftp/src/transfer_planner.rs` 中的测试
+  - 仅在需要确定性的远程部分规划 fixture 时修改 `crates/sftp/src/session_actor.rs` 中的测试
   - `crates/app/src/workspace/transfer_render.rs`
-- Required invariant: once a child appears in `TransferPlanProgress`, it must end in exactly one terminal state: `Completed`, `Skipped`, or `Failed`.
-- A plan terminal event must terminalize children already known to core even if the planner returns no `Vec<TransferJob>`.
-- A successful planner return transfers ownership to runtime; accepted `TransferManagerRequest::Enqueue` transfers ownership to the manager.
-- Do not invent a rich partial-planner result solely to repeat information already held by `TransferStore`.
-- Do not register fake child retry routes. A retry button is valid only when runtime/manager can execute it.
+- 必须满足以下不变量：子任务一旦出现在 `TransferPlanProgress` 中，就必须最终且仅进入一个终态，即 `Completed`、`Skipped` 或 `Failed`。
+- 即使 planner 没有返回 `Vec<TransferJob>`，计划终态事件也必须将 core 已知的子任务转换为终态。
+- planner 成功返回后，所有权转移至 runtime；`TransferManagerRequest::Enqueue` 被接受后，所有权转移至 manager。
+- 不得仅为重复 `TransferStore` 已有的信息而新增复杂的部分规划结果类型。
+- 不得注册虚假的子任务重试路径。只有 runtime/manager 能够执行重试时，重试按钮才有效。
 
-### Task 1: Prove partial-plan failure and cancellation in the core reducer
+### 任务 1：验证 core reducer 对部分规划失败和取消的处理
 
-**Files:**
-- Modify/Test: `crates/core/src/core.rs:760-843, 1018-1040`
+**文件：**
+- 修改及测试：`crates/core/src/core.rs:760-843, 1018-1040`
 
-**Step 1: Add a failing partial-plan failure test**
+**步骤 1：增加一个预期失败的部分规划失败测试**
 
-Create a plan, publish two queued children with `TransferPlanProgress`, then apply:
+创建一个计划，通过 `TransferPlanProgress` 发布两个 queued 子任务，然后应用：
 
 ```rust
 AppEvent::TransferPlanFailed {
@@ -42,52 +42,52 @@ AppEvent::TransferPlanFailed {
 }
 ```
 
-Name the test:
+测试名称如下：
 
 ```rust
 #[test]
 fn transfer_plan_failure_terminalizes_every_published_child()
 ```
 
-Assert:
-- the plan is `TransferPlanState::Failed` with the original error;
-- the root is `TransferState::Failed` with the original retryable flag;
-- both children are `TransferState::Failed` with the same error and retryable flag;
-- applying the same event again returns `false` and changes nothing.
+验证以下结果：
+- 计划为 `TransferPlanState::Failed`，并且包含原始错误；
+- 根任务为 `TransferState::Failed`，并且保留原始 retryable 标志；
+- 两个子任务均为 `TransferState::Failed`，并且包含相同的错误和 retryable 标志；
+- 再次应用相同事件时返回 `false`，并且状态不再变化。
 
-**Step 2: Add a failing partial-plan cancellation test**
+**步骤 2：增加一个预期失败的部分规划取消测试**
 
-Name it:
+测试名称如下：
 
 ```rust
 #[test]
 fn transfer_plan_cancellation_skips_every_published_child()
 ```
 
-Publish two children, apply `TransferPlanCancelled`, and assert plan cancellation plus `Skipped` root and children. Reapply the event and assert idempotence.
+发布两个子任务并应用 `TransferPlanCancelled`，然后验证计划已取消，而且根任务和子任务均为 `Skipped`。再次应用该事件，并验证操作具有幂等性。
 
-**Step 3: Run the tests to verify the gap**
+**步骤 3：运行测试并验证当前缺陷**
 
 ```bash
 cargo test -p macsftp-core transfer_plan_failure_terminalizes_every_published_child -- --nocapture
 cargo test -p macsftp-core transfer_plan_cancellation_skips_every_published_child -- --nocapture
 ```
 
-Expected before implementation: FAIL because only the root becomes terminal while both children remain `Queued`.
+实现前的预期结果为 FAIL，因为只有根任务进入终态，而两个子任务仍为 `Queued`。
 
-**Step 4: Keep the red tests local**
+**步骤 4：仅在本地保留失败测试**
 
-Do not commit deliberately failing tests unless the project explicitly permits red commits.
+除非项目明确允许包含失败测试的提交，否则不得提交这些预期失败的测试。
 
-### Task 2: Terminalize published children with the plan event
+### 任务 2：通过计划事件将已发布子任务转换为终态
 
-**Files:**
-- Modify: `crates/core/src/core.rs:829-843, 1018-1040`
-- Test: `crates/core/src/core.rs` transfer-store test module
+**文件：**
+- 修改：`crates/core/src/core.rs:829-843, 1018-1040`
+- 测试：`crates/core/src/core.rs` 的 transfer-store 测试模块
 
-**Step 1: Extend the existing helper rather than adding a new event**
+**步骤 1：扩展现有辅助函数，不增加新事件**
 
-Change the helper to apply the plan terminal state to the root and every child ID already recorded on the plan:
+修改辅助函数，使其将计划终态应用于根任务以及计划中已经记录的每个子任务 ID：
 
 ```rust
 fn set_plan_terminal_state(
@@ -115,107 +115,107 @@ fn set_plan_terminal_state(
 }
 ```
 
-Use the existing failure error for all published children. Cancellation maps all published children to `Skipped`. No child terminal event is emitted separately because the global reducer is already applying the authoritative plan terminal event once.
+所有已发布子任务使用现有的失败错误。取消事件将所有已发布子任务转换为 `Skipped`。由于全局 reducer 已经应用一次权威的计划终态事件，因此无需单独发送子任务终态事件。
 
-**Step 2: Preserve event-order safety**
+**步骤 2：保证事件顺序安全**
 
-Do not let a late `TransferPlanProgress` resurrect a terminal plan. Add or extend a test named:
+延迟到达的 `TransferPlanProgress` 不得使终态计划重新进入非终态。因此，增加或扩展以下测试：
 
 ```rust
 #[test]
 fn transfer_plan_progress_after_terminal_event_is_ignored()
 ```
 
-Before inserting progress children, require the plan to still be `Planning`. This protects against a progress event delayed behind failure/cancellation.
+增加 progress 子任务之前，必须确认计划仍为 `Planning`。因此，晚于失败或取消事件到达的 progress 事件不会修改计划。
 
-**Step 3: Run focused tests**
+**步骤 3：运行专项测试**
 
 ```bash
 cargo test -p macsftp-core transfer_plan_ -- --nocapture
 ```
 
-Expected: all transfer-plan reducer tests PASS, including failure, cancellation, late progress rejection, and idempotence.
+预期结果：所有 transfer-plan reducer 测试均 PASS，包括失败、取消、延迟 progress 拒绝和幂等性测试。
 
-**Step 4: Commit**
+**步骤 4：提交**
 
 ```bash
 git add crates/core/src/core.rs
 git commit -m "Terminalize children when transfer planning ends"
 ```
 
-### Task 3: Prove both planners can fail after publishing progress
+### 任务 3：验证两个 planner 均可能在发布 progress 后失败
 
-**Files:**
-- Test: `crates/sftp/src/transfer_planner.rs` test module
-- Test: `crates/sftp/src/session_actor.rs` test module or `crates/sftp/tests/real_session.rs`
+**文件：**
+- 测试：`crates/sftp/src/transfer_planner.rs` 的测试模块
+- 测试：`crates/sftp/src/session_actor.rs` 的测试模块或 `crates/sftp/tests/real_session.rs`
 
-**Step 1: Add a deterministic local partial-failure test**
+**步骤 1：增加确定性的本地部分失败测试**
 
-Name it:
+测试名称如下：
 
 ```rust
 #[test]
 fn local_upload_failure_after_progress_emits_plan_failure()
 ```
 
-Use unique paths containing the test label and `std::process::id()`. Provide two sources in order:
-1. a valid file that publishes the first child immediately;
-2. a missing/invalid source that fails later.
+使用包含测试标签和 `std::process::id()` 的唯一路径。按照以下顺序提供两个 source：
+1. 有效文件，用于立即发布第一个子任务；
+2. 缺失或无效的 source，用于触发后续失败。
 
-Assert the event order contains:
-- `TransferPlanProgress` with the first child ID;
-- `TransferPlanFailed` for the same plan;
-- planner result `None`.
+验证事件顺序包含以下内容：
+- 包含第一个子任务 ID 的 `TransferPlanProgress`；
+- 同一计划的 `TransferPlanFailed`；
+- planner 结果 `None`。
 
-Do not assert child terminal events from the planner; core owns terminalization of already-published children.
+不要验证 planner 发出的子任务终态事件，因为 core 负责将已发布子任务转换为终态。
 
-**Step 2: Add deterministic cancellation coverage**
+**步骤 2：增加确定性的取消场景测试**
 
-Name it:
+测试名称如下：
 
 ```rust
 #[test]
 fn local_upload_cancellation_after_progress_emits_plan_cancelled()
 ```
 
-Use a test-only synchronization point only if existing planner seams cannot deterministically cancel after first progress. Prefer controlling the event receiver/cancellation token over adding production hooks.
+仅当现有 planner seam 无法在第一次 progress 之后确定性地取消时，才增加测试专用同步点。优先控制事件 receiver 或 cancellation token，不要增加生产环境 hook。
 
-**Step 3: Cover the remote planner**
+**步骤 3：测试远程 planner**
 
-Add:
+增加以下测试：
 
 ```rust
 async fn remote_download_failure_after_progress_emits_plan_failure()
 ```
 
-Use the real sshd fixture if a deterministic unit seam is unavailable. Publish at least one valid remote child, then make a later directory/source unreadable or absent. Assert progress precedes failure and the result is `None`. Add the cancellation counterpart when the existing cancellation token can be triggered deterministically.
+如果没有确定性的单元测试 seam，则使用真实 sshd fixture。先发布至少一个有效的远程子任务，然后使后续目录或 source 不可读或不存在。验证 progress 先于 failure，并且结果为 `None`。如果现有 cancellation token 可以被确定性触发，那么还需增加对应的取消测试。
 
-**Step 4: Run planner tests**
+**步骤 4：运行 planner 测试**
 
 ```bash
 cargo test -p macsftp-sftp local_upload_ -- --nocapture
 cargo test -p macsftp-sftp remote_download_ -- --nocapture
 ```
 
-Expected: PASS. These tests prove both producer paths exercise the core contract; they do not duplicate reducer assertions.
+预期结果为 PASS。这些测试用于验证两个 producer 路径均符合 core 契约，因此不重复 reducer 断言。
 
-**Step 5: Commit**
+**步骤 5：提交**
 
 ```bash
 git add crates/sftp/src/transfer_planner.rs crates/sftp/src/session_actor.rs crates/sftp/tests/real_session.rs
 git commit -m "Test partial transfer planning termination"
 ```
 
-Only add files that actually changed.
+仅将实际修改的文件加入提交。
 
-### Task 4: Compensate every post-planning handoff failure
+### 任务 4：处理规划完成后的每种传递失败
 
-**Files:**
-- Modify/Test: `crates/sftp/src/runtime.rs:748-925`
+**文件：**
+- 修改及测试：`crates/sftp/src/runtime.rs:748-925`
 
-**Step 1: Add a non-retryable handoff error**
+**步骤 1：增加不可重试的传递错误**
 
-A child rejected before manager ownership has no `RetryRoute`, so do not advertise a retry that cannot work:
+manager 获得所有权之前被拒绝的子任务没有 `RetryRoute`，因此不得显示无法执行的重试操作：
 
 ```rust
 fn transfer_handoff_error(detail: &'static str) -> UserFacingError {
@@ -227,9 +227,9 @@ fn transfer_handoff_error(detail: &'static str) -> UserFacingError {
 }
 ```
 
-Keep details structural and path/credential-free.
+错误详情仅说明结构性原因，并且不得包含路径或凭据。
 
-**Step 2: Add one private compensation helper**
+**步骤 2：增加一个私有失败处理辅助函数**
 
 ```rust
 async fn fail_planned_jobs(
@@ -252,9 +252,9 @@ async fn fail_planned_jobs(
 }
 ```
 
-**Step 3: Replace the missing connection receiver return**
+**步骤 3：修改 connection receiver 缺失时的返回逻辑**
 
-Replace:
+将以下代码：
 
 ```rust
 let Some(connection_rx) = transfer_connection_rx else {
@@ -262,15 +262,15 @@ let Some(connection_rx) = transfer_connection_rx else {
 };
 ```
 
-with compensation for all jobs. This covers missing/stale session, missing actor sender, and full/disconnected actor request queue because the current acquisition path collapses those cases to `None`.
+修改为针对所有 jobs 发送失败事件。当前获取路径会将 session 缺失或过期、actor sender 缺失以及 actor request queue 已满或断开等情况统一转换为 `None`，因此该处理可以覆盖这些情况。
 
-**Step 4: Reuse the helper for a dropped connection responder**
+**步骤 4：在 connection responder 被丢弃时复用辅助函数**
 
-Replace the existing inline failure loop with `fail_planned_jobs`.
+使用 `fail_planned_jobs` 代替现有的内联失败循环。
 
-**Step 5: Recover jobs from manager send failure**
+**步骤 5：从 manager 发送失败结果中取得 jobs**
 
-Construct the request first and recover the rejected value from `SendError<T>`:
+先构造 request，然后从 `SendError<T>` 中取得被拒绝的值：
 
 ```rust
 let request = TransferManagerRequest::Enqueue {
@@ -297,41 +297,41 @@ if let Err(send_error) = manager_tx.send_async(request).await {
 }
 ```
 
-Do not use `unwrap`, `expect`, or `unreachable!` for channel failure.
+处理 channel 失败时不得使用 `unwrap`、`expect` 或 `unreachable!`。
 
-**Step 6: Add deterministic handoff tests**
+**步骤 6：增加确定性的传递测试**
 
-Extract only a tiny private `handoff_planned_jobs` helper if needed. Add two-job tests:
+仅在必要时提取一个小型私有辅助函数 `handoff_planned_jobs`。增加包含两个 job 的以下测试：
 - `handoff_without_connection_receiver_fails_all_jobs`
 - `handoff_with_dropped_connection_responder_fails_all_jobs`
 - `handoff_with_closed_manager_fails_all_jobs`
 
-Assert exact IDs, order, `ErrorCode::ChannelClosed`, and `retryable == false`.
+验证准确的 ID、顺序、`ErrorCode::ChannelClosed` 以及 `retryable == false`。
 
-**Step 7: Run focused tests**
+**步骤 7：运行专项测试**
 
 ```bash
 cargo test -p macsftp-sftp handoff_ -- --nocapture
 cargo test -p macsftp-sftp completed_upload_plan_without_session_fails_every_planned_job -- --nocapture
 ```
 
-Expected: PASS; no test waits for an absent child terminal event.
+预期结果为 PASS；所有测试均不得等待不会出现的子任务终态事件。
 
-**Step 8: Commit**
+**步骤 8：提交**
 
 ```bash
 git add crates/sftp/src/runtime.rs
 git commit -m "Fail jobs rejected during transfer handoff"
 ```
 
-### Task 5: Make Retry visibility match actual ownership
+### 任务 5：使 Retry 可见性与实际所有权一致
 
-**Files:**
-- Modify/Test: `crates/app/src/workspace/transfer_render.rs:358-490`
+**文件：**
+- 修改及测试：`crates/app/src/workspace/transfer_render.rs:358-490`
 
-**Step 1: Add failing rendering-policy tests**
+**步骤 1：增加预期失败的渲染策略测试**
 
-Extract a pure helper if needed:
+如果需要，则提取以下纯函数：
 
 ```rust
 fn can_retry_transfer(job: &TransferJob) -> bool {
@@ -339,27 +339,27 @@ fn can_retry_transfer(job: &TransferJob) -> bool {
 }
 ```
 
-Add:
+增加以下测试：
 - `retry_action_is_hidden_for_non_retryable_failure`
 - `retry_action_is_shown_for_retryable_failure`
 
-**Step 2: Gate the callback by `retryable`**
+**步骤 2：根据 `retryable` 限制 callback**
 
-Replace the current `matches!(job.state, TransferState::Failed { .. })` condition with `can_retry_transfer(job)`.
+使用 `can_retry_transfer(job)` 代替当前的 `matches!(job.state, TransferState::Failed { .. })` 条件。
 
-This is required for correctness: post-planning handoff compensation deliberately has no retry route. Do not add a route that silently restarts unrelated work.
+此项修改用于保证正确性，因为规划完成后的传递失败处理没有重试路径。因此，不得增加会在无提示情况下重新执行无关任务的路径。
 
-**Step 3: Preserve planning retry through the root**
+**步骤 3：通过根任务保留规划重试能力**
 
-When all children were terminalized by `TransferPlanFailed`, keep the failed root visible and hide its children if every child carries the exact same failure as the root. This preserves the existing root-ID entry in `planning_retries`; ordinary execution failures continue showing individual child rows.
+当 `TransferPlanFailed` 已将全部子任务转换为终态时，如果每个子任务的失败信息均与根任务完全相同，则保留失败根任务并隐藏其子任务。因此，`planning_retries` 中现有的根 ID 条目仍然有效；对于常规执行失败，界面继续显示各个子任务行。
 
-Add:
+增加以下测试：
 - `partial_planning_failure_keeps_retryable_root_visible`
 - `execution_failure_shows_terminal_child_rows`
 
-Use a small pure classification helper rather than embedding another large boolean expression in rendering.
+使用小型纯分类函数，避免在渲染逻辑中增加大型布尔表达式。
 
-**Step 4: Run focused tests**
+**步骤 4：运行专项测试**
 
 ```bash
 cargo test -p macsftp-app retry_action_ -- --nocapture
@@ -367,27 +367,27 @@ cargo test -p macsftp-app partial_planning_failure_keeps_retryable_root_visible 
 cargo test -p macsftp-app execution_failure_shows_terminal_child_rows -- --nocapture
 ```
 
-Expected with complete Xcode tools: PASS. If local GPUI compilation is blocked by missing `metal`, record the environment blocker and require CI evidence.
+在 Xcode 工具完整时，预期结果为 PASS。如果本地 GPUI 编译因缺少 `metal` 而无法继续，则记录环境限制，并要求提供 CI 验证结果。
 
-**Step 5: Visual verification**
+**步骤 5：执行视觉验证**
 
-Verify the transfer drawer in a narrow pane and short window:
-- a planning failure shows one failed root with Retry only when retryable;
-- a handoff failure shows failed child rows without Retry;
-- cancellation shows no Retry.
+在窄 pane 和较低窗口中验证 transfer drawer：
+- 规划失败时显示一个失败根任务，并且仅在可重试时显示 Retry；
+- 传递失败时显示失败子任务行，但是不显示 Retry；
+- 取消后不显示 Retry。
 
-This changes visible actions. Attach a screenshot or record an explicit visual verification note.
+此修改会改变可见操作，因此需要附加截图或记录明确的视觉验证说明。
 
-**Step 6: Commit**
+**步骤 6：提交**
 
 ```bash
 git add crates/app/src/workspace/transfer_render.rs
 git commit -m "Show retry only for routable transfer failures"
 ```
 
-### Task 6: Run package and repository verification
+### 任务 6：执行 package 和 repository 验证
 
-**Step 1: Run focused non-GPUI checks**
+**步骤 1：运行非 GPUI 专项检查**
 
 ```bash
 cargo test -p macsftp-core transfer_plan_ -- --nocapture
@@ -398,7 +398,7 @@ cargo clippy -p macsftp-core -p macsftp-sftp --all-targets -- -D warnings
 cargo fmt --all --check
 ```
 
-**Step 2: Run app tests where the toolchain permits**
+**步骤 2：在工具链允许时运行 app 测试**
 
 ```bash
 cargo test -p macsftp-app retry_action_ -- --nocapture
@@ -406,7 +406,7 @@ cargo test -p macsftp-app partial_planning_failure -- --nocapture
 cargo test -p macsftp-app execution_failure -- --nocapture
 ```
 
-**Step 3: Run repository gates**
+**步骤 3：运行 repository 检查**
 
 ```bash
 bash scripts/check_architecture.sh
@@ -414,14 +414,14 @@ bash scripts/check_sensitive_logs.sh
 bash scripts/check.sh
 ```
 
-Expected with a complete Xcode installation: PASS. If `xcrun` cannot find `metal`, report that as an environment blocker and attach passing core/SFTP evidence; do not claim the full gate passed.
+在 Xcode 安装完整时，预期结果为 PASS。如果 `xcrun` 无法定位 `metal`，则将其记录为环境限制，并附上已经通过的 core/SFTP 验证结果；但是不得声称完整检查已经通过。
 
-## Acceptance checklist
+## 验收清单
 
-- Local and remote planning failure/cancellation cannot leave a published child queued.
-- Late progress cannot add or resurrect children after a plan is terminal.
-- Missing/stale session, missing/full/disconnected actor queue, dropped connection responder, and stopped manager terminalize every returned job.
-- Planning failure retry continues through the root command; cancelled work is not retryable.
-- Pre-manager child failures are non-retryable and render no dead Retry action.
-- Accepted manager enqueue and successful transfer behavior remain unchanged.
-- No new global timeout, watchdog, or duplicate partial-plan data model is added.
+- 本地和远程规划失败或取消后，已发布的子任务不能继续处于 queued 状态。
+- 计划进入终态后，延迟 progress 不能增加子任务，也不能使已有子任务重新进入非终态。
+- session 缺失或过期、actor queue 缺失/已满/断开、connection responder 被丢弃以及 manager 停止等情况，均会使每个已返回 job 进入终态。
+- 规划失败仍通过根命令执行重试；已取消任务不可重试。
+- manager 获得所有权之前发生的子任务失败不可重试，并且界面不显示无效的 Retry 操作。
+- manager 接受 enqueue 后的行为以及成功传输行为保持不变。
+- 不增加全局 timeout、watchdog 或重复的部分规划数据模型。

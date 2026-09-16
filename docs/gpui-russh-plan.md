@@ -1,6 +1,6 @@
 # macSFTP GPUI + russh 工程规划
 
-本文档记录 macSFTP 从零开发 Rust 桌面产品的工程方案。目标是使用 GPUI 构建 Zed 风格的高性能自绘 macOS UI，使用 `russh + russh-sftp` 构建异步 SFTP 后端，并从第一版开始支持多标签。
+本文档记录 macSFTP 从零开发 Rust 桌面产品的工程方案。项目使用 GPUI 构建 Zed 风格的高性能自绘 macOS UI，使用 `russh + russh-sftp` 构建异步 SFTP 后端，并且从第一版开始支持多标签。
 
 ## 1. 决策摘要
 
@@ -11,7 +11,7 @@
 - UI 风格：Zed 风格，高性能自绘 UI。
 - SFTP 后端：`russh + russh-sftp`，不使用 `ssh2`。
 - 项目性质：从零开发 Rust 产品。
-- 窗口模型：第一版只做单窗口，多窗口是后续能力。**（2026-07-13 更新：多窗口已作为 post-MVP 能力交付 —— Cmd+N / File › New Window 打开独立窗口，各窗口独立标签页、共享传输列表与设置。详见 `docs/progress-analysis-2026-07-13-multiwindow.md`。）**
+- 窗口模型：第一版只做单窗口，多窗口是后续能力。**（2026-07-13 更新：多窗口已作为 post-MVP 能力交付 —— Cmd+N / File › New Window 创建独立窗口，各窗口独立管理标签页，并共享传输列表与设置。详见 `docs/progress-analysis-2026-07-13-multiwindow.md`。）**
 - 第一版认证：密码、私钥。
 - Host key policy：OpenSSH-compatible。
 - known_hosts 兼容目标：第一版读写 OpenSSH-compatible 子集，完整 OpenSSH grammar 不作为 MVP 承诺。
@@ -24,12 +24,12 @@
 
 ### 主要取舍
 
-`russh + russh-sftp` 比 `ssh2` 更适合多标签和异步并发，但需要自己承担更多应用层责任：
+`russh + russh-sftp` 比 `ssh2` 更适合多标签和异步并发，但是应用需要负责更多事项：
 
 - host key 校验要在 `russh::client::Handler::check_server_key` 中接入；
 - session lifecycle、重连、取消、超时需要应用层设计；
 - GPUI 主线程和 Tokio runtime 之间必须有明确 command/event 边界；
-- API 版本需要 pin，避免 GPUI 和 russh 同时变化造成大面积返工。
+- API 版本需要 pin，因此可以避免 GPUI 和 russh 同时变化所造成的大范围修改。
 
 ## 2. 成功标准
 
@@ -50,7 +50,7 @@
 
 ## 3. 非目标
 
-这些能力不进入第一版，避免范围失控：
+这些能力不进入第一版，因此可以限制第一版的范围：
 
 - 目录同步。
 - 远程编辑。
@@ -67,7 +67,7 @@
 - uid/gid 恢复。
 - 完整 VoiceOver/accessibility 达标。
 
-注意：keyboard-interactive 在真实环境中很常见，很多服务器把密码认证包装成 keyboard-interactive。第一版不承诺完整交互流程，但认证模块需要保留扩展点。
+注意：keyboard-interactive 在真实环境中很常见，很多服务器将密码认证封装为 keyboard-interactive。第一版不承诺完整交互流程，但是认证模块需要保留扩展点。
 
 ## 4. Workspace 结构
 
@@ -108,10 +108,10 @@ GPUI 应用入口和窗口层。
 - 不直接访问 Keychain；
 - 不包含 transfer planning 业务逻辑。
 
-workspace 的渲染实现按产品 surface 分文件：`render.rs` 保留 tab、pane 和 About
-等主工作区骨架，`settings_render.rs` 只负责设置与 profile 编辑，
-`transfer_render.rs` 只负责传输 drawer、job row 和状态栏。三者仍是同一个
-`WorkspaceView` 的实现，不引入额外 view state 或跨层抽象。
+workspace 的渲染实现按产品 surface 分文件：`render.rs` 保留 tab、pane、About
+等主工作区结构，`settings_render.rs` 只负责设置与 profile 编辑，
+`transfer_render.rs` 只负责传输 drawer、job row 和状态栏。但是，三者仍属于同一个
+`WorkspaceView` 的实现，因此不引入额外 view state 或跨层抽象。
 
 ### `crates/ui`
 
@@ -148,7 +148,7 @@ GPUI reusable components 和主题。
 - transfer planning；
 - error taxonomy。
 
-这个 crate 是稳定核心。即使换 UI 或换 SFTP 库，`core` 也应尽量不动。
+这个 crate 是稳定核心。即使更换 UI 或 SFTP 库，`core` 也应尽量保持稳定。
 
 ### `crates/sftp`
 
@@ -188,9 +188,9 @@ GPUI reusable components 和主题。
 
 敏感信息不写入普通配置文件。
 
-profile 持久化内部按职责拆分：`profile_file.rs` 只处理 `profiles.json` 的解析与
+profile 持久化内部按职责划分：`profile_file.rs` 只处理 `profiles.json` 的解析与
 原子写入，`profiles.rs` 负责 `ProfileStore`、Keychain 协调和事务语义；
-`storage.rs` 只组装模块并重导出现有公共 API。调用方不能绕过 `ProfileStore`
+`storage.rs` 只组合模块并重导出现有公共 API。因此，调用方不能绕过 `ProfileStore`
 分别修改 profile 文件和 secret。
 
 ### `crates/platform`
@@ -247,7 +247,7 @@ test_support -> core
 
 ## 6. 运行时模型
 
-GPUI 主线程负责 UI 和同步状态更新；Tokio runtime 负责网络和文件传输。
+GPUI 主线程负责 UI 和同步状态更新，而 Tokio runtime 负责网络和文件传输。
 
 ```text
 GPUI main thread
@@ -293,9 +293,9 @@ GPUI main thread
 - channel 类型优先使用 `flume`，因为它在 GPUI executor 和 Tokio runtime 两侧都能工作，不要求接收端运行在 Tokio 上；
 - channel 容量初始值：commands 256，events 1024；
 - GPUI 侧发送 command 必须使用 `flume::Sender::try_send`，禁止在主线程调用阻塞 `send`；
-- Tokio 侧发送 event 使用 `send_async`，让背压传导到 actor，但 progress event 必须先节流或合并；
+- Tokio 侧发送 event 使用 `send_async`，使背压传导到 actor，但是 progress event 必须先节流或合并；
 - 唯一的 event drain task 由进程级 `AppEventCoordinator` 生命周期持有，在 GPUI executor 上运行；`RuntimeController::take_event_receiver()` 只能交出一次 receiver，禁止每窗口各自消费或订阅 runtime event；
-- event drain task 收到 event 后进入 GPUI update closure：transfer 与 residual-temp 事件只更新一次进程级状态，tab/window 事件再分发到各 `Workspace` 并由 core stale-event guard 过滤；
+- event drain task 接收 event 后进入 GPUI update closure：transfer 与 residual-temp 事件只更新一次进程级状态；tab/window 事件随后分发到各 `Workspace`，并由 core stale-event guard 过滤；
 - event drain task 只允许 await `flume::Receiver::recv_async()`，不能 await 网络、文件 IO 或其他可能阻塞 UI 的操作；
 - Tokio task 只发送 `AppEvent`，不能持有任何 GPUI handle。
 
@@ -320,7 +320,7 @@ GPUI action
 - 低优先级 command，如重复 refresh、重复 progress poll，可以被合并或丢弃；
 - event channel 满时由 bounded `flume` 背压生产者，不能覆盖或跳过未读事件；状态转换和终态事件绝不能丢；
 - `TransferProgress` 必须节流，例如每个 transfer 最多 10 Hz 进入 UI。
-- `TransferProgress` 节流必须在 TransferManager 发 event 前完成；目录 planning 的首个 child 立即发出，后续 child 在生产端按 128 个一批发送，完成事件前冲刷尾批。
+- `TransferProgress` 节流必须在 TransferManager 发送 event 前完成；目录 planning 的首个 child 立即发送，后续 child 在生产端按每批 128 个发送，并且在完成事件之前发送最后一批。
 
 shutdown 策略：
 
@@ -396,9 +396,9 @@ pub struct StartTransferCommand {
 `ConnectCommand` 的 session 身份由 UI/core 侧在发起连接时分配（`AppState`
 持有单调递增的 session id 计数器；`TabState::begin_connect` 递增
 epoch）。runtime 不再自行分配 session_id/epoch，而是原样携带到该
-session 的所有 event 中——这保证陈旧事件防护（见下文）能在 UI 侧闭环。
+session 的所有 event 中。因此，陈旧事件防护（见下文）可以在 UI 侧形成完整校验流程。
 
-`settings: ConnectionSettings` 是 Keychain-backed profile 落地前的过渡
+`settings: ConnectionSettings` 是 Keychain-backed profile 实现前的过渡
 字段（决策 21）：
 
 ```rust
@@ -416,9 +416,9 @@ pub enum AuthCredential {
 ```
 
 `ConnectionSettings`/`AuthCredential` 派生 `Zeroize`/`ZeroizeOnDrop`，
-`Debug` 手写实现并对 `auth` 字段整体打码；`profile_id` 字段目前恒为
-占位值，等 storage 的 Keychain-backed profile 落地后才会被真正解析
-使用，`settings` 随之退场。
+`Debug` 使用手写实现，并对 `auth` 字段整体脱敏；`profile_id` 字段目前恒为
+占位值。storage 完成 Keychain-backed profile 后才会实际解析并使用该字段，
+那么 `settings` 也会随之移除。
 
 规则：
 
@@ -474,7 +474,7 @@ pub struct TransferPlanProgress {
 - `TrustRequestId`
 - `ConflictRequestId`
 
-这能避免用户快速切换 tab、关闭 tab、重连时旧事件污染新状态。
+因此，即使用户快速切换 tab、关闭 tab 或重连，旧事件也不会污染新状态。
 
 ### 陈旧事件防护
 
@@ -496,7 +496,7 @@ AND event.session_epoch == current_tab.session_epoch
 AND event.session_id == current connected/connecting session
 ```
 
-不满足时直接丢弃，并写 debug log。这个逻辑放在 `core`，不要散落在 view 里。
+如果不满足条件，则直接丢弃事件并记录 debug log。该逻辑位于 `core`，不能分散在 view 中。
 
 必须覆盖的测试：
 
@@ -599,7 +599,7 @@ New
 - 同一 host 多 tab 会建立多条 SSH 连接；
 - 服务器连接数限制可能更容易触发。
 
-后续可以增加 host-level session pool，但不要在 MVP 引入。
+后续可以增加 host-level session pool，但是 MVP 不引入该机制。
 
 ### ADR-003: 浏览 session 与传输 session
 
@@ -625,14 +625,14 @@ plan 重做握手。BrowsingSession 关闭只释放自己的 lease，不能取�
 和 transfer lease 广播；后续 acquire 必须建立新连接，禁止复用死 handle。最后一个 lease
 释放后连接进入有界 idle grace period，超时从池中移除。
 
-落地加固（2026-07-18）：TransferManager 为进程级唯一 owner；成功或跳过的 job 立即
+实现强化（2026-07-18）：TransferManager 为进程级唯一 owner；成功或跳过的 job 立即
 释放 retry route，可重试失败只保留 `Weak<SharedConnection>` 与非敏感 `ConnectionKey`，
 不能阻止 idle eviction；用户重连后 Retry 从连接池取得新 generation。窗口通过 `SessionCoordinator` 登记
 尚未释放的 tab，窗口关闭后用一条 `CloseTabs` 批量释放 browsing actor；普通 tab 关闭在
-command channel 满时使用异步补发。物理断连 token 同时驱动连接池 generation 淘汰和
+command channel 满时使用异步再次发送。物理断连 token 同时驱动连接池 generation 淘汰和
 browsing actor 的 `ConnectionLost` 事件。
 
-这个取舍优先保证：
+该取舍优先保证以下行为：
 
 - 大文件传输不阻塞目录浏览；
 - tab 关闭后，已进入全局队列的传输可以继续；
@@ -650,7 +650,7 @@ browsing actor 的 `ConnectionLost` 事件。
 - TransferManager 做 per-host 并发限制；
 - 如果服务器拒绝额外连接，fallback 为使用当前 tab 的 browsing session 执行传输，此时该 transfer 绑定 tab 生命周期，关闭 tab 会提示用户传输将取消。
 
-这是一项显式架构取舍：MVP 默认选择传输独立性，必要时降级为少连接模式。
+这是一项明确的架构取舍：MVP 默认选择传输独立性，但是必要时会降级为少连接模式。
 
 ## 9. SFTP 后端设计
 
@@ -690,7 +690,7 @@ pub struct RuntimeController {
 - 执行 SSH handshake；
 - host key 校验；
 - password/private key 认证；
-- 打开 SFTP subsystem；
+- 初始化 SFTP subsystem；
 - 处理远端目录浏览；
 - 处理轻量远端操作，如 mkdir、rename、delete；
 - keepalive；
@@ -736,7 +736,7 @@ per host active transfers: 2
 per tab active planning operations: 1
 ```
 
-第一版不做高级 bandwidth limit，但数据结构应允许后续增加。
+第一版不实现高级 bandwidth limit，但是数据结构应允许后续增加该能力。
 
 ### TransferSession
 
@@ -781,10 +781,10 @@ pub struct AuthFingerprint {
 - TransferManager 只在 `TransferSessionKey` 完全一致时复用 session。
 
 持久化写入统一使用同目录临时文件、`0600`、file `fsync`、atomic rename 和 parent
-directory `fsync`。如果 config/profiles/session/recents/residual 文件损坏或版本不支持，应用可用
-空内存状态继续启动，但该 store 禁止写回，避免在用户恢复原文件前静默覆盖。
+directory `fsync`。如果 config/profiles/session/recents/residual 文件损坏或版本不支持，应用可以
+使用空内存状态继续启动，但是该 store 禁止写回，因此不会在用户恢复原文件前静默覆盖。
 
-默认使用 `Dedicated`。如果服务端拒绝额外 SSH 连接，且用户确认接受限制，则 fallback 到 `BorrowBrowsingSession`。
+默认使用 `Dedicated`。但是，如果服务端拒绝额外 SSH 连接，且用户确认接受限制，则 fallback 到 `BorrowBrowsingSession`。
 
 Dedicated session lifecycle：
 
@@ -846,7 +846,7 @@ check_server_key(server_key)
 
 ### ADR-004: host key 回调与 UI 决策回传
 
-`russh::client::Handler::check_server_key` 发生在 SSH handshake 中，必须返回是否接受 server key。因此未知 host key 的 UI 决策必须通过显式 request/response 机制回传给 runtime。
+`russh::client::Handler::check_server_key` 发生在 SSH handshake 中，并且必须返回是否接受 server key。因此，未知 host key 的 UI 决策必须通过明确的 request/response 机制传递给 runtime。
 
 结构：
 
@@ -904,17 +904,17 @@ check_server_key
 - Trust and Save；
 - Cancel。
 
-不建议第一版提供 Accept Once。它容易让用户误解为已保存，且会让重连行为变得不稳定。
+第一版不建议提供 Accept Once，因为用户可能将其误解为已保存，而且重连行为也会因此变得不稳定。
 
 ### Mismatch policy
 
 host key mismatch 必须阻断，不提供一键覆盖。
 
-用户若确实需要替换，应进入后续的 known_hosts 管理界面。MVP 可以先给出错误说明和文件路径。
+如果用户确实需要替换，则应使用后续的 known_hosts 管理界面。MVP 只提供错误说明和文件路径。
 
 ### known_hosts MVP 支持子集
 
-MVP 目标是 OpenSSH-compatible 子集，而不是完整 OpenSSH grammar。
+MVP 的兼容目标是 OpenSSH-compatible 子集，因此不承诺完整 OpenSSH grammar。
 
 读取支持：
 
@@ -944,7 +944,7 @@ MVP 不承诺：
 - OpenSSH certificate host keys；
 - FIDO/U2F `sk-*` host key 完整兼容。
 
-实现优先使用现成 crate，例如 `ssh-key` 的 `known_hosts` 能力。只有在确认 crate 不满足 MVP 子集时，才写小型解析器；禁止自己实现完整 OpenSSH parser。
+实现时优先使用现成 crate，例如 `ssh-key` 的 `known_hosts` 能力。只有确认 crate 不满足 MVP 子集时，才实现小型解析器；但是，禁止自行实现完整 OpenSSH parser。
 
 ## 11. 认证设计
 
@@ -982,7 +982,7 @@ pub enum AuthMethod {
 
 不变量 `ref.is_some() ⇒ has_passphrase`；违反即 Corrupt。v1/v2 文件的
 `remember_passphrase` 字段由 storage 在内存中迁移（ref 存在则置
-`has_passphrase = true`），下次保存写为 v3。
+`has_passphrase = true`），因此下次保存时写入 v3 格式。
 
 `revision` 规则：
 
@@ -1011,14 +1011,14 @@ pub enum AuthMethod {
 - passphrase 默认可记住到 Keychain；profile 用三态表达：无 passphrase /
   有但不记住 / 已记住（2026-08-22 更新，取代旧的 `remember_passphrase` 布尔）。
 
-**2026-07-14 边界收口：** `ProfileStore` 是 profile 文件与 Keychain 生命周期的
+**2026-07-14 边界确定：** `ProfileStore` 是 profile 文件与 Keychain 生命周期的
 唯一协调者，`app` 不持有或调用 `KeychainStore`。Connect 与 Settings 分别通过
 `save_connection_settings` / `save_request` 进入同一事务：先备份并写入新 secret，
 `profiles.json` 原子提交成功后才替换内存并清理旧认证方式的 orphan；磁盘提交失败
 时恢复原 Keychain 值。删除同样先提交 profile 文件，再 best-effort 清理无引用
 secret，并把清理失败作为 warning 返回调用方。
 
-**2026-07-14 内存与诊断收口：** password/passphrase 表单使用不可克隆的
+**2026-07-14 内存与诊断边界确定：** password/passphrase 表单使用不可克隆的
 `SecretInputState`；替换、删除、清空和 drop 都会清零旧字符串缓冲区。输入组件的
 `Debug` 始终脱敏。第三方 SSH/IO 错误原文不直接进入 `UserFacingError` 或认证日志；
 私钥诊断最多记录文件名，不记录完整路径。
@@ -1053,7 +1053,7 @@ pub enum AuthFlow {
 }
 ```
 
-如果服务器只接受 keyboard-interactive，MVP 显示明确错误：该服务器要求 keyboard-interactive，当前版本暂不支持。不要把它伪装成普通密码失败。
+如果服务器只接受 keyboard-interactive，MVP 显示明确错误：该服务器要求 keyboard-interactive，但是当前版本暂不支持。因此，不能将其表述为普通密码失败。
 
 ### 私钥认证
 
@@ -1175,7 +1175,7 @@ pub enum TransferPlanState {
 
 规划策略：
 
-- 单文件传输也创建一个 plan，保证 UI 和状态机统一；
+- 单文件传输也创建一个 plan，因此 UI 和状态机保持统一；
 - 目录递归 planning 采用流式产出，每发现一批 child job 就 emit plan progress；
 - planning 阶段只遍历 source、识别 file kind、估算 size 和生成 child job；
 - planning 阶段不做 destination stat，也不做冲突检测；
@@ -1266,7 +1266,7 @@ Plan Queued
  -> Completed | Failed | Cancelled
 ```
 
-planning 不能一次性 stat 完 10k 文件后才更新 UI。否则用户会看到长时间无反馈，并且取消不及时。
+planning 不能在完成 10k 个文件的全部 stat 后才更新 UI。否则，用户会长时间得不到反馈，并且取消操作也无法及时生效。
 
 ### 上传流程
 
@@ -1316,7 +1316,7 @@ plan source
 .filename.macsftp-part-<transfer-id>
 ```
 
-如果目标目录不允许 dotfile，可以后续提供 fallback。第一版先保持简单。
+如果目标目录不允许 dotfile，则后续可以提供 fallback。但是，第一版暂不增加该机制。
 
 ### 取消
 
@@ -1328,7 +1328,7 @@ plan source
 - `Running`：停止流，关闭 handle，保留或清理 temp file；
 - `Completed`：不能取消。
 
-取消正在 running 的传输时，默认清理 `.macsftp-part` 临时文件。清理失败则记录 warning。
+取消处于 running 状态的传输时，默认清理 `.macsftp-part` 临时文件。如果清理失败，则记录 warning。
 
 实现要求：
 
@@ -1391,12 +1391,12 @@ remote readlink
 
 ### metadata warning 展示
 
-权限、mtime 或 symlink metadata preservation 失败时，传输本身不一定失败。UI 展示规则：
+权限、mtime 或 symlink metadata preservation 失败时，传输本身不一定失败。因此，UI 遵循以下展示规则：
 
 - transfer drawer 默认在对应 transfer row 上显示 warning 图标；
 - row 展开或 details 面板显示完整 metadata warning；
 - warning detail 包含失败字段、目标路径、底层错误摘要和是否可重试；
-- warning 不弹 modal，避免批量传输时打断用户；
+- warning 不显示 modal，因此批量传输流程不会中断；
 - completed transfer 如果带 warning，状态显示为 completed with warnings。
 
 ### 不保留 uid/gid
@@ -1410,12 +1410,12 @@ remote readlink
 
 ## 15. UI 规划
 
-第一版只做单窗口。多窗口会改变 `AppModel`、event routing 和 modal ownership，不进入 MVP。
+第一版只实现单窗口。多窗口会改变 `AppModel`、event routing 和 modal ownership，因此不进入 MVP。
 
-> **2026-07-15 更新 —— 多窗口事件边界已收敛。** 上述三点担忧均已解决：
+> **2026-07-15 更新 —— 多窗口事件边界已经确定。** 上述三项问题均已解决：
 > - **event routing**：`RuntimeController` 只暴露一个 bounded flume receiver，由进程级 `AppEventCoordinator` 唯一消费。transfer 与 residual-temp 事件只归并/持久化一次；tab/window 事件再投递给全部 workspace，并由既有的 `TabStore::accepts_remote_event` 按 `tab_id + session_id + session_epoch` 过滤。禁止 broadcast lag 覆盖未读结构事件。
 > - **AppModel**：`TransferStore` 与持久化资源（config/profiles/keychain/residual_temps/recents）+ `AppPaths` + tab-id 计数器提升为进程级 GPUI global（`SharedTransfers` / `AppResources`），所有窗口共享同一实例；tab 集合、模态、焦点仍为每窗口私有。会话恢复由下述 `SessionCoordinator` 单独持有，避免通用资源容器暴露多写入口。
-> - **modal ownership**：host-key 模态携带 `tab_id`，只在拥有该 tab 的窗口弹出；transfer conflict 由协调器只分配给一个活动窗口，窗口关闭后把仍 pending 的 prompt 重新分配给另一个窗口。
+> - **modal ownership**：host-key 模态携带 `tab_id`，只在拥有该 tab 的窗口显示；transfer conflict 由协调器只分配给一个活动窗口，窗口关闭后将仍处于 pending 状态的 prompt 重新分配给另一个窗口。
 > - `TabId` 由每实例 `max+1` 改为共享 `Arc<AtomicU64>`，跨窗口绝不冲突（runtime 的 session 注册表按 `TabId` 索引）。
 > - 关闭全部窗口后 app 常驻（原生 macOS 行为），Cmd+N / Dock 图标可重新开窗口。
 
@@ -1423,9 +1423,9 @@ remote readlink
 > 升级为 v2：顶层保存有序的窗口快照、活动窗口索引，每个窗口快照保存稳定的
 > `WindowSessionId`、活动 tab 索引和非敏感 tab/路径信息；v1 平面 tab 列表加载时
 > 自动迁移为一个窗口。`SessionCoordinator` 是 `SessionStore` 的唯一所有者：app quit
-> 在 GPUI 拆窗前一次收集并冻结所有 live workspace，之后的窗口关闭回调不得覆盖；
+> 在 GPUI 销毁窗口前一次性记录并冻结所有 live workspace，之后的窗口关闭回调不得覆盖；
 > 普通手动关窗则在窗口已不可访问后保存剩余窗口，关闭最后窗口保存空会话，Dock
-> 重开得到新窗口。启动按窗口快照逐窗恢复，但不会自动发起远端连接。窗口位置和大小
+> 再次启用应用时会创建新窗口。启动时按窗口快照逐个恢复窗口，但是不会自动发起远端连接。窗口位置和大小
 > 暂不持久化。
 
 ### 主布局
@@ -1465,7 +1465,7 @@ remote readlink
 - virtualized file list；
 - selection；
 - context menu；
-- drag selection 后续再做。
+- drag selection 在后续版本实现。
 
 远端 pane 状态：
 
@@ -1491,7 +1491,7 @@ Error
 - warning icon for completed-with-warning transfers；
 - pause/cancel/retry controls。
 
-第一版可以不做 pause，因为 SFTP chunk stream 暂停恢复比取消/重试复杂。UI 上先提供 cancel/retry。
+第一版可以不实现 pause，因为 SFTP chunk stream 的暂停与恢复比取消和重试更复杂。因此，UI 先提供 cancel/retry。
 
 metadata preservation warning 默认只显示 warning 图标；点击或展开 transfer row 后显示详情。
 
@@ -1506,21 +1506,21 @@ modal 类型：
 - destructive operation confirm；
 - error details。
 
-注意：modal 必须绑定 request id。用户切换 tab 或旧请求过期后，旧 modal 的确认不能误作用到新 session。
+注意：modal 必须绑定 request id。如果用户切换 tab 或旧请求过期，则旧 modal 的确认不能作用于新 session。
 
 ### Accessibility
 
-GPUI 的 accessibility 能力需要单独验证。MVP 不承诺完整 VoiceOver 达标，但不能主动破坏基础可用性：
+GPUI 的 accessibility 能力需要单独验证。MVP 不承诺完整 VoiceOver 达标，但是必须保持基础可用性：
 
 - 所有 icon-only button 必须有 tooltip/label；
 - modal 必须有明确标题和主操作；
 - keyboard focus flow 必须可测试；
 - 文件列表 selection 必须能通过键盘操作；
-- 后续若 GPUI a11y API 成熟，再补 VoiceOver 语义。
+- 后续若 GPUI a11y API 成熟，再增加 VoiceOver 语义。
 
 ### 文案与国际化边界
 
-MVP UI 默认语言英文优先，但业务层不能硬编码最终展示文案。
+MVP UI 默认优先使用英文，但是业务层不能硬编码最终展示文案。
 
 要求：
 
@@ -1564,7 +1564,7 @@ M1 前置 spike：
 - 确认当前 pin 住的 GPUI 版本是否提供 `list` 或 uniform list API；
 - 验证 10k 行滚动、hover、selection 不明显卡顿；
 - 验证 row 高度固定时不会出现 layout 抖动；
-- 如果 API 不存在或签名变化，先封装 `VirtualFileList`，不要让业务 view 直接依赖具体 GPUI list API。
+- 如果 API 不存在或签名变化，则先封装 `VirtualFileList`，因此业务 view 不会直接依赖具体 GPUI list API。
 
 ### Actions
 
@@ -1658,7 +1658,7 @@ DEBUG: stale event dropped, command coalesced, known_hosts match details
 TRACE: disabled by default
 ```
 
-MVP 的 SFTP 诊断日志只覆盖一次真实连接尝试的开始到终止结果：连接开始、连接池等待或复用、SSH 握手、host key 校验、认证、SFTP subsystem 初始化，以及连接成功或分类后的失败。（2026-08-21 补充：中途断线也纳入审计范围——`ClientHandler::disconnected` 按分类记录 `server_disconnected`（含枚举 reason code，不记录 wire 自由文本）或传输层失败标签；用户主动断开对应的 `Error::Disconnect` 哨兵路径保持静默。）每条连接事件携带 `tab_id`、`session_id`、`session_epoch`，便于关联并发连接；允许记录 host、port、username 和认证方式，但不记录 credential、完整私钥路径或第三方错误原文。默认日志过滤器关闭其他 `macsftp_sftp` target，只开启经过审计的 `macsftp_sftp::connection`；因此连接成功后，目录浏览、文件操作和传输过程不会写入 SFTP 诊断日志。开发者仍可通过 `RUST_LOG` 临时覆盖过滤器。
+MVP 的 SFTP 诊断日志只覆盖一次真实连接尝试的开始到终止结果：连接开始、连接池等待或复用、SSH 握手、host key 校验、认证、SFTP subsystem 初始化，以及连接成功或分类后的失败。（2026-08-21 更新：中途断线也纳入审计范围——`ClientHandler::disconnected` 按分类记录 `server_disconnected`（含枚举 reason code，不记录 wire 自由文本）或传输层失败标签；用户主动断开对应的 `Error::Disconnect` 哨兵路径保持静默。）每条连接事件携带 `tab_id`、`session_id`、`session_epoch`，因此可以关联并发连接；允许记录 host、port、username 和认证方式，但是不能记录 credential、完整私钥路径或第三方错误原文。默认日志过滤器关闭其他 `macsftp_sftp` target，只开启经过审计的 `macsftp_sftp::connection`；因此连接成功后，目录浏览、文件操作和传输过程不会写入 SFTP 诊断日志。开发者仍可通过 `RUST_LOG` 临时覆盖过滤器。
 
 ## 18. 配置与持久化
 
@@ -1684,18 +1684,18 @@ pub struct ProfilesFile {
 }
 ```
 
-第一版也要加版本号，避免后续迁移被迫写猜测逻辑。
+第一版也要增加版本号，因此后续迁移不需要使用推测逻辑。
 
 会话文件恢复（2026-07-18）：`session.json` 无法解析或版本不受支持时，启动仍使用空的
-内存快照，但第一次 checkpoint 必须先把原始字节原样保存为权限 `0600` 的
+内存快照，但是第一次 checkpoint 必须先将原始字节原样保存为权限 `0600` 的
 `session.json.corrupt[.N]`，备份成功后才允许原子写入新快照；恢复成功后正常 checkpoint
 必须重新开放。禁止因一次损坏永久关闭本次进程的会话持久化，也禁止无备份覆盖原文件。
 
 Profile 结构预留：
 
-- `group_id: Option<ProfileGroupId>`：MVP 不实现 folder/group UI，但数据结构预留；
+- `group_id: Option<ProfileGroupId>`：MVP 不实现 folder/group UI，但是数据结构预留该字段；
 - `last_local_path: Option<LocalPath>`：默认本地起始目录为 home，连接成功后可保存上次路径；
-- 同一个 profile 可以打开多个 tab，`TabState` 与 `ProfileId` 是多对一。
+- 同一个 profile 可以创建多个 tab，因此 `TabState` 与 `ProfileId` 是多对一关系。
 
 ### Transfer history
 
@@ -1737,12 +1737,12 @@ Profile 结构预留：
 测试环境：
 
 - 使用 Docker/容器化 OpenSSH server 作为主要 fixture；
-- 目标应用是 macOS，但 SFTP 协议层测试可以在 Linux CI 中跑；
+- 目标应用是 macOS，但是 SFTP 协议层测试可以在 Linux CI 中执行；
 - 测试容器内准备 password 用户、ed25519 key 用户、rsa key 用户；
 - 容器暴露独立 known_hosts fixture，覆盖 unknown/mismatch；
 - metadata 测试需要明确容器 filesystem 支持 chmod/mtime/symlink。
 
-不假设 OpenSSH 是 in-process library。`test_support` 负责启动/等待/清理测试容器。
+OpenSSH 不作为 in-process library 使用。因此，`test_support` 负责启动、等待和清理测试容器。
 
 无 Docker 策略：
 
@@ -1817,7 +1817,7 @@ Profile 结构预留：
 - `cargo test --workspace` 通过；
 - 空 GPUI window 启动。
 - ADR 中的关键数据流已反映到 `core` 类型草案；
-- M0 的类型草案只要求 struct/enum、id newtype、`new`/`Default` 骨架，不实现业务状态机。
+- M0 的类型草案只要求 struct/enum、id newtype、`new`/`Default` 基本结构，不实现业务状态机。
 
 状态：已交付。
 
@@ -1890,8 +1890,8 @@ Profile 结构预留：
 - host key modal 的 accept/reject 能完整回到 mock actor；
 - 旧 modal 确认不会作用到新 session。
 
-状态：已交付。`SessionBackend::Mock` 保留供 runtime 测试使用，App
-默认走 `SessionBackend::Real`（见 M3）。
+状态：已交付。`SessionBackend::Mock` 保留供 runtime 测试使用，而 App
+默认使用 `SessionBackend::Real`（见 M3）。
 
 ### M3: russh connection
 
@@ -1911,8 +1911,8 @@ Profile 结构预留：
 
 状态：已交付并在真实网络环境验证（真实 OpenSSH server，host key
 Match/Mismatch/NotFound 三分支、密码与私钥认证、`SessionBackend::Real`
-挂到 dispatch loop）。连接凭据来源是过渡态的连接表单（决策 21），
-Keychain-backed profile 仍留待后续里程碑。
+已经集成至 dispatch loop）。连接凭据来源是过渡态的连接表单（决策 21），
+但是 Keychain-backed profile 仍留待后续里程碑。
 
 ### M4: Remote browsing
 
@@ -1936,10 +1936,10 @@ Keychain-backed profile 仍留待后续里程碑。
 `RemoteDirLoaded(RemoteScoped<RemoteDirSnapshot>)`；`NoSuchFile` 和
 `PermissionDenied` 分别映射为可恢复的 `NotFound` / `PermissionDenied` pane
 错误并提供刷新重试。App 在 `TabConnected` 后自动请求 canonical 根目录，
-进目录/上级/刷新均经 command 路由，不再生成远端 mock 数据；读取期间保留
-旧列表并显示 refreshing 标记。结果仍走既有的 session/epoch 陈旧事件守卫，
+进入目录、访问上级目录和刷新均经 command 路由，因此不再生成远端 mock 数据；读取期间保留
+旧列表并显示 refreshing 标记。结果仍由既有的 session/epoch 陈旧事件守卫处理，
 且只会覆盖当前请求路径。`crates/sftp/tests/real_session.rs` 覆盖真实
-`read_dir`、10k entries、多 tab 独立性与 runtime → actor 路由闭环。
+`read_dir`、10k entries、多 tab 独立性与 runtime → actor 路由的完整流程。
 
 ### M5: Transfers
 
@@ -1962,18 +1962,18 @@ Keychain-backed profile 仍留待后续里程碑。
 - 4 个传输并发受控；
 - 大文件传输不阻塞目录浏览。
 
-状态：已交付。跨连接 residual temp 持久化与清理缺口已闭合（见 §1893 起），M5 ≈ 100%。`StartTransfer` 先建立 `TransferPlan`，本地
+状态：已交付。跨连接 residual temp 持久化与清理功能已经完成（见 §1893 起），M5 ≈ 100%。`StartTransfer` 先建立 `TransferPlan`，本地
 目录扫描在 blocking worker 中流式回传 `TransferPlanProgress`：首个 child 立即回传，
-后续 child 按 128 个一批并在完成前冲刷尾批；drawer 在
+后续 child 按每批 128 个发送，并在完成前发送最后一批；drawer 在
 planning 期间显示发现数量与总字节。进程级 TransferManager 最多并发 4 个不同 plan；
 同一 plan 的 child 按规划顺序串行，避免目录创建与子文件传输竞态。目录浏览保持在独立
 SFTP channel；规划、队列和运行态均可取消，失败
 job 可重试。目标已存在时 job 进入 conflict state，modal 支持 overwrite、skip、
 keep both、自定义 rename，以及 overwrite/skip/rename apply-to-all（作用域为
 `TransferPlanId`）。自定义 rename 默认建议副本名，输入仅接受同目录文件名，并可用
-Enter 提交；冲突 modal 打开后焦点直接落在该输入，并显示 source / destination /
+Enter 提交；冲突 modal 显示后，焦点直接置于该输入，并显示 source / destination /
 size / mtime，操作分两行布局以适配窄窗口。上传和
-下载会尽力保留 permissions / mtime；保留失败作为 warning，不把已完成的数据传输
+下载会尽力保留 permissions / mtime；如果保留失败，则记录 warning，但是不将已完成的数据传输
 改判失败。单文件上传/下载先写入按 `TransferId` 命名的隐藏 `.macsftp-part`，再用
 hard-link no-replace 发布最终目标；这避免在冲突检查后静默覆盖并发创建的文件。远端
 服务器未声明 `hardlink@openssh.com` 时 transfer 明确失败并可重试，不退回不安全的
@@ -1983,17 +1983,17 @@ rename 覆盖。成功、失败与取消都会 best-effort 清理 temp；清理�
 按 `connection_key = "{host}:{port}"` 区分远端、本地用 `"local"`），app 启动对本地
 temp 做无连接对账清理，tab 重连同 host 时发送 `AppCommand::RemoveRemoteTempFile` 清理
 远端残留；清理成功回写 `AppEvent::ResidualTempCleared` 移除记录。崩溃/强杀后残留的
-`.macsftp-part-*` 因此可在下次启动或重连时被主动清理，M5 该缺口已闭合。UI 层另新增可见的
-Upload/Download 工具栏按钮（按连接+选择态启用）与跨面板拖拽传输（本地条目拖至远端面板=上传，
-远端条目拖至本地面板=下载），消除此前仅菜单/快捷键导致的可发现性问题。修复一个 UI 状态 bug：当
+`.macsftp-part-*` 因此可在下次启动或重连时主动清理，M5 的该项功能已经完成。UI 层另新增可见的
+Upload/Download 工具栏按钮（按连接+选择态启用）与跨面板拖拽传输（本地条目移动至远端面板=上传，
+远端条目移动至本地面板=下载），因此解决了此前仅菜单和快捷键导致的可发现性问题。另修复一个 UI 状态 bug：当
 `TransferPlanCompleted` 时 root job 被错误地设为 `Queued` 且子任务完成后没有事件再次更新它，导致
 已完成的传输仍显示在 Queued 区；现子任务全部到达终态（Completed/Skipped/Failed）后 core reducer 会把
-root job 与 plan 同步 finalize，空 plan 在规划完成时直接 finalize。该状态转换现集中在 core 的幂等
+root job 与 plan 同步 finalize；如果 plan 为空，则在规划完成时直接 finalize。该状态转换现在集中在 core 的幂等
 `TransferStore::apply_event` reducer，重复事件不会复制 plan/job/conflict。上传和下载
 symlink 均复制 link 本身，不解引用，并由真实 sshd 集成测试覆盖。目录下载会在已连接 tab actor 中另开 SFTP channel
 执行远端递归 listing，并按同一首条即时 + 128 条批量规则发出 `TransferPlanProgress` 后才入队；这样远端扫描不占用
 浏览 channel，取消仍复用 root planning 的 cancellation token。目录 child job 会创建
-本地空目录与嵌套父目录，保留目录 metadata，文件与 symlink 继续走既有执行路径。
+本地空目录与嵌套父目录，并保留目录 metadata；文件与 symlink 继续使用既有执行路径。
 目录上传保留每个选中目录的顶层名称，多目录不会把相对路径铺平到同一个目标；空目录也
 生成 child job。已有同名目录按 merge 处理，文件级冲突仍逐项进入 plan-scoped 决策。
 本地目录 listing 及递归删除/rename/mkdir 已移到 GPUI background executor；每个 tab 用
@@ -2015,7 +2015,7 @@ symlink 均复制 link 本身，不解引用，并由真实 sshd 集成测试覆
 - 批量冲突不会重复弹大量 modal；
 - symlink 不被解引用复制。
 
-状态：已交付（conflict modal + apply-to-all + perms/mtime/symlink 全部落地，并由真实 sshd 集成测试覆盖）。M6 ≈ 100%。
+状态：已交付（conflict modal + apply-to-all + perms/mtime/symlink 均已实现，并由真实 sshd 集成测试覆盖）。M6 ≈ 100%。
 
 ### M7: Polish and packaging
 
@@ -2047,12 +2047,12 @@ symlink 均复制 link 本身，不解引用，并由真实 sshd 集成测试覆
 - 最终 bundle 的 `NSLocalNetworkUsageDescription` 存在且非空；
 - 不签名也可从本地构建产物运行；不承诺下载分发后的 Gatekeeper 行为。
 
-状态：已完成。M7 全部交付物落地：unsigned `build/macSFTP.app`（`plutil -lint` 通过）、
+状态：已完成。M7 的全部交付物均已实现：unsigned `build/macSFTP.app`（`plutil -lint` 通过）、
 `Info.plist` + 完整尺寸 `AppIcon.icns`、macOS 基础菜单与 About（`render_about` 含图标/名称/
 `CARGO_PKG_VERSION` 版本/Copy Version Info）、tracing 日志、单窗口 settings surface
 （`OpenSettings` 替换主工作区，外观 system/light/dark 持久化、关闭恢复）、`config.json` v1
-（仅外观）。验收证据已补齐：`docs/m7-test-matrix.md`（手动测试矩阵 + 执行结果）、
-`docs/m7-visual-polish.md`（Zed-style 视觉打磨验证标准与执行结果）、
+（仅外观）。验收证据已经完整：`docs/m7-test-matrix.md`（手动测试矩阵 + 执行结果）、
+`docs/m7-visual-polish.md`（Zed-style 视觉完善验证标准与执行结果）、
 `crates/app/src/m7_regression.rs`（M7 专属 `m7_` 前缀回归套件，守护版本单一来源与图标源资源）。
 M7 ≈ 100%；MVP ≈ 100%。
 
@@ -2065,7 +2065,7 @@ M7 ≈ 100%；MVP ≈ 100%。
 - API 破坏性变更；
 - 文档不完整；
 - macOS 细节可能需要读 Zed 源码。
-- `list` / uniform list API 可能不存在、移动或签名变化。
+- `list` / uniform list API 可能不存在，也可能发生移动或签名变化。
 
 缓解：
 
@@ -2087,7 +2087,7 @@ M7 ≈ 100%；MVP ≈ 100%。
 
 - 真实 OpenSSH server integration tests；
 - 错误分类清晰；
-- metadata preservation 失败时传输本身仍可完成，但 UI 显示 warning；
+- metadata preservation 失败时传输本身仍可完成，但是 UI 会显示 warning；
 - 版本 pin。
 
 ### 多标签资源占用
@@ -2103,7 +2103,7 @@ M7 ≈ 100%；MVP ≈ 100%。
 - 默认连接数限制；
 - 空闲 tab 后续可 suspend；
 - MVP 先保持独立 browsing session，后续再设计 pool；
-- transfer session 创建失败时 fallback 到借用 browsing session，并提示 tab 关闭会取消传输；
+- transfer session 创建失败时 fallback 到借用 browsing session，并且提示用户关闭 tab 会取消传输；
 - 对同 host 传输并发默认限制为 2，且允许用户降到 1。
 
 ### 传输取消和临时文件
@@ -2112,7 +2112,7 @@ M7 ≈ 100%；MVP ≈ 100%。
 
 - 取消时远端 temp file 残留；
 - 本地权限/mtime 设置失败；
-- rename 原子性依赖文件系统和 server。
+- rename 的原子性依赖文件系统和 server。
 
 缓解：
 
@@ -2120,7 +2120,7 @@ M7 ≈ 100%；MVP ≈ 100%。
 - best-effort cleanup；
 - warnings 可见；
 - transfer log 记录 temp path。
-- 记录 residual temp file（`ResidualTempStore` + `AppEvent` 持久化），下次连接同 host 时主动清理（已实现）。
+- 记录 residual temp file（`ResidualTempStore` + `AppEvent` 持久化），因此下次连接同 host 时可以主动清理（已实现）。
 
 ### 双运行时桥接
 
@@ -2152,11 +2152,11 @@ M7 ≈ 100%；MVP ≈ 100%。
 - request id + session epoch 绑定；
 - tab close/reconnect 时自动 reject pending request。
 
-## 22. Review 后补充决策
+## 22. Review 后增加的决策
 
 根据 `docs/archive/architecture-review.md`、`docs/architecture-review-v2.md` 和 `docs/architecture-review-v3.md`，以下问题已转为明确决策：
 
-1. Profile folder/group：MVP 不做 UI，但 profile 数据结构预留 `group_id: Option<ProfileGroupId>`。
+1. Profile folder/group：MVP 不实现 UI，但是 profile 数据结构预留 `group_id: Option<ProfileGroupId>`。
 2. 同 profile 多 tab：允许。`TabState` 与 `ProfileId` 是多对一。
 3. 关闭 app 时运行中 transfer：随进程结束；**不**跨启动展示未完成 history（会话清空）。
 4. 远端删除：SFTP 无 trash 概念。MVP 直接 confirm 删除，批量删除必须显示不可撤销提示。
@@ -2167,39 +2167,39 @@ M7 ≈ 100%；MVP ≈ 100%。
 8. transfer history：无跨会话目录；drawer 只显示进程内 `TransferStore` 分组。
 9. known_hosts 子集外 entry：按行忽略并写 WARN log，不阻断整个文件解析。
 10. 无 Docker 的本地 integration tests：默认 skip 并打印提示；CI 必须提供 Docker。
-11. M0 类型草案范围：只定义核心 struct/enum/id/new/default 骨架，不实现业务状态机。
+11. M0 类型草案范围：只定义核心 struct/enum/id/new/default 基本结构，不实现业务状态机。
 12. `ConnectionProfile.revision` 是 `AuthFingerprint.profile_revision` 的来源，由 storage 层自动递增。
-13. 用户取消 planning 会丢弃 child jobs；planning 错误中断会保留已发现 child jobs 并提示是否部分继续。
+13. 用户取消 planning 会丢弃 child jobs；但是 planning 因错误中断时会保留已发现的 child jobs，并提示是否继续部分传输。
 14. borrow fallback 失效时先回退 dedicated，dedicated 也不可行才 failed。
 15. `TransferProgress` 节流在 TransferManager 发 event 前完成；planning child 在生产端批量化，event drain 不通过丢事件来降载。
 16. dedicated transfer session 使用引用计数，最后一个 active transfer 释放后关闭。
-17. 三轮架构评审后不再继续做文档层架构评审；进入 M0，通过实现期 spike 验证剩余风险。
+17. 三轮架构评审后不再继续进行文档层架构评审；项目进入 M0，并且通过实现期 spike 验证剩余风险。
 18. MVP UI 默认语言英文优先。
 19. metadata preservation warning 默认在 transfer drawer 显示 warning 图标，点击或展开 transfer row 查看详情。
 20. session_id/session_epoch 由 UI/core 侧在发起连接时分配并放入 `ConnectCommand`；runtime 与 actor 只是回显，不自行分配（M2 实现期决策，保证 stale event guard 端到端一致）。
-21. Keychain-backed profile 落地前的过渡：连接表单收集 `ConnectionSettings`（zeroize 容器、Debug 全量 redact）并直接随 `ConnectCommand` 传给 runtime；secret 仅驻内存（per-tab 缓存供重连），不持久化。Keychain + profiles.json 接入后，command 恢复为按 `profile_id` 解析。
-22. M4a `ReadRemoteDir` 路由：dispatch loop 为每个 `SessionBackend::Real` session 建立请求信箱（`flume` bounded channel），`RemoteSessionActor` 连接成功后用 `select!` 循环同时监听 cancel / connection_lost / 请求信箱，复用已持有的 `SftpSession` 执行 `read_dir`；结果经 `RemoteDirLoaded(RemoteScoped<RemoteDirSnapshot>)` 回传，走既有 session/epoch 陈旧事件守卫。App 侧在 `TabConnected` 后自动发起根目录请求；导航/上级/刷新一律改为发命令，不再本地拼接路径或复用 mock 数据。若同一 session 内有后续导航请求，只有匹配当前目标路径的 listing 可以替换列表。
-23. 多窗口事件所有权：runtime event receiver 只有一个进程级所有者。transfer reducer、rate sampler 和 residual-temp persistence 只执行一次；workspace 只处理窗口/tab 状态。transfer conflict 只能属于一个 live window，owner 关闭后重新分配。
+21. Keychain-backed profile 实现前的过渡：连接表单收集 `ConnectionSettings`（zeroize 容器、Debug 全量 redact）并直接随 `ConnectCommand` 传给 runtime；secret 仅驻内存（per-tab 缓存供重连），不持久化。Keychain + profiles.json 接入后，command 恢复为按 `profile_id` 解析。
+22. M4a `ReadRemoteDir` 路由：dispatch loop 为每个 `SessionBackend::Real` session 建立请求信箱（`flume` bounded channel），`RemoteSessionActor` 连接成功后用 `select!` 循环同时监听 cancel / connection_lost / 请求信箱，复用已持有的 `SftpSession` 执行 `read_dir`；结果经 `RemoteDirLoaded(RemoteScoped<RemoteDirSnapshot>)` 回传，并由既有 session/epoch 陈旧事件守卫处理。App 侧在 `TabConnected` 后自动发起根目录请求；导航、上级目录和刷新一律改为发命令，因此不再在本地拼接路径或复用 mock 数据。若同一 session 内有后续导航请求，则只有匹配当前目标路径的 listing 可以替换列表。
+23. 多窗口事件所有权：runtime event receiver 只有一个进程级所有者。因此，transfer reducer、rate sampler 和 residual-temp persistence 只执行一次，而 workspace 只处理窗口/tab 状态。transfer conflict 只能属于一个 live window；owner 关闭后，协调器会重新分配该 conflict。
 
 ## 23. 剩余待确认问题
 
-当前没有阻塞 M0 的待确认问题。剩余风险通过第 19 节的实现期 spike 验证。
+当前没有阻塞 M0 的待确认问题。因此，剩余风险通过第 19 节的实现期 spike 验证。
 
 ## 24. 远程编辑的权威快照校验
 
-远程自动回传（edit-and-upload-back）在 M0 阶段落地，但本地保存绝不能再依赖任何**缓存的 UI 目录列表**来授权对远端文件的覆盖写。本节记录权威快照校验协议及其已知边界（历史 post-merge bug 分析已按惯例删除，见 `3f4692f`；修复验收与已知限制见 `docs/progress-analysis-2026-08-01.md` §2）。
+远程自动回传（edit-and-upload-back）在 M0 阶段完成，但是本地保存绝不能依赖任何**缓存的 UI 目录列表**来授权覆盖远端文件。本节记录权威快照校验协议及其已知边界（历史 post-merge bug 分析已按惯例删除，见 `3f4692f`；修复验收与已知限制见 `docs/progress-analysis-2026-08-01.md` §2）。
 
 ### 24.1 协议概要
 
-1. **本地保存进入 `CheckingRemote` 阶段。** 编辑监听器（watcher）在本地临时文件落盘后，将编辑会话（edit session）推进到 `EditPhase::CheckingRemote`，并写入两个仅在该阶段为 `Some` 的字段：`pending_check_id: Option<EditCheckId>` 与 `checking_local_mtime: Option<Timestamp>`。这两个字段在每次离开该阶段时都被清空，用于阻止监听器对同一保存重复派发校验命令。
+1. **本地保存进入 `CheckingRemote` 阶段。** 编辑监听器（watcher）在本地临时文件完成写入后，将编辑会话（edit session）推进到 `EditPhase::CheckingRemote`，并写入两个仅在该阶段为 `Some` 的字段：`pending_check_id: Option<EditCheckId>` 与 `checking_local_mtime: Option<Timestamp>`。这两个字段在每次离开该阶段时都会清空，因此监听器不会针对同一次保存重复派发校验命令。
 2. **UI/core 是 `EditCheckId` 的唯一分配方。** 只能通过 `EditSessionStore::next_check_id()` 分配；runtime 与 actor 只回显该 ID，绝不自行生成。
-3. **runtime 将受限命令路由到 live actor。** watcher 派发一个 `AppCommand`，请求对 `remote_path` 执行一次实时的 `symlink_metadata` 读取，并携带 `EditCheckId` 与本地保存时刻的 mtime。该命令是有界的（bounded），无法路由到 live actor 时不会无限挂起。
+3. **runtime 将受限命令路由到 live actor。** watcher 派发一个 `AppCommand`，请求对 `remote_path` 执行一次实时的 `symlink_metadata` 读取，并携带 `EditCheckId` 与本地保存时刻的 mtime。该命令是有界的（bounded），因此无法路由到 live actor 时不会无限等待。
 4. **actor 使用 `symlink_metadata` 并发出带作用域的结果。** `RemoteSessionActor` 针对目标文件（而非目录列表）调用 `symlink_metadata`，回显 `EditSessionId` + `RemoteEventScope` + `EditCheckId` + path + 远端快照，经 `RemoteEditSnapshotChecked` / `RemoteEditSnapshotCheckFailed` 回传。
-5. **路由失败走 epoch 关联事件。** 当受限命令无法投递到 live actor（如会话已断开）时，发出 `RemoteEditSnapshotDispatchFailed`；该事件是**按 epoch 关联**的（非 remote-scoped），携带 `tab_id` / `session_epoch` / `path`，以便只有确切的待处理元组（tab/epoch/session/check/path）可以被重置，而不会误伤重连后的替换校验。
+5. **路由失败使用 epoch 关联事件。** 当受限命令无法投递到 live actor（如会话已断开）时，发出 `RemoteEditSnapshotDispatchFailed`；该事件是**按 epoch 关联**的（非 remote-scoped），携带 `tab_id` / `session_epoch` / `path`。因此，只有确切的待处理元组（tab/epoch/session/check/path）可以被重置，并且不会影响重连后的替换校验。
 
 ### 24.2 结果只被应用一次（相关性守卫）
 
-三个校验事件由**进程级** `AppEventCoordinator` 独占处理，**不广播到 workspace**（广播会竞争）。协调器通过 `TabStore::accepts_remote_event` + `workspace_windows(cx)` 迭代定位拥有该事件的 `Workspace`。
+三个校验事件由**进程级** `AppEventCoordinator` 独占处理，**不广播到 workspace**，因为广播会产生竞争。协调器通过 `TabStore::accepts_remote_event` + `workspace_windows(cx)` 迭代定位拥有该事件的 `Workspace`。
 
 应用前必须满足**完整相关性守卫**（apply exactly once）：
 
@@ -2210,11 +2210,11 @@ M7 ≈ 100%；MVP ≈ 100%。
 - `tab_id == session.tab_id`；
 - `session_epoch == session.session_epoch`。
 
-`DispatchFailed` 额外要求 `tab_id` / `session_epoch` / `path` 三者都与待处理元组一致（不仅仅是 `check_id` 匹配）。**过期的会话作用域、过期的 epoch、以及作废的 check ID 一律被忽略**，因此重连后的会话不会被旧结果篡改。
+`DispatchFailed` 额外要求 `tab_id` / `session_epoch` / `path` 三者都与待处理元组一致，不能只匹配 `check_id`。**过期的会话作用域、过期的 epoch、以及作废的 check ID 一律被忽略**，因此重连后的会话不会被旧结果篡改。
 
-### 24.3 重新 stat 守卫（TOCTOU 残余闭环）
+### 24.3 重新 stat 守卫（TOCTOU 残余风险控制）
 
-相关性通过后，协调器**再次 stat 临时文件**：若其当前 mtime ≠ `checking_local_mtime`，则放弃本次上传并回退到 `Editing`（保留 baseline）。这保证「校验在途期间又发生了一次本地保存」不能授权覆盖远端——必须重新发起一次校验。
+相关性通过后，协调器**再次 stat 临时文件**：若其当前 mtime ≠ `checking_local_mtime`，则放弃本次上传并回退到 `Editing`（保留 baseline）。因此，如果校验尚未完成时又发生一次本地保存，本次校验不能授权覆盖远端，而必须重新发起一次校验。
 
 ### 24.4 成功 / 冲突 / 失败分支
 

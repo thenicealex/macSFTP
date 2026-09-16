@@ -1,20 +1,20 @@
-# Scoped Host-Key Mismatch Implementation Plan
+# Host-Key Mismatch 作用域实施计划
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **Agent 执行要求：** 必须使用 `superpowers:executing-plans`，并且按任务实施本计划。
 
-**Goal:** Deliver one host-key mismatch event for every logical connection attempt, scoped to that attempt, even when several sessions wait on the same pooled physical handshake.
+**目标：** 每次逻辑连接尝试都必须收到一个 host-key mismatch event，并且该 event 仅属于对应的连接尝试。即使多个 session 等待同一个池化物理握手，该要求也必须成立。
 
-**Architecture:** The physical SSH handler records immutable mismatch details but no longer publishes a logical app event. `ConnectFailure::HostKeyMismatch` carries those details through the connection pool broadcast. Each logical caller—the runtime or `ConnectionManager::connect_session`—translates the failure into `AppEvent::HostKeyMismatch` using its own authoritative `RemoteEventScope`. Core exposes that scope to the existing stale-event guard, so current mismatches hard-block while stale mismatches cannot affect replacement sessions.
+**架构：** 物理 SSH handler 记录不可变的 mismatch details，但是不再发布逻辑 app event。`ConnectFailure::HostKeyMismatch` 通过连接池 broadcast 传递这些 details。每个逻辑调用方，即 runtime 或 `ConnectionManager::connect_session`，使用自身的权威 `RemoteEventScope` 将 failure 转换为 `AppEvent::HostKeyMismatch`。Core 将该 scope 提供给现有 stale-event guard。因此，当前 mismatch 会强制阻断连接，但是过期 mismatch 不会影响替代 session。
 
-**Tech Stack:** Rust, Tokio broadcast channels, `macsftp-core` stale-event guard, GPUI workspace tests, russh/OpenSSH integration tests.
+**技术栈：** Rust、Tokio broadcast channel、`macsftp-core` stale-event guard、GPUI workspace tests、russh/OpenSSH integration tests。
 
 ---
 
-## Scope and invariants
+## 范围与不变量
 
-- PR title: `Scope pooled host-key mismatches to logical sessions`
-- Primary defect: `CORE-SFTP-001`
-- Files expected to change:
+- PR 标题：`Scope pooled host-key mismatches to logical sessions`
+- 主要缺陷：`CORE-SFTP-001`
+- 预计修改以下文件：
   - `crates/core/src/core.rs`
   - `crates/sftp/src/physical_connection.rs`
   - `crates/sftp/src/pool.rs`
@@ -22,20 +22,20 @@
   - `crates/app/src/workspace/event_handling.rs`
   - `crates/app/src/workspace/tests.rs`
   - `crates/sftp/tests/real_session.rs`
-- Required invariants:
-  1. A matching host-key mismatch always blocks the connection and remains non-retryable in UI.
-  2. Every logical connection attempt receives exactly one mismatch event with its own `(tab_id, session_id, session_epoch)`.
-  3. A stale mismatch never mutates a replacement session.
-  4. Fingerprint details are calculated once by the physical handshake and cloned through the pooled failure; logical callers do not reread `known_hosts`.
-- Do not add an override action, one-click known-host replacement, or a new session-ID allocator.
-- Do not attach the first caller’s scope to a pooled failure shared by later logical callers.
+- 必须保持以下不变量：
+  1. 匹配的 host-key mismatch 始终阻断连接，并且在 UI 中保持不可重试。
+  2. 每次逻辑连接尝试恰好收到一个 mismatch event，并且 event 包含该尝试自身的 `(tab_id, session_id, session_epoch)`。
+  3. 过期 mismatch 绝不能修改替代 session。
+  4. 物理握手只计算一次 fingerprint details，并通过 pooled failure 复制该数据。因此，逻辑调用方不能再次读取 `known_hosts`。
+- 不能增加 override action、一键替换 known-host 的功能或新的 session-ID allocator。
+- 不能将第一个调用方的 scope 写入由后续逻辑调用方共享的 pooled failure。
 
-### Task 1: Prove the core stale-event gap
+### Task 1：验证 core 的 stale-event 缺口
 
-**Files:**
-- Modify/Test: `crates/core/src/core.rs:1630-1728, 1843-1849`
+**文件：**
+- 修改/测试：`crates/core/src/core.rs:1630-1728, 1843-1849`
 
-**Step 1: Add a failing stale mismatch test**
+**Step 1：增加失败的 stale mismatch 测试**
 
 ```rust
 #[test]
@@ -55,27 +55,27 @@ fn app_state_rejects_host_key_mismatch_from_old_session() {
 }
 ```
 
-This initially fails to compile because `HostKeyMismatch` has `tab_id`, not `scope`.
+该测试在实现前无法编译，因为 `HostKeyMismatch` 包含 `tab_id`，但是不包含 `scope`。
 
-**Step 2: Add the live companion test**
+**Step 2：增加当前 session 的对应测试**
 
-Add `app_state_accepts_host_key_mismatch_from_current_session` using scope `(TabId(1), SessionId(11), 2)`.
+增加 `app_state_accepts_host_key_mismatch_from_current_session`，并使用 scope `(TabId(1), SessionId(11), 2)`。
 
-**Step 3: Run the red tests**
+**Step 3：执行预期失败的测试**
 
 ```bash
 cargo test -p macsftp-core app_state_rejects_host_key_mismatch -- --nocapture
 cargo test -p macsftp-core app_state_accepts_host_key_mismatch -- --nocapture
 ```
 
-Expected before implementation: compile failure mentioning unknown field `scope`.
+实现前的预期结果：编译失败，并且错误信息指出未知字段 `scope`。
 
-### Task 2: Add one authoritative scope to the core event
+### Task 2：为 core event 增加唯一的权威 scope
 
-**Files:**
-- Modify/Test: `crates/core/src/core.rs:1630-1728, 1843-1849, 2973-3015`
+**文件：**
+- 修改/测试：`crates/core/src/core.rs:1630-1728, 1843-1849, 2973-3015`
 
-**Step 1: Change the payload**
+**Step 1：修改 payload**
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,44 +88,44 @@ pub struct HostKeyMismatch {
 }
 ```
 
-Remove `tab_id`; do not duplicate identity values that can drift.
+移除 `tab_id`，因为重复存储 identity values 可能导致数据不一致。
 
-**Step 2: Expose it through the central guard**
+**Step 2：通过 central guard 提供 scope**
 
-Add to `AppEvent::remote_scope()`:
+在 `AppEvent::remote_scope()` 中增加：
 
 ```rust
 Self::HostKeyMismatch(mismatch) => Some(mismatch.scope.clone()),
 ```
 
-Update the method comment to name unknown-host prompts and mismatch events as security-sensitive stale-filtered events.
+更新方法注释，并明确说明 unknown-host prompt 和 mismatch event 是需要 stale filtering 的安全敏感事件。
 
-**Step 3: Add scope extraction coverage**
+**Step 3：增加 scope extraction 覆盖**
 
-Add `remote_scope_extracts_from_host_key_mismatch`, asserting exact scope, `is_remote_scoped() == true`, and `is_transfer_event() == false`.
+增加 `remote_scope_extracts_from_host_key_mismatch`，并断言 scope 完全一致、`is_remote_scoped() == true` 和 `is_transfer_event() == false`。
 
-**Step 4: Run core tests**
+**Step 4：执行 core 测试**
 
 ```bash
 cargo test -p macsftp-core host_key_mismatch -- --nocapture
 cargo test -p macsftp-core remote_scope_extracts_from_host_key_mismatch -- --nocapture
 ```
 
-Expected: PASS.
+预期结果：PASS。
 
-**Step 5: Commit**
+**Step 5：提交变更**
 
 ```bash
 git add crates/core/src/core.rs
 git commit -m "Scope host key mismatches to sessions"
 ```
 
-### Task 3: Return mismatch details from the physical handshake
+### Task 3：让物理握手返回 mismatch details
 
-**Files:**
-- Modify/Test: `crates/sftp/src/physical_connection.rs:25-39, 105-128, 516-580`
+**文件：**
+- 修改/测试：`crates/sftp/src/physical_connection.rs:25-39, 105-128, 516-580`
 
-**Step 1: Add a scope-free physical result**
+**Step 1：增加不含 scope 的物理结果**
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,20 +153,21 @@ pub enum ConnectFailure {
 }
 ```
 
-`HostKeyMismatchDetails` deliberately has no `RemoteEventScope`: one physical handshake result can be observed by multiple logical callers.
+`HostKeyMismatchDetails` 明确不包含 `RemoteEventScope`，因为多个逻辑调用方可以观察同一个物理握手结果。
 
-**Step 2: Stop sending the app event from `check_server_key`**
+**Step 2：停止从 `check_server_key` 发送 app event**
 
-On mismatch:
-1. calculate expected and actual fingerprints once;
-2. record `HostKeyRejection::Mismatch(details)`;
-3. return `Ok(false)`.
+发生 mismatch 时：
 
-Remove the current `event_tx.send_async(AppEvent::HostKeyMismatch(...))` from this branch. Keep structural mismatch logging, including the physical initiator’s scope for diagnostics, but never log fingerprints.
+1. 计算一次 expected 和 actual fingerprints；
+2. 记录 `HostKeyRejection::Mismatch(details)`；
+3. 返回 `Ok(false)`。
 
-**Step 3: Carry details through handshake failure**
+从该分支移除当前的 `event_tx.send_async(AppEvent::HostKeyMismatch(...))`。保留结构化 mismatch 日志，并且为诊断信息保留物理发起方的 scope，但是绝不能记录 fingerprint。
 
-Map:
+**Step 3：通过 handshake failure 传递 details**
+
+使用以下映射：
 
 ```rust
 Some(HostKeyRejection::Mismatch(details)) => {
@@ -174,11 +175,11 @@ Some(HostKeyRejection::Mismatch(details)) => {
 }
 ```
 
-Update `log_connect_failure` pattern matching to `ConnectFailure::HostKeyMismatch(_)`.
+将 `log_connect_failure` 的模式匹配更新为 `ConnectFailure::HostKeyMismatch(_)`。
 
-**Step 4: Add a pure event-construction helper**
+**Step 4：增加纯 event-construction helper**
 
-Keep logical translation consistent:
+使用以下辅助函数。因此，各处的逻辑转换保持一致：
 
 ```rust
 pub fn host_key_mismatch_event(
@@ -195,31 +196,31 @@ pub fn host_key_mismatch_event(
 }
 ```
 
-Add `host_key_mismatch_event_uses_logical_scope` as a unit test.
+增加单元测试 `host_key_mismatch_event_uses_logical_scope`。
 
-**Step 5: Run physical-connection tests**
+**Step 5：执行 physical-connection 测试**
 
 ```bash
 cargo test -p macsftp-sftp host_key_mismatch_event_uses_logical_scope -- --nocapture
 ```
 
-Expected: PASS.
+预期结果：PASS。
 
-**Step 6: Commit**
+**Step 6：提交变更**
 
 ```bash
 git add crates/sftp/src/physical_connection.rs
 git commit -m "Return host key mismatch details from handshake"
 ```
 
-### Task 4: Emit one mismatch per runtime connection attempt
+### Task 4：为每次 runtime 连接尝试发送一个 mismatch event
 
-**Files:**
-- Modify/Test: `crates/sftp/src/runtime.rs:480-610`
+**文件：**
+- 修改/测试：`crates/sftp/src/runtime.rs:480-610`
 
-**Step 1: Translate pooled failure in both runtime branches**
+**Step 1：在两个 runtime 分支中转换 pooled failure**
 
-Both failure paths currently map `ConnectFailure::HostKeyMismatch` to `None`. Replace them with:
+两个 failure path 目前都将 `ConnectFailure::HostKeyMismatch` 映射为 `None`。因此，将该映射替换为：
 
 ```rust
 ConnectFailure::HostKeyMismatch(details) => Some(
@@ -230,64 +231,64 @@ ConnectFailure::HostKeyMismatch(details) => Some(
 ),
 ```
 
-The branches are:
-- `Ok(Ok(shared_connection))` followed by SFTP channel setup failure handling;
-- `Ok(Err(failure))` from the physical connection broadcast.
+需要修改以下分支：
+- `Ok(Ok(shared_connection))` 之后的 SFTP channel setup failure 处理；
+- 来自物理连接 broadcast 的 `Ok(Err(failure))`。
 
-The first branch should not normally receive a host-key mismatch, but exhaustive handling keeps the contract total.
+第一个分支通常不会收到 host-key mismatch，但是处理全部枚举情况可以保证 contract 完备。
 
-**Step 2: Handle event-send failure explicitly**
+**Step 2：明确处理 event-send failure**
 
-Replace silent `let _ = event_tx_clone.send_async(event).await` in the touched branches with a structural warning. Do not log fingerprints or credentials.
+将所修改分支中的静默 `let _ = event_tx_clone.send_async(event).await` 替换为结构化 warning。但是，不能记录 fingerprint 或 credential。
 
-**Step 3: Extract a private failure-to-event helper if it removes duplication**
+**Step 3：如果能够消除重复，则提取 private failure-to-event helper**
 
-The helper must receive the logical `scope`; it must not read a scope from `ConnectFailure`.
+该辅助函数必须接收逻辑 `scope`，并且不能从 `ConnectFailure` 读取 scope。
 
-**Step 4: Add deterministic runtime tests**
+**Step 4：增加确定性的 runtime 测试**
 
-Add:
+增加以下测试：
 - `pooled_mismatch_failure_uses_first_logical_scope`
 - `pooled_mismatch_failure_uses_second_logical_scope`
 
-Use the same cloned details and two different scopes. Assert exactly one event per translation and exact fingerprint preservation.
+两个测试使用相同的 details 副本和不同的 scope。每次转换必须恰好产生一个 event，并且 fingerprint 必须保持完全一致。
 
-**Step 5: Run focused runtime tests**
+**Step 5：执行聚焦的 runtime 测试**
 
 ```bash
 cargo test -p macsftp-sftp pooled_mismatch_failure_ -- --nocapture
 ```
 
-Expected: PASS.
+预期结果：PASS。
 
-**Step 6: Commit**
+**Step 6：提交变更**
 
 ```bash
 git add crates/sftp/src/runtime.rs
 git commit -m "Emit scoped mismatch events per runtime session"
 ```
 
-### Task 5: Fix the pooled convenience path and prove multiple waiters
+### Task 5：修复 pooled convenience path，并验证多个 waiter
 
-**Files:**
-- Modify: `crates/sftp/src/pool.rs:218-363`
-- Test: `crates/sftp/tests/real_session.rs:1371-1410`
+**文件：**
+- 修改：`crates/sftp/src/pool.rs:218-363`
+- 测试：`crates/sftp/tests/real_session.rs:1371-1410`
 
-**Step 1: Translate mismatch in `connect_session`**
+**Step 1：在 `connect_session` 中转换 mismatch**
 
-Replace:
+替换以下代码：
 
 ```rust
 ConnectFailure::HostKeyMismatch => {}
 ```
 
-with an explicit send of `host_key_mismatch_event(scope.clone(), details.clone())`. Handle send failure with a structural warning. The returned `result` remains `Err(ConnectFailure::HostKeyMismatch(details))`; emitting the event does not convert failure into success.
+使用 `host_key_mismatch_event(scope.clone(), details.clone())` 明确发送 event。如果发送失败，则记录结构化 warning。发送 event 不会将 failure 转换为 success，因此返回的 `result` 仍然是 `Err(ConnectFailure::HostKeyMismatch(details))`。
 
-`get_or_connect` itself remains a physical pooling primitive and emits no logical mismatch event.
+`get_or_connect` 本身仍然是物理连接池 primitive，因此不发送逻辑 mismatch event。
 
-**Step 2: Strengthen the single-session real test**
+**Step 2：强化 single-session 集成测试**
 
-In `host_key_mismatch_blocks_connection`, assert:
+在 `host_key_mismatch_blocks_connection` 中增加以下断言：
 
 ```rust
 assert_eq!(
@@ -296,70 +297,69 @@ assert_eq!(
 );
 ```
 
-Retain fingerprint assertions and the hard-block/no-follow-up assertion.
+保留 fingerprint 断言，以及 hard-block/no-follow-up 断言。
 
-**Step 3: Add a pooled two-waiter regression test**
+**Step 3：增加 pooled two-waiter 回归测试**
 
-Name it:
+测试名称如下：
 
 ```rust
 #[tokio::test(flavor = "multi_thread")]
 async fn pooled_host_key_mismatch_is_emitted_for_every_logical_session()
 ```
 
-Feasibility is confirmed deterministic, not racy: `get_or_connect` inserts
-`PoolEntry::Connecting(rx.resubscribe())` synchronously at `pool.rs:124-125`
-*before* it spawns the physical handshake and before it returns `rx`, and the
-function takes no `.await` between that insert and its `rx` return. So calling
-`connect_session` twice back-to-back (the first future is polled only up to its
-first `.await`) deterministically sees the second call hit the in-progress key
-and `resubscribe`. No test-only barrier or production-only hook is required;
-both spawned `connect_session` tasks merely `recv().await` the same broadcast
-and each maps the single `ConnectFailure::HostKeyMismatch(details)` to its own
-scoped event.
+该测试具有确定性，因此不依赖竞态条件。`get_or_connect` 在 `pool.rs:124-125`
+同步插入 `PoolEntry::Connecting(rx.resubscribe())`，然后创建物理握手任务并
+返回 `rx`。在插入 entry 与返回 `rx` 之间，该函数没有 `.await`。因此，连续
+调用两次 `connect_session` 时，第一个 future 只执行到首个 `.await`，而第二次
+调用必然查询到进行中的 key 并执行 `resubscribe`。因此，测试无需专用 barrier，
+也无需仅用于 production 的 hook。两个 `connect_session` task 都对同一个 broadcast
+执行 `recv().await`，并且分别将同一个 `ConnectFailure::HostKeyMismatch(details)`
+映射为包含自身 scope 的 event。
 
-Arrange:
-1. start the real sshd fixture with a wrong known-host key;
-2. create one `ConnectionManager`;
-3. use one shared `ConnectionPoolIdentity::Saved(AuthFingerprint::private_key(...))` so both calls share the same `ConnectionKey`;
-4. call `connect_session` twice synchronously before awaiting either result, with scopes `(TAB, SESSION, EPOCH)` and `(SECOND_TAB, SECOND_SESSION, EPOCH)`;
-5. collect both connection results and two mismatch events.
+准备测试环境：
 
-Assert:
-- both connection results are `Err(ConnectFailure::HostKeyMismatch(_))`;
-- exactly two app mismatch events arrive;
-- the event scopes are the two logical scopes, irrespective of event order;
-- both events contain identical host/port/fingerprint details;
-- no third mismatch or success event arrives;
-- the connection remains blocked.
+1. 使用错误的 known-host key 启动真实 sshd fixture；
+2. 创建一个 `ConnectionManager`；
+3. 使用一个共享的 `ConnectionPoolIdentity::Saved(AuthFingerprint::private_key(...))`，因此两次调用共享同一个 `ConnectionKey`；
+4. 在等待任何结果之前，同步调用两次 `connect_session`，并分别使用 scopes `(TAB, SESSION, EPOCH)` 和 `(SECOND_TAB, SECOND_SESSION, EPOCH)`；
+5. 获取两个 connection result 和两个 mismatch event。
 
-This test specifically proves `PoolEntry::Connecting(rx).resubscribe()` does not collapse logical identity to the first caller.
+验证以下结果：
+- 两个 connection result 都是 `Err(ConnectFailure::HostKeyMismatch(_))`；
+- app 恰好收到两个 mismatch event；
+- event scope 等于两个逻辑 scope，并且不依赖 event 顺序；
+- 两个 event 包含完全相同的 host、port 和 fingerprint details；
+- 不会出现第三个 mismatch event 或 success event；
+- 连接保持阻断状态。
 
-**Step 4: Run real integration tests**
+该测试专门验证 `PoolEntry::Connecting(rx).resubscribe()` 不会将逻辑 identity 限制为第一个调用方的 identity。
+
+**Step 4：执行真实 integration tests**
 
 ```bash
 cargo test -p macsftp-sftp --test real_session host_key_mismatch_blocks_connection -- --exact --nocapture
 cargo test -p macsftp-sftp --test real_session pooled_host_key_mismatch_is_emitted_for_every_logical_session -- --exact --nocapture
 ```
 
-Expected with sshd: PASS. Without sshd: explicit skip. A skip is not runtime evidence; CI must run these tests with the fixture server.
+存在 sshd 时，预期结果为 PASS。不存在 sshd 时，测试必须明确标记为 skip。但是，skip 不能作为 runtime 证据，因此 CI 必须通过 fixture server 执行这些测试。
 
-**Step 5: Commit**
+**Step 5：提交变更**
 
 ```bash
 git add crates/sftp/src/pool.rs crates/sftp/tests/real_session.rs
 git commit -m "Scope pooled mismatches to each logical session"
 ```
 
-### Task 6: Reject stale mismatches in the GPUI workspace
+### Task 6：在 GPUI workspace 中拒绝过期 mismatch
 
-**Files:**
-- Modify: `crates/app/src/workspace/event_handling.rs:39-84`
-- Modify/Test: `crates/app/src/workspace/tests.rs:4294-4333`
+**文件：**
+- 修改：`crates/app/src/workspace/event_handling.rs:39-84`
+- 修改/测试：`crates/app/src/workspace/tests.rs:4294-4333`
 
-**Step 1: Update the consumer**
+**Step 1：更新 consumer**
 
-After the central stale guard accepts the event, use:
+central stale guard 接受 event 后，使用以下代码：
 
 ```rust
 if let Some(tab) = self.state.tabs.find_tab_mut(mismatch.scope.tab_id) {
@@ -367,53 +367,53 @@ if let Some(tab) = self.state.tabs.find_tab_mut(mismatch.scope.tab_id) {
 }
 ```
 
-Do not add a second scope comparison in the view.
+不要在 view 中增加第二次 scope 比较。
 
-**Step 2: Update the current mismatch test**
+**Step 2：更新当前 mismatch 测试**
 
-Construct the event with the live scope produced by the connection action. Retain assertions that:
-- the current tab enters failed state;
-- `ErrorCode::HostKeyMismatch` is used;
-- the error is non-retryable;
-- no trust modal opens.
+使用 connection action 产生的 live scope 构造 event。保留以下断言：
+- 当前 tab 进入 failed state；
+- 使用 `ErrorCode::HostKeyMismatch`；
+- 该错误不可重试；
+- 不会显示 trust modal。
 
-**Step 3: Add the reconnect regression**
+**Step 3：增加 reconnect 回归测试**
 
 ```rust
 #[gpui::test]
 fn stale_host_key_mismatch_does_not_fail_replacement_session(cx: &mut TestAppContext)
 ```
 
-Connect session 1/epoch 1, establish session 2/epoch 2 in the same tab, then deliver the old mismatch. Assert the replacement remains connecting/connected and no modal appears.
+先在同一个 tab 中连接 session 1/epoch 1，再建立 session 2/epoch 2，然后传递旧 mismatch。确认替代 session 保持 connecting 或 connected 状态，并且不会显示 modal。
 
-**Step 4: Add the current-session companion**
+**Step 4：增加当前 session 的对应测试**
 
 ```rust
 #[gpui::test]
 fn current_host_key_mismatch_hard_blocks_without_retry_or_trust_action(...)
 ```
 
-This prevents stale filtering from accidentally weakening the live mismatch path.
+该测试可以防止 stale filtering 意外削弱 live mismatch path。
 
-**Step 5: Run app tests**
+**Step 5：执行 app 测试**
 
 ```bash
 cargo test -p macsftp-app stale_host_key_mismatch -- --nocapture
 cargo test -p macsftp-app current_host_key_mismatch -- --nocapture
 ```
 
-Expected with complete Xcode tools: PASS. If local GPUI compilation is blocked by missing `metal`, report the environment blocker and require CI evidence.
+Xcode 工具完整时，预期结果为 PASS。如果本地 GPUI 编译因为缺少 `metal` 而无法继续，那么需要报告环境限制，并要求提供 CI 证据。
 
-**Step 6: Commit**
+**Step 6：提交变更**
 
 ```bash
 git add crates/app/src/workspace/event_handling.rs crates/app/src/workspace/tests.rs
 git commit -m "Ignore stale host key mismatches"
 ```
 
-### Task 7: Run security-focused verification
+### Task 7：执行安全专项验证
 
-**Step 1: Run focused tests**
+**Step 1：执行聚焦测试**
 
 ```bash
 cargo test -p macsftp-core host_key_mismatch -- --nocapture
@@ -422,7 +422,7 @@ cargo test -p macsftp-sftp --test real_session host_key_mismatch_blocks_connecti
 cargo test -p macsftp-sftp --test real_session pooled_host_key_mismatch_is_emitted_for_every_logical_session -- --exact --nocapture
 ```
 
-**Step 2: Run lint and security gates**
+**Step 2：执行 lint 与安全检查**
 
 ```bash
 cargo clippy -p macsftp-core -p macsftp-sftp --all-targets -- -D warnings
@@ -431,22 +431,22 @@ bash scripts/check_sensitive_logs.sh
 bash scripts/check_architecture.sh
 ```
 
-Expected: PASS; fingerprints remain absent from logs.
+预期结果为 PASS，并且日志中仍然没有 fingerprint。
 
-**Step 3: Run the full quality gate**
+**Step 3：执行完整质量检查**
 
 ```bash
 bash scripts/check.sh
 ```
 
-Expected with complete Xcode tools: PASS. If blocked by missing `metal`, document the environment failure without classifying it as a product failure.
+Xcode 工具完整时，预期结果为 PASS。如果缺少 `metal` 导致检查无法继续，那么需要记录该环境问题，但是不能将其归类为产品缺陷。
 
-## Acceptance checklist
+## 验收清单
 
-- `HostKeyMismatch` contains one authoritative logical `RemoteEventScope`.
-- `ConnectFailure::HostKeyMismatch` carries fingerprint details but no logical scope.
-- Physical handshake code emits no first-caller-only mismatch app event.
-- Two logical waiters on one in-progress pooled handshake each receive exactly one mismatch event with their own scope.
-- Core accepts a current mismatch and rejects an old-session mismatch.
-- A current mismatch remains a hard, non-retryable block with no trust/overwrite action.
-- No fingerprint, credential, or private-key path is added to logs.
+- `HostKeyMismatch` 包含唯一且权威的逻辑 `RemoteEventScope`。
+- `ConnectFailure::HostKeyMismatch` 包含 fingerprint details，但是不包含逻辑 scope。
+- 物理握手代码不会产生仅属于第一个调用方的 mismatch app event。
+- 两个逻辑 waiter 等待同一个进行中的 pooled handshake 时，各自恰好收到一个包含自身 scope 的 mismatch event。
+- Core 接受当前 mismatch，并且拒绝旧 session 的 mismatch。
+- 当前 mismatch 始终构成强制且不可重试的阻断，并且不提供 trust/overwrite action。
+- 日志中没有新增 fingerprint、credential 或 private-key path。

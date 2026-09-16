@@ -1,73 +1,73 @@
-# Phase 5 Onboarding & Persistence Implementation Plan
+# 阶段 5 实施计划：初始引导与持久化
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Agent 实施要求：** 必须使用 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans`，并按任务实施本计划。各步骤使用复选框（`- [ ]`）记录状态。
 
-**Goal:** Persist workspace session layout across quit/relaunch (without auto-connect), track successful connections in an independent recents list, surface recents + Connect on the empty remote pane, and keep the window title in sync with the active tab.
+**目标：** 在应用退出和重新启动之间持久化 workspace 会话布局，但是不得自动连接；同时使用独立的 recents 列表记录成功连接，在空 remote pane 中显示 recents 和 Connect，并使窗口标题与当前 tab 保持一致。
 
-**Architecture:** Two new versioned JSON stores in `macsftp_storage` (`session.json`, `recents.json`) behind `AppPaths`, mounted on process-global `AppResources`. First window restores session layout into `TabState` with `ConnectionState::Empty` and never sends `ConnectTab`. Successful `TabConnected` upserts recents. Empty remote pane lists recents as next-step actions. Window title updates via `Window::set_window_title`.
+**架构：** 在 `macsftp_storage` 中增加两个具有版本号的 JSON store（`session.json`、`recents.json`），其路径由 `AppPaths` 提供，并由进程级 `AppResources` 统一管理。第一个窗口将会话布局恢复至 `TabState`，同时将连接状态设置为 `ConnectionState::Empty`，因此不会发送 `ConnectTab`。成功的 `TabConnected` 事件更新或新增 recents 条目。因此，空 remote pane 将 recents 显示为可选操作，而窗口标题通过 `Window::set_window_title` 更新。
 
-**Tech Stack:** Rust, GPUI (`on_app_quit`, `Window::set_window_title`), serde JSON, existing `ProfileStore` / atomic tmp+rename pattern, `AppResources` globals.
+**技术栈：** Rust、GPUI（`on_app_quit`、`Window::set_window_title`）、serde JSON、现有 `ProfileStore` / 原子 tmp+rename 模式和 `AppResources` 全局资源。
 
-**Spec:** `docs/plans/2026-07-14-phase5-onboarding-persistence-design.md`
+**规格文档：** `docs/plans/2026-07-14-phase5-onboarding-persistence-design.md`
 
-## Global Constraints
+## 全局约束
 
-- **Layout restore ≠ auto-connect** — restored tabs stay `Empty`/`Disconnected`; no `AppCommand::ConnectTab` on startup.
-- **No secrets** in `session.json` or `recents.json` — only `profile_id` + host/port/username/path metadata.
-- **Single global session file** — one `session.json`; first window restores; later windows open a blank new tab.
-- **Recents cap 20**; dedupe key `(host, port, username, profile_id)`; write only on successful connect.
-- **No marketing empty state** — "Not connected" + Connect… + optional recents list only.
-- **MVP session fields only:** title, profile_id, host, port, username, local_path, remote_path, active_tab_index — no filter/MRU/sort/drawer.
-- Atomic write: temp file + rename (same as `ProfilesFile` / `TransferHistoryFile`).
-- Corrupt / unsupported version → empty fallback + WARN; never block startup.
-- No `unwrap`/`expect` on recoverable paths (AGENTS.md §5). Prefer `src/foo.rs` over `mod.rs`.
-- Do **not** change SFTP protocol, Keychain, or transfer restore.
+- **恢复布局不表示自动连接。** 恢复后的 tab 保持 `Empty`/`Disconnected`，因此启动时不得发送 `AppCommand::ConnectTab`。
+- `session.json` 和 `recents.json` 中**不得包含 secret**，只能包含 `profile_id` 以及 host/port/username/path 元数据。
+- **使用单一全局会话文件。** 应用仅使用一个 `session.json`；第一个窗口恢复会话，而后续窗口创建空白新 tab。
+- **Recents 最多包含 20 项。** 去重键为 `(host, port, username, profile_id)`，并且仅在连接成功后写入。
+- **空状态不得包含营销文案。** 仅显示 "Not connected"、Connect… 和可选的 recents 列表。
+- **MVP 仅保存以下会话字段：** title、profile_id、host、port、username、local_path、remote_path、active_tab_index；不得保存 filter/MRU/sort/drawer。
+- 文件写入必须采用原子方式，即先写入临时文件，然后执行 rename，并与 `ProfilesFile` / `TransferHistoryFile` 保持一致。
+- 如果文件损坏或版本不受支持，则使用空数据并记录 WARN；但是不得阻止应用启动。
+- 根据 AGENTS.md §5，可恢复路径不得使用 `unwrap`/`expect`。同时，优先使用 `src/foo.rs`，而不是 `mod.rs`。
+- 不得修改 SFTP protocol、Keychain 或 transfer restore。
 
-## File Map
+## 文件清单
 
-| File | Responsibility |
+| 文件 | 职责 |
 | --- | --- |
-| **Modify** `crates/platform/src/platform.rs` | `session_file`, `recents_file` on `AppPaths`; include in `ensure_directories` + path tests |
-| **Create** `crates/storage/src/session.rs` | `SessionFile`, `SessionTabSnapshot`, `SessionStore` load/save |
-| **Create** `crates/storage/src/recents.rs` | `RecentsFile`, `RecentEntry`, `RecentsStore` load/save/upsert |
-| **Modify** `crates/storage/src/storage.rs` | `mod session` / `mod recents`; re-export |
-| **Modify** `crates/app/src/resources.rs` | `session: SessionStore`, `recents: RecentsStore` on `AppResources` |
-| **Modify** `crates/app/src/main.rs` | Pass `restore_session` into first window only |
-| **Modify** `crates/app/src/workspace/mod.rs` | `restore_session` flag; restore tabs; quit flush; title helper; restored meta |
-| **Modify** `crates/app/src/workspace/event_handling.rs` | `TabConnected` → recents upsert; prefer restored remote path |
-| **Modify** `crates/app/src/workspace/connect_form.rs` | Prefill from restored meta / open from recent |
-| **Modify** `crates/app/src/workspace/render.rs` | Empty/Disconnected empty-state + recents rows |
-| **Modify** `crates/app/src/workspace/tests.rs` | Restore / recents / title / no-connect tests |
-| **Do not modify** | `crates/sftp/**` (except if a test fixture needs a path — avoid), core transfer/session protocols |
+| **修改** `crates/platform/src/platform.rs` | 在 `AppPaths` 中增加 `session_file` 和 `recents_file`，并纳入 `ensure_directories` 与路径测试 |
+| **新建** `crates/storage/src/session.rs` | 实现 `SessionFile`、`SessionTabSnapshot`、`SessionStore` 的加载和保存 |
+| **新建** `crates/storage/src/recents.rs` | 实现 `RecentsFile`、`RecentEntry`、`RecentsStore` 的加载、保存和 upsert |
+| **修改** `crates/storage/src/storage.rs` | 声明并重新导出 `session` / `recents` 模块 |
+| **修改** `crates/app/src/resources.rs` | 在 `AppResources` 中增加 `session: SessionStore` 和 `recents: RecentsStore` |
+| **修改** `crates/app/src/main.rs` | 仅向第一个窗口传递 `restore_session` |
+| **修改** `crates/app/src/workspace/mod.rs` | 增加 `restore_session` 标志、tab 恢复、退出保存、标题辅助函数和恢复元数据 |
+| **修改** `crates/app/src/workspace/event_handling.rs` | 收到 `TabConnected` 后 upsert recents，并优先使用恢复的远程路径 |
+| **修改** `crates/app/src/workspace/connect_form.rs` | 根据恢复元数据预填表单，或者根据 recent 条目显示表单 |
+| **修改** `crates/app/src/workspace/render.rs` | 实现 Empty/Disconnected 空状态和 recents 行 |
+| **修改** `crates/app/src/workspace/tests.rs` | 验证恢复、recents、标题和不自动连接 |
+| **不得修改** | `crates/sftp/**` 和 core transfer/session protocol；如果测试 fixture 需要路径，也应尽量避免修改 sftp 文件 |
 
-## Suggested PR mapping (optional when stacking)
+## 建议的 PR 划分（仅在堆叠 PR 时采用）
 
-| PR | Tasks | Notes |
+| PR | 任务 | 说明 |
 | --- | --- | --- |
-| PR1 | Task 1–3 | Paths + SessionStore + restore + quit save |
-| PR2 | Task 4–5 | RecentsStore + TabConnected + empty state |
-| PR3 | Task 6 | Window title |
-| PR4 | Task 7 | Recent click → prefill/connect polish |
+| PR1 | 任务 1–3 | 路径、SessionStore、恢复和退出保存 |
+| PR2 | 任务 4–5 | RecentsStore、TabConnected 和空状态 |
+| PR3 | 任务 6 | 窗口标题 |
+| PR4 | 任务 7 | Recent 选择后的预填和连接行为 |
 
-Tasks below are ordered for a single sequential implementation; PR2 can start after Task 1 if parallelized carefully.
+以下任务按照单一顺序实施流程排列。但是，如果能够明确隔离并行修改，那么 PR2 可以在任务 1 完成后开始。
 
 ---
 
-### Task 1: AppPaths — `session_file` / `recents_file`
+### 任务 1：AppPaths 中的 `session_file` / `recents_file`
 
-**Files:**
-- Modify: `crates/platform/src/platform.rs`
-- Test: same file `#[cfg(test)]` module (`builds_expected_macos_app_paths`)
+**文件：**
+- 修改：`crates/platform/src/platform.rs`
+- 测试：同一文件内的 `#[cfg(test)]` 模块（`builds_expected_macos_app_paths`）
 
-**Interfaces:**
-- Produces:
+**接口：**
+- 提供：
   - `AppPaths.session_file: LocalPath` → `{app_support}/session.json`
   - `AppPaths.recents_file: LocalPath` → `{app_support}/recents.json`
-  - Both included in `ensure_directories` parent creation list
+  - 两个路径均包含在 `ensure_directories` 的父目录创建列表中
 
-- [ ] **Step 1: Extend the existing path unit test (fail first if fields missing)**
+- [ ] **步骤 1：扩展现有路径单元测试（字段缺失时应先失败）**
 
-In `builds_expected_macos_app_paths`, add:
+在 `builds_expected_macos_app_paths` 中增加：
 
 ```rust
 assert_eq!(
@@ -80,13 +80,13 @@ assert_eq!(
 );
 ```
 
-- [ ] **Step 2: Run test — expect FAIL (unknown fields)**
+- [ ] **步骤 2：运行测试，并确认因字段未知而失败**
 
 ```bash
 cargo test -p macsftp-platform builds_expected_macos_app_paths -- --nocapture
 ```
 
-- [ ] **Step 3: Implement fields**
+- [ ] **步骤 3：实现字段**
 
 ```rust
 // AppPaths struct — add:
@@ -102,13 +102,13 @@ recents_file: LocalPath::new(format!("{app_support_dir}/recents.json")),
 &self.recents_file,
 ```
 
-- [ ] **Step 4: Re-run test — PASS**
+- [ ] **步骤 4：再次运行测试，并确认测试通过**
 
 ```bash
 cargo test -p macsftp-platform builds_expected_macos_app_paths -- --nocapture
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **步骤 5：提交**
 
 ```bash
 git add crates/platform/src/platform.rs
@@ -117,31 +117,31 @@ git commit -m "feat(platform): add session.json and recents.json AppPaths"
 
 ---
 
-### Task 2: SessionStore (storage)
+### 任务 2：SessionStore（storage）
 
-**Files:**
-- Create: `crates/storage/src/session.rs`
-- Modify: `crates/storage/src/storage.rs` (mod + re-export)
-- Test: unit tests inside `session.rs`
+**文件：**
+- 新建：`crates/storage/src/session.rs`
+- 修改：`crates/storage/src/storage.rs`，声明模块并重新导出
+- 测试：在 `session.rs` 中编写单元测试
 
-**Interfaces:**
-- Produces:
+**接口：**
+- 提供：
   - `SessionTabSnapshot { title, profile_id: Option<u64>, host, port, username, local_path: Option<String>, remote_path: Option<String> }`
   - `SessionFile { version: u32, active_tab_index: usize, tabs: Vec<SessionTabSnapshot> }` with `CURRENT_VERSION = 1`
   - `SessionStore { path, file }` with:
     - `open(path) -> Result<Self, StorageError>`
-    - `open_or_empty(path) -> Self` (missing/corrupt/unsupported version → empty)
+    - `open_or_empty(path) -> Self`；文件缺失、损坏或版本不受支持时返回空数据
     - `file(&self) -> &SessionFile`
     - `replace(&mut self, file: SessionFile)`
-    - `save(&self) -> Result<(), StorageError>` atomic tmp+rename
+    - `save(&self) -> Result<(), StorageError>`，使用原子 tmp+rename
   - Re-export: `pub use session::{SessionFile, SessionStore, SessionTabSnapshot};`
 
-**Rules (implement exactly):**
-- Missing file → empty session (`tabs: []`, `active_tab_index: 0`)
-- Parse error / `version > CURRENT_VERSION` → `open_or_empty` returns empty (do not delete file)
-- JSON must **not** include password / passphrase / key material fields on `SessionTabSnapshot`
+**规则（必须准确实现）：**
+- 文件缺失 → 返回空 session（`tabs: []`、`active_tab_index: 0`）
+- 解析错误或 `version > CURRENT_VERSION` → `open_or_empty` 返回空数据，但是不删除原文件
+- JSON 中的 `SessionTabSnapshot` **不得**包含 password、passphrase 或 key material 字段
 
-- [ ] **Step 1: Write failing unit tests** in `session.rs`
+- [ ] **步骤 1：在 `session.rs` 中编写预期失败的单元测试**
 
 ```rust
 #[cfg(test)]
@@ -247,15 +247,15 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run — expect FAIL (module missing)**
+- [ ] **步骤 2：运行测试，并确认因模块缺失而失败**
 
 ```bash
 cargo test -p macsftp-storage session_ -- --nocapture
 ```
 
-- [ ] **Step 3: Implement `session.rs`**
+- [ ] **步骤 3：实现 `session.rs`**
 
-Mirror `transfer_history.rs` / `ProfilesFile` patterns:
+实现方式应与 `transfer_history.rs` / `ProfilesFile` 模式一致：
 
 ```rust
 use macsftp_core::LocalPath;
@@ -380,20 +380,20 @@ impl SessionStore {
 }
 ```
 
-Wire in `storage.rs`:
+在 `storage.rs` 中声明并导出：
 
 ```rust
 pub mod session;
 pub use session::{SessionFile, SessionStore, SessionTabSnapshot};
 ```
 
-- [ ] **Step 4: Run tests — PASS**
+- [ ] **步骤 4：运行测试，并确认测试通过**
 
 ```bash
 cargo test -p macsftp-storage session_ -- --nocapture
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **步骤 5：提交**
 
 ```bash
 git add crates/storage/src/session.rs crates/storage/src/storage.rs
@@ -402,22 +402,22 @@ git commit -m "feat(storage): add SessionStore for session.json"
 
 ---
 
-### Task 3: Restore session on first window + flush on quit
+### 任务 3：在第一个窗口恢复会话，并在退出时保存
 
-**Files:**
-- Modify: `crates/app/src/resources.rs`
-- Modify: `crates/app/src/main.rs` (`open_workspace_window`, `Workspace::new` call)
-- Modify: `crates/app/src/workspace/mod.rs` (`Workspace::new` signature, restore, flush, `build_session_snapshot`)
-- Modify: `crates/app/src/workspace/event_handling.rs` (prefer restored remote path on `TabConnected`)
-- Modify: `crates/app/src/workspace/connect_form.rs` (prefill from restored meta when opening form)
-- Test: `crates/app/src/workspace/tests.rs`
+**文件：**
+- 修改：`crates/app/src/resources.rs`
+- 修改：`crates/app/src/main.rs`（`open_workspace_window`、`Workspace::new` 调用）
+- 修改：`crates/app/src/workspace/mod.rs`（`Workspace::new` 签名、恢复、保存、`build_session_snapshot`）
+- 修改：`crates/app/src/workspace/event_handling.rs`（处理 `TabConnected` 时优先使用恢复的远程路径）
+- 修改：`crates/app/src/workspace/connect_form.rs`（显示表单时根据恢复元数据预填）
+- 测试：`crates/app/src/workspace/tests.rs`
 
-**Interfaces:**
-- Produces:
+**接口：**
+- 提供：
   - `AppResources.session: SessionStore`
   - `Workspace::new(..., restore_session: bool, ...)`
-  - `Workspace.session_flushed: bool` (guard like transfer history)
-  - `Workspace.restored_targets: HashMap<TabId, RestoredTabTarget>` where:
+  - `Workspace.session_flushed: bool`，其防重复机制与 transfer history 一致
+  - `Workspace.restored_targets: HashMap<TabId, RestoredTabTarget>`，其中：
 
 ```rust
 #[derive(Debug, Clone)]
@@ -432,17 +432,17 @@ pub(crate) struct RestoredTabTarget {
 
   - `fn build_session_snapshot(&self) -> SessionFile`
   - `fn flush_session(&mut self, cx: &mut Context<Self>)`
-  - `fn restore_session_tabs(&mut self, window, cx)` — only when `restore_session && !file.tabs.is_empty()`
-  - First window: `restore_session = true`; Cmd+N windows: `false` → `open_new_tab` only
+  - `fn restore_session_tabs(&mut self, window, cx)`，仅在 `restore_session && !file.tabs.is_empty()` 时执行
+  - 第一个窗口使用 `restore_session = true`；Cmd+N 创建的窗口使用 `false`，因此仅执行 `open_new_tab`
 
-**Restore rules:**
-1. For each snapshot: `next_tab_id()`, `TabState::new(id, title)`, set `profile_id`, `local.path` + `load_local_directory`, `remote.path` from snapshot (entries empty), `connection = Empty`.
-2. Store `RestoredTabTarget` for form prefill / post-connect navigation.
-3. Clamp `active_tab_index` to `tabs.len()-1`; set `active_tab_id`; seed `tab_mru` in tab order then touch active.
-4. **Do not** call `send_command(ConnectTab)`.
-5. Empty session → existing `open_new_tab` path.
+**恢复规则：**
+1. 对每个 snapshot 依次调用 `next_tab_id()` 和 `TabState::new(id, title)`，然后设置 `profile_id`；设置 `local.path` 并调用 `load_local_directory`；根据 snapshot 设置 `remote.path`，同时保持 entries 为空；最后设置 `connection = Empty`。
+2. 保存 `RestoredTabTarget`，以便预填表单以及在连接后访问目标路径。
+3. 将 `active_tab_index` 限制在 `tabs.len()-1` 以内，并设置 `active_tab_id`；然后按照 tab 顺序初始化 `tab_mru`，并将当前 tab 更新为最近使用项。
+4. **不得**调用 `send_command(ConnectTab)`。
+5. 如果 session 为空，则使用现有 `open_new_tab` 路径。
 
-**TabConnected path preference (critical for restored remote path):**
+**TabConnected 路径优先级（恢复远程路径所必需）：**
 
 ```rust
 // In AppEvent::TabConnected — after finding tab:
@@ -463,7 +463,7 @@ if let Some(target) = self.restored_targets.get_mut(&tab_id) {
 // then set tab.remote.path = Some(navigate_to.clone()) and request_remote_directory
 ```
 
-Simpler equivalent used in implementation:
+实现时也可以使用以下等价的简化形式：
 
 ```rust
 let navigate_to = {
@@ -478,7 +478,7 @@ if let Some(target) = self.restored_targets.get_mut(&tab_id) {
 }
 ```
 
-**Quit flush:**
+**退出时保存：**
 
 ```rust
 // In Workspace::new after construction, alongside transfer history:
@@ -563,7 +563,7 @@ pub(crate) fn flush_session(&mut self, cx: &mut Context<Self>) {
 }
 ```
 
-**First window flag in `main.rs`:**
+**`main.rs` 中的第一个窗口标志：**
 
 ```rust
 fn open_workspace_window(cx: &mut App) -> gpui::Result<()> {
@@ -581,7 +581,7 @@ fn open_workspace_window(cx: &mut App) -> gpui::Result<()> {
 }
 ```
 
-**`Workspace::new` change:**
+**`Workspace::new` 修改：**
 
 ```rust
 pub fn new(
@@ -664,9 +664,9 @@ fn restore_session_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) 
 }
 ```
 
-**Connect form prefill from restored meta:**
+**根据恢复元数据预填连接表单：**
 
-In `open_connect_form`, if no `tab_settings`, build a temporary non-secret prefill:
+在 `open_connect_form` 中，如果没有 `tab_settings`，则创建不含 secret 的临时预填内容：
 
 ```rust
 pub(crate) fn open_connect_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -697,7 +697,7 @@ pub(crate) fn open_connect_form(&mut self, window: &mut Window, cx: &mut Context
 }
 ```
 
-**`resources.rs`:**
+**`resources.rs`：**
 
 ```rust
 use macsftp_storage::{
@@ -715,11 +715,11 @@ pub struct AppResources {
 let session = SessionStore::open_or_empty(app_paths.session_file.clone());
 ```
 
-> **Note:** If implementing PR-style, add a temporary `// recents in Task 4` only after Task 4 exists. Prefer adding both stores in resources when Task 4 lands; for Task 3 alone, add only `session`.
+> **说明：** 如果按照 PR 划分实施，则仅在任务 4 的实现存在后增加临时的 `// recents in Task 4`。任务 4 完成时，优先在 resources 中同时增加两个 store；但是仅实施任务 3 时，只增加 `session`。
 
-Update all `Workspace::new(...)` call sites (tests + main) with `restore_session: false` by default in tests unless a test opts in.
+更新测试和 main 中所有 `Workspace::new(...)` 调用位置。测试默认使用 `restore_session: false`，但是明确验证恢复行为的测试可以使用 true。
 
-- [ ] **Step 1: Failing app tests**
+- [ ] **步骤 1：编写预期失败的 app 测试**
 
 ```rust
 #[gpui::test]
@@ -743,7 +743,7 @@ fn flush_session_writes_session_json(cx: &mut TestAppContext) {
 }
 ```
 
-Helper pattern for restore tests (sketch):
+恢复测试可以采用以下辅助函数结构（示意）：
 
 ```rust
 fn init_workspace_with_paths(
@@ -774,22 +774,22 @@ fn init_workspace_with_paths(
 }
 ```
 
-- [ ] **Step 2: Run — expect FAIL**
+- [ ] **步骤 2：运行测试，并确认测试失败**
 
 ```bash
 cargo test -p macsftp-app --bin macsftp restore_session build_session_snapshot flush_session -- --nocapture
 ```
 
-- [ ] **Step 3: Implement restore + flush + resources.session + main flag + TabConnected path preference**
+- [ ] **步骤 3：实现恢复、保存、resources.session、main 标志和 TabConnected 路径优先级**
 
-- [ ] **Step 4: Run tests — PASS**
+- [ ] **步骤 4：运行测试，并确认测试通过**
 
 ```bash
 cargo test -p macsftp-app --bin macsftp restore_session build_session_snapshot flush_session -- --nocapture
 cargo test -p macsftp-storage session_ -- --nocapture
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **步骤 5：提交**
 
 ```bash
 git add crates/app/src/resources.rs crates/app/src/main.rs \
@@ -800,16 +800,16 @@ git commit -m "feat(app): restore session layout on launch and save on quit"
 
 ---
 
-### Task 4: RecentsStore (storage)
+### 任务 4：RecentsStore（storage）
 
-**Files:**
-- Create: `crates/storage/src/recents.rs`
-- Modify: `crates/storage/src/storage.rs`
-- Modify: `crates/app/src/resources.rs` (mount `recents`)
-- Test: unit tests in `recents.rs`
+**文件：**
+- 新建：`crates/storage/src/recents.rs`
+- 修改：`crates/storage/src/storage.rs`
+- 修改：`crates/app/src/resources.rs`，在资源中增加 `recents`
+- 测试：在 `recents.rs` 中编写单元测试
 
-**Interfaces:**
-- Produces:
+**接口：**
+- 提供：
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -861,9 +861,9 @@ pub struct RecentEntryInput {
 }
 ```
 
-Dedupe equality: `(host, port, username, profile_id)` all match → update fields, set `last_connected_at`, move to index 0. Else push front with new `id`, truncate to 20.
+如果 `(host, port, username, profile_id)` 全部相同，则判定为重复项。因此，需要更新字段和 `last_connected_at`，并将条目置于索引 0。否则，使用新的 `id` 在列表首部增加条目，并将列表限制为 20 项。
 
-- [ ] **Step 1: Failing tests**
+- [ ] **步骤 1：编写预期失败的测试**
 
 ```rust
 #[test]
@@ -896,20 +896,20 @@ fn corrupt_recents_open_or_empty() { /* same as session */ }
 fn serialized_recents_has_no_secret_keys() { /* same forbidden list as session */ }
 ```
 
-- [ ] **Step 2: Run — FAIL**
+- [ ] **步骤 2：运行测试，并确认测试失败**
 
 ```bash
 cargo test -p macsftp-storage upsert_ caps_at corrupt_recents serialized_recents -- --nocapture
 ```
 
-- [ ] **Step 3: Implement + export + `AppResources.recents`**
+- [ ] **步骤 3：实现并导出类型，同时增加 `AppResources.recents`**
 
 ```rust
 // resources load:
 let recents = RecentsStore::open_or_empty(app_paths.recents_file.clone());
 ```
 
-- [ ] **Step 4: PASS + commit**
+- [ ] **步骤 4：确认测试通过并提交**
 
 ```bash
 cargo test -p macsftp-storage -- --nocapture
@@ -919,24 +919,24 @@ git commit -m "feat(storage): add RecentsStore for recents.json"
 
 ---
 
-### Task 5: TabConnected → recents + empty-state list UI
+### 任务 5：根据 TabConnected 更新 recents，并实现空状态列表 UI
 
-**Files:**
-- Modify: `crates/app/src/workspace/event_handling.rs`
-- Modify: `crates/app/src/workspace/render.rs`
-- Modify: `crates/app/src/workspace/mod.rs` (helper `record_recent_connection` if cleaner)
-- Test: `crates/app/src/workspace/tests.rs`
+**文件：**
+- 修改：`crates/app/src/workspace/event_handling.rs`
+- 修改：`crates/app/src/workspace/render.rs`
+- 修改：`crates/app/src/workspace/mod.rs`；如果结构更清晰，则增加辅助方法 `record_recent_connection`
+- 测试：`crates/app/src/workspace/tests.rs`
 
-**Interfaces:**
-- Produces:
+**接口：**
+- 提供：
   - `Workspace::record_recent_for_tab(&mut self, tab_id: TabId, cx: &mut Context<Self>)`
   - Empty-state for `ConnectionState::Empty` and `Disconnected` includes:
-    - primary Connect / Reconnect button (existing)
-    - if `cx.resources().recents.entries()` non-empty: a vertical list under label `"Recent connections"`
-    - each row: `display_name · user@host:port` (if no display_name: `user@host:port`)
-    - click → `open_recent_connection(entry_id, window, cx)` (implement fully in Task 7; Task 5 may open form prefilled only)
+    - 现有的主要 Connect / Reconnect 按钮
+    - 如果 `cx.resources().recents.entries()` 非空，则在 `"Recent connections"` 标签下显示垂直列表
+    - 每行显示 `display_name · user@host:port`；如果没有 display_name，则显示 `user@host:port`
+    - 用户选择条目后调用 `open_recent_connection(entry_id, window, cx)`；任务 7 完整实现该方法，而任务 5 可以仅显示预填表单
 
-**TabConnected hook (after complete_connect / directory request):**
+**TabConnected 事件处理（在 complete_connect / directory request 后执行）：**
 
 ```rust
 self.record_recent_for_tab(tab_id, cx);
@@ -994,7 +994,7 @@ pub(crate) fn record_recent_for_tab(&mut self, tab_id: TabId, cx: &mut Context<S
 }
 ```
 
-**Empty state UI sketch (`render.rs` for Empty):**
+**空状态 UI 示意（`render.rs` 中的 Empty 状态）：**
 
 ```rust
 Some(ConnectionState::Empty) => {
@@ -1023,11 +1023,11 @@ Some(ConnectionState::Empty) => {
 }
 ```
 
-For `Disconnected`, keep Reconnect + Edit Connection; still show the same recents list below.
+对于 `Disconnected`，保留 Reconnect 和 Edit Connection，并且在其下方显示相同的 recents 列表。
 
-**No marketing copy** — do not add "Welcome to macSFTP".
+**不得增加营销文案，**因此不要增加 "Welcome to macSFTP"。
 
-- [ ] **Step 1: Failing tests**
+- [ ] **步骤 1：编写预期失败的测试**
 
 ```rust
 #[gpui::test]
@@ -1048,13 +1048,13 @@ fn format_recent_label_uses_display_name_when_present() {
 }
 ```
 
-- [ ] **Step 2: FAIL → implement → PASS**
+- [ ] **步骤 2：确认失败，然后实现功能并确认测试通过**
 
 ```bash
 cargo test -p macsftp-app --bin macsftp tab_connected_upserts tab_connected_dedupes -- --nocapture
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **步骤 3：提交**
 
 ```bash
 git add crates/app/src/workspace/event_handling.rs crates/app/src/workspace/render.rs \
@@ -1064,15 +1064,15 @@ git commit -m "feat(app): record recents on connect and show them in empty remot
 
 ---
 
-### Task 6: Window title tracks active tab
+### 任务 6：窗口标题与当前 tab 保持一致
 
-**Files:**
-- Modify: `crates/app/src/workspace/mod.rs` (`update_window_title`, call sites)
-- Optionally: `event_handling.rs` (connect complete / disconnect / title change)
-- Test: `crates/app/src/workspace/tests.rs` using `VisualTestContext` / window title API
+**文件：**
+- 修改：`crates/app/src/workspace/mod.rs`（`update_window_title` 及其调用位置）
+- 可选修改：`event_handling.rs`（连接完成、断开连接或标题变化）
+- 测试：在 `crates/app/src/workspace/tests.rs` 中使用 `VisualTestContext` / window title API
 
-**Interfaces:**
-- Produces:
+**接口：**
+- 提供：
 
 ```rust
 pub(crate) fn update_window_title(&self, window: &mut Window) {
@@ -1084,11 +1084,11 @@ pub(crate) fn update_window_title(&self, window: &mut Window) {
 }
 ```
 
-Call after: `open_new_tab`, `close_tab_by_id`, `activate_tab`, `connect_with` (title set to host), `TabConnected` / fail / disconnect handlers if title changes, and once at end of `Workspace::new` / restore.
+在 `open_new_tab`、`close_tab_by_id`、`activate_tab`、`connect_with`（标题设置为 host）之后调用该方法。如果 `TabConnected` / fail / disconnect 处理会修改标题，那么也应调用该方法；此外，还需在 `Workspace::new` / restore 结束时调用一次。
 
-GPUI API: `window.set_window_title(&str)` (`gpui` 0.2.2). Tests can use `TestAppContext` window title reader if available (`window_title()` on test context).
+GPUI 0.2.2 提供 `window.set_window_title(&str)` API。如果 `TestAppContext` 提供窗口标题读取方法，那么测试可以使用 test context 的 `window_title()`。
 
-- [ ] **Step 1: Failing test**
+- [ ] **步骤 1：编写预期失败的测试**
 
 ```rust
 #[gpui::test]
@@ -1108,7 +1108,7 @@ fn window_title_follows_active_tab(cx: &mut TestAppContext) {
 }
 ```
 
-If reading title from GPUI test is awkward, extract:
+如果 GPUI 测试难以读取标题，那么提取以下函数：
 
 ```rust
 pub(crate) fn window_title_for_active_tab(tab_title: Option<&str>) -> String {
@@ -1119,9 +1119,9 @@ pub(crate) fn window_title_for_active_tab(tab_title: Option<&str>) -> String {
 }
 ```
 
-Unit-test that helper; still call `set_window_title` at the production call sites.
+为该辅助函数编写单元测试，但是生产代码的调用位置仍需调用 `set_window_title`。
 
-- [ ] **Step 2–4: implement, pass, commit**
+- [ ] **步骤 2–4：实现功能、确认测试通过并提交**
 
 ```bash
 cargo test -p macsftp-app --bin macsftp window_title -- --nocapture
@@ -1132,15 +1132,15 @@ git commit -m "feat(app): set window title from active tab"
 
 ---
 
-### Task 7: Open recent — prefill / profile connect path
+### 任务 7：根据 recent 条目预填表单或使用 profile 连接
 
-**Files:**
-- Modify: `crates/app/src/workspace/mod.rs` or `connect_form.rs`
-- Modify: `crates/app/src/workspace/render.rs` (wire already from Task 5)
-- Test: `crates/app/src/workspace/tests.rs`
+**文件：**
+- 修改：`crates/app/src/workspace/mod.rs` 或 `connect_form.rs`
+- 修改：`crates/app/src/workspace/render.rs`，任务 5 已经配置相应事件
+- 测试：`crates/app/src/workspace/tests.rs`
 
-**Interfaces:**
-- Produces:
+**接口：**
+- 提供：
 
 ```rust
 pub(crate) fn open_recent_connection(
@@ -1215,7 +1215,7 @@ pub(crate) fn open_recent_connection(
 }
 ```
 
-- [ ] **Step 1: Failing tests**
+- [ ] **步骤 1：编写预期失败的测试**
 
 ```rust
 #[gpui::test]
@@ -1233,7 +1233,7 @@ fn open_recent_with_profile_and_keychain_connects(cx: &mut TestAppContext) {
 }
 ```
 
-- [ ] **Step 2–4: implement, pass, commit**
+- [ ] **步骤 2–4：实现功能、确认测试通过并提交**
 
 ```bash
 cargo test -p macsftp-app --bin macsftp open_recent -- --nocapture
@@ -1243,11 +1243,11 @@ git commit -m "feat(app): connect from recent entries with profile or form prefi
 
 ---
 
-### Task 8: Full regression + manual checklist
+### 任务 8：完整回归验证与人工检查清单
 
-**Files:** none new (docs only if `docs/gpui-russh-plan.md` needs a one-line session note — optional; only update if you already touch architecture docs)
+**文件：** 不增加新文件。如果 `docs/gpui-russh-plan.md` 需要一行 session 说明，则可以选择修改该文件；但是仅在本次实施已经涉及架构文档时才进行该修改。
 
-- [ ] **Step 1: Run focused + broader tests**
+- [ ] **步骤 1：运行专项测试和较完整的测试**
 
 ```bash
 cargo test -p macsftp-platform -- --nocapture
@@ -1255,18 +1255,18 @@ cargo test -p macsftp-storage -- --nocapture
 cargo test -p macsftp-app --bin macsftp -- --nocapture
 ```
 
-Expected: all PASS (or only pre-existing unrelated failures — do not leave new failures).
+预期结果：所有测试均通过；如果存在与本次修改无关的既有失败，也不得新增失败。
 
-- [ ] **Step 2: Manual smoke (human or local run)**
+- [ ] **步骤 2：执行人工或本地冒烟验证**
 
-1. Connect to a real/mock host, open 2 tabs, change local/remote paths → Quit.
-2. Relaunch → tabs restored, titles/paths present, **not** auto-connected.
-3. Reconnect succeeds; remote lands on restored path when possible.
-4. Empty remote pane shows recents; click opens form or connects.
-5. Window title shows `{tab} — macSFTP` and updates on tab switch.
-6. Inspect `~/Library/Application Support/macSFTP/session.json` and `recents.json` — no password fields.
+1. 连接真实或 mock host，创建 2 个 tab，并修改本地和远程路径，然后退出应用。
+2. 重新启动应用，确认 tab、标题和路径均已恢复，并且**没有**自动连接。
+3. 确认重新连接成功；如果条件允许，远程 pane 应访问恢复的路径。
+4. 确认空 remote pane 显示 recents；选择条目后应显示表单或开始连接。
+5. 确认窗口标题显示 `{tab} — macSFTP`，并且在切换 tab 后更新。
+6. 检查 `~/Library/Application Support/macSFTP/session.json` 和 `recents.json`，确认其中没有 password 字段。
 
-- [ ] **Step 3: Final commit only if polish leftovers exist**
+- [ ] **步骤 3：仅在存在必要的完善修改时进行最终提交**
 
 ```bash
 git status
@@ -1275,37 +1275,37 @@ git status
 
 ---
 
-## Self-Review (plan vs design)
+## 自审（实施计划与设计文档对照）
 
-| Design requirement | Task |
+| 设计要求 | 对应任务 |
 | --- | --- |
-| Session silent save on quit | Task 3 |
-| Startup restore layout, no auto Connect | Task 3 |
-| session.json schema + version/corrupt fallback | Task 2 |
-| AppPaths session/recents | Task 1 |
-| Recents independent + profile_id + cap 20 | Task 4–5 |
-| TabConnected writes recents | Task 5 |
-| Empty state Connect + recents, no marketing | Task 5 |
-| Recent click prefill / profile connect | Task 7 |
-| Window title active tab | Task 6 |
-| Multi-window single session file, first window restore | Task 3 (`restore_session` flag) |
-| No secrets in JSON | Task 2/4 tests |
-| Restored remote path after connect | Task 3 TabConnected preference + Task 7 |
-| PR split PR1–4 | Header mapping |
+| 退出时静默保存 Session | 任务 3 |
+| 启动时恢复布局，但是不自动 Connect | 任务 3 |
+| session.json schema、版本和损坏回退 | 任务 2 |
+| AppPaths session/recents | 任务 1 |
+| 独立 Recents、profile_id 和 20 项限制 | 任务 4–5 |
+| TabConnected 写入 recents | 任务 5 |
+| 空状态 Connect 和 recents，不含营销文案 | 任务 5 |
+| 选择 Recent 条目后预填或使用 profile 连接 | 任务 7 |
+| 窗口标题显示当前 tab | 任务 6 |
+| 多窗口使用单一 session 文件，并且第一个窗口恢复会话 | 任务 3（`restore_session` 标志） |
+| JSON 不含 secret | 任务 2/4 的测试 |
+| 连接后使用恢复的远程路径 | 任务 3 的 TabConnected 路径优先级和任务 7 |
+| PR1–4 划分 | 文档前部的 PR 划分表 |
 
-**Placeholder scan:** no TBD/TODO steps; concrete types and commands included.
+**占位内容检查：** 不存在 TBD/TODO 步骤，并且已经包含具体类型和命令。
 
-**Type consistency:** `SessionTabSnapshot.profile_id: Option<u64>` ↔ `ProfileId(u64)`; `RecentEntry.id: u64`; `RestoredTabTarget` shared by Tasks 3/5/7; `Workspace::new(..., restore_session: bool, ...)` updated in main + tests.
+**类型一致性：** `SessionTabSnapshot.profile_id: Option<u64>` 与 `ProfileId(u64)` 对应；`RecentEntry.id` 使用 `u64`；任务 3/5/7 共享 `RestoredTabTarget`；main 和测试均更新 `Workspace::new(..., restore_session: bool, ...)`。
 
 ---
 
-## Execution Handoff
+## 实施交接
 
-Plan saved to `docs/plans/2026-07-14-phase5-onboarding-persistence-impl.md` (project convention; same directory as design).
+本计划保存于 `docs/plans/2026-07-14-phase5-onboarding-persistence-impl.md`，并且按照项目约定与设计文档位于同一目录。
 
-**Two execution options:**
+**实施方式有以下两种：**
 
-1. **Subagent-Driven (recommended)** — fresh subagent per task, review between tasks (`superpowers:subagent-driven-development`)
-2. **Inline Execution** — this session with `superpowers:executing-plans` and checkpoints
+1. **Subagent-Driven（推荐）**：每个任务使用新的 subagent，并且在任务之间进行审查（`superpowers:subagent-driven-development`）
+2. **Inline Execution**：在当前会话中使用 `superpowers:executing-plans`，并设置检查点
 
-Which approach?
+实施时需要选择其中一种方式。
