@@ -17,7 +17,6 @@ pub(crate) fn connection_in_flight(connection: &ConnectionState) -> bool {
         connection,
         ConnectionState::Connecting { .. }
             | ConnectionState::AwaitingHostKey { .. }
-            | ConnectionState::AwaitingCredentials { .. }
             | ConnectionState::Reconnecting { .. }
     )
 }

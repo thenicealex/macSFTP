@@ -2,7 +2,7 @@
 //! OpenSSH server (see `macsftp_test_support::SshTestServer`).
 //!
 //! Skipped (with a message) when no local sshd is available. CI must
-//! provide a real server per plan §19.
+//! provide a real server per current architecture §14.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};

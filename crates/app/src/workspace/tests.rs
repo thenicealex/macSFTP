@@ -178,7 +178,7 @@ mod tests {
     }
 
     /// A unique temp `AppPaths` per call so parallel tests never share a
-    /// `profiles.json` (plan §9: tests must not clobber each other's files).
+    /// `profiles.json` (current architecture §14: tests must not clobber each other's files).
     fn temp_app_paths() -> AppPaths {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -1406,7 +1406,7 @@ mod tests {
         });
     }
 
-    // ── Runtime bridge wiring (M2a/M2c app side) ───────────────────
+    // ── Runtime bridge wiring ─────────────────────────────────────
 
     #[gpui::test]
     fn connect_sends_command_with_ui_allocated_session(cx: &mut TestAppContext) {
@@ -5234,7 +5234,7 @@ mod tests {
     }
 
     /// Saving, reusing, updating, and deleting profiles through the
-    /// connect form must persist to disk and round-trip (plan §5/§22).
+    /// connect form must persist to disk and round-trip (current architecture §11).
     #[gpui::test]
     fn connect_form_save_use_update_and_delete_profile(cx: &mut TestAppContext) {
         let (workspace, mut cx, _channels) = init_workspace(cx);
@@ -5542,7 +5542,7 @@ mod tests {
                 created_at: now,
             };
             workspace.handle_app_event(
-                AppEvent::TransferPlanStarted(TransferPlanSnapshot { plan, root_job }),
+                AppEvent::TransferPlanStarted(Box::new(TransferPlanSnapshot { plan, root_job })),
                 window,
                 cx,
             );
@@ -5595,7 +5595,7 @@ mod tests {
                 created_at: now,
             };
             workspace.handle_app_event(
-                AppEvent::TransferPlanStarted(TransferPlanSnapshot { plan, root_job }),
+                AppEvent::TransferPlanStarted(Box::new(TransferPlanSnapshot { plan, root_job })),
                 window,
                 cx,
             );

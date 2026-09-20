@@ -1005,7 +1005,7 @@ mod tests {
     };
 
     // Unique temp path per call so concurrent tests never clobber each
-    // other's profiles.json (plan §9: parallel tests must not share paths).
+    // other's profiles.json (current architecture §14: parallel tests must not share paths).
     static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
     fn temp_profiles_path(tag: &str) -> LocalPath {

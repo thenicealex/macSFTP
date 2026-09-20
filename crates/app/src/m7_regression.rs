@@ -1,8 +1,8 @@
-//! M7 回归套件（plan §M7 acceptance）。
+//! Packaging and release-metadata regression tests.
 //!
 //! 运行方式：`cargo test -p macsftp-app m7_`
 //!
-//! 本模块覆盖**无需 GUI、无需预构建产物**即可自动验证的 M7 验收项：
+//! 本模块覆盖**无需 GUI、无需预构建产物**即可自动验证的发布门禁：
 //! - 版本号单一来源（About 与 plist 均派生自 Cargo package version，禁止分别维护）；
 //! - 图标源资源随仓库提交；
 //! - 包版本格式为 `x.y.z`。
@@ -12,7 +12,7 @@
 //! - `cargo test -p macsftp-app settings` → `settings_action_switches_surface_and_persists_appearance`
 //! - `cargo test -p macsftp-ui theme` → `dark_and_light_token_sets_are_both_defined_and_distinct`
 //!
-//! 与 `docs/m7-test-matrix.md`、`docs/m7-visual-polish.md` 共同构成 M7 验收证据。
+//! 版本级验证结果记录在 `docs/release-evidence/`。
 
 #[cfg(test)]
 mod tests {

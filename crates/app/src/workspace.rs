@@ -407,7 +407,7 @@ impl Workspace {
             self.retry_close_tab(tab_id, cx);
         }
         // Modals bound to the closed tab's session are now stale; drop
-        // them so their confirm buttons can never act (plan §7).
+        // them so their confirm buttons can never act (current architecture §6).
         self.drain_expired_modals();
         if self.state.tabs.tabs.is_empty() {
             window.focus(&self.workspace_focus);

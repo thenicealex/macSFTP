@@ -1,16 +1,12 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use macsftp_core::{
-    AppEvent, DisconnectReason, HostKeyPrompt, LocalPath, RemoteEventScope, RemotePath,
-    RemoteScoped, SessionId, TabConnected, TabDisconnected, TabId, TransferDirection,
-    TransferEndpoint, TransferId, TransferProgress, TransferSnapshot, TrustDecision,
-    TrustRequestId,
+    AppEvent, DisconnectReason, HostKeyPrompt, RemoteEventScope, RemotePath, RemoteScoped,
+    SessionId, TabConnected, TabDisconnected, TabId, TrustDecision, TrustRequestId,
 };
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use crate::ProgressThrottle;
 use crate::trust::TrustRegistry;
 
 /// Configuration for a mock remote session actor.
@@ -24,9 +20,6 @@ pub struct MockSessionConfig {
     pub fingerprint: String,
     pub algorithm: String,
     pub remote_root: RemotePath,
-    /// Simulated transfer speed in bytes per second. Used by
-    /// [`MockTransferJob`] to pace progress events.
-    pub transfer_bytes_per_sec: u64,
 }
 
 impl Default for MockSessionConfig {
@@ -37,7 +30,6 @@ impl Default for MockSessionConfig {
             fingerprint: "SHA256:mockfingerprint000000000000000000000000000".to_string(),
             algorithm: "ssh-ed25519".to_string(),
             remote_root: RemotePath::new("/home/user"),
-            transfer_bytes_per_sec: 1_000_000,
         }
     }
 }
@@ -170,137 +162,11 @@ impl MockRemoteSessionActor {
     }
 }
 
-/// A mock transfer job that emits throttled `TransferProgress` events.
-///
-/// Simulates a file transfer by emitting progress at the configured
-/// speed, respecting the `ProgressThrottle` (max 10 Hz by default per
-/// ADR-002). The job completes when all bytes are transferred or the
-/// cancellation token fires.
-pub struct MockTransferJob {
-    transfer_id: TransferId,
-    total_bytes: u64,
-    bytes_per_sec: u64,
-    event_tx: flume::Sender<AppEvent>,
-}
-
-impl MockTransferJob {
-    pub fn new(
-        transfer_id: TransferId,
-        total_bytes: u64,
-        bytes_per_sec: u64,
-        event_tx: flume::Sender<AppEvent>,
-    ) -> Self {
-        Self {
-            transfer_id,
-            total_bytes,
-            bytes_per_sec,
-            event_tx,
-        }
-    }
-
-    /// Run the mock transfer, emitting progress events at most 10 Hz.
-    /// Returns when the transfer completes or the cancel token fires.
-    pub async fn run(self, cancel: CancellationToken) {
-        // Emit TransferQueued.
-        if self
-            .event_tx
-            .send_async(AppEvent::TransferQueued(self.snapshot(0)))
-            .await
-            .is_err()
-        {
-            return; // event channel closed — stop the mock transfer
-        }
-
-        let interval = Duration::from_millis(100); // 10 Hz
-        let bytes_per_tick = self.bytes_per_sec.saturating_div(10).max(1);
-        let mut throttle = ProgressThrottle::new(10);
-        let mut bytes_done: u64 = 0;
-
-        while bytes_done < self.total_bytes {
-            tokio::select! {
-                _ = tokio::time::sleep(interval) => {
-                    bytes_done = bytes_done.saturating_add(bytes_per_tick).min(self.total_bytes);
-
-                    let now = std::time::Instant::now();
-                    if throttle.should_send(now)
-                        && self
-                            .event_tx
-                            .send_async(AppEvent::TransferProgress(TransferProgress {
-                                transfer_id: self.transfer_id,
-                                bytes_done,
-                                bytes_total: Some(self.total_bytes),
-                            }))
-                            .await
-                            .is_err()
-                    {
-                        return; // event channel closed — stop the mock transfer
-                    }
-                }
-                _ = cancel.cancelled() => {
-                    // Transfer cancelled — don't emit completion.
-                    return;
-                }
-            }
-        }
-
-        // Emit final progress (force-send by resetting throttle).
-        throttle.reset();
-        if self
-            .event_tx
-            .send_async(AppEvent::TransferProgress(TransferProgress {
-                transfer_id: self.transfer_id,
-                bytes_done: self.total_bytes,
-                bytes_total: Some(self.total_bytes),
-            }))
-            .await
-            .is_err()
-        {
-            return; // event channel closed — completion cannot be delivered
-        }
-
-        // Emit completion.
-        if let Err(error) = self
-            .event_tx
-            .send_async(AppEvent::TransferCompleted {
-                transfer_id: self.transfer_id,
-            })
-            .await
-        {
-            // Event channel closed; the run ends here regardless, but the
-            // failure is worth recording for test diagnostics.
-            tracing::warn!(error = %error, "mock transfer event channel closed");
-        }
-    }
-
-    fn snapshot(&self, bytes_done: u64) -> TransferSnapshot {
-        use macsftp_core::{ConflictPolicy, MetadataPolicy, TransferJob, TransferState};
-        use std::time::UNIX_EPOCH;
-
-        TransferSnapshot {
-            job: TransferJob {
-                id: self.transfer_id,
-                direction: TransferDirection::Upload,
-                source: TransferEndpoint::Local(LocalPath::new("/tmp/source")),
-                destination: TransferEndpoint::Remote(RemotePath::new("/srv/dest")),
-                state: TransferState::Running {
-                    bytes_done,
-                    bytes_total: Some(self.total_bytes),
-                    started_at: macsftp_core::Timestamp(UNIX_EPOCH),
-                },
-                metadata_policy: MetadataPolicy::default(),
-                conflict_policy: ConflictPolicy::default(),
-                warnings: Vec::new(),
-                created_at: macsftp_core::Timestamp(UNIX_EPOCH),
-            },
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use macsftp_core::AppEvent;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     /// Helper: create a mock actor with default config.
     fn mock_actor(
@@ -478,63 +344,6 @@ mod tests {
     }
 
     #[test]
-    fn mock_transfer_job_emits_queued_progress_and_completed() {
-        let (_event_tx, event_rx) = flume::bounded::<AppEvent>(64);
-        let event_tx = _event_tx;
-
-        // Small transfer: 1000 bytes at 10000 bytes/sec → ~1 tick.
-        let job = MockTransferJob::new(TransferId(1), 1000, 10_000, event_tx);
-        let cancel = CancellationToken::new();
-
-        let helper = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("helper runtime");
-
-        helper.block_on(async {
-            let job_handle = tokio::spawn(job.run(cancel));
-
-            // Collect events until the job completes.
-            let mut got_queued = false;
-            let mut got_progress = false;
-            let mut got_completed = false;
-
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while Instant::now() < deadline {
-                let event =
-                    match tokio::time::timeout(Duration::from_secs(1), event_rx.recv_async()).await
-                    {
-                        Ok(Ok(event)) => event,
-                        _ => break,
-                    };
-
-                match event {
-                    AppEvent::TransferQueued(_) => got_queued = true,
-                    AppEvent::TransferProgress(p) => {
-                        got_progress = true;
-                        assert_eq!(p.transfer_id, TransferId(1));
-                        assert!(p.bytes_done <= 1000);
-                    }
-                    AppEvent::TransferCompleted { transfer_id } => {
-                        assert_eq!(transfer_id, TransferId(1));
-                        got_completed = true;
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-
-            assert!(got_queued, "should receive TransferQueued");
-            assert!(got_progress, "should receive TransferProgress");
-            assert!(got_completed, "should receive TransferCompleted");
-
-            job_handle.await.expect("job should complete");
-        });
-
-        helper.shutdown_timeout(Duration::from_secs(1));
-    }
-
-    #[test]
     fn mock_actor_exits_when_event_channel_closed() {
         // Audit SFTP-MOCK-001: a dropped receiver must make the mock exit
         // promptly instead of silently continuing or deadlocking.
@@ -557,33 +366,6 @@ mod tests {
             assert!(
                 finished.is_ok(),
                 "mock actor must exit quickly when the event channel is closed"
-            );
-        });
-
-        helper.shutdown_timeout(Duration::from_secs(1));
-    }
-
-    #[test]
-    fn mock_transfer_job_exits_when_event_channel_closed() {
-        // Audit SFTP-MOCK-001: same guarantee for the mock transfer job.
-        let (event_tx, event_rx) = flume::bounded::<AppEvent>(1);
-        drop(event_rx); // close the channel before the job starts
-
-        let job = MockTransferJob::new(TransferId(1), 1000, 10_000, event_tx);
-        let cancel = CancellationToken::new();
-        let helper = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("helper runtime");
-
-        helper.block_on(async {
-            // TransferQueued send fails immediately; the job must not spin in
-            // its progress loop or deadlock.
-            let job_handle = tokio::spawn(job.run(cancel));
-            let finished = tokio::time::timeout(Duration::from_secs(1), job_handle).await;
-            assert!(
-                finished.is_ok(),
-                "mock transfer job must exit quickly when the event channel is closed"
             );
         });
 

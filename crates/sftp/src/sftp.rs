@@ -13,7 +13,7 @@ pub use keyboard_interactive::{KeyboardInteractiveRegistry, KeyboardInteractiveR
 pub use known_hosts::{
     HostKeyCheckResult, KnownHostsStore, fingerprint_sha256, host_pattern, key_algorithm,
 };
-pub use mock_actor::{MockRemoteSessionActor, MockSessionConfig, MockTransferJob};
+pub use mock_actor::{MockRemoteSessionActor, MockSessionConfig};
 pub use runtime::{
     BridgeChannels, EventReceiver, ProgressThrottle, RuntimeClient, RuntimeController,
     SessionBackend, test_event_channel,

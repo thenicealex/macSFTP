@@ -248,7 +248,7 @@ impl RuntimeController {
     /// Expose the runtime for spawning tasks internally (e.g. during tests).
     ///
     /// Panics if called after shutdown — internal callers must not use it
-    /// past the shutdown point. Used by M2c actor dispatch and tests.
+    /// past the shutdown point. Used by actor dispatch and tests.
     #[allow(dead_code)]
     pub(crate) fn runtime(&self) -> &Runtime {
         self.runtime
@@ -385,7 +385,7 @@ async fn dispatch_fs_command(
 /// Receives `AppCommand`s from the GPUI side, routes them to mock actors
 /// or the `TrustRegistry`, and emits `AppEvent`s back to GPUI.
 ///
-/// Command routing (M2c):
+/// Command routing:
 /// - `ConnectTab` → cancel any old session for the tab, reject its stale
 ///   trust requests, spawn a `MockRemoteSessionActor` bound to the
 ///   command's UI-allocated `session_id`/`session_epoch`, emit
@@ -802,10 +802,12 @@ async fn command_dispatch_loop(
                     Timestamp(std::time::SystemTime::now()),
                 );
                 if event_tx
-                    .send_async(AppEvent::TransferPlanStarted(TransferPlanSnapshot {
-                        plan,
-                        root_job: root_job.clone(),
-                    }))
+                    .send_async(AppEvent::TransferPlanStarted(Box::new(
+                        TransferPlanSnapshot {
+                            plan,
+                            root_job: root_job.clone(),
+                        },
+                    )))
                     .await
                     .is_err()
                 {
@@ -986,11 +988,6 @@ async fn command_dispatch_loop(
 
             Ok(AppCommand::Fs(command)) => {
                 dispatch_fs_command(command, &sessions, &event_tx).await;
-            }
-
-            Ok(_) => {
-                // Other commands (OpenTab, StartTransfer, etc.) are not
-                // handled yet.
             }
 
             Err(flume::RecvError::Disconnected) => break,
@@ -1941,7 +1938,7 @@ mod tests {
         }
     }
 
-    // ── M2c: Mock actor full loop integration tests ───────────────
+    // ── Mock actor full-loop integration tests ────────────────────
 
     /// Helper: receive an event within a timeout, panicking if it
     /// doesn't arrive.

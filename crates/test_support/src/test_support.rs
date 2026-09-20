@@ -15,7 +15,7 @@ pub fn crate_name() -> &'static str {
 /// handshake, host key verification, and public key authentication.
 /// Password authentication is disabled (a non-root sshd cannot verify
 /// passwords), so password tests can only assert the rejection path;
-/// the full password matrix needs the Docker fixture in CI (plan §19).
+/// the full password matrix needs the Docker fixture in CI (current architecture §14).
 ///
 /// `spawn()` returns `None` (with an explanatory message on stderr) when sshd
 /// or ssh-keygen is unavailable. When `MACSFTP_REQUIRE_SSHD=1`, used by CI,

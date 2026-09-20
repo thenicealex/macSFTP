@@ -458,7 +458,7 @@ impl crate::workspace::Workspace {
     /// Persist the current form as a profile. If the form came from an
     /// existing profile, the same id is reused (update); otherwise a new
     /// id is allocated. The secret is mapped to a `SecretRef`, written to
-    /// the macOS Keychain, and never written to disk (plan §5/§11). The
+    /// the macOS Keychain, and never written to disk (current architecture §11). The
     /// profile is only flushed to `profiles.json` after the Keychain
     /// write succeeds, so the two never drift apart.
     pub(crate) fn save_current_profile(&mut self, cx: &mut Context<Self>) {

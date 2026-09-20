@@ -613,7 +613,7 @@ mod tests {
         RuntimeBridgeConfig, SessionId, TabId, Timestamp, TransferConflictPrompt,
         TransferDirection, TransferEndpoint, TransferFailure, TransferId, TransferJob,
         TransferPlan, TransferPlanId, TransferPlanProgress, TransferPlanSnapshot,
-        TransferPlanState, TransferSnapshot, TransferState, UserFacingError, WindowSessionId,
+        TransferPlanState, TransferState, UserFacingError, WindowSessionId,
     };
     use macsftp_platform::AppPaths;
     use macsftp_sftp::{BridgeChannels, RuntimeClient};
@@ -650,6 +650,29 @@ mod tests {
             },
             ConnectionPoolIdentity::Ephemeral(SessionId(1)),
         )
+    }
+
+    fn seed_transfer(cx: &mut TestAppContext, job: TransferJob) {
+        let plan = TransferPlan {
+            id: TransferPlanId(job.id.0),
+            root_job_id: job.id,
+            source_root: job.source.clone(),
+            destination_root: job.destination.clone(),
+            state: TransferPlanState::Planning,
+            planned_count: 0,
+            total_bytes: None,
+            child_jobs: Vec::new(),
+            conflict_policy: job.conflict_policy.clone(),
+        };
+        cx.update(|cx| {
+            dispatch_event(
+                AppEvent::TransferPlanStarted(Box::new(TransferPlanSnapshot {
+                    plan,
+                    root_job: job,
+                })),
+                cx,
+            );
+        });
     }
 
     /// Register a `Downloading` edit session whose temp path is a real file on
@@ -711,9 +734,7 @@ mod tests {
             warnings: Vec::new(),
             created_at: now,
         };
-        cx.update(|cx| {
-            dispatch_event(AppEvent::TransferQueued(TransferSnapshot { job }), cx);
-        });
+        seed_transfer(cx, job);
 
         (session_id, temp_path)
     }
@@ -771,9 +792,7 @@ mod tests {
             warnings: Vec::new(),
             created_at: now,
         };
-        cx.update(|cx| {
-            dispatch_event(AppEvent::TransferQueued(TransferSnapshot { job }), cx);
-        });
+        seed_transfer(cx, job);
 
         (session_id, temp_path)
     }
@@ -877,8 +896,8 @@ mod tests {
             warnings: Vec::new(),
             created_at: now,
         };
+        seed_transfer(cx, job);
         cx.update(|cx| {
-            dispatch_event(AppEvent::TransferQueued(TransferSnapshot { job }), cx);
             dispatch_event(
                 AppEvent::TransferCompleted {
                     transfer_id: unrelated,
@@ -1194,7 +1213,7 @@ mod tests {
             ..root_job.clone()
         };
         let events = [
-            AppEvent::TransferPlanStarted(TransferPlanSnapshot { plan, root_job }),
+            AppEvent::TransferPlanStarted(Box::new(TransferPlanSnapshot { plan, root_job })),
             AppEvent::TransferPlanProgress(TransferPlanProgress {
                 plan_id,
                 child_jobs: vec![child_job.clone()],

@@ -21,14 +21,14 @@ pub use profiles::{
     ProfileSaveOutcome, ProfileSaveRequest, ProfileStore,
 };
 
-/// Recent successful connections (plan §18 / Phase 5): `recents.json`.
+/// Recent successful connections (current architecture §11): `recents.json`.
 pub mod recents;
 pub use recents::{RecentEntry, RecentEntryInput, RecentsFile, RecentsStore};
 
 pub mod residual_temp;
 pub use residual_temp::ResidualTempStore;
 
-/// Restorable workspace windows and tabs (plan §15/§18): `session.json`.
+/// Restorable workspace windows and tabs (current architecture §11): `session.json`.
 pub mod session;
 pub use session::{SessionFile, SessionStore, SessionTabSnapshot, SessionWindowSnapshot};
 

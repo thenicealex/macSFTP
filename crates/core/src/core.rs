@@ -30,9 +30,6 @@ pub struct TrustRequestId(pub u64);
 pub struct ConflictRequestId(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct CredentialRequestId(pub u64);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct KeyboardInteractiveRequestId(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -688,12 +685,6 @@ pub enum ConnectionPoolIdentity {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransferSessionMode {
-    Dedicated,
-    BorrowBrowsingSession { tab_id: TabId, session_epoch: u64 },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeBridgeConfig {
     pub command_channel_capacity: usize,
     pub event_channel_capacity: usize,
@@ -789,7 +780,6 @@ impl AppState {
                     !tabs.accepts_remote_event(&prompt.scope)
                 }
                 ModalRequest::TransferConflict(_) => false,
-                ModalRequest::Error(_) => false,
             };
             if is_expired {
                 expired.push(request.clone());
@@ -985,12 +975,7 @@ impl TransferStore {
                     error: error.clone(),
                 },
             ),
-            AppEvent::TransferQueued(snapshot) | AppEvent::TransferRunning(snapshot) => {
-                self.upsert_job(snapshot.job.clone())
-            }
-            AppEvent::TransferPlanning { transfer_id } => {
-                self.set_job_state(*transfer_id, TransferState::Planning)
-            }
+            AppEvent::TransferRunning(snapshot) => self.upsert_job(snapshot.job.clone()),
             AppEvent::TransferConflict(prompt) => {
                 let waiting = self.set_job_state(
                     prompt.transfer_id,
@@ -1301,20 +1286,19 @@ pub struct TabState {
     /// never persists anywhere. Zeroized on drop; Debug is fully redacted.
     /// MUST stay out of any serialized surface (session snapshots take only
     /// host/port/user).
-    /// Boxed: cold field, keeps TabSnapshot-carrying events compact.
+    /// Boxed: cold field, keeps the hot `TabState` representation smaller.
     pub connection_settings: Option<Box<ConnectionSettings>>,
     /// Non-secret identity of this tab's current physical connection, built
     /// from `connection_settings` + pool identity at connect time — the same
     /// key the connection pool uses for reuse decisions. Remote editing reads
     /// it so dedup follows the physical connection rather than the profile
     /// record, which may be re-pointed at another host mid-connection.
-    /// Boxed: cold field, keeps TabSnapshot-carrying events compact.
+    /// Boxed: cold field, keeps the hot `TabState` representation smaller.
     pub connection_key: Option<Box<ConnectionKey>>,
     pub nav: TabNavState,
-    pub pending: Vec<PendingOperation>,
     /// Non-secret connection metadata restored from `session.json` or
     /// recents, consumed by reconnect prefill and snapshot building.
-    /// Boxed: cold field, keeps TabSnapshot-carrying events compact.
+    /// Boxed: cold field, keeps the hot `TabState` representation smaller.
     pub restored_target: Option<Box<RestoredTabTarget>>,
 }
 
@@ -1333,7 +1317,6 @@ impl TabState {
             connection_settings: None,
             connection_key: None,
             nav: TabNavState::default(),
-            pending: Vec::new(),
             restored_target: None,
         }
     }
@@ -1553,11 +1536,6 @@ pub enum ConnectionState {
         session_epoch: u64,
         request_id: TrustRequestId,
     },
-    AwaitingCredentials {
-        session_id: SessionId,
-        session_epoch: u64,
-        request_id: CredentialRequestId,
-    },
     Connected {
         session_id: SessionId,
         session_epoch: u64,
@@ -1594,11 +1572,6 @@ impl ConnectionState {
                 session_epoch: current_session_epoch,
                 ..
             }
-            | Self::AwaitingCredentials {
-                session_id: current_session_id,
-                session_epoch: current_session_epoch,
-                ..
-            }
             | Self::Reconnecting {
                 session_id: current_session_id,
                 session_epoch: current_session_epoch,
@@ -1625,13 +1598,6 @@ pub struct SelectionState {
 pub enum EntryPath {
     Local(LocalPath),
     Remote(RemotePath),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PendingOperation {
-    ReadRemoteDir(RemotePath),
-    ReadLocalDir(LocalPath),
-    Transfer(TransferPlanId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1808,7 +1774,6 @@ pub enum FileKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppCommand {
-    OpenTab(OpenTabCommand),
     CloseTab {
         tab_id: TabId,
     },
@@ -1831,10 +1796,6 @@ pub enum AppCommand {
         tab_id: TabId,
         transfer_id: TransferId,
         path: RemotePath,
-    },
-    ReadLocalDir {
-        tab_id: TabId,
-        path: LocalPath,
     },
     /// Create / rename / delete for local or remote (phase 1).
     Fs(FsCommand),
@@ -1860,11 +1821,6 @@ pub enum AppCommand {
         request_id: KeyboardInteractiveRequestId,
     },
     Shutdown,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OpenTabCommand {
-    pub profile_id: Option<ProfileId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1955,10 +1911,6 @@ impl KeyboardInteractiveResponse {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
-    TabOpened(TabSnapshot),
-    TabClosed {
-        tab_id: TabId,
-    },
     TabConnecting {
         tab_id: TabId,
     },
@@ -1971,13 +1923,12 @@ pub enum AppEvent {
     RemoteDirLoading(RemoteScoped<RemoteDirLoading>),
     RemoteDirLoaded(RemoteScoped<RemoteDirSnapshot>),
     RemoteOperationFailed(RemoteScoped<RemoteOperationFailure>),
-    LocalDirLoaded(LocalDirSnapshot),
     /// Create / rename / delete failure shared by local and remote.
     FsOperationFailed {
         scope: FsScope,
         failure: UserFacingError,
     },
-    TransferPlanStarted(TransferPlanSnapshot),
+    TransferPlanStarted(Box<TransferPlanSnapshot>),
     TransferPlanProgress(TransferPlanProgress),
     TransferPlanCompleted {
         plan_id: TransferPlanId,
@@ -1988,10 +1939,6 @@ pub enum AppEvent {
     TransferPlanFailed {
         plan_id: TransferPlanId,
         error: UserFacingError,
-    },
-    TransferQueued(TransferSnapshot),
-    TransferPlanning {
-        transfer_id: TransferId,
     },
     TransferConflict(TransferConflictPrompt),
     TransferRunning(TransferSnapshot),
@@ -2006,7 +1953,7 @@ pub enum AppEvent {
     TransferFailed(TransferFailure),
     /// A temporary `.macsftp-part-*` file was created for an in-flight
     /// transfer. The app persists it so a crash or hard-kill can be
-    /// reconciled on the next launch (plan M5/M6 residual).
+    /// reconciled on the next launch (current architecture §8).
     ResidualTempCreated(ResidualTempRecord),
     /// The temporary file for `transfer_id` at `path` was cleaned, so its
     /// residual record can be dropped.
@@ -2101,13 +2048,11 @@ impl AppEvent {
     pub fn is_transfer_event(&self) -> bool {
         matches!(
             self,
-            Self::TransferQueued(_)
-                | Self::TransferPlanStarted(_)
+            Self::TransferPlanStarted(_)
                 | Self::TransferPlanProgress(_)
                 | Self::TransferPlanCompleted { .. }
                 | Self::TransferPlanCancelled { .. }
                 | Self::TransferPlanFailed { .. }
-                | Self::TransferPlanning { .. }
                 | Self::TransferConflict(_)
                 | Self::TransferRunning(_)
                 | Self::TransferProgress(_)
@@ -2117,11 +2062,6 @@ impl AppEvent {
                 | Self::TransferFailed(_)
         )
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TabSnapshot {
-    pub tab: TabState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2237,13 +2177,6 @@ pub struct RemoteOperationFailure {
     /// navigation request in the same session.
     pub path: Option<RemotePath>,
     pub error: UserFacingError,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocalDirSnapshot {
-    pub tab_id: TabId,
-    pub path: LocalPath,
-    pub entries: Vec<LocalEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2742,7 +2675,7 @@ pub enum TransferState {
 /// A temporary `.macsftp-part-*` file left behind by an in-flight
 /// transfer. Recorded eagerly the moment the temp file is created so a
 /// crash or hard-kill mid-transfer can be reconciled on the next launch
-/// (plan M5/M6 residual). `transfer_id` + `path` together uniquely name
+/// (current architecture §8). `transfer_id` + `path` together uniquely name
 /// the temp file and double as the removal key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResidualTempRecord {
@@ -2779,7 +2712,6 @@ pub enum ModalRequest {
     HostKey(HostKeyPrompt),
     KeyboardInteractive(KeyboardInteractivePrompt),
     TransferConflict(TransferConflictPrompt),
-    Error(UserFacingError),
 }
 
 impl ModalRequest {
@@ -2790,7 +2722,6 @@ impl ModalRequest {
                 Some(ModalRequestId::KeyboardInteractive(prompt.request_id))
             }
             Self::TransferConflict(prompt) => Some(ModalRequestId::Conflict(prompt.request_id)),
-            Self::Error(_) => None,
         }
     }
 }
@@ -3153,7 +3084,7 @@ mod tests {
         );
     }
 
-    // ── M2b: Stale event guard tests ──────────────────────────────
+    // ── Stale event guard tests ───────────────────────────────────
 
     /// Helper: create a connected tab with a known session.
     fn connected_tab(tab_id: u64, session_id: u64, epoch: u64) -> TabState {
@@ -3331,7 +3262,8 @@ mod tests {
             child_jobs: Vec::new(),
             conflict_policy: super::ConflictPolicy::default(),
         };
-        let started = AppEvent::TransferPlanStarted(super::TransferPlanSnapshot { plan, root_job });
+        let started =
+            AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot { plan, root_job }));
         let child_job = super::TransferJob {
             id: TransferId(2),
             direction: TransferDirection::Upload,
@@ -3409,7 +3341,10 @@ mod tests {
         };
         let mut store = super::TransferStore::default();
         store.apply_event(
-            &AppEvent::TransferPlanStarted(super::TransferPlanSnapshot { plan, root_job }),
+            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
+                plan,
+                root_job,
+            })),
             now,
         );
         store.apply_event(
@@ -3478,10 +3413,10 @@ mod tests {
 
         let mut store = TransferStore::default();
         store.apply_event(
-            &AppEvent::TransferPlanStarted(super::TransferPlanSnapshot {
+            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
                 plan: plan.clone(),
                 root_job: root_job.clone(),
-            }),
+            })),
             now,
         );
         store.apply_event(
@@ -3568,10 +3503,10 @@ mod tests {
 
         let mut store = TransferStore::default();
         store.apply_event(
-            &AppEvent::TransferPlanStarted(super::TransferPlanSnapshot {
+            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
                 plan: plan.clone(),
                 root_job: root_job.clone(),
-            }),
+            })),
             now,
         );
         store.apply_event(
@@ -3638,10 +3573,10 @@ mod tests {
 
         let mut store = TransferStore::default();
         store.apply_event(
-            &AppEvent::TransferPlanStarted(super::TransferPlanSnapshot {
+            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
                 plan: plan.clone(),
                 root_job: root_job.clone(),
-            }),
+            })),
             now,
         );
         store.apply_event(
@@ -3750,22 +3685,6 @@ mod tests {
     #[test]
     fn transfer_events_have_no_remote_scope() {
         let events = [
-            AppEvent::TransferQueued(super::TransferSnapshot {
-                job: super::TransferJob {
-                    id: TransferId(1),
-                    direction: TransferDirection::Upload,
-                    source: TransferEndpoint::Local(LocalPath::new("/tmp/a")),
-                    destination: TransferEndpoint::Remote(RemotePath::new("/srv/a")),
-                    state: super::TransferState::Queued,
-                    metadata_policy: MetadataPolicy::default(),
-                    conflict_policy: super::ConflictPolicy::default(),
-                    warnings: Vec::new(),
-                    created_at: Timestamp::from_secs_since_epoch(1),
-                },
-            }),
-            AppEvent::TransferPlanning {
-                transfer_id: TransferId(1),
-            },
             AppEvent::TransferProgress(super::TransferProgress {
                 transfer_id: TransferId(1),
                 bytes_done: 0,
@@ -3934,24 +3853,6 @@ mod tests {
             state.should_accept_event(&event),
             "current host key mismatch must be accepted"
         );
-    }
-
-    #[test]
-    fn global_events_always_accepted() {
-        let state = AppState::new(); // no tabs at all
-
-        // TabOpened, TabClosed, LocalDirLoaded — all global, no tab needed.
-        let tab_opened = AppEvent::TabOpened(super::TabSnapshot {
-            tab: TabState::new(TabId(1), "example.com"),
-        });
-        assert!(state.should_accept_event(&tab_opened));
-
-        let local_dir = AppEvent::LocalDirLoaded(super::LocalDirSnapshot {
-            tab_id: TabId(1),
-            path: LocalPath::new("/Users/alex"),
-            entries: Vec::new(),
-        });
-        assert!(state.should_accept_event(&local_dir));
     }
 
     // ── Default sort rules (plan §12) ──────────────────────────────

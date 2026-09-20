@@ -271,7 +271,7 @@ impl ActiveTransfers for App {
 }
 
 /// Remove any local `.macsftp-part-*` residuals left by a previous run
-/// (plan M5/M6). Runs once at startup while building [`AppResources`],
+/// (current architecture §8). Runs once at startup while building [`AppResources`],
 /// not per window. Moved verbatim from `Workspace`.
 fn reconcile_local_residual_temps(mut store: ResidualTempStore) -> ResidualTempStore {
     let local: Vec<_> = store.local_records().cloned().collect();

@@ -5,7 +5,7 @@ use std::path::Path;
 use super::StorageError;
 use crate::{file_lock::FileLock, write_private_file_atomically};
 
-/// On-disk envelope for residual temporary-transfer files (plan M5/M6
+/// On-disk envelope for residual temporary-transfer files (current architecture §8
 /// residual). The versioned wrapper lets the record format evolve without
 /// breaking older writes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -230,7 +230,7 @@ mod tests {
     use super::{ResidualTempFile, ResidualTempStore, StorageError};
 
     // Unique temp path per call so concurrent tests never clobber each
-    // other's residual_temp.json (plan §9).
+    // other's residual_temp.json (current architecture §14).
     fn temp_path() -> LocalPath {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, Ordering::SeqCst);
