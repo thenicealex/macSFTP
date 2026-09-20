@@ -692,12 +692,14 @@ impl crate::workspace::Workspace {
         if keystroke.modifiers.platform && keystroke.key == "v" {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
                 self.settings.profile_filter.insert(&text);
+                self.settings.profile_list_scroll = gpui::ScrollHandle::new();
                 cx.stop_propagation();
                 cx.notify();
             }
             return;
         }
         if self.settings.profile_filter.handle_keystroke(keystroke) == InputKeyResult::Handled {
+            self.settings.profile_list_scroll = gpui::ScrollHandle::new();
             cx.stop_propagation();
             cx.notify();
         }

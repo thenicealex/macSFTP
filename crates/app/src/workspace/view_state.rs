@@ -253,6 +253,8 @@ pub(crate) struct SettingsUi {
     pub(crate) profile_delete_confirm: Option<macsftp_core::ProfileId>,
     pub(crate) picker_scroll: gpui::ScrollHandle,
     pub(crate) picker_scrollbar: ScrollbarState,
+    pub(crate) profile_list_scroll: gpui::ScrollHandle,
+    pub(crate) profile_list_scrollbar: ScrollbarState,
     pub(crate) editor_scroll: gpui::ScrollHandle,
     pub(crate) editor_scrollbar: ScrollbarState,
 }
@@ -270,6 +272,8 @@ impl SettingsUi {
             profile_delete_confirm: None,
             picker_scroll: gpui::ScrollHandle::new(),
             picker_scrollbar: ScrollbarState::new(),
+            profile_list_scroll: gpui::ScrollHandle::new(),
+            profile_list_scrollbar: ScrollbarState::new(),
             editor_scroll: gpui::ScrollHandle::new(),
             editor_scrollbar: ScrollbarState::new(),
         }

@@ -201,6 +201,7 @@ remote pane 必须覆盖这些状态：
   外观变化覆盖。
 - 配置保存失败必须在 Settings 内行内展示，因此不能使用 toast，也不能静默丢弃错误。
 - Settings → Profiles 是创建、编辑和删除保存 Profile 的唯一入口。Connect modal 只能选择已有 Profile 或填写临时连接；`Manage…` 必须关闭 Connect 并进入 Settings → Profiles。
+- Profile 列表使用紧凑双行条目：名称是主层级，`username@host` 是可截断的次层级，port 独立显示；选中、hover 和焦点不能改变条目高度或挤压地址文本。
 - Profile editor 必须明确显示认证与 route 字段；密码和 passphrase 输入必须遮罩，保存失败不得清空用户仍可修正的草稿。
 - About 是非阻塞的简洁浮层，因此只显示图标、应用名、从构建元数据派生的版本、简短说明和
   复制版本信息操作；但是不得包含设置功能或营销页面内容。

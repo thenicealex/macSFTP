@@ -4,7 +4,8 @@ use gpui::{
 };
 use macsftp_core::{AuthMethodKind, ConnectionRoute};
 use macsftp_ui::{
-    ActiveTheme, InputKeyResult, InputState, TextFieldModel, empty_state, text_button, text_field,
+    ActiveTheme, IconName, InputKeyResult, InputState, TextFieldModel, empty_state, icon,
+    text_button, text_field, text_tooltip,
 };
 use tracing::warn;
 
@@ -392,24 +393,99 @@ impl crate::workspace::Workspace {
             .map(|profile| {
                 let profile_id = profile.id;
                 let selected = selected_id == Some(profile_id) && !editing_new;
-                let label = profile_list_label(profile);
-                div()
-                    .id(("settings-profile-row", profile_id.0))
-                    .px_2()
-                    .py_2()
+                let full_label = profile_list_label(profile);
+                let endpoint = format!("{}@{}", profile.username, profile.host);
+                let port = format!(":{}", profile.port);
+                let hover_background = if selected {
+                    theme.colors.element_active
+                } else {
+                    theme.colors.element_hover
+                };
+                let profile_icon = div()
+                    .size(px(28.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .bg(if selected {
+                        theme.colors.element_active
+                    } else {
+                        theme.colors.elevated_surface
+                    })
+                    .child(icon(
+                        IconName::Server,
+                        if selected {
+                            theme.colors.accent
+                        } else {
+                            theme.colors.text_muted
+                        },
+                    ));
+                let profile_name = div()
+                    .truncate()
+                    .text_size(px(12.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.colors.text)
+                    .child(profile.name.clone());
+                let profile_endpoint = div().flex_1().min_w_0().truncate().child(endpoint);
+                let profile_port = div()
+                    .flex_none()
+                    .px_1()
                     .rounded_sm()
+                    .bg(theme.colors.element_active)
+                    .child(port);
+                let row = div()
+                    .h(px(54.0))
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .cursor_pointer()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(if selected {
+                        theme.colors.accent
+                    } else {
+                        theme.colors.border
+                    })
                     .bg(if selected {
                         theme.colors.element_selected
                     } else {
                         theme.colors.background
-                    })
-                    .text_size(px(12.0))
-                    .text_color(theme.colors.text)
-                    .hover(|style| style.bg(theme.colors.element_hover))
+                    });
+                let row = if selected {
+                    row.id("settings-selected-profile-row")
+                } else {
+                    row.id(("settings-profile-row", profile_id.0))
+                };
+                row.tooltip(text_tooltip(full_label))
+                    .hover(move |style| style.bg(hover_background))
                     .on_click(cx.listener(move |workspace, _event, _window, cx| {
                         workspace.select_profile_in_settings(profile_id, cx);
                     }))
-                    .child(label)
+                    .child(profile_icon)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(profile_name)
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .min_w_0()
+                                    .gap_1()
+                                    .text_size(px(10.0))
+                                    .text_color(theme.colors.text_muted)
+                                    .child(profile_endpoint)
+                                    .child(profile_port),
+                            ),
+                    )
+                    .into_any_element()
             })
             .collect();
 
@@ -461,7 +537,7 @@ impl crate::workspace::Workspace {
             .min_w_0()
             .child(
                 div()
-                    .w(px(220.0))
+                    .w(px(240.0))
                     .flex_none()
                     .flex()
                     .flex_col()
@@ -493,7 +569,29 @@ impl crate::workspace::Workspace {
                                 cx,
                             )),
                     )
-                    .child(list_body),
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .px_1()
+                            .text_size(px(10.0))
+                            .text_color(theme.colors.text_disabled)
+                            .child("SAVED PROFILES")
+                            .child(if filter_active {
+                                format!("{filtered_count} of {total_count}")
+                            } else {
+                                total_count.to_string()
+                            }),
+                    )
+                    .child(macsftp_ui::scroll_area(
+                        "settings-profile-list-scroll",
+                        div().flex().flex_col().gap_1().pr_1().child(list_body),
+                        &self.settings.profile_list_scroll,
+                        &self.settings.profile_list_scrollbar,
+                        window,
+                        cx,
+                    )),
             )
             .child(div().flex().flex_col().flex_1().min_w_0().min_h_0().child(
                 macsftp_ui::scroll_area(

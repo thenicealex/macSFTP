@@ -833,6 +833,45 @@ fn settings_profiles_section_lists_saved_profiles(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn settings_profile_list_overflow_uses_custom_scrollbar(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        for id in 1..=12 {
+            let host = if id == 1 {
+                "a-very-long-production-hostname.internal.example.com".to_string()
+            } else {
+                format!("host-{id}.example.com")
+            };
+            let profile = macsftp_core::ConnectionProfile::new(
+                ProfileId(id),
+                format!("Server {id}"),
+                host,
+                format!("operator-{id}"),
+                AuthMethod::Password {
+                    secret_ref: macsftp_core::SecretRef::keychain_ref(ProfileId(id), "password"),
+                },
+            );
+            save_profile_fixture(cx, profile);
+        }
+        workspace.surface = WorkspaceSurface::Settings;
+        workspace.set_settings_section(SettingsSection::Profiles, cx);
+    });
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(workspace.settings.selected_profile_id, Some(ProfileId(1)));
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    cx.run_until_parked();
+    cx.run_until_parked();
+
+    assert!(
+        cx.debug_bounds("settings-profile-list-scroll-scrollbar-thumb")
+            .is_some(),
+        "overflowing profile lists expose the shared custom scrollbar"
+    );
+}
+
+#[gpui::test]
 fn settings_new_profile_save_persists(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
