@@ -1,8 +1,9 @@
 use gpui::{Context, FontWeight, IntoElement, ParentElement, Styled, div, prelude::*, px};
 use macsftp_core::{
-    AppCommand, ConflictPolicy, ConnectionKey, EditPhase, EditSession, EditSessionId, EntryPath,
-    FileKind, LocalPath, MetadataPolicy, ProfileId, RemotePath, RemoteSnapshot,
-    StartTransferCommand, TabId, Timestamp, TransferDirection, TransferEndpoint,
+    AppCommand, CheckRemoteEditSnapshotCommand, ConflictPolicy, ConnectionKey, EditPhase,
+    EditSession, EditSessionId, EntryPath, FileKind, LocalPath, MetadataPolicy, ProfileId,
+    RemotePath, RemoteSnapshot, StartTransferCommand, TabId, Timestamp, TransferDirection,
+    TransferEndpoint,
 };
 use macsftp_ui::{ActiveTheme, format_size, text_button};
 use tracing::warn;
@@ -81,6 +82,103 @@ impl Workspace {
             return;
         };
         self.begin_edit(remote_path, size, modified_at, cx);
+    }
+
+    pub(crate) fn selected_edit_session(
+        &self,
+        cx: &gpui::App,
+    ) -> Option<(EditSessionId, EditPhase)> {
+        let tab = self.active_tab()?;
+        let remote_path = tab
+            .selection
+            .selected_paths
+            .iter()
+            .find_map(|path| match path {
+                EntryPath::Remote(path) => Some(path),
+                EntryPath::Local(_) => None,
+            })?;
+        cx.resources()
+            .edit_sessions
+            .find_for_tab_path(tab.id, remote_path)
+            .map(|session| (session.id, session.phase.clone()))
+    }
+
+    pub(crate) fn upload_selected_edit(&mut self, cx: &mut Context<Self>) {
+        let Some((session_id, phase)) = self.selected_edit_session(cx) else {
+            self.status_message = Some("Select a remote file opened for editing".into());
+            cx.notify();
+            return;
+        };
+        if phase != EditPhase::Editing {
+            self.status_message = Some(match phase {
+                EditPhase::Downloading => "The editable copy is still downloading".into(),
+                EditPhase::CheckingRemote => "The remote file is already being checked".into(),
+                EditPhase::UploadingBack => "The modified file is already uploading".into(),
+                EditPhase::RemoteConflict => "Resolve the remote edit conflict first".into(),
+                EditPhase::Editing => "The editable copy is ready".into(),
+            });
+            cx.notify();
+            return;
+        }
+
+        let Some(session) = cx.resources().edit_sessions.get(session_id).cloned() else {
+            return;
+        };
+        let Some(tab) = self.state.tabs.find_tab(session.tab_id) else {
+            return;
+        };
+        let Some((session_epoch, connection_key)) = connected_edit_session(tab) else {
+            self.status_message = Some("Reconnect before uploading the modified file".into());
+            cx.notify();
+            return;
+        };
+        if connection_key != session.connection_key {
+            self.status_message =
+                Some("Connection changed — reconnect the original server before uploading".into());
+            cx.notify();
+            return;
+        }
+
+        let checking_local_mtime = match std::fs::metadata(session.local_temp_path.as_str())
+            .and_then(|metadata| metadata.modified())
+        {
+            Ok(modified) => Timestamp::from_system_time(modified),
+            Err(error) => {
+                warn!(error = %error, "edited temp file is unavailable");
+                if let Some(session) = cx.resources_mut().edit_sessions.get_mut(session_id) {
+                    session.phase = EditPhase::Editing;
+                    session.pending_check_id = None;
+                    session.checking_local_mtime = None;
+                }
+                self.status_message =
+                    Some("Could not read the edited file — restore access and try again".into());
+                cx.notify();
+                return;
+            }
+        };
+
+        let check_id = cx.resources_mut().edit_sessions.next_check_id();
+        if let Some(session) = cx.resources_mut().edit_sessions.get_mut(session_id) {
+            session.phase = EditPhase::CheckingRemote;
+            session.session_epoch = session_epoch;
+            session.pending_check_id = Some(check_id);
+            session.checking_local_mtime = Some(checking_local_mtime);
+        }
+        let command = AppCommand::CheckRemoteEditSnapshot(CheckRemoteEditSnapshotCommand {
+            tab_id: session.tab_id,
+            session_epoch,
+            edit_session_id: session_id,
+            check_id,
+            path: session.remote_path,
+        });
+        if self.send_command(command, cx) {
+            self.status_message = Some("Checking remote file before upload…".into());
+        } else if let Some(session) = cx.resources_mut().edit_sessions.get_mut(session_id) {
+            session.phase = EditPhase::Editing;
+            session.pending_check_id = None;
+            session.checking_local_mtime = None;
+        }
+        cx.notify();
     }
 
     pub(crate) fn begin_edit(
@@ -202,11 +300,8 @@ impl Workspace {
                 size: pending.size,
                 modified_at: pending.modified_at,
             },
-            local_mtime: None,
-            active_transfer: None,
             pending_check_id: None,
             checking_local_mtime: None,
-            missing_ticks: 0,
         };
         cx.resources_mut().edit_sessions.register(session);
         let command = AppCommand::StartTransfer(StartTransferCommand {

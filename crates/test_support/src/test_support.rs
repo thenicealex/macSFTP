@@ -4,10 +4,6 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-pub fn crate_name() -> &'static str {
-    "macsftp-test-support"
-}
-
 /// A real OpenSSH server for SFTP integration tests.
 ///
 /// Runs the local `/usr/sbin/sshd` as the current user on a loopback
@@ -15,7 +11,7 @@ pub fn crate_name() -> &'static str {
 /// handshake, host key verification, and public key authentication.
 /// Password authentication is disabled (a non-root sshd cannot verify
 /// passwords), so password tests can only assert the rejection path;
-/// the full password matrix needs the Docker fixture in CI (plan §19).
+/// the full password matrix needs the Docker fixture in CI (current architecture §14).
 ///
 /// `spawn()` returns `None` (with an explanatory message on stderr) when sshd
 /// or ssh-keygen is unavailable. When `MACSFTP_REQUIRE_SSHD=1`, used by CI,
@@ -266,12 +262,7 @@ fn free_loopback_port() -> Option<u16> {
 mod tests {
     use std::ffi::OsStr;
 
-    use super::{crate_name, integration_tests_required};
-
-    #[test]
-    fn exposes_crate_name() {
-        assert_eq!(crate_name(), "macsftp-test-support");
-    }
+    use super::integration_tests_required;
 
     #[test]
     fn integration_requirement_accepts_only_explicit_truthy_values() {

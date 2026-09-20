@@ -10,8 +10,8 @@ use crate::file_lock::FileLock;
 use crate::keychain::{KeychainError, KeychainStore};
 use crate::profile_file::{PhasedSaveError, ProfilesFile, StorageError, TransactionPhase};
 
-/// Disk-backed profile store: owns the `profiles.json` path and the
-/// in-memory `ProfilesFile`, keeping them in sync on every write.
+/// Disk-backed profile store that keeps its validated in-memory state,
+/// Keychain credentials, and `profiles.json` synchronized on every write.
 pub struct ProfileStore {
     path: LocalPath,
     profiles: ProfilesFile,
@@ -398,8 +398,8 @@ impl ProfileStore {
         Ok(ProfileId(self.profiles.next_profile_high_water()))
     }
 
-    /// Insert or update a profile and flush the whole store to disk.
-    pub fn save_profile(
+    #[cfg(test)]
+    fn save_profile_for_test(
         &mut self,
         profile: ConnectionProfile,
     ) -> Result<ConnectionProfile, StorageError> {
@@ -421,7 +421,7 @@ impl ProfileStore {
 
     /// Remove a profile by id and flush. Removing a non-existent id is a
     /// no-op that still succeeds (idempotent).
-    pub fn delete_profile(&mut self, profile_id: ProfileId) -> Result<(), StorageError> {
+    fn delete_profile(&mut self, profile_id: ProfileId) -> Result<(), StorageError> {
         self.ensure_writable()?;
         match self.commit_transaction(TransactionKind::Delete { profile_id }) {
             Ok(TransactionOutcome::Committed { .. }) | Ok(TransactionOutcome::Unchanged) => Ok(()),
@@ -572,57 +572,6 @@ impl ProfileStore {
         }
     }
 
-    /// Save a complete connect-form value. Existing UI-only profile metadata
-    /// is preserved when the same profile id is updated.
-    pub fn save_connection_settings(
-        &mut self,
-        profile_id: ProfileId,
-        name: String,
-        settings: &ConnectionSettings,
-    ) -> Result<ProfileSaveOutcome, ProfileMutationError> {
-        let previous = self.find_profile(profile_id).cloned();
-        let auth = match &settings.auth {
-            AuthCredential::Password { password } => ProfileAuthUpdate::Password {
-                password: Some(password.clone()),
-            },
-            AuthCredential::PrivateKey {
-                key_path,
-                passphrase,
-            } => ProfileAuthUpdate::PrivateKey {
-                key_path: LocalPath::new(key_path.clone()),
-                passphrase: match &passphrase {
-                    Some(passphrase) => PrivateKeyPassphraseUpdate::Remember(passphrase.clone()),
-                    None => PrivateKeyPassphraseUpdate::KeepExisting,
-                },
-            },
-            AuthCredential::KeyboardInteractive => ProfileAuthUpdate::KeyboardInteractive,
-            AuthCredential::SshAgent { socket_path } => ProfileAuthUpdate::SshAgent {
-                socket_path: socket_path.as_ref().map(LocalPath::new),
-            },
-        };
-        let route = match &settings.route {
-            ResolvedConnectionRoute::JumpHost { .. } => previous
-                .as_ref()
-                .map(|profile| profile.route.clone())
-                .filter(|route| matches!(route, ConnectionRoute::JumpHost { .. }))
-                .unwrap_or(ConnectionRoute::Direct),
-            _ => settings.route.persisted_shape(),
-        };
-        let request = ProfileSaveRequest {
-            profile_id,
-            name,
-            host: settings.host.clone(),
-            port: settings.port,
-            username: settings.username.clone(),
-            auth,
-            route,
-            default_remote_path: previous
-                .as_ref()
-                .and_then(|profile| profile.default_remote_path.clone()),
-        };
-        self.save_request(request)
-    }
-
     /// Coordinate Keychain and profiles.json with a compensating rollback.
     /// A disk write that never committed (failed before the rename) restores
     /// the prior Keychain value; a write that replaced the file but could
@@ -655,10 +604,6 @@ impl ProfileStore {
         profile.port = request.port;
         profile.default_remote_path = request.default_remote_path.clone();
         profile.route = request.route.clone();
-        if let Some(previous) = &previous {
-            profile.group_id = previous.group_id;
-        }
-
         let saved = match self.commit_transaction(TransactionKind::Save {
             profile: Box::new(profile),
         }) {
@@ -845,22 +790,6 @@ impl ProfileStore {
         })
     }
 
-    /// Remove the credential behind a profile while leaving its metadata.
-    /// This is used by recovery tests and is also suitable for a future
-    /// explicit "forget credential" action.
-    pub fn delete_profile_credentials(
-        &self,
-        profile_id: ProfileId,
-    ) -> Result<(), ProfileMutationError> {
-        let profile = self
-            .find_profile(profile_id)
-            .ok_or(ProfileMutationError::ProfileNotFound(profile_id))?;
-        for secret_ref in secret_refs_for_auth(&profile.auth) {
-            self.keychain.delete(&secret_ref)?;
-        }
-        Ok(())
-    }
-
     fn resolve_auth<'a>(
         request: &'a ProfileSaveRequest,
         previous: Option<&ConnectionProfile>,
@@ -993,11 +922,12 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use macsftp_core::{
-        AuthCredential, AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionRoute,
-        ConnectionSettings, LocalPath, ProfileId, SecretRef,
+        AuthCredential, AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionRoute, LocalPath,
+        ProfileId, SecretRef,
     };
 
-    use crate::{ProfilesFile, StorageError, core_crate_name, crate_name};
+    use crate::StorageError;
+    use crate::profile_file::ProfilesFile;
 
     use super::{
         PrivateKeyPassphraseUpdate, ProfileAuthUpdate, ProfileMutationError, ProfileSaveRequest,
@@ -1005,7 +935,7 @@ mod tests {
     };
 
     // Unique temp path per call so concurrent tests never clobber each
-    // other's profiles.json (plan §9: parallel tests must not share paths).
+    // other's profiles.json (current architecture §14: parallel tests must not share paths).
     static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
     fn temp_profiles_path(tag: &str) -> LocalPath {
@@ -1036,15 +966,23 @@ mod tests {
         )
     }
 
-    fn password_settings(host: &str, password: &str) -> ConnectionSettings {
-        ConnectionSettings {
+    fn password_save_request(
+        id: u64,
+        name: &str,
+        host: &str,
+        password: &str,
+    ) -> ProfileSaveRequest {
+        ProfileSaveRequest {
+            profile_id: ProfileId(id),
+            name: name.into(),
             host: host.into(),
             port: 22,
             username: "alex".into(),
-            auth: AuthCredential::Password {
-                password: password.into(),
+            auth: ProfileAuthUpdate::Password {
+                password: Some(password.into()),
             },
-            route: macsftp_core::ResolvedConnectionRoute::Direct,
+            route: ConnectionRoute::Direct,
+            default_remote_path: None,
         }
     }
 
@@ -1080,12 +1018,6 @@ mod tests {
             } => (*has_passphrase, passphrase_ref.clone()),
             other => panic!("expected private-key auth, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn links_core_crate() {
-        assert_eq!(crate_name(), "macsftp-storage");
-        assert_eq!(core_crate_name(), "macsftp-core");
     }
 
     #[test]
@@ -1137,14 +1069,14 @@ mod tests {
         cleanup(&path);
         let mut store = ProfileStore::open_or_empty_memory(path.clone());
         let first = store
-            .save_profile(password_profile(1, "Production"))
+            .save_profile_for_test(password_profile(1, "Production"))
             .expect("save first profile revision");
         let first_fingerprint = store
             .auth_fingerprint(first.id)
             .expect("saved profile has a fingerprint");
 
         let second = store
-            .save_profile(first)
+            .save_profile_for_test(first)
             .expect("save second profile revision");
         let second_fingerprint = store
             .auth_fingerprint(second.id)
@@ -1183,8 +1115,12 @@ mod tests {
         second.route = ConnectionRoute::ProxyCommand {
             command: "proxy-two %h %p".into(),
         };
-        store.save_profile(first).expect("save first profile");
-        store.save_profile(second).expect("save second profile");
+        store
+            .save_profile_for_test(first)
+            .expect("save first profile");
+        store
+            .save_profile_for_test(second)
+            .expect("save second profile");
 
         let first = store
             .auth_fingerprint(ProfileId(1))
@@ -1207,7 +1143,7 @@ mod tests {
         let first_path = "/Users/alex/.ssh/first_ed25519";
         let second_path = "/Users/alex/.ssh/second_ed25519";
         let first = store
-            .save_profile(ConnectionProfile::new(
+            .save_profile_for_test(ConnectionProfile::new(
                 ProfileId(1),
                 "First",
                 "example.com",
@@ -1220,7 +1156,7 @@ mod tests {
             ))
             .expect("save first key profile");
         let second = store
-            .save_profile(ConnectionProfile::new(
+            .save_profile_for_test(ConnectionProfile::new(
                 ProfileId(2),
                 "Second",
                 "example.com",
@@ -1287,7 +1223,7 @@ mod tests {
 
         let mut store = ProfileStore::open(path.clone()).expect("open empty store");
         let saved = store
-            .save_profile(password_profile(1, "Production"))
+            .save_profile_for_test(password_profile(1, "Production"))
             .expect("save profile");
         assert_eq!(saved.revision, 1);
 
@@ -1311,10 +1247,10 @@ mod tests {
 
         let mut store = ProfileStore::open(path.clone()).expect("open store");
         store
-            .save_profile(password_profile(2, "First"))
+            .save_profile_for_test(password_profile(2, "First"))
             .expect("save first");
         store
-            .save_profile(password_profile(2, "Second"))
+            .save_profile_for_test(password_profile(2, "Second"))
             .expect("save second");
 
         let reloaded = ProfileStore::open(path.clone()).expect("reopen store");
@@ -1331,11 +1267,11 @@ mod tests {
         cleanup(&path);
         let mut store = ProfileStore::open_or_empty_memory(path.clone());
         store
-            .save_profile(password_profile(1, "Before"))
+            .save_profile_for_test(password_profile(1, "Before"))
             .expect("seed profile");
         store.path = LocalPath::new("/nonexistent-dir-xyz/macsftp/profiles.json");
 
-        let result = store.save_profile(password_profile(1, "After"));
+        let result = store.save_profile_for_test(password_profile(1, "After"));
 
         assert!(matches!(result, Err(StorageError::Io { .. })));
         let retained = store.find_profile(ProfileId(1)).expect("profile retained");
@@ -1353,7 +1289,7 @@ mod tests {
 
         assert!(store.initial_error().is_some());
         assert!(matches!(
-            store.save_profile(password_profile(1, "Replacement")),
+            store.save_profile_for_test(password_profile(1, "Replacement")),
             Err(StorageError::RecoveryRequired { .. })
         ));
         assert_eq!(
@@ -1369,19 +1305,21 @@ mod tests {
         cleanup(&path);
         let mut store = ProfileStore::open_or_empty_memory(path.clone());
         store
-            .save_connection_settings(
-                ProfileId(1),
-                "Before".into(),
-                &password_settings("before.example.com", "old-secret"),
-            )
+            .save_request(password_save_request(
+                1,
+                "Before",
+                "before.example.com",
+                "old-secret",
+            ))
             .expect("seed profile and credential");
         store.path = LocalPath::new("/nonexistent-dir-xyz/macsftp/profiles.json");
 
-        let result = store.save_connection_settings(
-            ProfileId(1),
-            "After".into(),
-            &password_settings("after.example.com", "new-secret"),
-        );
+        let result = store.save_request(password_save_request(
+            1,
+            "After",
+            "after.example.com",
+            "new-secret",
+        ));
 
         assert!(matches!(result, Err(ProfileMutationError::Storage(_))));
         let retained = store
@@ -1401,11 +1339,12 @@ mod tests {
         cleanup(&path);
         let mut store = ProfileStore::open_or_empty_memory(path.clone());
         store
-            .save_connection_settings(
-                ProfileId(1),
-                "Server".into(),
-                &password_settings("example.com", "old-secret"),
-            )
+            .save_request(password_save_request(
+                1,
+                "Server",
+                "example.com",
+                "old-secret",
+            ))
             .expect("seed password profile");
         let old_ref = SecretRef::keychain_ref(ProfileId(1), "password");
 
@@ -1440,11 +1379,12 @@ mod tests {
         let mut store = ProfileStore::open_or_empty_memory(path);
         let secret_ref = SecretRef::keychain_ref(ProfileId(7), "password");
 
-        let result = store.save_connection_settings(
-            ProfileId(7),
-            "Server".into(),
-            &password_settings("example.com", "temporary-secret"),
-        );
+        let result = store.save_request(password_save_request(
+            7,
+            "Server",
+            "example.com",
+            "temporary-secret",
+        ));
 
         assert!(matches!(result, Err(ProfileMutationError::Storage(_))));
         assert_eq!(
@@ -1462,20 +1402,15 @@ mod tests {
         let path = temp_profiles_path("no-secret");
         cleanup(&path);
 
-        let settings = ConnectionSettings {
-            host: "example.com".into(),
-            port: 2222,
-            username: "alex".into(),
-            auth: AuthCredential::Password {
-                password: "hunter2-do-not-leak".into(),
-            },
-            route: macsftp_core::ResolvedConnectionRoute::Direct,
-        };
-        let profile =
-            ConnectionProfile::from_connection_settings(ProfileId(9), "Staging", &settings);
-
-        let mut store = ProfileStore::open(path.clone()).expect("open store");
-        store.save_profile(profile).expect("save profile");
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
+        store
+            .save_request(password_save_request(
+                9,
+                "Staging",
+                "example.com",
+                "hunter2-do-not-leak",
+            ))
+            .expect("save profile through the canonical mutation boundary");
 
         let raw = std::fs::read_to_string(path.as_str()).expect("read profiles file");
         assert!(
@@ -1488,17 +1423,6 @@ mod tests {
         );
 
         cleanup(&path);
-    }
-
-    #[test]
-    fn save_to_uncreatable_path_returns_io_error() {
-        let path = LocalPath::new("/nonexistent-dir-xyz/macsftp/profiles.json");
-        let file = ProfilesFile::new();
-        let result = file.save(&path);
-        assert!(
-            matches!(result, Err(StorageError::Io { .. })),
-            "expected Io error, got {result:?}"
-        );
     }
 
     // --- Batch A regression tests ---
@@ -1546,7 +1470,7 @@ mod tests {
             "unsupported file must load as empty"
         );
         assert!(matches!(
-            store.save_profile(password_profile(1, "Replacement")),
+            store.save_profile_for_test(password_profile(1, "Replacement")),
             Err(StorageError::RecoveryRequired { .. })
         ));
         let raw_after = std::fs::read(path.as_str()).expect("read fixture bytes after writes");
@@ -1571,7 +1495,7 @@ mod tests {
         let mut store = ProfileStore::open_or_empty_memory(path.clone());
         assert!(store.initial_error().is_some());
         assert!(matches!(
-            store.save_profile(password_profile(3, "Replacement")),
+            store.save_profile_for_test(password_profile(3, "Replacement")),
             Err(StorageError::RecoveryRequired { .. })
         ));
         assert_eq!(
@@ -1594,7 +1518,7 @@ mod tests {
         let mut store = ProfileStore::open_or_empty_memory(path.clone());
         assert!(store.initial_error().is_some());
         assert!(matches!(
-            store.save_profile(password_profile(5, "Replacement")),
+            store.save_profile_for_test(password_profile(5, "Replacement")),
             Err(StorageError::RecoveryRequired { .. })
         ));
         assert_eq!(
@@ -1618,7 +1542,7 @@ mod tests {
         let mut store = ProfileStore::open_or_empty_memory(path.clone());
         assert!(store.initial_error().is_some());
         assert!(matches!(
-            store.save_profile(password_profile(8, "Replacement")),
+            store.save_profile_for_test(password_profile(8, "Replacement")),
             Err(StorageError::RecoveryRequired { .. })
         ));
         assert_eq!(
@@ -1670,10 +1594,10 @@ mod tests {
 
         // The next save rewrites the file in the current format.
         store
-            .save_profile(password_profile(10, "Trigger Rewrite"))
+            .save_profile_for_test(password_profile(10, "Trigger Rewrite"))
             .expect("rewrite triggers format upgrade");
         let rewritten = std::fs::read_to_string(path.as_str()).expect("reread rewritten file");
-        assert!(rewritten.contains(r#""version": 4"#));
+        assert!(rewritten.contains(r#""version": 5"#));
         assert!(rewritten.contains(r#""has_passphrase": true"#));
         assert!(!rewritten.contains("remember_passphrase"));
         cleanup(&path);
@@ -1726,7 +1650,7 @@ mod tests {
         let mut store = ProfileStore::open_or_empty_memory(path.clone());
         assert!(store.initial_error().is_some());
         assert!(matches!(
-            store.save_profile(password_profile(11, "Replacement")),
+            store.save_profile_for_test(password_profile(11, "Replacement")),
             Err(StorageError::RecoveryRequired { .. })
         ));
         assert_eq!(
@@ -1869,10 +1793,10 @@ mod tests {
         cleanup(&path);
         let mut store = ProfileStore::open_or_empty_memory(path.clone());
         store
-            .save_profile(password_profile(1, "One"))
+            .save_profile_for_test(password_profile(1, "One"))
             .expect("save profile one");
         store
-            .save_profile(password_profile(2, "Two"))
+            .save_profile_for_test(password_profile(2, "Two"))
             .expect("save profile two");
         assert_eq!(
             store.next_profile_id().expect("allocate next id"),
@@ -1923,12 +1847,12 @@ mod tests {
         );
 
         store
-            .save_profile(password_profile(6, "Added"))
+            .save_profile_for_test(password_profile(6, "Added"))
             .expect("save into migrated store");
 
         let raw = std::fs::read_to_string(path.as_str()).expect("read saved store");
         assert!(
-            raw.contains(r#""version": 4"#),
+            raw.contains(r#""version": 5"#),
             "first save must persist as the current format, got: {raw}"
         );
         assert!(
@@ -1954,10 +1878,10 @@ mod tests {
         let mut second = ProfileStore::open_or_empty_memory(path.clone());
 
         first
-            .save_profile(password_profile(1, "FromFirst"))
+            .save_profile_for_test(password_profile(1, "FromFirst"))
             .expect("first store saves");
         second
-            .save_profile(password_profile(2, "FromSecond"))
+            .save_profile_for_test(password_profile(2, "FromSecond"))
             .expect("second store saves");
 
         let reloaded = ProfileStore::open_or_empty_memory(path.clone());
@@ -1976,7 +1900,7 @@ mod tests {
             profiles: Vec::new(),
             next_profile_id: None,
         };
-        let conflict = stale.save_profile(ConnectionProfile::new(
+        let conflict = stale.save_profile_for_test(ConnectionProfile::new(
             ProfileId(1),
             "StaleInsert",
             "example.com",
@@ -2003,7 +1927,7 @@ mod tests {
         let mut first = ProfileStore::open_or_empty_memory(path.clone());
         let mut second = ProfileStore::open_or_empty_memory(path.clone());
         first
-            .save_profile(password_profile(1, "Live"))
+            .save_profile_for_test(password_profile(1, "Live"))
             .expect("seed profile in first store");
         // Second store was opened before the seed; delete through it sees
         // the fresh disk state and removes the profile.
@@ -2019,7 +1943,7 @@ mod tests {
             profiles: Vec::new(),
             next_profile_id: None,
         };
-        let result = stale.save_profile(password_profile(1, "Stale"));
+        let result = stale.save_profile_for_test(password_profile(1, "Stale"));
         assert!(matches!(
             result,
             Err(StorageError::ConcurrentModification { .. })
@@ -2051,7 +1975,7 @@ mod tests {
 
         let mut store = ProfileStore::open_or_empty_memory(path.clone());
         store
-            .save_profile(password_profile(1, "Trigger"))
+            .save_profile_for_test(password_profile(1, "Trigger"))
             .expect("save triggers temp sweep");
 
         assert!(
@@ -2085,11 +2009,12 @@ mod tests {
         cleanup(&path);
         let mut store = ProfileStore::open_or_empty_memory(path.clone());
         store
-            .save_connection_settings(
-                ProfileId(1),
-                "Before".into(),
-                &password_settings("before.example.com", "old-secret"),
-            )
+            .save_request(password_save_request(
+                1,
+                "Before",
+                "before.example.com",
+                "old-secret",
+            ))
             .expect("seed profile and credential");
 
         // Swap in the injected commit and re-run an update through the full
@@ -2101,11 +2026,12 @@ mod tests {
 
             // Drive save_request manually with the failing sync seam.
             store.commit_save_override = Some(Box::new(failing_parent_sync_save));
-            let result = store.save_connection_settings(
-                ProfileId(1),
-                "After".into(),
-                &password_settings("after.example.com", "new-secret"),
-            );
+            let result = store.save_request(password_save_request(
+                1,
+                "After",
+                "after.example.com",
+                "new-secret",
+            ));
             store.commit_save_override = None;
             result.expect("degraded-durability commit still succeeds")
         };
@@ -2146,11 +2072,12 @@ mod tests {
         cleanup(&path);
         let mut store = ProfileStore::open_or_empty_memory(path.clone());
         store
-            .save_connection_settings(
-                ProfileId(1),
-                "Jump".into(),
-                &password_settings("jump.example", "jump-secret"),
-            )
+            .save_request(password_save_request(
+                1,
+                "Jump",
+                "jump.example",
+                "jump-secret",
+            ))
             .expect("save direct jump profile");
         store
             .save_request(ProfileSaveRequest {
@@ -2183,8 +2110,19 @@ mod tests {
         assert_eq!(fingerprint.jump_profile_revision, Some((ProfileId(1), 1)));
 
         store
-            .save_connection_settings(ProfileId(2), "Target renamed".into(), &resolved)
-            .expect("saving resolved settings preserves the saved jump reference");
+            .save_request(ProfileSaveRequest {
+                profile_id: ProfileId(2),
+                name: "Target renamed".into(),
+                host: resolved.host.clone(),
+                port: resolved.port,
+                username: resolved.username.clone(),
+                auth: ProfileAuthUpdate::Password { password: None },
+                route: ConnectionRoute::JumpHost {
+                    profile_id: ProfileId(1),
+                },
+                default_remote_path: None,
+            })
+            .expect("canonical save preserves the saved jump reference");
         assert!(matches!(
             store
                 .find_profile(ProfileId(2))
@@ -2206,11 +2144,12 @@ mod tests {
         ));
 
         store
-            .save_connection_settings(
-                ProfileId(1),
-                "Jump updated".into(),
-                &password_settings("jump.example", "new-jump-secret"),
-            )
+            .save_request(password_save_request(
+                1,
+                "Jump updated",
+                "jump.example",
+                "new-jump-secret",
+            ))
             .expect("update jump profile");
         let updated = store
             .auth_fingerprint(ProfileId(2))
@@ -2251,6 +2190,46 @@ mod tests {
                 .route,
             macsftp_core::ConnectionRoute::Direct
         ));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn version_four_group_placeholder_is_dropped_on_next_save() {
+        let path = temp_profiles_path("v4-group-placeholder");
+        cleanup(&path);
+        std::fs::write(
+            path.as_str(),
+            r#"{
+                "version": 4,
+                "profiles": [{
+                    "id": 1,
+                    "revision": 1,
+                    "name": "Legacy grouped",
+                    "host": "legacy.example",
+                    "port": 22,
+                    "username": "alex",
+                    "auth": {"Password": {"secret_ref": "keychain:macsftp:1:password"}},
+                    "route": "Direct",
+                    "default_remote_path": null,
+                    "group_id": 7
+                }],
+                "next_profile_id": 2
+            }"#,
+        )
+        .expect("write v4 profile fixture");
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
+        let profile = store
+            .find_profile(ProfileId(1))
+            .expect("legacy profile loads")
+            .clone();
+
+        store
+            .save_profile_for_test(profile)
+            .expect("next save upgrades the profile file");
+
+        let rewritten = std::fs::read_to_string(path.as_str()).expect("read upgraded profile file");
+        assert!(rewritten.contains(r#""version": 5"#));
+        assert!(!rewritten.contains("group_id"));
         cleanup(&path);
     }
 }

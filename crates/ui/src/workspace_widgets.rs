@@ -24,9 +24,6 @@ pub fn connection_status(connection: &ConnectionState, theme: &Theme) -> (Hsla, 
         ConnectionState::AwaitingHostKey { .. } => {
             (theme.colors.warning, "Awaiting host key".into())
         }
-        ConnectionState::AwaitingCredentials { .. } => {
-            (theme.colors.warning, "Awaiting credentials".into())
-        }
         ConnectionState::Connected { .. } => (theme.colors.success, "Connected".into()),
         ConnectionState::Reconnecting { .. } => (theme.colors.warning, "Reconnecting…".into()),
         ConnectionState::Disconnected { .. } => (theme.colors.text_disabled, "Disconnected".into()),

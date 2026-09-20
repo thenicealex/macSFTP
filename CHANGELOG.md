@@ -15,6 +15,30 @@ based on Keep a Changelog, and releases use semantic versioning.
   without enabling the RustCrypto RSA implementation affected by
   RUSTSEC-2023-0071.
 
+### Changed
+
+- Make remote-edit uploads explicit. Saving in the external editor no longer
+  triggers a background watcher; users choose **Upload Modified File**, after
+  which macSFTP performs the same live remote-snapshot and conflict checks
+  before uploading.
+- Make **Settings → Profiles** the only place that creates, edits, or deletes
+  saved profiles. The Connect dialog now only selects a saved profile or starts
+  a temporary connection, with **Manage…** linking to Settings.
+- Expose only the real SSH backend from the production SFTP runtime; mock
+  actors and constructors now compile only for crate unit tests.
+- Remove protocol commands, events, states, and historical implementation
+  documents that no longer had production consumers.
+- Migrate `profiles.json` to version 5 and remove the never-consumed
+  `group_id` placeholder. Profile grouping remains an explicit future product
+  decision rather than a dormant persisted field.
+- Close the low-level profile-file writer, test-only connection helper, and
+  crate-link probe APIs so production callers use the canonical owners.
+- Make connection setup cancellation-aware and let runtime shutdown drain
+  session tasks within its configured timeout before forcing termination.
+- Keep process-wide transfer, residual-temp, and remote-edit events out of the
+  Workspace production reducer, and diagnose residual cleanup commands that
+  cannot reach a live actor.
+
 ## [0.2.1] - 2026-09-13
 
 ### Fixed

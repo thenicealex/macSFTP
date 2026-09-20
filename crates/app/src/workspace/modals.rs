@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use gpui::{
-    ClickEvent, Context, FontWeight, IntoElement, KeyDownEvent, ParentElement, SharedString,
-    Styled, Window, div, prelude::*, px,
+    Context, FontWeight, IntoElement, KeyDownEvent, ParentElement, SharedString, Styled, Window,
+    div, prelude::*, px,
 };
 use macsftp_core::{
     AppCommand, AuthMethodKind, ConflictDecision, ConflictDecisionCommand, ConflictRequestId,
@@ -999,76 +999,6 @@ impl crate::workspace::Workspace {
                         .child("Uses agent identities, including RSA keys."),
                 ),
         };
-
-        // Save as is collapsed by default so the form stays short for one-off
-        // connects. Expanding reveals the optional name field + Save profile.
-        // Secrets are mapped to a SecretRef stub and never written to disk
-        // (plan §5).
-        if form.save_as_expanded {
-            card = card.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .w(px(96.0))
-                            .flex_none()
-                            .text_size(px(11.0))
-                            .text_color(theme.colors.text_muted)
-                            .child("Save as"),
-                    )
-                    .child(
-                        div()
-                            .id("profile-name-row")
-                            .flex_1()
-                            .min_w_0()
-                            .on_click(cx.listener(
-                                move |workspace, _event: &ClickEvent, _window, cx| {
-                                    if let Some(form) = &mut workspace.connect_form_ui.form {
-                                        form.focused_field = ConnectField::ProfileName;
-                                        cx.notify();
-                                    }
-                                },
-                            ))
-                            .child(text_field(
-                                "profile-name-input",
-                                TextFieldModel {
-                                    state: &form.profile_name,
-                                    placeholder: "profile name (optional)",
-                                    focused: form.focused_field == ConnectField::ProfileName,
-                                    masked: false,
-                                },
-                                cx,
-                            )),
-                    )
-                    .child(
-                        text_button("save-profile", "Save profile").on_click(cx.listener(
-                            |workspace, _event, _window, cx| {
-                                workspace.save_current_profile(cx);
-                            },
-                        )),
-                    ),
-            );
-        } else {
-            card = card.child(
-                div()
-                    .id("save-as-profile-expand")
-                    .flex()
-                    .items_center()
-                    .cursor_pointer()
-                    .text_size(px(12.0))
-                    .text_color(theme.colors.text_muted)
-                    .on_click(cx.listener(|workspace, _event, _window, cx| {
-                        if let Some(form) = &mut workspace.connect_form_ui.form {
-                            form.save_as_expanded = true;
-                            form.focused_field = ConnectField::ProfileName;
-                            cx.notify();
-                        }
-                    }))
-                    .child("Save as profile…"),
-            );
-        }
 
         card = card.child(
             div()

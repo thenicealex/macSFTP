@@ -810,9 +810,6 @@ impl crate::workspace::Workspace {
                     )
                     .into_any_element(),
                 ),
-                Some(ConnectionState::AwaitingCredentials { .. }) => {
-                    Some(empty_state("Waiting for credentials…", vec![], cx).into_any_element())
-                }
                 Some(ConnectionState::Disconnected {
                     reason: macsftp_core::DisconnectReason::Error(error),
                 }) if error.code == macsftp_core::ErrorCode::LocalNetworkPermissionDenied => Some(

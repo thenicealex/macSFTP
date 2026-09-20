@@ -11,7 +11,7 @@ use crate::theme::ActiveTheme;
 /// no GPUI entities, so the form owner keeps one per field and routes
 /// key events to the focused one.
 ///
-/// MVP scope (M3): character input via `key_char`, backspace/delete,
+/// Current scope: character input via `key_char`, backspace/delete,
 /// arrow/home/end movement, insert-at-cursor paste. No selection, no
 /// IME composition — those come with a real input component later.
 #[derive(Default, Clone, PartialEq, Eq)]

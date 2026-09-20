@@ -1,6 +1,5 @@
 mod app_actions;
 mod assets;
-mod edit_watcher;
 mod event_coordinator;
 mod m7_regression;
 mod palette_commands;
@@ -15,7 +14,7 @@ use gpui::{
 };
 use macsftp_core::RuntimeBridgeConfig;
 use macsftp_platform::{AppPaths, prune_log_files, write_crash_marker};
-use macsftp_sftp::{HostTrustConfig, RuntimeController, SessionBackend};
+use macsftp_sftp::{HostTrustConfig, RuntimeController};
 use macsftp_storage::{AppearancePreference, ConfigStore, SessionStore, SessionWindowSnapshot};
 use macsftp_ui::Theme;
 use std::path::Path;
@@ -193,10 +192,7 @@ fn main() {
             user_known_hosts.exists().then_some(user_known_hosts),
         );
 
-        let mut controller = RuntimeController::start(
-            RuntimeBridgeConfig::default(),
-            SessionBackend::Real(trust_config),
-        );
+        let mut controller = RuntimeController::start(RuntimeBridgeConfig::default(), trust_config);
         let event_receiver = controller
             .take_event_receiver()
             .expect("runtime event receiver must be available at startup");
@@ -233,8 +229,6 @@ fn main() {
         cx.set_global(event_coordinator);
         // Long-lived loop that stats each open edit's temp file every second
         // and uploads saved changes back (or flags a remote conflict).
-        let edit_watcher = crate::edit_watcher::EditWatcher::start(cx);
-        cx.set_global(edit_watcher);
         cx.on_window_closed(|cx| {
             checkpoint_after_window_closed(cx);
             crate::workspace::cleanup_orphaned_edit_sessions(cx);

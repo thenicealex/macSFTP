@@ -4,9 +4,11 @@ use macsftp_core::{
     RestoredTabTarget, TabId, UserFacingError, sort_entries,
 };
 
-use tracing::{debug, warn};
+use tracing::debug;
 
-use crate::resources::{ActiveResources, ActiveTransfers};
+use crate::resources::ActiveResources;
+#[cfg(test)]
+use crate::resources::ActiveTransfers;
 
 impl crate::workspace::Workspace {
     pub(crate) fn handle_app_event(
@@ -15,10 +17,9 @@ impl crate::workspace::Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Production transfer events are intercepted by AppEventCoordinator
-        // and reduced once process-wide. Keeping this small delegation makes
-        // direct Workspace tests exercise the same reducer without restoring
-        // per-window event ownership.
+        // Test-only adapter for older direct Workspace tests. Production
+        // transfer ownership lives exclusively in AppEventCoordinator.
+        #[cfg(test)]
         if event.is_transfer_event() {
             let conflict_prompt = match &event {
                 AppEvent::TransferConflict(prompt) => Some(prompt.clone()),
@@ -113,13 +114,16 @@ impl crate::workspace::Workspace {
                     self.remote.scroll = UniformListScrollHandle::new();
                     self.request_remote_directory(tab_id, navigate_to, cx);
                     // Reconcile remote residual temp files from a previous run
-                    // now that a live session to this host exists (plan M5/M6).
+                    // now that a live session to this host exists (current architecture §8).
                     self.clean_remote_residual_temps(tab_id, cx);
                     self.record_recent_for_tab(tab_id, cx);
                 }
             }
             AppEvent::TabDisconnected(scoped) => {
                 let tab_id = scoped.scope.tab_id;
+                cx.resources_mut()
+                    .edit_sessions
+                    .update_epoch_for_tab(tab_id, scoped.scope.session_epoch);
                 // Before clearing the live remote path, stash it in the tab's
                 // restored_target so build_session_snapshot still records the
                 // last browsing location after disconnect-then-quit.
@@ -257,33 +261,25 @@ impl crate::workspace::Workspace {
                         Some(format!("{}: {}", failure.title, failure.message).into());
                 }
             }
-            AppEvent::LocalDirLoaded(snapshot) => {
-                if let Some(tab) = self.state.tabs.find_tab_mut(snapshot.tab_id)
-                    && tab.local.path.as_ref() == Some(&snapshot.path)
-                {
-                    let mut entries = snapshot.entries;
-                    sort_entries(&mut entries, &tab.sort);
-                    tab.local.entries = entries;
-                    tab.local.error = None;
-                    tab.selection.selected_paths.clear();
-                    self.local.scroll = UniformListScrollHandle::new();
-                }
+            AppEvent::TransferPlanStarted(_)
+            | AppEvent::TransferPlanProgress(_)
+            | AppEvent::TransferPlanCompleted { .. }
+            | AppEvent::TransferPlanCancelled { .. }
+            | AppEvent::TransferPlanFailed { .. }
+            | AppEvent::TransferConflict(_)
+            | AppEvent::TransferRunning(_)
+            | AppEvent::TransferProgress(_)
+            | AppEvent::TransferWarning(_)
+            | AppEvent::TransferCompleted { .. }
+            | AppEvent::TransferSkipped { .. }
+            | AppEvent::TransferFailed(_)
+            | AppEvent::ResidualTempCreated(_)
+            | AppEvent::ResidualTempCleared { .. }
+            | AppEvent::RemoteEditSnapshotChecked(_)
+            | AppEvent::RemoteEditSnapshotCheckFailed(_)
+            | AppEvent::RemoteEditSnapshotDispatchFailed(_) => {
+                debug_assert!(false, "process-owned event reached a Workspace")
             }
-            AppEvent::ResidualTempCreated(record) => {
-                if let Err(error) = cx.resources_mut().residual_temps.add_and_save(record) {
-                    warn!(error = %error, "could not persist residual temp record");
-                }
-            }
-            AppEvent::ResidualTempCleared { transfer_id, path } => {
-                if let Err(error) = cx
-                    .resources_mut()
-                    .residual_temps
-                    .remove_and_save(transfer_id, &path)
-                {
-                    warn!(error = %error, "could not update residual temp store");
-                }
-            }
-            _ => {}
         }
         cx.notify();
     }
@@ -291,10 +287,10 @@ impl crate::workspace::Workspace {
     /// Re-sync active-edit baselines against a just-loaded directory listing.
     ///
     /// A directory refresh replaces the tab's listing with the server's
-    /// ground-truth `(size, mtime)`. The edit watcher detects "someone changed
-    /// the remote underneath me" by comparing each session's stored
-    /// `remote_snapshot` against that listing, so the two must not drift apart
-    /// when nobody touched the remote. They otherwise do: an upload-back rebases
+    /// ground-truth `(size, mtime)`. The explicit upload flow compares each
+    /// session's stored `remote_snapshot` with a later live check, so harmless
+    /// listing precision changes must not leave the baseline behind when nobody
+    /// touched the remote. They otherwise do: an upload rebases
     /// the snapshot from the LOCAL temp file's mtime, and even after truncating
     /// to whole seconds (Part A) a later refresh re-reads the server's own
     /// mtime — usually identical, but this normalization makes the two byte-for-
@@ -305,8 +301,8 @@ impl crate::workspace::Workspace {
     /// the listing entry's exact `(size, mtime)` as the new baseline ONLY when
     /// it agrees with the current baseline at whole-second granularity (same
     /// size, same whole-second mtime). If they differ at that granularity, the
-    /// remote genuinely changed since we last synced — that is the signal the
-    /// watcher/conflict UI must surface, so we leave the baseline untouched.
+    /// remote genuinely changed since we last synced, so we leave the baseline
+    /// untouched for the next explicit upload check.
     /// `RemoteConflict` sessions are excluded entirely (see
     /// [`macsftp_core::EditSessionStore::editing_sessions_for_tab`]) so an
     /// already-surfaced conflict is never masked by a refresh.

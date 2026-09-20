@@ -230,7 +230,7 @@ impl client::Handler for ClientHandler {
                         // Clean up the registry entry so it can't be
                         // resolved later.
                         self.trust_registry
-                            .resolve(self.trust_request_id, TrustDecision::TimedOut);
+                            .resolve(self.trust_request_id, TrustDecision::RequestExpired);
                         self.record_rejection(HostKeyRejection::PromptTimeout);
                         Ok::<bool, russh::Error>(false)
                     }
@@ -258,7 +258,7 @@ impl client::Handler for ClientHandler {
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(cause);
         }
         // Mid-session drops were previously invisible to diagnostics: the
-        // audited connection log (plan §17) only covered the connect
+        // audited connection log (current architecture §13) only covered the connect
         // lifecycle, so "why did my connection drop" was unanswerable.
         match classify_mid_session_disconnect(&reason) {
             Some(MidSessionDisconnect::ServerClosed(reason_code)) => info!(
@@ -352,7 +352,7 @@ impl TransportFailureKind {
 enum MidSessionDisconnect<'a> {
     /// The server sent an SSH DISCONNECT message. Only the enumerated
     /// reason code is logged — the free-text description from the wire is
-    /// untrusted third-party content (plan §17 redaction boundary).
+    /// untrusted third-party content (current architecture §13 redaction boundary).
     ServerClosed(&'a russh::Disconnect),
     /// The transport failed locally; label from the shared transport
     /// failure taxonomy (`KeepaliveTimeout` maps to `timed_out`).

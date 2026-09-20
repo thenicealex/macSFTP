@@ -4,20 +4,20 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use macsftp_core::{
-    AppEvent, ConnectionKey, ConnectionPoolIdentity, ConnectionSettings, ErrorCode,
-    RemoteEventScope, TrustRequestId, UserFacingError,
+    AppEvent, ConnectionKey, ConnectionPoolIdentity, ConnectionSettings, RemoteEventScope,
+    TrustRequestId,
 };
 use russh::client;
 use russh_sftp::client::SftpSession;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::keyboard_interactive::KeyboardInteractiveRegistry;
 use crate::known_hosts::KnownHostsStore;
 use crate::physical_connection::{
     ClientHandler, ConnectFailure, PhysicalDisconnectCause, establish_physical_connection,
-    host_key_mismatch_event, log_connect_failure, sftp_connection_error,
+    sftp_connection_error,
 };
 use crate::session_actor::HostTrustConfig;
 use crate::trust::TrustRegistry;
@@ -237,172 +237,6 @@ impl ConnectionManager {
             match &result {
                 Ok(shared) => manager.mark_connected(&key_clone, shared.clone()),
                 Err(_) => manager.remove(&key_clone),
-            }
-            let _ = tx.send(result);
-        });
-
-        rx
-    }
-
-    /// Establish a physical connection via the pool and open a dedicated
-    /// SFTP session on it, returning both. This is the convenience entry
-    /// point for callers (integration tests, and the runtime) that need an
-    /// already-connected `RemoteSessionActor`: the returned `SftpSession` is
-    /// a fresh channel multiplexed over the shared SSH connection.
-    #[allow(clippy::too_many_arguments)]
-    pub fn connect_session(
-        self: &Arc<Self>,
-        settings: &ConnectionSettings,
-        pool_identity: &ConnectionPoolIdentity,
-        scope: &RemoteEventScope,
-        known_hosts: Arc<Mutex<KnownHostsStore>>,
-        trust_config: Arc<HostTrustConfig>,
-        trust_registry: Arc<TrustRegistry>,
-        event_tx: flume::Sender<AppEvent>,
-    ) -> flume::Receiver<Result<(Arc<SharedConnection>, SftpSession), ConnectFailure>> {
-        info!(
-            target: "macsftp_sftp::connection",
-            host = settings.host.as_str(),
-            port = settings.port,
-            username = settings.username.as_str(),
-            tab_id = scope.tab_id.0,
-            session_id = scope.session_id.0,
-            session_epoch = scope.session_epoch,
-            "SFTP connection started"
-        );
-        let cm = self.clone();
-        let settings = settings.clone();
-        let pool_identity = pool_identity.clone();
-        let scope = scope.clone();
-        let known_hosts = known_hosts.clone();
-        let trust_config = trust_config.clone();
-        let trust_registry = trust_registry.clone();
-        let event_tx = event_tx.clone();
-        // Separate clone kept for the failure-event path below; `event_tx`
-        // itself is moved into `get_or_connect`.
-        let event_tx_fail = event_tx.clone();
-
-        let mut connect_rx = cm.get_or_connect(
-            &settings,
-            &pool_identity,
-            &scope,
-            known_hosts,
-            trust_config,
-            trust_registry,
-            event_tx,
-        );
-
-        let (tx, rx) = flume::bounded(1);
-        tokio::spawn(async move {
-            let result = async {
-                let connect = connect_rx.recv().await.unwrap_or_else(|_| {
-                    Err(ConnectFailure::Connection(UserFacingError::new(
-                        ErrorCode::Unknown,
-                        "Connection channel closed",
-                        "The connection attempt ended before a session was established.",
-                    )))
-                });
-                let shared = connect?;
-                let channel = shared
-                    .handle
-                    .channel_open_session()
-                    .await
-                    .map_err(|error| {
-                        ConnectFailure::Connection(sftp_connection_error(
-                            "Could not open SFTP channel on shared connection",
-                            "The server did not open an SSH channel for SFTP.",
-                            &error,
-                        ))
-                    })?;
-                channel
-                    .request_subsystem(true, "sftp")
-                    .await
-                    .map_err(|error| {
-                        ConnectFailure::Connection(sftp_connection_error(
-                            "The server rejected the SFTP subsystem.",
-                            "The server did not accept the SFTP subsystem request.",
-                            &error,
-                        ))
-                    })?;
-                let sftp = SftpSession::new(channel.into_stream())
-                    .await
-                    .map_err(|error| {
-                        ConnectFailure::Connection(sftp_connection_error(
-                            "Could not start the SFTP session.",
-                            "The SFTP subsystem did not become ready.",
-                            &error,
-                        ))
-                    })?;
-                info!(
-                    target: "macsftp_sftp::connection",
-                    host = settings.host.as_str(),
-                    port = settings.port,
-                    tab_id = scope.tab_id.0,
-                    session_id = scope.session_id.0,
-                    session_epoch = scope.session_epoch,
-                    "SFTP connection succeeded"
-                );
-                Ok((shared, sftp))
-            }
-            .await;
-            // Mirror the runtime's connection-failure handling (runtime.rs):
-            // translate a failed connection into the same lifecycle event the
-            // runtime would emit, so callers (integration tests, and any
-            // future consumer) observe a consistent event stream.
-            if let Err(failure) = &result {
-                log_connect_failure(&settings.host, settings.port, &scope, failure);
-                match failure {
-                    ConnectFailure::HostKeyMismatch(details) => {
-                        // Emit one scoped event for THIS logical attempt. The
-                        // pooled handshake is shared, but the mismatch event
-                        // is built per waiter so each gets its own scope. The
-                        // failure still propagates as Err — emitting the event
-                        // does not convert failure into success.
-                        if let Err(send_error) = event_tx_fail
-                            .send_async(host_key_mismatch_event(scope.clone(), details.clone()))
-                            .await
-                        {
-                            warn!(error = %send_error, "host key mismatch event dropped");
-                        }
-                    }
-                    ConnectFailure::TrustRejected => {
-                        let _ = event_tx_fail
-                            .send_async(AppEvent::TabDisconnected(macsftp_core::RemoteScoped::new(
-                                scope.clone(),
-                                macsftp_core::TabDisconnected {
-                                    reason: macsftp_core::DisconnectReason::UserRequested,
-                                },
-                            )))
-                            .await;
-                    }
-                    ConnectFailure::TrustTimeout => {
-                        let _ = event_tx_fail
-                            .send_async(AppEvent::TabDisconnected(macsftp_core::RemoteScoped::new(
-                                scope.clone(),
-                                macsftp_core::TabDisconnected {
-                                    reason: macsftp_core::DisconnectReason::Error(
-                                        UserFacingError::new(
-                                            ErrorCode::Unknown,
-                                            "Trust prompt timed out",
-                                            "You did not respond to the host key prompt in time.",
-                                        ),
-                                    ),
-                                },
-                            )))
-                            .await;
-                    }
-                    ConnectFailure::AuthFailed(_) => {}
-                    ConnectFailure::Connection(error) => {
-                        let _ = event_tx_fail
-                            .send_async(AppEvent::TabDisconnected(macsftp_core::RemoteScoped::new(
-                                scope.clone(),
-                                macsftp_core::TabDisconnected {
-                                    reason: macsftp_core::DisconnectReason::Error(error.clone()),
-                                },
-                            )))
-                            .await;
-                    }
-                }
             }
             let _ = tx.send(result);
         });

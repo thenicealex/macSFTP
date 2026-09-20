@@ -5,7 +5,7 @@ use gpui::{
     MouseDownEvent, ParentElement, SharedString, Styled, Window, div, prelude::*, px,
 };
 use macsftp_core::{
-    EntryPath, TransferId, TransferJob, TransferPlanState, TransferState, TransferStore,
+    EditPhase, EntryPath, TransferId, TransferJob, TransferPlanState, TransferState, TransferStore,
 };
 use macsftp_ui::{
     ActiveTheme, IconName, connection_status, format_size, icon, icon_button,
@@ -563,6 +563,7 @@ impl crate::workspace::Workspace {
             .iter()
             .filter(|job| matches!(job.state, TransferState::Failed { .. }))
             .count();
+        let selected_edit = self.selected_edit_session(cx);
 
         div()
             .flex()
@@ -606,32 +607,78 @@ impl crate::workspace::Workspace {
             )
             .child(
                 div()
-                    .id("status-transfers")
                     .flex()
                     .flex_none()
                     .items_center()
                     .gap_1()
-                    .px_1()
-                    .rounded_sm()
-                    .hover(|style| style.bg(theme.colors.element_hover))
-                    .tooltip(text_tooltip(labeled_shortcut(
-                        "Toggle Transfers",
-                        "ShowTransferDrawer",
-                    )))
-                    .on_click(cx.listener(|workspace, _event, _window, cx| {
-                        workspace.transfer_drawer.open = !workspace.transfer_drawer.open;
-                        cx.notify();
-                    }))
-                    .child(icon(
-                        IconName::Transfers,
-                        if failed_count > 0 {
-                            theme.colors.error
-                        } else if active_count > 0 {
-                            theme.colors.accent
-                        } else {
-                            theme.colors.text_muted
-                        },
-                    )),
+                    .when_some(selected_edit, |row, (_, phase)| {
+                        row.child(match phase {
+                            EditPhase::Editing => div()
+                                .id("upload-modified-file")
+                                .flex()
+                                .items_center()
+                                .h(px(18.0))
+                                .px_2()
+                                .rounded_sm()
+                                .border_1()
+                                .border_color(theme.colors.border)
+                                .text_size(px(11.0))
+                                .text_color(theme.colors.text)
+                                .cursor_pointer()
+                                .hover(|style| style.bg(theme.colors.element_hover))
+                                .active(|style| style.bg(theme.colors.element_active))
+                                .on_click(cx.listener(|workspace, _event, _window, cx| {
+                                    workspace.upload_selected_edit(cx);
+                                }))
+                                .child("Upload Modified File")
+                                .into_any_element(),
+                            EditPhase::Downloading => div()
+                                .text_color(theme.colors.text_disabled)
+                                .child("Downloading Editable Copy…")
+                                .into_any_element(),
+                            EditPhase::CheckingRemote => div()
+                                .text_color(theme.colors.text_disabled)
+                                .child("Checking Remote…")
+                                .into_any_element(),
+                            EditPhase::UploadingBack => div()
+                                .text_color(theme.colors.text_disabled)
+                                .child("Uploading Modified File…")
+                                .into_any_element(),
+                            EditPhase::RemoteConflict => div()
+                                .text_color(theme.colors.error)
+                                .child("Resolve Edit Conflict")
+                                .into_any_element(),
+                        })
+                    })
+                    .child(
+                        div()
+                            .id("status-transfers")
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap_1()
+                            .px_1()
+                            .rounded_sm()
+                            .hover(|style| style.bg(theme.colors.element_hover))
+                            .tooltip(text_tooltip(labeled_shortcut(
+                                "Toggle Transfers",
+                                "ShowTransferDrawer",
+                            )))
+                            .on_click(cx.listener(|workspace, _event, _window, cx| {
+                                workspace.transfer_drawer.open = !workspace.transfer_drawer.open;
+                                cx.notify();
+                            }))
+                            .child(icon(
+                                IconName::Transfers,
+                                if failed_count > 0 {
+                                    theme.colors.error
+                                } else if active_count > 0 {
+                                    theme.colors.accent
+                                } else {
+                                    theme.colors.text_muted
+                                },
+                            )),
+                    ),
             )
     }
 }

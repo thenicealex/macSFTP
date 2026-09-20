@@ -3,20 +3,33 @@
 macSFTP is a native macOS SFTP client written in Rust. It uses GPUI for the
 interface and `russh`/`russh-sftp` for asynchronous SSH and SFTP operations.
 
-The project currently targets macOS and is distributed as an unsigned app
-bundle. App Store distribution, notarization, automatic updates, and protocols
-other than SFTP are outside the current scope.
+The project currently targets macOS and builds an unsigned app bundle for local
+testing. Public releases currently provide source only. App Store distribution,
+notarization, automatic updates, and protocols other than SFTP are outside the
+current scope.
 
 ## Current capabilities
 
 - Multiple windows and connection tabs
+- Saved connection profiles managed in Settings, plus one-off connections
 - Password, multi-round keyboard-interactive, SSH-agent, and private-key authentication
 - Ed25519/ECDSA plus RSA-SHA2 client keys; direct RSA signing uses AWS-LC
 - Saved-profile jump hosts and explicit OpenSSH-style ProxyCommand routes
 - OpenSSH-compatible host-key verification
 - Local and remote browsing, navigation, filtering, sorting, and file operations
 - Upload/download plans with progress, conflict handling, cancellation, and retry
-- Session-scoped transfer drawer; transfer jobs are not restored after relaunch
+- External-editor workflow with an explicit, conflict-checked **Upload Modified File** action
+- Process-wide transfer queue shown in each window; jobs are not restored after relaunch
+
+Connection profiles are created, edited, and deleted only in
+**Settings → Profiles**. The Connect dialog can select a saved profile or make
+a temporary connection; its **Manage…** button opens the profile editor.
+
+Remote editing is intentionally explicit: double-click a remote file to open a
+temporary copy in the configured editor, save it there, reselect the remote
+file in macSFTP, and choose **Upload Modified File** in the status bar. macSFTP
+checks current remote metadata before uploading and asks for a decision if the
+remote file changed. It does not watch local saves or upload them automatically.
 
 ## Requirements
 
@@ -58,6 +71,9 @@ The dependency rules and runtime model are documented in
 [`docs/gpui-russh-plan.md`](docs/gpui-russh-plan.md). Contributor requirements
 are defined in [`AGENTS.md`](AGENTS.md) and
 [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+The production SFTP runtime exposes only the real SSH backend. Mock actors and
+constructors are compiled only for crate tests.
 
 ## Security
 

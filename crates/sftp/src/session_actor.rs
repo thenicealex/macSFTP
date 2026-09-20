@@ -49,15 +49,14 @@ impl HostTrustConfig {
     }
 }
 
-/// The real per-tab browsing session actor (plan §9, milestone M3).
+/// The real per-tab browsing session actor (current architecture §7).
 ///
 /// Establishes TCP + SSH handshake with host key verification through
 /// `KnownHostsStore` and the `TrustRegistry` prompt flow, authenticates
 /// with a password or private key, opens the SFTP subsystem, and holds
 /// the connection until cancelled or the server disconnects.
 ///
-/// Event contract is identical to `MockRemoteSessionActor` so the app
-/// side needs no changes when the dispatch loop switches over.
+/// Emits the shared app event contract consumed by the runtime bridge.
 pub struct RemoteSessionActor {
     tab_id: TabId,
     session_id: SessionId,
@@ -104,7 +103,7 @@ pub enum RemoteSessionRequest {
         decision: ConflictDecision,
     },
     /// Delete a residual remote temp file left by a previous run. Used by
-    /// the app to reconcile the M5/M6 residual on reconnect.
+    /// the app to reconcile the recorded residual on reconnect.
     RemoveRemoteTempFile {
         transfer_id: TransferId,
         path: RemotePath,
@@ -2139,7 +2138,7 @@ async fn emit_temporary_file_warning(
 
 /// Record that a temporary `.macsftp-part-*` file now exists for an
 /// in-flight transfer, so a crash/hard-kill can be reconciled on the next
-/// launch (plan M5/M6 residual).
+/// launch (current architecture §8).
 async fn emit_residual_temp_created(
     event_tx: &flume::Sender<AppEvent>,
     record: ResidualTempRecord,
