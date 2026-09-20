@@ -378,13 +378,14 @@ impl ProfileStore {
                 Some(AuthFingerprint::keyboard_interactive(profile.revision))
             }
             AuthMethod::SshAgent { .. } => Some(AuthFingerprint::ssh_agent(profile.revision)),
-        }?;
-        match profile.route {
+        }?
+        .with_saved_profile(profile_id);
+        match &profile.route {
             ConnectionRoute::JumpHost {
                 profile_id: jump_id,
             } => self
-                .find_profile(jump_id)
-                .map(|jump| fingerprint.with_jump_profile(jump_id, jump.revision)),
+                .find_profile(*jump_id)
+                .map(|jump| fingerprint.with_jump_profile(*jump_id, jump.revision)),
             ConnectionRoute::Direct | ConnectionRoute::ProxyCommand { .. } => Some(fingerprint),
         }
     }
@@ -784,7 +785,7 @@ impl ProfileStore {
                             profile_id,
                             message: "jump-host profile was not found",
                         })?;
-                if !matches!(jump_profile.route, ConnectionRoute::Direct) {
+                if !matches!(&jump_profile.route, ConnectionRoute::Direct) {
                     return Err(ProfileMutationError::InvalidRoute {
                         profile_id,
                         message: "jump-host profiles must use a direct route",
@@ -992,8 +993,8 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use macsftp_core::{
-        AuthCredential, AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionSettings,
-        LocalPath, ProfileId, SecretRef,
+        AuthCredential, AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionRoute,
+        ConnectionSettings, LocalPath, ProfileId, SecretRef,
     };
 
     use crate::{ProfilesFile, StorageError, core_crate_name, crate_name};
@@ -1154,6 +1155,47 @@ mod tests {
         assert_eq!(second_fingerprint.profile_revision, 2);
         let debug = format!("{second_fingerprint:?}");
         assert!(!debug.contains("password-value"));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn auth_fingerprint_distinguishes_saved_profiles_with_different_routes() {
+        let path = temp_profiles_path("auth-fingerprint-route");
+        cleanup(&path);
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
+        let mut first = ConnectionProfile::new(
+            ProfileId(1),
+            "First",
+            "target.internal",
+            "alex",
+            AuthMethod::SshAgent { socket_path: None },
+        );
+        first.route = ConnectionRoute::ProxyCommand {
+            command: "proxy-one %h %p".into(),
+        };
+        let mut second = ConnectionProfile::new(
+            ProfileId(2),
+            "Second",
+            "target.internal",
+            "alex",
+            AuthMethod::SshAgent { socket_path: None },
+        );
+        second.route = ConnectionRoute::ProxyCommand {
+            command: "proxy-two %h %p".into(),
+        };
+        store.save_profile(first).expect("save first profile");
+        store.save_profile(second).expect("save second profile");
+
+        let first = store
+            .auth_fingerprint(ProfileId(1))
+            .expect("first profile has a fingerprint");
+        let second = store
+            .auth_fingerprint(ProfileId(2))
+            .expect("second profile has a fingerprint");
+
+        assert_eq!(first.saved_profile_id, Some(ProfileId(1)));
+        assert_eq!(second.saved_profile_id, Some(ProfileId(2)));
+        assert_ne!(first, second);
         cleanup(&path);
     }
 

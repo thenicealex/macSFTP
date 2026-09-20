@@ -170,7 +170,7 @@ impl ProfilesFile {
                             ),
                         });
                     };
-                    if !matches!(jump.route, ConnectionRoute::Direct) {
+                    if !matches!(&jump.route, ConnectionRoute::Direct) {
                         return Err(StorageError::Corrupt {
                             message: format!(
                                 "profile {} references non-direct jump profile {}",

@@ -613,6 +613,7 @@ pub struct AuthFingerprint {
     pub secret_ref: Option<SecretRef>,
     pub private_key_path_hash: Option<String>,
     pub profile_revision: u64,
+    pub saved_profile_id: Option<ProfileId>,
     pub jump_profile_revision: Option<(ProfileId, u64)>,
 }
 
@@ -623,6 +624,7 @@ impl AuthFingerprint {
             secret_ref: Some(secret_ref),
             private_key_path_hash: None,
             profile_revision,
+            saved_profile_id: None,
             jump_profile_revision: None,
         }
     }
@@ -637,6 +639,7 @@ impl AuthFingerprint {
             secret_ref: passphrase_ref,
             private_key_path_hash: Some(private_key_path_hash.into()),
             profile_revision,
+            saved_profile_id: None,
             jump_profile_revision: None,
         }
     }
@@ -647,6 +650,7 @@ impl AuthFingerprint {
             secret_ref: None,
             private_key_path_hash: None,
             profile_revision,
+            saved_profile_id: None,
             jump_profile_revision: None,
         }
     }
@@ -657,8 +661,14 @@ impl AuthFingerprint {
             secret_ref: None,
             private_key_path_hash: None,
             profile_revision,
+            saved_profile_id: None,
             jump_profile_revision: None,
         }
+    }
+
+    pub fn with_saved_profile(mut self, profile_id: ProfileId) -> Self {
+        self.saved_profile_id = Some(profile_id);
+        self
     }
 
     pub fn with_jump_profile(mut self, profile_id: ProfileId, revision: u64) -> Self {
@@ -4445,6 +4455,7 @@ mod tests {
                 secret_ref: Some(SecretRef::keychain_ref(ProfileId(1), "password")),
                 private_key_path_hash: None,
                 profile_revision: 1,
+                saved_profile_id: Some(ProfileId(1)),
                 jump_profile_revision: None,
             }),
         )

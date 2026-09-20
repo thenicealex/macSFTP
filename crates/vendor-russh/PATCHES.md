@@ -22,6 +22,10 @@ gateways that expose only RSA host keys without enabling RSA client signing.
 - silence one no-RSA unused-value warning exposed by this feature split.
 - omit upstream examples from the vendored build input; one example logs a
   password and is intentionally excluded by macSFTP's sensitive-log gate.
+- zeroize keyboard-interactive responses after the client session encodes
+  them, including channel-send failure paths;
+- remove agent-client debug output containing identity blobs, public keys,
+  signed payloads, or signature responses.
 
 The complete RustCrypto RSA client-private-key feature remains disabled in
 `crates/sftp/Cargo.toml`. macSFTP implements client RSA-SHA2 signing separately

@@ -1417,7 +1417,7 @@ pub async fn establish_physical_connection(
         ResolvedConnectionRoute::JumpHost {
             settings: jump_settings,
         } => {
-            if !matches!(jump_settings.route, ResolvedConnectionRoute::Direct) {
+            if !matches!(&jump_settings.route, ResolvedConnectionRoute::Direct) {
                 return Err(ConnectFailure::Connection(UserFacingError::new(
                     ErrorCode::ChannelClosed,
                     "Invalid jump-host route",

@@ -520,7 +520,7 @@ impl crate::workspace::Workspace {
             .iter()
             .filter(|profile| {
                 Some(profile.id) != editor.profile_id
-                    && matches!(profile.route, ConnectionRoute::Direct)
+                    && matches!(&profile.route, ConnectionRoute::Direct)
             })
             .map(|profile| (profile.id, profile.name.clone()))
             .collect::<Vec<_>>();

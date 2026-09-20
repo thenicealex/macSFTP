@@ -20,4 +20,11 @@ if rg -n \
     status=1
 fi
 
+if rg -n \
+    '(trace|debug)!\([^;]{0,800}(identities:|sign_request|self\.buf|public =)' \
+    crates/vendor-russh/src/keys/agent/client.rs; then
+    echo "error: SSH agent tracing exposes identity or signing material" >&2
+    status=1
+fi
+
 exit "$status"
