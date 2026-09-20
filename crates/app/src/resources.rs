@@ -31,8 +31,8 @@ pub struct AppResources {
     pub residual_temps: ResidualTempStore,
     /// Recent successful connections (host/user/paths). No secrets.
     pub recents: RecentsStore,
-    /// Active remote-edit sessions (begin_edit / edit watcher). Registered
-    /// here so the store is process-wide and shared across windows. Empty at
+    /// Active remote-edit sessions. Registered here so the store is
+    /// process-wide and shared across windows. Empty at
     /// launch; the edits directory is cleared in `main()` before this is
     /// built.
     pub edit_sessions: EditSessionStore,
@@ -310,7 +310,7 @@ mod edit_tests {
         let app_paths = AppPaths::from_home_dir(home.to_string_lossy().as_ref());
         let config = ConfigStore::with_defaults(app_paths.config_file.clone());
         let resources = AppResources::load_for_test(app_paths, config);
-        assert_eq!(resources.edit_sessions.editing_sessions().count(), 0);
+        assert!(resources.edit_sessions.session_tab_ids().is_empty());
     }
 
     #[test]

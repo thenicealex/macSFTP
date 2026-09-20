@@ -135,6 +135,7 @@ mod tests {
             workspace.set_local_path(path, window, cx);
         });
         cx.run_until_parked();
+        cx.run_until_parked();
     }
 
     fn init_workspace_with_paths(
@@ -2740,7 +2741,6 @@ mod tests {
                 .find_active(&manual_connection_key(), &entry.path)
                 .expect("small-file edit must register an active session");
             assert_eq!(session.phase, EditPhase::Downloading);
-            assert!(session.active_transfer.is_none());
             assert_eq!(session.remote_path, entry.path);
             let expected = format!("{}/{}/{}/notes.txt", edits_dir, edit_run_id, session.id.0);
             assert_eq!(
@@ -2804,11 +2804,8 @@ mod tests {
                     size: Some(13),
                     modified_at: Some(Timestamp::from_secs_since_epoch(100)),
                 },
-                local_mtime: None,
-                active_transfer: None,
                 pending_check_id: None,
                 checking_local_mtime: None,
-                missing_ticks: 0,
             });
             (session_id, temp_path)
         });
@@ -2837,7 +2834,10 @@ mod tests {
                 .expect("the existing edit session remains active");
             assert_eq!(session.id, session_id);
             assert_eq!(session.phase, EditPhase::Editing);
-            assert_eq!(cx.resources().edit_sessions.editing_sessions().count(), 1);
+            assert!(
+                !cx.resources().edit_sessions.session_tab_ids().is_empty(),
+                "the existing edit session remains registered"
+            );
             assert_eq!(
                 workspace.status_message_for_test().as_deref(),
                 Some("Reopened file for editing")
@@ -2847,6 +2847,85 @@ mod tests {
             channels.command_rx.try_recv().is_err(),
             "reopening an existing edit must not dispatch another download"
         );
+    }
+
+    #[gpui::test]
+    fn upload_modified_file_is_explicit_and_checks_remote_first(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        connect_and_drain(&workspace, &mut cx, &channels);
+        cx.run_until_parked();
+        let remote_path = RemotePath::new("/home/tester/notes.txt");
+
+        let session_id = workspace.update_in(&mut cx, |workspace, _window, cx| {
+            let session_id = cx.resources_mut().edit_sessions.next_id();
+            let temp_path = LocalPath::new(format!(
+                "{}/{}/{}/notes.txt",
+                cx.resources().app_paths.edits_dir.as_str(),
+                cx.resources().edit_run_id,
+                session_id.0
+            ));
+            let parent = std::path::Path::new(temp_path.as_str())
+                .parent()
+                .expect("edit temp has a parent directory");
+            std::fs::create_dir_all(parent).expect("create edit temp directory");
+            std::fs::write(temp_path.as_str(), b"modified locally")
+                .expect("write modified edit temp");
+            cx.resources_mut().edit_sessions.register(EditSession {
+                id: session_id,
+                remote_path: remote_path.clone(),
+                tab_id: TabId(1),
+                session_epoch: 1,
+                profile_id: ProfileId(0),
+                connection_key: manual_connection_key(),
+                local_temp_path: temp_path,
+                phase: EditPhase::Editing,
+                remote_snapshot: RemoteSnapshot {
+                    size: Some(13),
+                    modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+                },
+                pending_check_id: None,
+                checking_local_mtime: None,
+            });
+            let tab = workspace.active_tab_mut().expect("active tab");
+            tab.selection.selected_paths = vec![EntryPath::Remote(remote_path.clone())];
+            cx.refresh_windows();
+            session_id
+        });
+
+        workspace.read_with(&cx, |workspace, cx| {
+            assert_eq!(
+                workspace.selected_edit_session(cx),
+                Some((session_id, EditPhase::Editing))
+            );
+        });
+        assert!(
+            channels.command_rx.try_recv().is_err(),
+            "opening an editable copy must not monitor or upload local saves automatically"
+        );
+
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            workspace.upload_selected_edit(cx);
+        });
+
+        let command = channels
+            .command_rx
+            .try_recv()
+            .expect("explicit upload must request a live remote check");
+        let AppCommand::CheckRemoteEditSnapshot(command) = command else {
+            panic!("expected CheckRemoteEditSnapshot, got {command:?}");
+        };
+        assert_eq!(command.edit_session_id, session_id);
+        assert_eq!(command.path, remote_path);
+        workspace.read_with(&cx, |_workspace, cx| {
+            let session = cx
+                .resources()
+                .edit_sessions
+                .get(session_id)
+                .expect("edit session remains live");
+            assert_eq!(session.phase, EditPhase::CheckingRemote);
+            assert_eq!(session.pending_check_id, Some(command.check_id));
+            assert!(session.checking_local_mtime.is_some());
+        });
     }
 
     #[gpui::test]
@@ -2880,11 +2959,8 @@ mod tests {
                     size: Some(5),
                     modified_at: None,
                 },
-                local_mtime: None,
-                active_transfer: None,
                 pending_check_id: None,
                 checking_local_mtime: None,
-                missing_ticks: 0,
             });
             id
         });
@@ -3304,7 +3380,7 @@ mod tests {
 
     /// Register a `RemoteConflict` edit session directly in the store and return
     /// its id, so the conflict-resolution tests can drive
-    /// `resolve_edit_conflict` without replaying a full download+watch cycle.
+    /// `resolve_edit_conflict` without replaying a full download cycle.
     fn register_conflict_session(
         workspace: &Entity<Workspace>,
         cx: &mut VisualTestContext,
@@ -3326,11 +3402,8 @@ mod tests {
                     size: Some(10),
                     modified_at: Some(Timestamp::from_secs_since_epoch(100)),
                 },
-                local_mtime: None,
-                active_transfer: None,
                 pending_check_id: None,
                 checking_local_mtime: None,
-                missing_ticks: 0,
             });
             id
         })
@@ -3502,11 +3575,8 @@ mod tests {
                     size: Some(10),
                     modified_at: None,
                 },
-                local_mtime: None,
-                active_transfer: None,
                 pending_check_id: None,
                 checking_local_mtime: None,
-                missing_ticks: 0,
             });
         });
         while channels.command_rx.try_recv().is_ok() {}
@@ -3524,10 +3594,10 @@ mod tests {
         // edit; this connection downloads its own temp copy instead.
         workspace.read_with(&cx, |_workspace, cx| {
             let store = &cx.resources().edit_sessions;
-            assert_eq!(store.editing_sessions().count(), 1);
+            assert_eq!(store.editing_sessions_for_tab(TabId(99)).count(), 1);
             assert_eq!(
                 store
-                    .editing_sessions()
+                    .editing_sessions_for_tab(TabId(99))
                     .next()
                     .map(|s| s.connection_key.clone()),
                 Some(test_connection_key(SessionId(7))),
@@ -3618,11 +3688,8 @@ mod tests {
                     size: Some(10),
                     modified_at: None,
                 },
-                local_mtime: None,
-                active_transfer: None,
                 pending_check_id: None,
                 checking_local_mtime: None,
-                missing_ticks: 0,
             });
             key
         });
@@ -3726,7 +3793,7 @@ mod tests {
                 "the conflict is preserved verbatim across the reconnect"
             );
 
-            // The save-back upload path still works off the preserved session:
+            // The explicit upload path still works off the preserved session:
             // resolve as overwrite and expect an upload command carrying the
             // REFRESHED epoch.
             workspace.resolve_edit_conflict(id, ConflictChoice::Overwrite, cx);
@@ -4015,11 +4082,8 @@ mod tests {
                 local_temp_path: LocalPath::new("/tmp/edits/doc.txt"),
                 phase: EditPhase::Editing,
                 remote_snapshot: snapshot,
-                local_mtime: None,
-                active_transfer: None,
                 pending_check_id: None,
                 checking_local_mtime: None,
-                missing_ticks: 0,
             });
             id
         })
@@ -4097,16 +4161,10 @@ mod tests {
             "the session baseline must adopt the listing's exact values, \
              normalizing away the sub-second drift"
         );
-        // The watcher flags a conflict when `listing != baseline`. After
+        // The explicit upload check flags a conflict when `listing != baseline`. After
         // adoption the session no longer diverges from the same listing, so the
-        // next save would upload cleanly instead of popping RemoteConflict.
-        let diverged = workspace.read_with(&cx, |_workspace, cx| {
-            cx.resources()
-                .edit_sessions
-                .get(id)
-                .expect("edit session survives refresh")
-                .remote_diverged(listed)
-        });
+        // next explicit upload would proceed instead of popping RemoteConflict.
+        let diverged = after != listed;
         assert!(
             !diverged,
             "adopted baseline must not diverge from the listing (no false conflict)"
@@ -4142,19 +4200,13 @@ mod tests {
             after, baseline,
             "a genuine remote change must not be adopted as the new baseline"
         );
-        // The watcher's divergence check (baseline != current listing) still
+        // The explicit divergence check (baseline != current listing) still
         // fires, so the RemoteConflict path remains reachable.
         assert_ne!(
             after, changed,
             "the preserved baseline still diverges from the changed listing"
         );
-        let diverged = workspace.read_with(&cx, |_workspace, cx| {
-            cx.resources()
-                .edit_sessions
-                .get(id)
-                .expect("edit session survives refresh")
-                .remote_diverged(changed)
-        });
+        let diverged = after != changed;
         assert!(
             diverged,
             "a genuine remote change must remain detectable as divergence"
@@ -6200,11 +6252,8 @@ mod tests {
                     size: Some(6),
                     modified_at: None,
                 },
-                local_mtime: None,
-                active_transfer: None,
                 pending_check_id: None,
                 checking_local_mtime: None,
-                missing_ticks: 0,
             });
             id
         });
@@ -6255,11 +6304,8 @@ mod tests {
                     size: Some(6),
                     modified_at: None,
                 },
-                local_mtime: None,
-                active_transfer: None,
                 pending_check_id: None,
                 checking_local_mtime: None,
-                missing_ticks: 0,
             });
             id
         });

@@ -193,19 +193,19 @@ ProxyCommand 是明确的代码执行能力。UI 必须显示风险提示，日�
 
 远程编辑 session 属于进程级状态，因为外部编辑器和传输可能跨窗口存活。tab 关闭必须清理该 tab 的 session 和临时目录；应用启动时使用新的 run namespace，避免外部编辑器缓存旧路径。
 
-本地保存不能依赖 UI 缓存的目录 listing 授权覆盖远端文件。流程为：
+应用不监视外部编辑器的保存动作。用户在选中已打开编辑的远端文件后，通过明确的 **Upload Modified File** 操作发起上传。上传不能依赖 UI 缓存的目录 listing 授权覆盖远端文件。流程为：
 
 ```text
 Editing
-  -> 本地 mtime 改变
+  -> 用户选择 Upload Modified File
   -> CheckingRemote（分配唯一 check id）
   -> actor 对目标执行实时 metadata 查询
   -> 快照一致：UploadingBack
   -> 快照不同：RemoteConflict
-  -> 路由/检查失败：回到 Editing，保留本地文件
+  -> 路由/检查失败：回到 Editing，保留本地文件并等待用户重试
 ```
 
-结果应用前必须完整匹配 edit session、tab、session epoch、check ID、remote path 和发起检查时的本地 mtime。检查完成后还要再次 stat 本地文件，避免检查期间再次保存造成 TOCTOU 覆盖。
+结果应用前必须完整匹配 edit session、tab、session epoch、check ID、remote path 和发起检查时的本地 mtime。检查完成后还要再次 stat 本地文件；若用户在检查期间再次保存，本次结果不能授权上传，必须回到 Editing 等待用户再次点击。
 
 已知限制：远端快照只比较 size 和整秒 mtime。同一秒内发生、且 size 不变的并发远端修改无法识别。没有内容哈希或服务端版本号前，不得声称已解决这一限制。
 

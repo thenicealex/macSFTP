@@ -120,6 +120,9 @@ impl crate::workspace::Workspace {
             }
             AppEvent::TabDisconnected(scoped) => {
                 let tab_id = scoped.scope.tab_id;
+                cx.resources_mut()
+                    .edit_sessions
+                    .update_epoch_for_tab(tab_id, scoped.scope.session_epoch);
                 // Before clearing the live remote path, stash it in the tab's
                 // restored_target so build_session_snapshot still records the
                 // last browsing location after disconnect-then-quit.
@@ -279,10 +282,10 @@ impl crate::workspace::Workspace {
     /// Re-sync active-edit baselines against a just-loaded directory listing.
     ///
     /// A directory refresh replaces the tab's listing with the server's
-    /// ground-truth `(size, mtime)`. The edit watcher detects "someone changed
-    /// the remote underneath me" by comparing each session's stored
-    /// `remote_snapshot` against that listing, so the two must not drift apart
-    /// when nobody touched the remote. They otherwise do: an upload-back rebases
+    /// ground-truth `(size, mtime)`. The explicit upload flow compares each
+    /// session's stored `remote_snapshot` with a later live check, so harmless
+    /// listing precision changes must not leave the baseline behind when nobody
+    /// touched the remote. They otherwise do: an upload rebases
     /// the snapshot from the LOCAL temp file's mtime, and even after truncating
     /// to whole seconds (Part A) a later refresh re-reads the server's own
     /// mtime — usually identical, but this normalization makes the two byte-for-
@@ -293,8 +296,8 @@ impl crate::workspace::Workspace {
     /// the listing entry's exact `(size, mtime)` as the new baseline ONLY when
     /// it agrees with the current baseline at whole-second granularity (same
     /// size, same whole-second mtime). If they differ at that granularity, the
-    /// remote genuinely changed since we last synced — that is the signal the
-    /// watcher/conflict UI must surface, so we leave the baseline untouched.
+    /// remote genuinely changed since we last synced, so we leave the baseline
+    /// untouched for the next explicit upload check.
     /// `RemoteConflict` sessions are excluded entirely (see
     /// [`macsftp_core::EditSessionStore::editing_sessions_for_tab`]) so an
     /// already-surfaced conflict is never masked by a refresh.

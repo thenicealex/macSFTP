@@ -590,28 +590,15 @@ impl Workspace {
         })
         .detach();
     }
-    /// Clone of this window's runtime client, for process-wide callers (the
-    /// edit watcher) that need to dispatch a command to the session owning a
-    /// tab without a `Context<Workspace>`. `RuntimeClient` is a cheap channel
-    /// handle.
+    /// Clone of this window's runtime client for process-wide event handling
+    /// that must dispatch to the session owning a tab. `RuntimeClient` is a
+    /// cheap channel handle.
     pub(crate) fn runtime_client(&self) -> RuntimeClient {
         self.runtime_client.clone()
     }
-    /// Whether this window holds the tab with `tab_id`. Used by the edit
-    /// watcher to find the window that owns an edit session's tab.
+    /// Whether this window holds the tab with `tab_id`.
     pub(crate) fn owns_tab(&self, tab_id: TabId) -> bool {
         self.state.tabs.find_tab(tab_id).is_some()
-    }
-    /// Whether the tab's remote listing is authoritative enough for edit
-    /// conflict detection. A connection transition or in-flight directory
-    /// refresh must defer the check instead of turning an empty/stale listing
-    /// into a false conflict.
-    pub(crate) fn tab_remote_is_ready(&self, tab_id: TabId) -> bool {
-        self.state.tabs.find_tab(tab_id).is_some_and(|tab| {
-            matches!(tab.connection, ConnectionState::Connected { .. })
-                && tab.remote.path.is_some()
-                && !tab.remote.is_refreshing
-        })
     }
     /// Whether this window owns the tab referenced by `scope` and that tab's
     /// session is still live at `scope`'s epoch. Used by the process-wide
@@ -770,9 +757,8 @@ impl Workspace {
         }
         // A reconnect bumps the tab's epoch. Any edit session preserved across
         // the disconnect still holds the OLD epoch; refresh it to the new epoch
-        // so its save-back is accepted by the runtime instead of being silently
-        // dropped as stale (which would strand the session in UploadingBack and
-        // block re-editing the file).
+        // so its next explicit upload is accepted by the runtime instead of
+        // being rejected as stale.
         cx.resources_mut()
             .edit_sessions
             .update_epoch_for_tab(tab_id, next_epoch);

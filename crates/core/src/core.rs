@@ -2363,21 +2363,11 @@ pub enum EditPhase {
     Downloading,
     Editing,
     /// A live, authoritative remote-metadata check is in flight before upload.
-    /// Treated as a live phase (blocks duplicate dispatch and re-edit) so the
-    /// watcher cannot redispatch a check while one is pending. Both
-    /// `pending_check_id` and `checking_local_mtime` are `Some` only here.
+    /// Both `pending_check_id` and `checking_local_mtime` are `Some` only here.
     CheckingRemote,
     UploadingBack,
     RemoteConflict,
 }
-
-/// Number of *consecutive* watcher ticks on which an edit temp file's metadata
-/// must be unreadable before the session is torn down. The watcher polls once a
-/// second, so this tolerates a few seconds of transient unavailability (atomic
-/// saves, `EINTR`, mount hiccups) while still reaping a session whose file the
-/// user genuinely deleted. One tick is not enough: an editor's rename-over save
-/// leaves a sub-second window in which the path does not resolve.
-pub const EDIT_MISSING_TICKS_LIMIT: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditSession {
@@ -2395,43 +2385,16 @@ pub struct EditSession {
     pub local_temp_path: LocalPath,
     pub phase: EditPhase,
     pub remote_snapshot: RemoteSnapshot,
-    pub local_mtime: Option<Timestamp>,
-    pub active_transfer: Option<TransferId>,
     /// The `EditCheckId` of an in-flight authoritative remote-metadata check,
     /// set when the phase enters `CheckingRemote` and cleared on every
     /// transition out of it. Binds a returned result to the exact check that
-    /// initiated it, so a delayed result from an earlier retry of the same
-    /// local save is rejected.
+    /// initiated it, so a delayed result from an earlier request is rejected.
     pub pending_check_id: Option<EditCheckId>,
-    /// The local-save mtime captured when the check was dispatched. The result
+    /// The local file mtime captured when the upload check was dispatched. The result
     /// is only honored if the temp file still carries this exact mtime at
-    /// result time; if the user saved again mid-flight the session reverts and
-    /// rechecks the newer save rather than authorizing a stale result.
+    /// result time; if the user saves again mid-flight the session requires a
+    /// new explicit upload rather than authorizing a stale result.
     pub checking_local_mtime: Option<Timestamp>,
-    /// Consecutive watcher ticks on which the temp file's metadata could not be
-    /// read. A single miss is treated as transient (an editor's atomic save
-    /// briefly unlinks the file, `EINTR`, a mount hiccup) and does not tear the
-    /// session down; only [`EDIT_MISSING_TICKS_LIMIT`] consecutive misses are
-    /// taken as "the file is really gone". Reset to 0 on any successful stat.
-    pub missing_ticks: u32,
-}
-
-impl EditSession {
-    /// 仅 Editing 阶段、且本地 mtime 严格变新时返回 true。
-    pub fn local_changed(&self, current_mtime: Option<Timestamp>) -> bool {
-        if self.phase != EditPhase::Editing {
-            return false;
-        }
-        match (self.local_mtime, current_mtime) {
-            (Some(last), Some(now)) => now > last,
-            _ => false,
-        }
-    }
-
-    /// 远程 (size, mtime) 与下载时快照不一致即视为已改动。
-    pub fn remote_diverged(&self, current: RemoteSnapshot) -> bool {
-        current != self.remote_snapshot
-    }
 }
 
 #[derive(Debug, Default)]
@@ -2480,14 +2443,18 @@ impl EditSessionStore {
         self.sessions.iter_mut().find(|s| s.id == id)
     }
 
-    pub fn find_by_transfer(&self, transfer: TransferId) -> Option<&EditSession> {
-        self.sessions
-            .iter()
-            .find(|s| s.active_transfer == Some(transfer))
-    }
-
     pub fn find_by_temp_path(&self, path: &LocalPath) -> Option<&EditSession> {
         self.sessions.iter().find(|s| &s.local_temp_path == path)
+    }
+
+    pub fn find_for_tab_path(
+        &self,
+        tab_id: TabId,
+        remote_path: &RemotePath,
+    ) -> Option<&EditSession> {
+        self.sessions
+            .iter()
+            .find(|session| session.tab_id == tab_id && &session.remote_path == remote_path)
     }
 
     /// Find an active edit session for `(connection_key, remote_path)`, used
@@ -2535,19 +2502,15 @@ impl EditSessionStore {
     /// Refresh the `session_epoch` of every edit session on `tab_id` to
     /// `session_epoch`. A session captures the tab's epoch when it is created,
     /// but a reconnect bumps the tab's epoch; without this the session's
-    /// save-back would carry the stale epoch and the runtime would silently drop
-    /// it (an epoch mismatch is filtered with no terminal event), stranding the
-    /// session in `UploadingBack` forever. Called on every (re)connect after the
-    /// tab's epoch is bumped, so a preserved edit survives a reconnect.
+    /// next explicit upload would carry the stale epoch and be rejected by the
+    /// runtime. Called on every (re)connect after the tab's epoch is bumped.
     pub fn update_epoch_for_tab(&mut self, tab_id: TabId, session_epoch: u64) {
         for session in self.sessions.iter_mut().filter(|s| s.tab_id == tab_id) {
             // A check in flight at reconnect time can never complete: the actor
             // that owned it is gone. Reset to `Editing` and clear the pending
-            // check so the watcher rediscovers the save and issues a fresh
-            // authoritative check against the new session. `local_mtime` is
-            // preserved as the pre-save baseline so the unchanged save is
-            // detected again. `UploadingBack` is left untouched: that phase is
-            // owned by the transfer lifecycle, which handles its own reconnect.
+            // check so the user can request a fresh authoritative check against
+            // the replacement session. `UploadingBack` is left untouched: that
+            // phase is owned by the transfer lifecycle.
             if session.phase == EditPhase::CheckingRemote {
                 session.phase = EditPhase::Editing;
                 session.pending_check_id = None;
@@ -2557,17 +2520,9 @@ impl EditSessionStore {
         }
     }
 
-    pub fn editing_sessions(&self) -> impl Iterator<Item = &EditSession> {
-        self.sessions
-            .iter()
-            .filter(|s| s.phase == EditPhase::Editing)
-    }
-
     /// `Editing`-phase sessions belonging to `tab_id`. Used when a directory
-    /// listing (re)loads for a tab: only `Editing` sessions matter, because
-    /// that is the phase in which the watcher actively compares the session
-    /// baseline against the listing, so it is the phase whose baseline must be
-    /// re-synced to absorb sub-second mtime drift. `RemoteConflict` sessions
+    /// listing (re)loads for a tab: only `Editing` sessions should adopt benign
+    /// sub-second mtime normalization. `RemoteConflict` sessions
     /// are deliberately excluded so a real, already-surfaced conflict is never
     /// masked by a refresh.
     pub fn editing_sessions_for_tab(&self, tab_id: TabId) -> impl Iterator<Item = &EditSession> {
@@ -2580,18 +2535,6 @@ impl EditSessionStore {
         self.sessions
             .iter()
             .filter(|s| s.phase == EditPhase::RemoteConflict)
-    }
-
-    /// `CheckingRemote`-phase sessions. Used by the edit watcher's lifecycle
-    /// pass so a session whose temp file is deleted while an authoritative
-    /// remote check is in flight is still reaped. These sessions never
-    /// initiate a new check through the polling loop (duplicate dispatch is
-    /// prevented by construction: `poll_edit_sessions` only dispatches for
-    /// `Editing` sessions), so this iterator is purely for cleanup.
-    pub fn checking_sessions(&self) -> impl Iterator<Item = &EditSession> {
-        self.sessions
-            .iter()
-            .filter(|s| s.phase == EditPhase::CheckingRemote)
     }
 
     /// The distinct `tab_id`s across all registered sessions. Used after a
@@ -4119,45 +4062,9 @@ mod tests {
                 size: Some(10),
                 modified_at: Some(crate::Timestamp::from_secs_since_epoch(100)),
             },
-            local_mtime: Some(crate::Timestamp::from_secs_since_epoch(200)),
-            active_transfer: None,
             pending_check_id: None,
             checking_local_mtime: None,
-            missing_ticks: 0,
         }
-    }
-
-    #[test]
-    fn local_changed_only_in_editing_phase() {
-        let newer = Some(crate::Timestamp::from_secs_since_epoch(300));
-        assert!(sample_edit_session(crate::EditPhase::Editing).local_changed(newer));
-        assert!(!sample_edit_session(crate::EditPhase::Downloading).local_changed(newer));
-        assert!(!sample_edit_session(crate::EditPhase::UploadingBack).local_changed(newer));
-    }
-
-    #[test]
-    fn local_changed_detects_newer_mtime() {
-        let s = sample_edit_session(crate::EditPhase::Editing);
-        assert!(s.local_changed(Some(crate::Timestamp::from_secs_since_epoch(300))));
-        assert!(!s.local_changed(Some(crate::Timestamp::from_secs_since_epoch(200))));
-        assert!(!s.local_changed(None));
-    }
-
-    #[test]
-    fn remote_diverged_on_size_or_mtime_and_false_when_identical() {
-        let s = sample_edit_session(crate::EditPhase::Editing);
-        assert!(s.remote_diverged(crate::RemoteSnapshot {
-            size: Some(11),
-            modified_at: Some(crate::Timestamp::from_secs_since_epoch(100))
-        }));
-        assert!(s.remote_diverged(crate::RemoteSnapshot {
-            size: Some(10),
-            modified_at: Some(crate::Timestamp::from_secs_since_epoch(101))
-        }));
-        assert!(!s.remote_diverged(crate::RemoteSnapshot {
-            size: Some(10),
-            modified_at: Some(crate::Timestamp::from_secs_since_epoch(100))
-        }));
     }
 
     #[test]
@@ -4330,12 +4237,6 @@ mod tests {
             "checking local mtime is cleared on reconnect"
         );
         assert_eq!(stored.session_epoch, 2, "epoch is bumped on reconnect");
-        // local_mtime baseline is preserved so the unchanged save is re-flagged.
-        assert_eq!(
-            stored.local_mtime,
-            Some(Timestamp::from_secs_since_epoch(200)),
-            "pre-save baseline is preserved"
-        );
     }
 
     /// The connection identity every edit-session fixture shares; tests that
@@ -4367,14 +4268,12 @@ mod tests {
         profile: u64,
         path: &str,
         phase: crate::EditPhase,
-        transfer: Option<crate::TransferId>,
     ) -> crate::EditSession {
         let mut session = sample_edit_session(phase);
         session.id = crate::EditSessionId(id_hint);
         session.remote_path = crate::RemotePath::new(path);
         session.profile_id = crate::ProfileId(profile);
         session.local_temp_path = crate::LocalPath::new(format!("/tmp/edits/{id_hint}"));
-        session.active_transfer = transfer;
         session
     }
 
@@ -4382,16 +4281,9 @@ mod tests {
     fn store_register_find_and_remove() {
         let mut store = crate::EditSessionStore::new();
         let id = store.next_id();
-        let mut s = store_session(
-            id.0,
-            1,
-            "/srv/a.txt",
-            crate::EditPhase::Downloading,
-            Some(crate::TransferId(7)),
-        );
+        let mut s = store_session(id.0, 1, "/srv/a.txt", crate::EditPhase::Downloading);
         s.id = id;
         store.register(s);
-        assert!(store.find_by_transfer(crate::TransferId(7)).is_some());
         assert!(
             store
                 .find_by_temp_path(&crate::LocalPath::new(format!("/tmp/edits/{}", id.0)))
@@ -4405,14 +4297,13 @@ mod tests {
         assert!(store.get(id).is_some());
         assert!(store.remove(id).is_some());
         assert!(store.get(id).is_none());
-        assert!(store.find_by_transfer(crate::TransferId(7)).is_none());
     }
 
     #[test]
     fn store_dedup_by_connection_key_and_remote_path() {
         let mut store = crate::EditSessionStore::new();
         let id1 = store.next_id();
-        let mut s1 = store_session(id1.0, 1, "/srv/a.txt", crate::EditPhase::Editing, None);
+        let mut s1 = store_session(id1.0, 1, "/srv/a.txt", crate::EditPhase::Editing);
         s1.id = id1;
         store.register(s1);
         // 同 connection+path 已有活跃会话可被查到；不同 path 或不同物理连接
@@ -4474,7 +4365,7 @@ mod tests {
             ConnectionPoolIdentity::Ephemeral(SessionId(2)),
         );
         let id2 = store.next_id();
-        let mut s2 = store_session(id2.0, 0, "/srv/a.txt", crate::EditPhase::Editing, None);
+        let mut s2 = store_session(id2.0, 0, "/srv/a.txt", crate::EditPhase::Editing);
         s2.id = id2;
         s2.connection_key = manual_a.clone();
         store.register(s2);
@@ -4503,7 +4394,7 @@ mod tests {
         ] {
             let mut store = crate::EditSessionStore::new();
             let id = store.next_id();
-            let mut s = store_session(id.0, 1, "/srv/a.txt", phase.clone(), None);
+            let mut s = store_session(id.0, 1, "/srv/a.txt", phase.clone());
             s.id = id;
             store.register(s);
             assert!(
@@ -4525,28 +4416,14 @@ mod tests {
     }
 
     #[test]
-    fn store_editing_sessions_filters_phase() {
-        let mut store = crate::EditSessionStore::new();
-        let a = store.next_id();
-        let mut sa = store_session(a.0, 1, "/a", crate::EditPhase::Editing, None);
-        sa.id = a;
-        store.register(sa);
-        let b = store.next_id();
-        let mut sb = store_session(b.0, 1, "/b", crate::EditPhase::Downloading, None);
-        sb.id = b;
-        store.register(sb);
-        assert_eq!(store.editing_sessions().count(), 1);
-    }
-
-    #[test]
     fn store_conflict_sessions_filters_phase() {
         let mut store = crate::EditSessionStore::new();
         let a = store.next_id();
-        let mut sa = store_session(a.0, 1, "/a", crate::EditPhase::RemoteConflict, None);
+        let mut sa = store_session(a.0, 1, "/a", crate::EditPhase::RemoteConflict);
         sa.id = a;
         store.register(sa);
         let b = store.next_id();
-        let mut sb = store_session(b.0, 1, "/b", crate::EditPhase::Editing, None);
+        let mut sb = store_session(b.0, 1, "/b", crate::EditPhase::Editing);
         sb.id = b;
         store.register(sb);
         assert_eq!(store.conflict_sessions().count(), 1);
@@ -4561,7 +4438,7 @@ mod tests {
         epoch: u64,
     ) -> crate::EditSessionId {
         let id = store.next_id();
-        let mut session = store_session(id.0, 1, path, crate::EditPhase::Editing, None);
+        let mut session = store_session(id.0, 1, path, crate::EditPhase::Editing);
         session.id = id;
         session.tab_id = crate::TabId(tab);
         session.session_epoch = epoch;

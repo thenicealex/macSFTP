@@ -1,6 +1,5 @@
 mod app_actions;
 mod assets;
-mod edit_watcher;
 mod event_coordinator;
 mod m7_regression;
 mod palette_commands;
@@ -230,8 +229,6 @@ fn main() {
         cx.set_global(event_coordinator);
         // Long-lived loop that stats each open edit's temp file every second
         // and uploads saved changes back (or flags a remote conflict).
-        let edit_watcher = crate::edit_watcher::EditWatcher::start(cx);
-        cx.set_global(edit_watcher);
         cx.on_window_closed(|cx| {
             checkpoint_after_window_closed(cx);
             crate::workspace::cleanup_orphaned_edit_sessions(cx);
