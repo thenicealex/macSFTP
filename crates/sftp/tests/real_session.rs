@@ -1710,40 +1710,70 @@ async fn host_key_mismatch_blocks_connection() {
     // public key as the "expected" host key.
     let wrong_key = std::fs::read_to_string(server.client_key_path.with_extension("pub"))
         .expect("read client public key");
-    let fixture = spawn_actor(&server, client_key_auth(&server), Some(wrong_key.trim()));
+    let known_hosts_path = server.fixture_dir.join("mismatch_runtime_known_hosts");
+    std::fs::write(
+        &known_hosts_path,
+        format!("[127.0.0.1]:{} {}\n", server.port, wrong_key.trim()),
+    )
+    .expect("prefill mismatched known_hosts");
+    let mut controller = RuntimeController::start(
+        RuntimeBridgeConfig::default(),
+        HostTrustConfig::new(known_hosts_path, None),
+    );
+    let client = controller.client();
+    let mut events = controller
+        .take_event_receiver()
+        .expect("event receiver should be available once");
+    client
+        .try_send(AppCommand::ConnectTab(ConnectCommand {
+            tab_id: TAB,
+            session_id: SESSION,
+            session_epoch: EPOCH,
+            profile_id: ProfileId(1),
+            pool_identity: ConnectionPoolIdentity::Ephemeral(SESSION),
+            settings: ConnectionSettings {
+                host: "127.0.0.1".to_string(),
+                port: server.port,
+                username: server.username.clone(),
+                auth: client_key_auth(&server),
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
+            },
+        }))
+        .expect("connect command should send");
 
-    let event = next_event(&fixture, "HostKeyMismatch").await;
-    match event {
-        AppEvent::HostKeyMismatch(mismatch) => {
-            assert_eq!(
-                mismatch.scope,
-                RemoteEventScope::new(TAB, SESSION, EPOCH),
-                "mismatch must carry the logical scope of the failed connection"
-            );
-            assert!(mismatch.expected_fingerprint_sha256.is_some());
-            assert!(
-                mismatch.actual_fingerprint_sha256.starts_with("SHA256:"),
-                "actual fingerprint must be present"
-            );
-            assert_ne!(
-                mismatch.expected_fingerprint_sha256.as_deref(),
-                Some(mismatch.actual_fingerprint_sha256.as_str()),
-            );
+    let mismatch = loop {
+        if let AppEvent::HostKeyMismatch(mismatch) =
+            next_runtime_event(&mut events, "HostKeyMismatch").await
+        {
+            break mismatch;
         }
-        other => panic!("expected HostKeyMismatch, got {other:?}"),
-    }
+    };
+    assert_eq!(
+        mismatch.scope,
+        RemoteEventScope::new(TAB, SESSION, EPOCH),
+        "mismatch must carry the logical scope of the failed connection"
+    );
+    assert!(mismatch.expected_fingerprint_sha256.is_some());
+    assert!(
+        mismatch.actual_fingerprint_sha256.starts_with("SHA256:"),
+        "actual fingerprint must be present"
+    );
+    assert_ne!(
+        mismatch.expected_fingerprint_sha256.as_deref(),
+        Some(mismatch.actual_fingerprint_sha256.as_str()),
+    );
 
     // The connection is blocked — no further event may arrive. The
     // actor exiting (channel disconnect) is fine; another event is not.
-    let follow_up =
-        tokio::time::timeout(Duration::from_millis(500), fixture.events.recv_async()).await;
+    let follow_up = tokio::time::timeout(Duration::from_millis(500), events.recv()).await;
     match follow_up {
         Err(_timeout) => {}
-        Ok(Err(_channel_closed)) => {}
-        Ok(Ok(event)) => panic!("mismatch must block without further events, got {event:?}"),
+        Ok(None) => {}
+        Ok(Some(event)) => panic!("mismatch must block without further events, got {event:?}"),
     }
-
-    fixture.cancel.cancel();
+    std::thread::spawn(move || controller.shutdown())
+        .join()
+        .expect("runtime shutdown thread");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1838,7 +1868,9 @@ async fn pooled_host_key_mismatch_is_emitted_for_every_logical_session() {
         Ok(None) => {}
         Ok(Some(event)) => panic!("only two mismatch events expected, got {event:?}"),
     }
-    controller.shutdown();
+    std::thread::spawn(move || controller.shutdown())
+        .join()
+        .expect("runtime shutdown thread");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1846,30 +1878,60 @@ async fn rejecting_unknown_host_key_disconnects() {
     let Some(server) = SshTestServer::spawn() else {
         return;
     };
-    let fixture = spawn_actor(&server, client_key_auth(&server), None);
+    let known_hosts_path = server.fixture_dir.join("reject_runtime_known_hosts");
+    let mut controller = RuntimeController::start(
+        RuntimeBridgeConfig::default(),
+        HostTrustConfig::new(known_hosts_path.clone(), None),
+    );
+    let client = controller.client();
+    let mut events = controller
+        .take_event_receiver()
+        .expect("event receiver should be available once");
+    client
+        .try_send(AppCommand::ConnectTab(ConnectCommand {
+            tab_id: TAB,
+            session_id: SESSION,
+            session_epoch: EPOCH,
+            profile_id: ProfileId(1),
+            pool_identity: ConnectionPoolIdentity::Ephemeral(SESSION),
+            settings: ConnectionSettings {
+                host: "127.0.0.1".to_string(),
+                port: server.port,
+                username: server.username.clone(),
+                auth: client_key_auth(&server),
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
+            },
+        }))
+        .expect("connect command should send");
 
-    let event = next_event(&fixture, "HostKeyUnknown").await;
-    let prompt = match event {
-        AppEvent::HostKeyUnknown(prompt) => prompt,
-        other => panic!("expected HostKeyUnknown, got {other:?}"),
-    };
-    fixture
-        .trust_registry
-        .resolve(prompt.request_id, TrustDecision::Reject);
-
-    let event = next_event(&fixture, "TabDisconnected").await;
-    match event {
-        AppEvent::TabDisconnected(scoped) => {
-            assert_eq!(scoped.payload.reason, DisconnectReason::UserRequested);
+    let prompt = loop {
+        if let AppEvent::HostKeyUnknown(prompt) =
+            next_runtime_event(&mut events, "HostKeyUnknown").await
+        {
+            break prompt;
         }
-        other => panic!("expected TabDisconnected, got {other:?}"),
-    }
+    };
+    client
+        .try_send(AppCommand::RejectHostKey {
+            request_id: prompt.request_id,
+        })
+        .expect("reject host key command should send");
+
+    let disconnected = loop {
+        if let AppEvent::TabDisconnected(disconnected) =
+            next_runtime_event(&mut events, "TabDisconnected").await
+        {
+            break disconnected;
+        }
+    };
+    assert_eq!(disconnected.payload.reason, DisconnectReason::UserRequested);
 
     // Nothing was persisted.
-    let store = KnownHostsStore::load(&fixture.app_known_hosts_path, None);
+    let store = KnownHostsStore::load(&known_hosts_path, None);
     assert_eq!(store.entry_count(), 0);
-
-    fixture.cancel.cancel();
+    std::thread::spawn(move || controller.shutdown())
+        .join()
+        .expect("runtime shutdown thread");
 }
 
 #[tokio::test(flavor = "multi_thread")]
