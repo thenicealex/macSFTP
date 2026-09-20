@@ -56,8 +56,7 @@ impl HostTrustConfig {
 /// with a password or private key, opens the SFTP subsystem, and holds
 /// the connection until cancelled or the server disconnects.
 ///
-/// Event contract is identical to `MockRemoteSessionActor` so the app
-/// side needs no changes when the dispatch loop switches over.
+/// Emits the shared app event contract consumed by the runtime bridge.
 pub struct RemoteSessionActor {
     tab_id: TabId,
     session_id: SessionId,

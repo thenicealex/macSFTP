@@ -1,5 +1,6 @@
 mod keyboard_interactive;
 mod known_hosts;
+#[cfg(test)]
 mod mock_actor;
 mod physical_connection;
 pub mod pool;
@@ -13,10 +14,9 @@ pub use keyboard_interactive::{KeyboardInteractiveRegistry, KeyboardInteractiveR
 pub use known_hosts::{
     HostKeyCheckResult, KnownHostsStore, fingerprint_sha256, host_pattern, key_algorithm,
 };
-pub use mock_actor::{MockRemoteSessionActor, MockSessionConfig};
 pub use runtime::{
     BridgeChannels, EventReceiver, ProgressThrottle, RuntimeClient, RuntimeController,
-    SessionBackend, test_event_channel,
+    test_event_channel,
 };
 pub use session_actor::{HostTrustConfig, RemoteSessionActor, RemoteSessionRequest};
 pub use trust::{TrustRegistry, TrustRegistryEntry};

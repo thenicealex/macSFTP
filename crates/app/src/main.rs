@@ -15,7 +15,7 @@ use gpui::{
 };
 use macsftp_core::RuntimeBridgeConfig;
 use macsftp_platform::{AppPaths, prune_log_files, write_crash_marker};
-use macsftp_sftp::{HostTrustConfig, RuntimeController, SessionBackend};
+use macsftp_sftp::{HostTrustConfig, RuntimeController};
 use macsftp_storage::{AppearancePreference, ConfigStore, SessionStore, SessionWindowSnapshot};
 use macsftp_ui::Theme;
 use std::path::Path;
@@ -193,10 +193,7 @@ fn main() {
             user_known_hosts.exists().then_some(user_known_hosts),
         );
 
-        let mut controller = RuntimeController::start(
-            RuntimeBridgeConfig::default(),
-            SessionBackend::Real(trust_config),
-        );
+        let mut controller = RuntimeController::start(RuntimeBridgeConfig::default(), trust_config);
         let event_receiver = controller
             .take_event_receiver()
             .expect("runtime event receiver must be available at startup");

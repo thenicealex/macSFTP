@@ -14,7 +14,7 @@ use crate::trust::TrustRegistry;
 /// Defaults simulate a typical SFTP server: ed25519 host key, port 22,
 /// home directory at `/home/user`.
 #[derive(Debug, Clone)]
-pub struct MockSessionConfig {
+pub(crate) struct MockSessionConfig {
     pub host: String,
     pub port: u16,
     pub fingerprint: String,
@@ -47,7 +47,7 @@ impl Default for MockSessionConfig {
 /// Cancellation: if the `CancellationToken` fires (tab closed, reconnect,
 /// shutdown), the actor exits without emitting a final event — the
 /// dispatch loop handles cleanup.
-pub struct MockRemoteSessionActor {
+pub(crate) struct MockRemoteSessionActor {
     tab_id: TabId,
     session_id: SessionId,
     session_epoch: u64,
@@ -58,7 +58,7 @@ pub struct MockRemoteSessionActor {
 }
 
 impl MockRemoteSessionActor {
-    pub fn new(
+    pub(crate) fn new(
         tab_id: TabId,
         session_id: SessionId,
         session_epoch: u64,
@@ -79,7 +79,7 @@ impl MockRemoteSessionActor {
     }
 
     /// Run the mock connect flow to completion (or cancellation).
-    pub async fn run(self, cancel: CancellationToken) {
+    pub(crate) async fn run(self, cancel: CancellationToken) {
         // 1. Create oneshot and register trust request.
         let (responder, decision_rx) = oneshot::channel();
         self.trust_registry.register(

@@ -8,7 +8,7 @@ use macsftp_core::{
     ConnectionSettings, HostKeyDecisionCommand, KeyboardInteractiveResponse, ProfileId,
     RuntimeBridgeConfig, SessionId, TabId,
 };
-use macsftp_sftp::{EventReceiver, HostTrustConfig, RuntimeController, SessionBackend};
+use macsftp_sftp::{EventReceiver, HostTrustConfig, RuntimeController};
 
 struct PasswordServer {
     host: String,
@@ -76,7 +76,7 @@ async fn password_and_keyboard_interactive_authenticate_without_identity_reuse()
     let known_hosts_path = temp_known_hosts_path();
     let mut controller = RuntimeController::start(
         RuntimeBridgeConfig::default(),
-        SessionBackend::Real(HostTrustConfig::new(known_hosts_path.clone(), None)),
+        HostTrustConfig::new(known_hosts_path.clone(), None),
     );
     let client = controller.client();
     let mut events = controller

@@ -17,7 +17,7 @@ use macsftp_core::{
 use macsftp_sftp::pool::ConnectionManager;
 use macsftp_sftp::{
     EventReceiver, HostTrustConfig, KnownHostsStore, RemoteSessionActor, RemoteSessionRequest,
-    RuntimeController, SessionBackend, TrustRegistry,
+    RuntimeController, TrustRegistry,
 };
 use macsftp_test_support::SshTestServer;
 use tokio_util::sync::CancellationToken;
@@ -1054,7 +1054,7 @@ async fn runtime_plans_and_executes_single_file_upload_and_download() {
     .expect("prefill known_hosts");
     let mut controller = RuntimeController::start(
         RuntimeBridgeConfig::default(),
-        SessionBackend::Real(HostTrustConfig::new(known_hosts_path, None)),
+        HostTrustConfig::new(known_hosts_path, None),
     );
     let client = controller.client();
     let mut events = controller
@@ -1162,7 +1162,7 @@ async fn runtime_directory_upload_survives_browsing_tab_close() {
     .expect("prefill known_hosts");
     let mut controller = RuntimeController::start(
         RuntimeBridgeConfig::default(),
-        SessionBackend::Real(HostTrustConfig::new(known_hosts_path, None)),
+        HostTrustConfig::new(known_hosts_path, None),
     );
     let client = controller.client();
     let mut events = controller
@@ -1277,7 +1277,7 @@ async fn runtime_streams_and_executes_directory_download() {
     .expect("prefill known_hosts");
     let mut controller = RuntimeController::start(
         RuntimeBridgeConfig::default(),
-        SessionBackend::Real(HostTrustConfig::new(known_hosts_path, None)),
+        HostTrustConfig::new(known_hosts_path, None),
     );
     let client = controller.client();
     let mut events = controller
@@ -1382,7 +1382,7 @@ async fn remote_download_failure_after_progress_emits_plan_failure() {
     .expect("prefill known_hosts");
     let mut controller = RuntimeController::start(
         RuntimeBridgeConfig::default(),
-        SessionBackend::Real(HostTrustConfig::new(known_hosts_path, None)),
+        HostTrustConfig::new(known_hosts_path, None),
     );
     let client = controller.client();
     let mut events = controller
@@ -1522,7 +1522,7 @@ async fn runtime_routes_read_dir_to_real_actor() {
     .expect("prefill known_hosts");
     let mut controller = RuntimeController::start(
         RuntimeBridgeConfig::default(),
-        SessionBackend::Real(HostTrustConfig::new(known_hosts_path, None)),
+        HostTrustConfig::new(known_hosts_path, None),
     );
     let client = controller.client();
     let mut events = controller
@@ -1598,7 +1598,7 @@ async fn tabs_browse_independently_after_another_tab_disconnects() {
     .expect("prefill known_hosts");
     let mut controller = RuntimeController::start(
         RuntimeBridgeConfig::default(),
-        SessionBackend::Real(HostTrustConfig::new(known_hosts_path, None)),
+        HostTrustConfig::new(known_hosts_path, None),
     );
     let client = controller.client();
     let mut events = controller

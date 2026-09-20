@@ -3,12 +3,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use macsftp_core::TrustRequestId;
 use macsftp_core::{
     AppCommand, AppEvent, CheckRemoteEditSnapshotCommand, CommandDispatchError, ErrorCode,
     FsCommand, FsScope, RemoteEditSnapshotDispatchFailed, RemoteEventScope, RemoteOperationFailure,
     RemoteScoped, RuntimeBridgeConfig, SessionId, TabId, Timestamp, TransferDirection, TransferId,
-    TransferJob, TransferPlanId, TransferPlanSnapshot, TrustDecision, TrustRequestId,
-    UserFacingError,
+    TransferJob, TransferPlanId, TransferPlanSnapshot, TrustDecision, UserFacingError,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
@@ -17,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::keyboard_interactive::KeyboardInteractiveRegistry;
 use crate::known_hosts::KnownHostsStore;
+#[cfg(test)]
 use crate::mock_actor::{MockRemoteSessionActor, MockSessionConfig};
 use crate::session_actor::{HostTrustConfig, RemoteSessionActor, RemoteSessionRequest};
 use crate::transfer_manager::{TransferManager, TransferManagerRequest};
@@ -24,12 +26,11 @@ use crate::transfer_planner::{new_plan, plan_local_upload};
 use crate::trust::TrustRegistry;
 use tracing::{info, warn};
 
-/// Which session actor `ConnectTab` spawns.
-///
-/// `Real` connects to actual SSH servers through `RemoteSessionActor`;
-/// `Mock` keeps the deterministic in-process flow for tests.
-pub enum SessionBackend {
+/// Internal runtime construction detail. Production builds contain only the
+/// real variant; the mock variant and actor are compiled for unit tests only.
+enum RuntimeBackend {
     Real(HostTrustConfig),
+    #[cfg(test)]
     Mock(MockSessionConfig),
 }
 
@@ -158,9 +159,17 @@ pub struct RuntimeController {
 
 impl RuntimeController {
     /// Boot the runtime: create the Tokio runtime, channels, trust
-    /// registry, and spawn the command dispatch loop with the given
-    /// session backend.
-    pub fn start(config: RuntimeBridgeConfig, backend: SessionBackend) -> Self {
+    /// registry, and spawn the command dispatch loop for real SSH sessions.
+    pub fn start(config: RuntimeBridgeConfig, trust_config: HostTrustConfig) -> Self {
+        Self::start_with_backend(config, RuntimeBackend::Real(trust_config))
+    }
+
+    #[cfg(test)]
+    fn start_mock(config: RuntimeBridgeConfig) -> Self {
+        Self::start_with_backend(config, RuntimeBackend::Mock(MockSessionConfig::default()))
+    }
+
+    fn start_with_backend(config: RuntimeBridgeConfig, backend: RuntimeBackend) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -382,14 +391,14 @@ async fn dispatch_fs_command(
 
 /// The command dispatch loop running on the Tokio runtime.
 ///
-/// Receives `AppCommand`s from the GPUI side, routes them to mock actors
-/// or the `TrustRegistry`, and emits `AppEvent`s back to GPUI.
+/// Receives `AppCommand`s from the GPUI side, routes them to actors or request
+/// registries, and emits `AppEvent`s back to GPUI. Production builds spawn
+/// only `RemoteSessionActor`; unit tests compile a private mock actor.
 ///
 /// Command routing:
 /// - `ConnectTab` → cancel any old session for the tab, reject its stale
-///   trust requests, spawn a `MockRemoteSessionActor` bound to the
-///   command's UI-allocated `session_id`/`session_epoch`, emit
-///   `TabConnecting`.
+///   trust requests, spawn an actor bound to the command's UI-allocated
+///   `session_id`/`session_epoch`, emit `TabConnecting`.
 /// - `AcceptHostKey` → resolve the trust request via `TrustRegistry`.
 /// - `RejectHostKey` → resolve the trust request via `TrustRegistry`.
 /// - `DisconnectTab` / `CloseTab` → cancel the actor, reject pending
@@ -400,7 +409,7 @@ async fn command_dispatch_loop(
     event_tx: flume::Sender<AppEvent>,
     trust_registry: Arc<TrustRegistry>,
     keyboard_interactive_registry: Arc<KeyboardInteractiveRegistry>,
-    backend: SessionBackend,
+    backend: RuntimeBackend,
     _config: RuntimeBridgeConfig,
 ) {
     let mut sessions: HashMap<TabId, RemoteSessionHandle> = HashMap::new();
@@ -430,14 +439,15 @@ async fn command_dispatch_loop(
     // Real sessions share one known_hosts store so a trust decision in
     // one tab covers later sessions to the same host (plan ADR-003).
     let known_hosts: Option<(Arc<Mutex<KnownHostsStore>>, Arc<HostTrustConfig>)> = match &backend {
-        SessionBackend::Real(trust_config) => {
+        RuntimeBackend::Real(trust_config) => {
             let store = KnownHostsStore::load(
                 &trust_config.app_known_hosts_path,
                 trust_config.user_known_hosts_path.as_deref(),
             );
             Some((Arc::new(Mutex::new(store)), Arc::new(trust_config.clone())))
         }
-        SessionBackend::Mock(_) => None,
+        #[cfg(test)]
+        RuntimeBackend::Mock(_) => None,
     };
 
     loop {
@@ -457,12 +467,13 @@ async fn command_dispatch_loop(
                 trust_registry.reject_stale(cmd.tab_id, cmd.session_epoch);
                 keyboard_interactive_registry.reject_stale(cmd.tab_id, cmd.session_epoch);
 
+                #[cfg(test)]
                 let trust_request_id =
                     TrustRequestId(next_trust_id.fetch_add(1, Ordering::Relaxed));
 
                 let cancel = CancellationToken::new();
                 let (join, request_tx) = match (&backend, &known_hosts) {
-                    (SessionBackend::Real(_), Some((store, trust_config))) => {
+                    (RuntimeBackend::Real(_), Some((store, trust_config))) => {
                         let (request_tx, request_rx) = flume::bounded(16);
 
                         let scope =
@@ -608,22 +619,20 @@ async fn command_dispatch_loop(
 
                         (join, Some(request_tx))
                     }
-                    _ => {
-                        let mock_config = match &backend {
-                            SessionBackend::Mock(mock_config) => mock_config.clone(),
-                            SessionBackend::Real(_) => MockSessionConfig::default(),
-                        };
+                    #[cfg(test)]
+                    (RuntimeBackend::Mock(mock_config), None) => {
                         let actor = MockRemoteSessionActor::new(
                             cmd.tab_id,
                             cmd.session_id,
                             cmd.session_epoch,
                             trust_request_id,
-                            mock_config,
+                            mock_config.clone(),
                             event_tx.clone(),
                             trust_registry.clone(),
                         );
                         (tokio::spawn(actor.run(cancel.clone())), None)
                     }
+                    _ => unreachable!("runtime backend resources must match the backend"),
                 };
 
                 // Emit TabConnecting after spawning the actor.
@@ -1269,8 +1278,7 @@ mod tests {
             transfer_progress_hz: 10,
             shutdown_timeout: Duration::from_secs(1),
         };
-        let controller =
-            RuntimeController::start(config, SessionBackend::Mock(MockSessionConfig::default()));
+        let controller = RuntimeController::start_mock(config);
         let client = controller.client();
 
         // Fill the single-slot command channel.
@@ -1288,8 +1296,7 @@ mod tests {
     #[test]
     fn event_receiver_gets_events_via_recv_async() {
         let config = RuntimeBridgeConfig::default();
-        let mut controller =
-            RuntimeController::start(config, SessionBackend::Mock(MockSessionConfig::default()));
+        let mut controller = RuntimeController::start_mock(config);
         let mut event_rx = controller
             .take_event_receiver()
             .expect("event receiver should be available once");
@@ -1322,8 +1329,7 @@ mod tests {
             shutdown_timeout: Duration::from_millis(500),
             ..RuntimeBridgeConfig::default()
         };
-        let controller =
-            RuntimeController::start(config, SessionBackend::Mock(MockSessionConfig::default()));
+        let controller = RuntimeController::start_mock(config);
 
         let start = Instant::now();
         controller.shutdown();
@@ -1372,8 +1378,7 @@ mod tests {
             shutdown_timeout: Duration::from_millis(200),
             ..RuntimeBridgeConfig::default()
         };
-        let controller =
-            RuntimeController::start(config, SessionBackend::Mock(MockSessionConfig::default()));
+        let controller = RuntimeController::start_mock(config);
         let client = controller.client();
 
         controller.shutdown();
@@ -1440,10 +1445,7 @@ mod tests {
 
     #[test]
     fn runtime_event_receiver_has_one_authoritative_owner() {
-        let mut controller = RuntimeController::start(
-            RuntimeBridgeConfig::default(),
-            SessionBackend::Mock(MockSessionConfig::default()),
-        );
+        let mut controller = RuntimeController::start_mock(RuntimeBridgeConfig::default());
 
         assert!(controller.take_event_receiver().is_some());
         assert!(controller.take_event_receiver().is_none());
@@ -1492,8 +1494,7 @@ mod tests {
             shutdown_timeout: Duration::from_millis(500),
             ..RuntimeBridgeConfig::default()
         };
-        let controller =
-            RuntimeController::start(config, SessionBackend::Mock(MockSessionConfig::default()));
+        let controller = RuntimeController::start_mock(config);
         let client = controller.client();
 
         // Send a few non-shutdown commands first — they should be accepted
@@ -1543,8 +1544,7 @@ mod tests {
             event_channel_capacity: 8,
             ..RuntimeBridgeConfig::default()
         };
-        let mut controller =
-            RuntimeController::start(config, SessionBackend::Mock(MockSessionConfig::default()));
+        let mut controller = RuntimeController::start_mock(config);
         let mut event_rx = controller
             .take_event_receiver()
             .expect("event receiver should be available once");
@@ -1582,10 +1582,7 @@ mod tests {
             std::env::temp_dir().join(format!("macsftp-runtime-plan-{}", std::process::id()));
         std::fs::write(&fixture_path, b"plan me").expect("write planning fixture");
 
-        let mut controller = RuntimeController::start(
-            RuntimeBridgeConfig::default(),
-            SessionBackend::Mock(MockSessionConfig::default()),
-        );
+        let mut controller = RuntimeController::start_mock(RuntimeBridgeConfig::default());
         let client = controller.client();
         let mut events = controller
             .take_event_receiver()
@@ -1641,10 +1638,7 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_file(&fixture_path);
-        let mut controller = RuntimeController::start(
-            RuntimeBridgeConfig::default(),
-            SessionBackend::Mock(MockSessionConfig::default()),
-        );
+        let mut controller = RuntimeController::start_mock(RuntimeBridgeConfig::default());
         let client = controller.client();
         let mut events = controller
             .take_event_receiver()
@@ -1717,10 +1711,7 @@ mod tests {
             std::env::temp_dir().join(format!("macsftp-runtime-handoff-{}", std::process::id()));
         std::fs::write(&fixture_path, b"handoff").expect("write planning fixture");
 
-        let mut controller = RuntimeController::start(
-            RuntimeBridgeConfig::default(),
-            SessionBackend::Mock(MockSessionConfig::default()),
-        );
+        let mut controller = RuntimeController::start_mock(RuntimeBridgeConfig::default());
         let client = controller.client();
         let mut events = controller
             .take_event_receiver()
@@ -1977,10 +1968,7 @@ mod tests {
 
     #[test]
     fn full_round_trip_connect_accept_host_key_tab_connected() {
-        let mut controller = RuntimeController::start(
-            RuntimeBridgeConfig::default(),
-            SessionBackend::Mock(MockSessionConfig::default()),
-        );
+        let mut controller = RuntimeController::start_mock(RuntimeBridgeConfig::default());
         let client = controller.client();
         let mut event_rx = controller
             .take_event_receiver()
@@ -2038,10 +2026,7 @@ mod tests {
 
     #[test]
     fn full_round_trip_connect_reject_host_key_tab_disconnected() {
-        let mut controller = RuntimeController::start(
-            RuntimeBridgeConfig::default(),
-            SessionBackend::Mock(MockSessionConfig::default()),
-        );
+        let mut controller = RuntimeController::start_mock(RuntimeBridgeConfig::default());
         let client = controller.client();
         let mut event_rx = controller
             .take_event_receiver()
@@ -2089,10 +2074,7 @@ mod tests {
 
     #[test]
     fn reconnect_rejects_old_host_key_request() {
-        let mut controller = RuntimeController::start(
-            RuntimeBridgeConfig::default(),
-            SessionBackend::Mock(MockSessionConfig::default()),
-        );
+        let mut controller = RuntimeController::start_mock(RuntimeBridgeConfig::default());
         let client = controller.client();
         let mut event_rx = controller
             .take_event_receiver()
@@ -2171,10 +2153,7 @@ mod tests {
 
     #[test]
     fn close_tab_cancels_actor_and_rejects_pending_trust() {
-        let mut controller = RuntimeController::start(
-            RuntimeBridgeConfig::default(),
-            SessionBackend::Mock(MockSessionConfig::default()),
-        );
+        let mut controller = RuntimeController::start_mock(RuntimeBridgeConfig::default());
         let client = controller.client();
         let mut event_rx = controller
             .take_event_receiver()
@@ -2237,10 +2216,7 @@ mod tests {
 
     #[test]
     fn shutdown_rejects_all_pending_trust_requests() {
-        let mut controller = RuntimeController::start(
-            RuntimeBridgeConfig::default(),
-            SessionBackend::Mock(MockSessionConfig::default()),
-        );
+        let mut controller = RuntimeController::start_mock(RuntimeBridgeConfig::default());
         let client = controller.client();
         let mut event_rx = controller
             .take_event_receiver()
@@ -2281,10 +2257,7 @@ mod tests {
 
     #[test]
     fn multiple_tabs_connect_independently() {
-        let mut controller = RuntimeController::start(
-            RuntimeBridgeConfig::default(),
-            SessionBackend::Mock(MockSessionConfig::default()),
-        );
+        let mut controller = RuntimeController::start_mock(RuntimeBridgeConfig::default());
         let client = controller.client();
         let mut event_rx = controller
             .take_event_receiver()
@@ -2501,10 +2474,7 @@ mod tests {
 
     #[test]
     fn runtime_routes_keyboard_interactive_response_once() {
-        let controller = RuntimeController::start(
-            RuntimeBridgeConfig::default(),
-            SessionBackend::Mock(MockSessionConfig::default()),
-        );
+        let controller = RuntimeController::start_mock(RuntimeBridgeConfig::default());
         let request_id = macsftp_core::KeyboardInteractiveRequestId(42);
         let (responder, receiver) = tokio::sync::oneshot::channel();
         controller.keyboard_interactive_registry.register(

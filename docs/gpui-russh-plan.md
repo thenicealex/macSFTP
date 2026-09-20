@@ -62,7 +62,7 @@ GPUI 入口、窗口、Entity、Action、事件协调和 UI 状态。它可以�
 
 ### `crates/sftp`
 
-Tokio runtime、russh adapter、物理连接池、浏览 actor、传输 planning/执行、host trust 和认证请求。它不能持有 GPUI Context、Window 或 Entity。
+Tokio runtime、russh adapter、物理连接池、浏览 actor、传输 planning/执行、host trust 和认证请求。生产 API 只构造真实 SSH runtime；mock actor 和 mock 构造器必须受 `#[cfg(test)]` 限制，不能进入发布构建或公共 API。该 crate 不能持有 GPUI Context、Window 或 Entity。
 
 ### `crates/storage`
 
