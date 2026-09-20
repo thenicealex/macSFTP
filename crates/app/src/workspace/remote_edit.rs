@@ -145,11 +145,13 @@ impl Workspace {
             Ok(modified) => Timestamp::from_system_time(modified),
             Err(error) => {
                 warn!(error = %error, "edited temp file is unavailable");
-                if let Some(session) = cx.resources_mut().edit_sessions.remove(session_id) {
-                    cleanup_edit_temp_dir(&session.local_temp_path);
+                if let Some(session) = cx.resources_mut().edit_sessions.get_mut(session_id) {
+                    session.phase = EditPhase::Editing;
+                    session.pending_check_id = None;
+                    session.checking_local_mtime = None;
                 }
                 self.status_message =
-                    Some("Edited file is unavailable — reopen the remote file".into());
+                    Some("Could not read the edited file — restore access and try again".into());
                 cx.notify();
                 return;
             }

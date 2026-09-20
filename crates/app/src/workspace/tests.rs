@@ -2965,6 +2965,76 @@ fn upload_modified_file_is_explicit_and_checks_remote_first(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn edit_metadata_failure_preserves_session_and_temp_directory(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+    let remote_path = RemotePath::new("/home/tester/notes.txt");
+    let temp_dir = unique_temp_dir("edit-metadata-failure");
+    std::fs::create_dir_all(&temp_dir).expect("create edit temp directory");
+    let preserved_file = temp_dir.join("notes.txt");
+    std::fs::write(&preserved_file, b"important local edits").expect("write local edit");
+    let invalid_temp_path = LocalPath::new(format!(
+        "{}/unreadable\0notes.txt",
+        temp_dir.to_string_lossy()
+    ));
+
+    let session_id = workspace.update_in(&mut cx, |workspace, _window, cx| {
+        let session_id = cx.resources_mut().edit_sessions.next_id();
+        cx.resources_mut().edit_sessions.register(EditSession {
+            id: session_id,
+            remote_path: remote_path.clone(),
+            tab_id: TabId(1),
+            session_epoch: 1,
+            profile_id: ProfileId(0),
+            connection_key: manual_connection_key(),
+            local_temp_path: invalid_temp_path,
+            phase: EditPhase::Editing,
+            remote_snapshot: RemoteSnapshot {
+                size: Some(21),
+                modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+            },
+            pending_check_id: None,
+            checking_local_mtime: None,
+        });
+        workspace
+            .active_tab_mut()
+            .expect("active tab")
+            .selection
+            .selected_paths = vec![EntryPath::Remote(remote_path)];
+        workspace.upload_selected_edit(cx);
+        session_id
+    });
+
+    workspace.read_with(&cx, |workspace, cx| {
+        let session = cx
+            .resources()
+            .edit_sessions
+            .get(session_id)
+            .expect("metadata failure keeps the edit session retryable");
+        assert_eq!(session.phase, EditPhase::Editing);
+        assert!(session.pending_check_id.is_none());
+        assert!(session.checking_local_mtime.is_none());
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some("Could not read the edited file — restore access and try again")
+        );
+    });
+    assert!(
+        preserved_file.exists(),
+        "metadata failure must not delete the edit session directory"
+    );
+    assert!(
+        channels.command_rx.try_recv().is_err(),
+        "metadata failure must not authorize a remote check or upload"
+    );
+
+    workspace.update_in(&mut cx, |_workspace, _window, cx| {
+        cx.resources_mut().edit_sessions.remove(session_id);
+    });
+    std::fs::remove_dir_all(temp_dir).expect("remove edit metadata fixture");
+}
+
+#[gpui::test]
 fn edit_reaps_orphaned_existing_session_and_retries(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     connect_and_drain(&workspace, &mut cx, &channels);
