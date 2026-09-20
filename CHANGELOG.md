@@ -5,6 +5,8 @@ based on Keep a Changelog, and releases use semantic versioning.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-20
+
 ### Added
 
 - Add one-hop saved-profile jump hosts and explicit OpenSSH-style
@@ -38,6 +40,13 @@ based on Keep a Changelog, and releases use semantic versioning.
 - Keep process-wide transfer, residual-temp, and remote-edit events out of the
   Workspace production reducer, and diagnose residual cleanup commands that
   cannot reach a live actor.
+- Redesign the Settings profile list with compact two-line rows, endpoint
+  truncation, port badges, clearer selection, result counts, and scrolling.
+
+### Fixed
+
+- Preserve the local editable copy and retryable edit session when macSFTP
+  cannot read temporary-file metadata before an explicit upload.
 
 ## [0.2.1] - 2026-09-13
 
