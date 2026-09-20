@@ -1,11 +1,12 @@
-//! Docker-backed password authentication release gate.
+//! Docker-backed password and keyboard-interactive authentication release gate.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use macsftp_core::{
     AppCommand, AppEvent, AuthCredential, ConnectCommand, ConnectionPoolIdentity,
-    ConnectionSettings, HostKeyDecisionCommand, ProfileId, RuntimeBridgeConfig, SessionId, TabId,
+    ConnectionSettings, HostKeyDecisionCommand, KeyboardInteractiveResponse, ProfileId,
+    RuntimeBridgeConfig, SessionId, TabId,
 };
 use macsftp_sftp::{EventReceiver, HostTrustConfig, RuntimeController, SessionBackend};
 
@@ -45,6 +46,7 @@ impl PasswordServer {
             port: self.port,
             username: self.username.clone(),
             auth: AuthCredential::Password { password },
+            route: macsftp_core::ResolvedConnectionRoute::Direct,
         }
     }
 }
@@ -67,7 +69,7 @@ async fn next_event(events: &mut EventReceiver, label: &str) -> AppEvent {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn password_authenticates_and_a_different_identity_cannot_reuse_it() {
+async fn password_and_keyboard_interactive_authenticate_without_identity_reuse() {
     let Some(server) = PasswordServer::from_environment() else {
         return;
     };
@@ -109,6 +111,57 @@ async fn password_authenticates_and_a_different_identity_cannot_reuse_it() {
     loop {
         match next_event(&mut events, "first TabConnected").await {
             AppEvent::TabConnected(scoped) if scoped.scope.tab_id == TabId(1) => break,
+            _ => {}
+        }
+    }
+
+    client
+        .try_send(AppCommand::ConnectTab(ConnectCommand {
+            tab_id: TabId(3),
+            session_id: SessionId(3),
+            session_epoch: 1,
+            profile_id: ProfileId(0),
+            pool_identity: ConnectionPoolIdentity::Ephemeral(SessionId(3)),
+            settings: ConnectionSettings {
+                host: server.host.clone(),
+                port: server.port,
+                username: server.username.clone(),
+                auth: AuthCredential::KeyboardInteractive,
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
+            },
+        }))
+        .expect("send keyboard-interactive connection");
+
+    loop {
+        match next_event(&mut events, "keyboard-interactive authentication").await {
+            AppEvent::KeyboardInteractivePrompt(prompt) => {
+                let responses = prompt
+                    .prompts
+                    .iter()
+                    .map(|field| {
+                        if field.echo {
+                            String::new()
+                        } else {
+                            server.password.clone()
+                        }
+                    })
+                    .collect();
+                client
+                    .try_send(AppCommand::RespondKeyboardInteractive(
+                        KeyboardInteractiveResponse {
+                            request_id: prompt.request_id,
+                            responses,
+                        },
+                    ))
+                    .expect("answer keyboard-interactive prompt");
+            }
+            AppEvent::TabConnected(scoped) if scoped.scope.tab_id == TabId(3) => break,
+            AppEvent::AuthFailed(scoped) if scoped.scope.tab_id == TabId(3) => {
+                panic!(
+                    "keyboard-interactive authentication failed: {:?}",
+                    scoped.payload.reason
+                )
+            }
             _ => {}
         }
     }

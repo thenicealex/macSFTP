@@ -55,6 +55,9 @@ impl crate::workspace::Workspace {
                     window.focus(&self.modal_focus);
                 }
             }
+            AppEvent::KeyboardInteractivePrompt(prompt) => {
+                self.present_keyboard_interactive(prompt, window, cx);
+            }
             AppEvent::HostKeyMismatch(mismatch) => {
                 // Security block, no override (plan §10): the tab fails
                 // with an explanation and the known_hosts file location.
@@ -150,7 +153,7 @@ impl crate::workspace::Workspace {
                     tab.remote.is_refreshing = false;
                     tab.remote.error = None;
                 }
-                let had_modal = !self.state.drain_expired_modals().is_empty();
+                let had_modal = self.drain_expired_modals();
                 if had_modal {
                     self.focus_pane(self.focused_side, window, cx);
                 }
@@ -159,7 +162,7 @@ impl crate::workspace::Workspace {
                 if let Some(tab) = self.state.tabs.find_tab_mut(scoped.scope.tab_id) {
                     tab.fail(scoped.payload.reason);
                 }
-                let had_modal = !self.state.drain_expired_modals().is_empty();
+                let had_modal = self.drain_expired_modals();
                 if had_modal {
                     self.focus_pane(self.focused_side, window, cx);
                 }

@@ -1,6 +1,7 @@
 use gpui::{App, Context, KeyDownEvent, SharedString, Window};
 use macsftp_core::{
     AuthCredential, AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionSettings, ProfileId,
+    ResolvedConnectionRoute,
 };
 use macsftp_storage::ProfileMutationError;
 use macsftp_ui::{InputKeyResult, InputState, SecretInputState};
@@ -19,6 +20,7 @@ pub(crate) enum ConnectField {
     Password,
     KeyPath,
     Passphrase,
+    AgentSocket,
     ProfileName,
 }
 
@@ -33,6 +35,8 @@ pub(crate) struct ConnectForm {
     pub(crate) password: SecretInputState,
     pub(crate) key_path: InputState,
     pub(crate) passphrase: SecretInputState,
+    pub(crate) agent_socket: InputState,
+    pub(crate) route: ResolvedConnectionRoute,
     pub(crate) focused_field: ConnectField,
     pub(crate) error: Option<SharedString>,
     /// Profile this form was prefilled from, if any. Carried into the
@@ -59,6 +63,8 @@ impl ConnectForm {
             password: SecretInputState::new(),
             key_path: InputState::new(),
             passphrase: SecretInputState::new(),
+            agent_socket: InputState::new(),
+            route: ResolvedConnectionRoute::Direct,
             focused_field: ConnectField::Host,
             error: None,
             source_profile_id: None,
@@ -84,9 +90,22 @@ impl ConnectForm {
         form.host = InputState::with_value(settings.host.clone());
         form.port = InputState::with_value(settings.port.to_string());
         form.username = InputState::with_value(settings.username.clone());
-        if let AuthCredential::PrivateKey { key_path, .. } = &settings.auth {
-            form.auth_method = AuthMethodKind::PrivateKey;
-            form.key_path = InputState::with_value(key_path.clone());
+        form.route = settings.route.clone();
+        match &settings.auth {
+            AuthCredential::PrivateKey { key_path, .. } => {
+                form.auth_method = AuthMethodKind::PrivateKey;
+                form.key_path = InputState::with_value(key_path.clone());
+            }
+            AuthCredential::KeyboardInteractive => {
+                form.auth_method = AuthMethodKind::KeyboardInteractive;
+            }
+            AuthCredential::SshAgent { socket_path } => {
+                form.auth_method = AuthMethodKind::SshAgent;
+                if let Some(socket_path) = socket_path {
+                    form.agent_socket = InputState::with_value(socket_path.clone());
+                }
+            }
+            AuthCredential::Password { .. } => {}
         }
         // Secrets are deliberately not prefilled.
         form
@@ -109,6 +128,15 @@ impl ConnectForm {
                 form.auth_method = AuthMethodKind::PrivateKey;
                 form.key_path = InputState::with_value(key_path.as_str().to_string());
             }
+            AuthMethod::KeyboardInteractive => {
+                form.auth_method = AuthMethodKind::KeyboardInteractive;
+            }
+            AuthMethod::SshAgent { socket_path } => {
+                form.auth_method = AuthMethodKind::SshAgent;
+                if let Some(socket_path) = socket_path {
+                    form.agent_socket = InputState::with_value(socket_path.as_str().to_string());
+                }
+            }
         }
         form
     }
@@ -130,6 +158,19 @@ impl ConnectForm {
                 ConnectField::Passphrase,
                 ConnectField::ProfileName,
             ],
+            AuthMethodKind::KeyboardInteractive => &[
+                ConnectField::Host,
+                ConnectField::Port,
+                ConnectField::Username,
+                ConnectField::ProfileName,
+            ],
+            AuthMethodKind::SshAgent => &[
+                ConnectField::Host,
+                ConnectField::Port,
+                ConnectField::Username,
+                ConnectField::AgentSocket,
+                ConnectField::ProfileName,
+            ],
         }
     }
 
@@ -141,6 +182,7 @@ impl ConnectForm {
             ConnectField::Password => self.password.as_input_state_mut(),
             ConnectField::KeyPath => &mut self.key_path,
             ConnectField::Passphrase => self.passphrase.as_input_state_mut(),
+            ConnectField::AgentSocket => &mut self.agent_socket,
             ConnectField::ProfileName => &mut self.profile_name,
         }
     }
@@ -163,6 +205,9 @@ impl ConnectForm {
             self.focused_field = match method {
                 AuthMethodKind::Password => ConnectField::Password,
                 AuthMethodKind::PrivateKey => ConnectField::KeyPath,
+                AuthMethodKind::KeyboardInteractive | AuthMethodKind::SshAgent => {
+                    ConnectField::Username
+                }
             };
         }
     }
@@ -207,6 +252,13 @@ impl ConnectForm {
                     },
                 }
             }
+            AuthMethodKind::KeyboardInteractive => AuthCredential::KeyboardInteractive,
+            AuthMethodKind::SshAgent => AuthCredential::SshAgent {
+                socket_path: {
+                    let path = expand_home(self.agent_socket.value().trim());
+                    (!path.is_empty()).then_some(path)
+                },
+            },
         };
 
         Ok(ConnectionSettings {
@@ -214,6 +266,7 @@ impl ConnectForm {
             port,
             username,
             auth,
+            route: self.route.clone(),
         })
     }
 
@@ -228,6 +281,7 @@ impl ConnectForm {
         match self.auth_method {
             AuthMethodKind::Password => !self.password.value().is_empty(),
             AuthMethodKind::PrivateKey => true,
+            AuthMethodKind::KeyboardInteractive | AuthMethodKind::SshAgent => true,
         }
     }
 
@@ -238,6 +292,7 @@ impl ConnectForm {
         self.source_profile_id = None;
         self.password.clear();
         self.passphrase.clear();
+        self.route = ResolvedConnectionRoute::Direct;
         self.profile_picker_open = false;
         self.profile_picker_filter = InputState::new();
     }
@@ -332,14 +387,25 @@ impl crate::workspace::Workspace {
         };
         let mut form = ConnectForm::from_profile(&profile);
         match cx.resources().profiles.load_connection_settings(profile_id) {
-            Ok(settings) => match &settings.auth {
-                AuthCredential::Password { password } => form.password.set_value(password.clone()),
-                AuthCredential::PrivateKey { passphrase, .. } => {
-                    if let Some(passphrase) = passphrase {
-                        form.passphrase.set_value(passphrase.clone());
+            Ok(settings) => {
+                form.route = settings.route.clone();
+                match &settings.auth {
+                    AuthCredential::Password { password } => {
+                        form.password.set_value(password.clone())
+                    }
+                    AuthCredential::PrivateKey { passphrase, .. } => {
+                        if let Some(passphrase) = passphrase {
+                            form.passphrase.set_value(passphrase.clone());
+                        }
+                    }
+                    AuthCredential::KeyboardInteractive => {}
+                    AuthCredential::SshAgent { socket_path } => {
+                        if let Some(socket_path) = socket_path {
+                            form.agent_socket.set_value(socket_path.clone());
+                        }
                     }
                 }
-            },
+            }
             Err(ProfileMutationError::CredentialRequired(AuthMethodKind::Password)) => {
                 self.status_message = Some("Saved password not found — re-enter it.".into());
             }

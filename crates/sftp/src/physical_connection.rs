@@ -1,17 +1,36 @@
+use std::pin::Pin;
+use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
+use aws_lc_rs::rand::SystemRandom;
+use aws_lc_rs::signature::{RSA_PKCS1_SHA256, RSA_PKCS1_SHA512, RsaKeyPair};
+use crypto_bigint::{BoxedUint, CheckedSub, NonZero};
+use der::asn1::UintRef;
 use macsftp_core::{
     AppEvent, AuthCredential, AuthFailure, ConnectionSettings, ErrorCode, HostKeyMismatch,
-    HostKeyPrompt, RemoteEventScope, RemoteScoped, TrustDecision, TrustRequestId, UserFacingError,
+    HostKeyPrompt, KeyboardInteractivePrompt, KeyboardInteractivePromptField,
+    KeyboardInteractiveRequestId, RemoteEventScope, RemoteScoped, ResolvedConnectionRoute,
+    TrustDecision, TrustRequestId, UserFacingError,
 };
+use pkcs1::RsaPrivateKey as Pkcs1RsaPrivateKey;
+use russh::Signer;
 use russh::client;
+use russh::client::KeyboardInteractiveAuthResponse;
+use russh::keys::agent::{AgentIdentity, client::AgentClient};
+use russh::keys::ssh_encoding::Encode;
 use russh::keys::{PrivateKeyWithHashAlg, load_secret_key};
 use ssh_key::{Algorithm, EcdsaCurve, HashAlg};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
+use zeroize::Zeroizing;
 
+use crate::keyboard_interactive::{KeyboardInteractiveRegistry, KeyboardInteractiveRegistryEntry};
 use crate::known_hosts::{HostKeyCheckResult, KnownHostsStore, fingerprint_sha256, key_algorithm};
 use crate::session_actor::HostTrustConfig;
 use crate::trust::{TrustRegistry, TrustRegistryEntry};
@@ -458,7 +477,8 @@ fn client_config() -> client::Config {
         ..client::Config::default()
     };
     // The local russh patch verifies RSA-SHA2 host signatures with AWS-LC.
-    // Legacy SHA-1 `ssh-rsa` remains excluded, as does RSA private-key auth.
+    // Legacy SHA-1 `ssh-rsa` remains excluded. Direct RSA client signatures
+    // also use AWS-LC and never enable russh's RustCrypto `rsa` feature.
     config.preferred.key = vec![
         Algorithm::Ed25519,
         Algorithm::Ecdsa {
@@ -489,15 +509,426 @@ pub fn sftp_connection_error(
     UserFacingError::new(ErrorCode::ChannelClosed, title, message).with_retryable(true)
 }
 
-fn validate_private_key_algorithm(algorithm: Algorithm) -> Result<(), UserFacingError> {
-    if matches!(algorithm, Algorithm::Rsa { .. }) {
-        return Err(UserFacingError::new(
-            ErrorCode::AuthFailed,
-            "RSA private keys are disabled",
-            "Use an Ed25519 or ECDSA private key. RSA signing is disabled until its dependency provides a constant-time implementation.",
-        ));
+#[derive(Debug)]
+enum AwsLcRsaSignerError {
+    Send,
+    InvalidKey,
+    Signing,
+}
+
+impl From<russh::SendError> for AwsLcRsaSignerError {
+    fn from(_error: russh::SendError) -> Self {
+        Self::Send
     }
-    Ok(())
+}
+
+struct AwsLcRsaSigner {
+    key_pair: RsaKeyPair,
+    public_key: ssh_key::PublicKey,
+}
+
+fn rsa_crt_exponent(
+    private_exponent: &[u8],
+    prime: &[u8],
+    bits_precision: u32,
+) -> Result<Zeroizing<Box<[u8]>>, AwsLcRsaSignerError> {
+    let private_exponent = Zeroizing::new(
+        BoxedUint::from_be_slice(private_exponent, bits_precision)
+            .map_err(|_| AwsLcRsaSignerError::InvalidKey)?,
+    );
+    let prime = Zeroizing::new(
+        BoxedUint::from_be_slice(prime, bits_precision)
+            .map_err(|_| AwsLcRsaSignerError::InvalidKey)?,
+    );
+    let modulus = prime
+        .checked_sub(&BoxedUint::one_with_precision(bits_precision))
+        .into_option()
+        .ok_or(AwsLcRsaSignerError::InvalidKey)?;
+    let modulus = Zeroizing::new(
+        NonZero::new(modulus)
+            .into_option()
+            .ok_or(AwsLcRsaSignerError::InvalidKey)?,
+    );
+    let exponent = Zeroizing::new(&*private_exponent % &*modulus);
+    Ok(Zeroizing::new(exponent.to_be_bytes_trimmed_vartime()))
+}
+
+impl AwsLcRsaSigner {
+    fn new(key: &ssh_key::PrivateKey) -> Result<Self, AwsLcRsaSignerError> {
+        let rsa = key
+            .key_data()
+            .rsa()
+            .ok_or(AwsLcRsaSignerError::InvalidKey)?;
+        if rsa.key_size() < 2048 {
+            return Err(AwsLcRsaSignerError::InvalidKey);
+        }
+        let public = rsa.public();
+        let private = rsa.private();
+        let private_exponent = private
+            .d()
+            .as_positive_bytes()
+            .ok_or(AwsLcRsaSignerError::InvalidKey)?;
+        let prime1 = private
+            .p()
+            .as_positive_bytes()
+            .ok_or(AwsLcRsaSignerError::InvalidKey)?;
+        let prime2 = private
+            .q()
+            .as_positive_bytes()
+            .ok_or(AwsLcRsaSignerError::InvalidKey)?;
+        let exponent1 = rsa_crt_exponent(private_exponent, prime1, rsa.key_size())?;
+        let exponent2 = rsa_crt_exponent(private_exponent, prime2, rsa.key_size())?;
+        let modulus = public
+            .n()
+            .as_positive_bytes()
+            .ok_or(AwsLcRsaSignerError::InvalidKey)?;
+        let public_exponent = public
+            .e()
+            .as_positive_bytes()
+            .ok_or(AwsLcRsaSignerError::InvalidKey)?;
+        let coefficient = private
+            .iqmp()
+            .as_positive_bytes()
+            .ok_or(AwsLcRsaSignerError::InvalidKey)?;
+        let document = der::SecretDocument::try_from(&Pkcs1RsaPrivateKey {
+            modulus: UintRef::new(modulus).map_err(|_| AwsLcRsaSignerError::InvalidKey)?,
+            public_exponent: UintRef::new(public_exponent)
+                .map_err(|_| AwsLcRsaSignerError::InvalidKey)?,
+            private_exponent: UintRef::new(private_exponent)
+                .map_err(|_| AwsLcRsaSignerError::InvalidKey)?,
+            prime1: UintRef::new(prime1).map_err(|_| AwsLcRsaSignerError::InvalidKey)?,
+            prime2: UintRef::new(prime2).map_err(|_| AwsLcRsaSignerError::InvalidKey)?,
+            exponent1: UintRef::new(&exponent1).map_err(|_| AwsLcRsaSignerError::InvalidKey)?,
+            exponent2: UintRef::new(&exponent2).map_err(|_| AwsLcRsaSignerError::InvalidKey)?,
+            coefficient: UintRef::new(coefficient).map_err(|_| AwsLcRsaSignerError::InvalidKey)?,
+            other_prime_infos: None,
+        })
+        .map_err(|_| AwsLcRsaSignerError::InvalidKey)?;
+        let key_pair = RsaKeyPair::from_der(document.as_bytes())
+            .map_err(|_| AwsLcRsaSignerError::InvalidKey)?;
+        Ok(Self {
+            key_pair,
+            public_key: key.public_key().clone(),
+        })
+    }
+}
+
+impl Signer for AwsLcRsaSigner {
+    type Error = AwsLcRsaSignerError;
+
+    async fn auth_sign(
+        &mut self,
+        key: &AgentIdentity,
+        hash_alg: Option<HashAlg>,
+        mut to_sign: Vec<u8>,
+    ) -> Result<Vec<u8>, Self::Error> {
+        if key.public_key().key_data() != self.public_key.key_data() {
+            return Err(AwsLcRsaSignerError::InvalidKey);
+        }
+        let (algorithm_name, encoding) = match hash_alg {
+            Some(HashAlg::Sha512) => ("rsa-sha2-512", &RSA_PKCS1_SHA512),
+            Some(HashAlg::Sha256) => ("rsa-sha2-256", &RSA_PKCS1_SHA256),
+            None | Some(_) => return Err(AwsLcRsaSignerError::Signing),
+        };
+        let mut signature = vec![0u8; self.key_pair.public_modulus_len()];
+        self.key_pair
+            .sign(encoding, &SystemRandom::new(), &to_sign, &mut signature)
+            .map_err(|_| AwsLcRsaSignerError::Signing)?;
+        (algorithm_name.len() + signature.len() + 8)
+            .encode(&mut to_sign)
+            .map_err(|_| AwsLcRsaSignerError::Signing)?;
+        algorithm_name
+            .encode(&mut to_sign)
+            .map_err(|_| AwsLcRsaSignerError::Signing)?;
+        signature
+            .encode(&mut to_sign)
+            .map_err(|_| AwsLcRsaSignerError::Signing)?;
+        Ok(to_sign)
+    }
+}
+
+async fn authenticate_rsa_private_key(
+    handle: &mut client::Handle<ClientHandler>,
+    settings: &ConnectionSettings,
+    key: &ssh_key::PrivateKey,
+) -> Result<client::AuthResult, ConnectFailure> {
+    let server_support = handle.best_supported_rsa_hash().await.map_err(|error| {
+        ConnectFailure::Connection(connection_error(&settings.host, settings.port, &error))
+    })?;
+    let hash = match server_support {
+        Some(Some(hash @ (HashAlg::Sha256 | HashAlg::Sha512))) => hash,
+        None => HashAlg::Sha512,
+        Some(None) => {
+            return Err(ConnectFailure::AuthFailed(AuthFailure {
+                reason: UserFacingError::new(
+                    ErrorCode::AuthFailed,
+                    "Server does not support RSA-SHA2",
+                    "Enable rsa-sha2-256 or rsa-sha2-512 on the server. SHA-1 ssh-rsa is not supported.",
+                ),
+            }));
+        }
+        Some(Some(_)) => {
+            return Err(ConnectFailure::AuthFailed(AuthFailure {
+                reason: UserFacingError::new(
+                    ErrorCode::AuthFailed,
+                    "Unsupported RSA hash algorithm",
+                    "The server selected an RSA signature algorithm macSFTP does not support.",
+                ),
+            }));
+        }
+    };
+    let mut signer = AwsLcRsaSigner::new(key).map_err(|_| {
+        ConnectFailure::AuthFailed(AuthFailure {
+            reason: UserFacingError::new(
+                ErrorCode::AuthFailed,
+                "Could not use RSA private key",
+                "RSA client keys must be valid and at least 2048 bits.",
+            ),
+        })
+    })?;
+    handle
+        .authenticate_publickey_with(
+            settings.username.clone(),
+            key.public_key().clone(),
+            Some(hash),
+            &mut signer,
+        )
+        .await
+        .map_err(|_| {
+            ConnectFailure::AuthFailed(AuthFailure {
+                reason: UserFacingError::new(
+                    ErrorCode::AuthFailed,
+                    "RSA private-key authentication failed",
+                    "AWS-LC could not sign the SSH authentication request.",
+                ),
+            })
+        })
+}
+
+async fn emit_auth_failure(
+    scope: &RemoteEventScope,
+    event_tx: &flume::Sender<AppEvent>,
+    reason: UserFacingError,
+) -> ConnectFailure {
+    let failure = AuthFailure {
+        reason: reason.clone(),
+    };
+    if let Err(send_error) = event_tx
+        .send_async(AppEvent::AuthFailed(RemoteScoped::new(
+            scope.clone(),
+            failure.clone(),
+        )))
+        .await
+    {
+        warn!(error = %send_error, "authentication failure event dropped");
+    }
+    ConnectFailure::AuthFailed(failure)
+}
+
+async fn authenticate_keyboard_interactive(
+    handle: &mut client::Handle<ClientHandler>,
+    settings: &ConnectionSettings,
+    scope: &RemoteEventScope,
+    event_tx: &flume::Sender<AppEvent>,
+    registry: &KeyboardInteractiveRegistry,
+    next_request_id: &AtomicU64,
+) -> Result<client::AuthResult, ConnectFailure> {
+    let mut result = handle
+        .authenticate_keyboard_interactive_start(settings.username.clone(), None::<String>)
+        .await
+        .map_err(|error| {
+            ConnectFailure::Connection(connection_error(&settings.host, settings.port, &error))
+        })?;
+
+    loop {
+        result = match result {
+            KeyboardInteractiveAuthResponse::Success => return Ok(client::AuthResult::Success),
+            KeyboardInteractiveAuthResponse::Failure {
+                remaining_methods,
+                partial_success,
+            } => {
+                return Ok(client::AuthResult::Failure {
+                    remaining_methods,
+                    partial_success,
+                });
+            }
+            KeyboardInteractiveAuthResponse::InfoRequest {
+                name,
+                instructions,
+                prompts,
+            } => {
+                let request_id =
+                    KeyboardInteractiveRequestId(next_request_id.fetch_add(1, Ordering::Relaxed));
+                let prompt_count = prompts.len();
+                let (responder, response_rx) = oneshot::channel();
+                registry.register(
+                    request_id,
+                    KeyboardInteractiveRegistryEntry {
+                        tab_id: scope.tab_id,
+                        session_epoch: scope.session_epoch,
+                        responder,
+                    },
+                );
+                let event = AppEvent::KeyboardInteractivePrompt(KeyboardInteractivePrompt {
+                    request_id,
+                    scope: scope.clone(),
+                    name,
+                    instruction: instructions,
+                    prompts: prompts
+                        .into_iter()
+                        .map(|prompt| KeyboardInteractivePromptField {
+                            prompt: prompt.prompt,
+                            echo: prompt.echo,
+                        })
+                        .collect(),
+                });
+                if event_tx.send_async(event).await.is_err() {
+                    registry.cancel(request_id);
+                    let reason = UserFacingError::new(
+                        ErrorCode::ChannelClosed,
+                        "Authentication prompt unavailable",
+                        "The application could not display the server's authentication prompt.",
+                    );
+                    return Err(emit_auth_failure(scope, event_tx, reason).await);
+                }
+                let response = tokio::time::timeout(Duration::from_secs(120), response_rx).await;
+                let mut response = match response {
+                    Ok(Ok(Some(response))) => response,
+                    Ok(Ok(None)) | Ok(Err(_)) => {
+                        let reason = UserFacingError::new(
+                            ErrorCode::Cancelled,
+                            "Authentication cancelled",
+                            "The keyboard-interactive prompt was cancelled.",
+                        );
+                        return Err(emit_auth_failure(scope, event_tx, reason).await);
+                    }
+                    Err(_) => {
+                        registry.cancel(request_id);
+                        let reason = UserFacingError::new(
+                            ErrorCode::AuthFailed,
+                            "Authentication prompt timed out",
+                            "The server's keyboard-interactive prompt was not answered in time.",
+                        );
+                        return Err(emit_auth_failure(scope, event_tx, reason).await);
+                    }
+                };
+                if response.responses.len() != prompt_count {
+                    let reason = UserFacingError::new(
+                        ErrorCode::AuthFailed,
+                        "Invalid authentication response",
+                        "The number of responses did not match the server's prompts.",
+                    );
+                    return Err(emit_auth_failure(scope, event_tx, reason).await);
+                }
+                handle
+                    .authenticate_keyboard_interactive_respond(response.take_responses())
+                    .await
+                    .map_err(|error| {
+                        ConnectFailure::Connection(connection_error(
+                            &settings.host,
+                            settings.port,
+                            &error,
+                        ))
+                    })?
+            }
+        };
+    }
+}
+
+async fn authenticate_ssh_agent(
+    handle: &mut client::Handle<ClientHandler>,
+    settings: &ConnectionSettings,
+    socket_path: Option<&str>,
+) -> Result<client::AuthResult, ConnectFailure> {
+    let agent_result = match socket_path {
+        Some(path) => AgentClient::connect_uds(path).await,
+        None => AgentClient::connect_env().await,
+    };
+    let mut agent = agent_result.map_err(|_| {
+        ConnectFailure::AuthFailed(AuthFailure {
+            reason: UserFacingError::new(
+                ErrorCode::AuthFailed,
+                "SSH agent unavailable",
+                "Start an SSH agent and make SSH_AUTH_SOCK available to macSFTP.",
+            ),
+        })
+    })?;
+    let identities = agent.request_identities().await.map_err(|_| {
+        ConnectFailure::AuthFailed(AuthFailure {
+            reason: UserFacingError::new(
+                ErrorCode::AuthFailed,
+                "Could not read SSH agent identities",
+                "The SSH agent did not return its available identities.",
+            ),
+        })
+    })?;
+    if identities.is_empty() {
+        return Err(ConnectFailure::AuthFailed(AuthFailure {
+            reason: UserFacingError::new(
+                ErrorCode::AuthFailed,
+                "SSH agent has no identities",
+                "Add a key to the SSH agent and try again.",
+            ),
+        }));
+    }
+
+    let rsa_hash_support = handle.best_supported_rsa_hash().await.map_err(|error| {
+        ConnectFailure::Connection(connection_error(&settings.host, settings.port, &error))
+    })?;
+    let mut last_failure = None;
+    for identity in identities {
+        let public_key = identity.public_key();
+        let hash = if matches!(public_key.algorithm(), Algorithm::Rsa { .. }) {
+            match rsa_hash_support {
+                Some(Some(hash)) => Some(hash),
+                None => Some(HashAlg::Sha512),
+                Some(None) => continue,
+            }
+        } else {
+            None
+        };
+        let result = match identity.clone() {
+            AgentIdentity::PublicKey { key, .. } => {
+                handle
+                    .authenticate_publickey_with(settings.username.clone(), key, hash, &mut agent)
+                    .await
+            }
+            AgentIdentity::Certificate { certificate, .. } => {
+                handle
+                    .authenticate_certificate_with(
+                        settings.username.clone(),
+                        certificate,
+                        hash,
+                        &mut agent,
+                    )
+                    .await
+            }
+        }
+        .map_err(|_| {
+            ConnectFailure::AuthFailed(AuthFailure {
+                reason: UserFacingError::new(
+                    ErrorCode::AuthFailed,
+                    "SSH agent signing failed",
+                    "The SSH agent could not sign the authentication request.",
+                ),
+            })
+        })?;
+        if result.success() {
+            return Ok(result);
+        }
+        last_failure = Some(result);
+    }
+
+    match last_failure {
+        Some(failure) => Ok(failure),
+        None => Err(ConnectFailure::AuthFailed(AuthFailure {
+            reason: UserFacingError::new(
+                ErrorCode::AuthFailed,
+                "No compatible SSH agent identity",
+                "The server did not accept any compatible identity from the SSH agent.",
+            ),
+        })),
+    }
 }
 
 async fn authenticate(
@@ -505,10 +936,14 @@ async fn authenticate(
     settings: &ConnectionSettings,
     scope: &RemoteEventScope,
     event_tx: &flume::Sender<AppEvent>,
+    keyboard_interactive_registry: &KeyboardInteractiveRegistry,
+    next_keyboard_interactive_id: &AtomicU64,
 ) -> Result<(), ConnectFailure> {
     let method = match &settings.auth {
         AuthCredential::Password { .. } => "password",
         AuthCredential::PrivateKey { .. } => "private_key",
+        AuthCredential::KeyboardInteractive => "keyboard_interactive",
+        AuthCredential::SshAgent { .. } => "ssh_agent",
     };
     info!(
         target: "macsftp_sftp::connection",
@@ -561,47 +996,70 @@ async fn authenticate(
                     return Err(ConnectFailure::AuthFailed(AuthFailure { reason }));
                 }
             };
-            if let Err(reason) = validate_private_key_algorithm(key.algorithm()) {
-                let key_file = private_key_file_name(key_path);
-                warn!(
-                    key_file,
-                    "RSA private key authentication blocked by security policy"
-                );
-                let _ = event_tx
-                    .send_async(AppEvent::AuthFailed(RemoteScoped::new(
-                        scope.clone(),
-                        AuthFailure {
-                            reason: reason.clone(),
-                        },
-                    )))
-                    .await;
-                return Err(ConnectFailure::AuthFailed(AuthFailure { reason }));
+            if matches!(key.algorithm(), Algorithm::Rsa { .. }) {
+                match authenticate_rsa_private_key(handle, settings, &key).await {
+                    Ok(result) => result,
+                    Err(ConnectFailure::AuthFailed(failure)) => {
+                        return Err(emit_auth_failure(scope, event_tx, failure.reason).await);
+                    }
+                    Err(other) => return Err(other),
+                }
+            } else {
+                handle
+                    .authenticate_publickey(
+                        settings.username.clone(),
+                        PrivateKeyWithHashAlg::new(Arc::new(key), None),
+                    )
+                    .await
+                    .map_err(|error| {
+                        ConnectFailure::Connection(connection_error(
+                            &settings.host,
+                            settings.port,
+                            &error,
+                        ))
+                    })?
             }
-            let best_hash = handle
-                .best_supported_rsa_hash()
-                .await
-                .map_err(|error| {
-                    ConnectFailure::Connection(connection_error(
-                        &settings.host,
-                        settings.port,
-                        &error,
-                    ))
-                })?
-                .flatten();
-            handle
-                .authenticate_publickey(
-                    settings.username.clone(),
-                    PrivateKeyWithHashAlg::new(Arc::new(key), best_hash),
-                )
-                .await
-                .map_err(|error| {
-                    ConnectFailure::Connection(connection_error(
-                        &settings.host,
-                        settings.port,
-                        &error,
-                    ))
-                })?
         }
+        AuthCredential::KeyboardInteractive => {
+            authenticate_keyboard_interactive(
+                handle,
+                settings,
+                scope,
+                event_tx,
+                keyboard_interactive_registry,
+                next_keyboard_interactive_id,
+            )
+            .await?
+        }
+        AuthCredential::SshAgent { socket_path } => {
+            match authenticate_ssh_agent(handle, settings, socket_path.as_deref()).await {
+                Ok(result) => result,
+                Err(ConnectFailure::AuthFailed(failure)) => {
+                    return Err(emit_auth_failure(scope, event_tx, failure.reason).await);
+                }
+                Err(other) => return Err(other),
+            }
+        }
+    };
+
+    let auth_result = match &auth_result {
+        client::AuthResult::Failure {
+            remaining_methods,
+            partial_success: true,
+        } if !matches!(settings.auth, AuthCredential::KeyboardInteractive)
+            && remaining_methods.contains(&russh::MethodKind::KeyboardInteractive) =>
+        {
+            authenticate_keyboard_interactive(
+                handle,
+                settings,
+                scope,
+                event_tx,
+                keyboard_interactive_registry,
+                next_keyboard_interactive_id,
+            )
+            .await?
+        }
+        _ => auth_result,
     };
 
     match auth_result {
@@ -647,19 +1105,175 @@ async fn authenticate(
     }
 }
 
+struct ProxyCommandStream {
+    stdout: ChildStdout,
+    stdin: ChildStdin,
+    _child: Child,
+}
+
+impl AsyncRead for ProxyCommandStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stdout).poll_read(context, buffer)
+    }
+}
+
+impl AsyncWrite for ProxyCommandStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.stdin).poll_write(context, buffer)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stdin).poll_flush(context)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stdin).poll_shutdown(context)
+    }
+}
+
+struct JumpHostStream {
+    stream: russh::ChannelStream<client::Msg>,
+    _jump_handle: client::Handle<ClientHandler>,
+}
+
+impl AsyncRead for JumpHostStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_read(context, buffer)
+    }
+}
+
+impl AsyncWrite for JumpHostStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.stream).poll_write(context, buffer)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_flush(context)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stream).poll_shutdown(context)
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn expand_proxy_command(command: &str, settings: &ConnectionSettings) -> String {
+    let mut expanded = String::with_capacity(command.len());
+    let mut characters = command.chars();
+    while let Some(character) = characters.next() {
+        if character != '%' {
+            expanded.push(character);
+            continue;
+        }
+        match characters.next() {
+            Some('%') => expanded.push('%'),
+            Some('h') => expanded.push_str(&shell_quote(&settings.host)),
+            Some('p') => expanded.push_str(&settings.port.to_string()),
+            Some('r') => expanded.push_str(&shell_quote(&settings.username)),
+            Some(other) => {
+                expanded.push('%');
+                expanded.push(other);
+            }
+            None => expanded.push('%'),
+        }
+    }
+    expanded
+}
+
+fn spawn_proxy_command(
+    command: &str,
+    settings: &ConnectionSettings,
+) -> Result<ProxyCommandStream, ConnectFailure> {
+    let expanded = expand_proxy_command(command, settings);
+    let mut child = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(expanded)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|_| {
+            ConnectFailure::Connection(
+                UserFacingError::new(
+                    ErrorCode::ChannelClosed,
+                    "Could not start ProxyCommand",
+                    "The configured proxy command could not be started.",
+                )
+                .with_retryable(true),
+            )
+        })?;
+    let stdin = child.stdin.take().ok_or_else(|| {
+        ConnectFailure::Connection(UserFacingError::new(
+            ErrorCode::ChannelClosed,
+            "Could not start ProxyCommand",
+            "The proxy command did not provide a writable input stream.",
+        ))
+    })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        ConnectFailure::Connection(UserFacingError::new(
+            ErrorCode::ChannelClosed,
+            "Could not start ProxyCommand",
+            "The proxy command did not provide a readable output stream.",
+        ))
+    })?;
+    Ok(ProxyCommandStream {
+        stdout,
+        stdin,
+        _child: child,
+    })
+}
+
 /// Trust registry, known_hosts, and event_tx are co-required for host-key flow.
 #[allow(clippy::too_many_arguments)]
-pub async fn establish_physical_connection(
+async fn establish_on_stream<R>(
+    stream: R,
     settings: &ConnectionSettings,
     scope: &RemoteEventScope,
     trust_request_id: TrustRequestId,
     known_hosts: Arc<Mutex<KnownHostsStore>>,
     trust_config: Arc<HostTrustConfig>,
     trust_registry: Arc<TrustRegistry>,
+    keyboard_interactive_registry: Arc<KeyboardInteractiveRegistry>,
+    next_keyboard_interactive_id: Arc<AtomicU64>,
     event_tx: flume::Sender<AppEvent>,
     connection_lost: CancellationToken,
     disconnect_cause: Arc<Mutex<Option<PhysicalDisconnectCause>>>,
-) -> Result<client::Handle<ClientHandler>, ConnectFailure> {
+) -> Result<client::Handle<ClientHandler>, ConnectFailure>
+where
+    R: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let config = Arc::new(client_config());
 
     let rejection: Arc<Mutex<Option<HostKeyRejection>>> = Arc::new(Mutex::new(None));
@@ -687,8 +1301,7 @@ pub async fn establish_physical_connection(
         "SSH transport and handshake started"
     );
 
-    let address = (settings.host.as_str(), settings.port);
-    let mut handle = match client::connect(config, address, handler).await {
+    let mut handle = match client::connect_stream(config, stream, handler).await {
         Ok(handle) => handle,
         Err(error) => {
             let failure = TransportFailureKind::from_russh_error(&error).as_str();
@@ -721,9 +1334,151 @@ pub async fn establish_physical_connection(
         }
     };
 
-    authenticate(&mut handle, settings, scope, &event_tx).await?;
+    authenticate(
+        &mut handle,
+        settings,
+        scope,
+        &event_tx,
+        &keyboard_interactive_registry,
+        &next_keyboard_interactive_id,
+    )
+    .await?;
 
     Ok(handle)
+}
+
+async fn connect_tcp_stream(
+    settings: &ConnectionSettings,
+) -> Result<tokio::net::TcpStream, ConnectFailure> {
+    tokio::net::TcpStream::connect((settings.host.as_str(), settings.port))
+        .await
+        .map_err(|error| {
+            ConnectFailure::Connection(connection_error(
+                &settings.host,
+                settings.port,
+                &russh::Error::IO(error),
+            ))
+        })
+}
+
+/// Trust registry, known_hosts, and event_tx are co-required for host-key flow.
+#[allow(clippy::too_many_arguments)]
+pub async fn establish_physical_connection(
+    settings: &ConnectionSettings,
+    scope: &RemoteEventScope,
+    trust_request_id: TrustRequestId,
+    jump_trust_request_id: TrustRequestId,
+    known_hosts: Arc<Mutex<KnownHostsStore>>,
+    trust_config: Arc<HostTrustConfig>,
+    trust_registry: Arc<TrustRegistry>,
+    keyboard_interactive_registry: Arc<KeyboardInteractiveRegistry>,
+    next_keyboard_interactive_id: Arc<AtomicU64>,
+    event_tx: flume::Sender<AppEvent>,
+    connection_lost: CancellationToken,
+    disconnect_cause: Arc<Mutex<Option<PhysicalDisconnectCause>>>,
+) -> Result<client::Handle<ClientHandler>, ConnectFailure> {
+    match &settings.route {
+        ResolvedConnectionRoute::Direct => {
+            let stream = connect_tcp_stream(settings).await?;
+            establish_on_stream(
+                stream,
+                settings,
+                scope,
+                trust_request_id,
+                known_hosts,
+                trust_config,
+                trust_registry,
+                keyboard_interactive_registry,
+                next_keyboard_interactive_id,
+                event_tx,
+                connection_lost,
+                disconnect_cause,
+            )
+            .await
+        }
+        ResolvedConnectionRoute::ProxyCommand { command } => {
+            let stream = spawn_proxy_command(command, settings)?;
+            establish_on_stream(
+                stream,
+                settings,
+                scope,
+                trust_request_id,
+                known_hosts,
+                trust_config,
+                trust_registry,
+                keyboard_interactive_registry,
+                next_keyboard_interactive_id,
+                event_tx,
+                connection_lost,
+                disconnect_cause,
+            )
+            .await
+        }
+        ResolvedConnectionRoute::JumpHost {
+            settings: jump_settings,
+        } => {
+            if !matches!(&jump_settings.route, ResolvedConnectionRoute::Direct) {
+                return Err(ConnectFailure::Connection(UserFacingError::new(
+                    ErrorCode::ChannelClosed,
+                    "Invalid jump-host route",
+                    "Jump-host profiles must connect directly.",
+                )));
+            }
+            let jump_stream = connect_tcp_stream(jump_settings).await?;
+            let jump_handle = establish_on_stream(
+                jump_stream,
+                jump_settings,
+                scope,
+                jump_trust_request_id,
+                known_hosts.clone(),
+                trust_config.clone(),
+                trust_registry.clone(),
+                keyboard_interactive_registry.clone(),
+                next_keyboard_interactive_id.clone(),
+                event_tx.clone(),
+                connection_lost.clone(),
+                disconnect_cause.clone(),
+            )
+            .await?;
+            let channel = jump_handle
+                .channel_open_direct_tcpip(
+                    settings.host.clone(),
+                    u32::from(settings.port),
+                    "127.0.0.1",
+                    0,
+                )
+                .await
+                .map_err(|_| {
+                    ConnectFailure::Connection(
+                        UserFacingError::new(
+                            ErrorCode::ChannelClosed,
+                            "Jump host could not reach target",
+                            "The jump host rejected the TCP forwarding request.",
+                        )
+                        .with_retryable(true),
+                    )
+                })?;
+            let stream = JumpHostStream {
+                stream: channel.into_stream(),
+                _jump_handle: jump_handle,
+            };
+            establish_on_stream(
+                stream,
+                settings,
+                scope,
+                trust_request_id,
+                known_hosts,
+                trust_config,
+                trust_registry,
+                keyboard_interactive_registry,
+                next_keyboard_interactive_id,
+                event_tx,
+                connection_lost,
+                disconnect_cause,
+            )
+            .await
+        }
+    }
 }
 
 /// Translate physical handshake mismatch details into a logical,
@@ -835,8 +1590,8 @@ mod tests {
     use super::{
         AppEvent, ClientHandler, HostKeyMismatchDetails, MidSessionDisconnect,
         PhysicalDisconnectCause, TransportFailureKind, classify_mid_session_disconnect,
-        client_config, connection_error, host_key_mismatch_event, legacy_rsa_host_key_bits,
-        private_key_file_name, sftp_connection_error, validate_private_key_algorithm,
+        client_config, connection_error, expand_proxy_command, host_key_mismatch_event,
+        legacy_rsa_host_key_bits, private_key_file_name, sftp_connection_error,
     };
     use crate::session_actor::HostTrustConfig;
     use crate::trust::TrustRegistry;
@@ -1025,13 +1780,18 @@ mod tests {
     }
 
     #[test]
-    fn rsa_private_key_authentication_is_blocked() {
-        let Err(error) = validate_private_key_algorithm(Algorithm::Rsa { hash: None }) else {
-            panic!("RSA private keys must remain blocked while RUSTSEC-2023-0071 applies");
+    fn proxy_command_expansion_quotes_target_values() {
+        let settings = macsftp_core::ConnectionSettings {
+            host: "host'; touch /tmp/never".into(),
+            port: 2200,
+            username: "user name".into(),
+            auth: macsftp_core::AuthCredential::KeyboardInteractive,
+            route: macsftp_core::ResolvedConnectionRoute::Direct,
         };
-
-        assert_eq!(error.code, macsftp_core::ErrorCode::AuthFailed);
-        assert!(validate_private_key_algorithm(Algorithm::Ed25519).is_ok());
+        assert_eq!(
+            expand_proxy_command("proxy --host %h --port %p --user %r %%", &settings),
+            "proxy --host 'host'\\''; touch /tmp/never' --port 2200 --user 'user name' %"
+        );
     }
 
     #[test]

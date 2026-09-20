@@ -32,6 +32,9 @@ pub struct ConflictRequestId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct CredentialRequestId(pub u64);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct KeyboardInteractiveRequestId(pub u64);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct ProfileId(pub u64);
 
@@ -374,6 +377,8 @@ pub struct ConnectionProfile {
     pub port: u16,
     pub username: String,
     pub auth: AuthMethod,
+    #[serde(default)]
+    pub route: ConnectionRoute,
     pub default_remote_path: Option<RemotePath>,
     pub group_id: Option<ProfileGroupId>,
 }
@@ -394,6 +399,7 @@ impl ConnectionProfile {
             port: 22,
             username: username.into(),
             auth,
+            route: ConnectionRoute::Direct,
             default_remote_path: None,
             group_id: None,
         }
@@ -424,11 +430,41 @@ impl ConnectionProfile {
                     .as_ref()
                     .map(|_| SecretRef::keychain_ref(id, "passphrase")),
             },
+            AuthCredential::KeyboardInteractive => AuthMethod::KeyboardInteractive,
+            AuthCredential::SshAgent { socket_path } => AuthMethod::SshAgent {
+                socket_path: socket_path.as_ref().map(LocalPath::new),
+            },
         };
         let mut profile =
             ConnectionProfile::new(id, name, &settings.host, &settings.username, auth);
         profile.port = settings.port;
+        profile.route = settings.route.persisted_shape();
         profile
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ConnectionRoute {
+    #[default]
+    Direct,
+    JumpHost {
+        profile_id: ProfileId,
+    },
+    ProxyCommand {
+        command: String,
+    },
+}
+
+impl std::fmt::Debug for ConnectionRoute {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Direct => formatter.write_str("Direct"),
+            Self::JumpHost { profile_id } => formatter
+                .debug_struct("JumpHost")
+                .field("profile_id", profile_id)
+                .finish(),
+            Self::ProxyCommand { .. } => formatter.write_str("ProxyCommand(<redacted>)"),
+        }
     }
 }
 
@@ -452,6 +488,11 @@ pub enum AuthMethod {
         has_passphrase: bool,
         passphrase_ref: Option<SecretRef>,
     },
+    KeyboardInteractive,
+    SshAgent {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        socket_path: Option<LocalPath>,
+    },
 }
 
 impl AuthMethod {
@@ -459,6 +500,8 @@ impl AuthMethod {
         match self {
             Self::Password { .. } => AuthMethodKind::Password,
             Self::PrivateKey { .. } => AuthMethodKind::PrivateKey,
+            Self::KeyboardInteractive => AuthMethodKind::KeyboardInteractive,
+            Self::SshAgent { .. } => AuthMethodKind::SshAgent,
         }
     }
 }
@@ -467,6 +510,8 @@ impl AuthMethod {
 pub enum AuthMethodKind {
     Password,
     PrivateKey,
+    KeyboardInteractive,
+    SshAgent,
 }
 
 /// Everything needed to open one SSH connection, including the secret.
@@ -485,6 +530,34 @@ pub struct ConnectionSettings {
     pub port: u16,
     pub username: String,
     pub auth: AuthCredential,
+    pub route: ResolvedConnectionRoute,
+}
+
+#[derive(Clone, Default, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+pub enum ResolvedConnectionRoute {
+    #[default]
+    Direct,
+    JumpHost {
+        settings: Box<ConnectionSettings>,
+    },
+    ProxyCommand {
+        command: String,
+    },
+}
+
+impl ResolvedConnectionRoute {
+    pub fn persisted_shape(&self) -> ConnectionRoute {
+        match self {
+            Self::Direct => ConnectionRoute::Direct,
+            // A settings-only manual connection cannot manufacture a stable
+            // saved profile reference. ProfileStore replaces this shape from
+            // its ProfileSaveRequest when saving an editor draft.
+            Self::JumpHost { .. } => ConnectionRoute::Direct,
+            Self::ProxyCommand { command } => ConnectionRoute::ProxyCommand {
+                command: command.clone(),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -515,6 +588,10 @@ pub enum AuthCredential {
         key_path: String,
         passphrase: Option<String>,
     },
+    KeyboardInteractive,
+    SshAgent {
+        socket_path: Option<String>,
+    },
 }
 
 impl std::fmt::Debug for ConnectionSettings {
@@ -525,6 +602,7 @@ impl std::fmt::Debug for ConnectionSettings {
             .field("port", &self.port)
             .field("username", &self.username)
             .field("auth", &"<redacted>")
+            .field("route", &"<redacted>")
             .finish()
     }
 }
@@ -535,6 +613,8 @@ pub struct AuthFingerprint {
     pub secret_ref: Option<SecretRef>,
     pub private_key_path_hash: Option<String>,
     pub profile_revision: u64,
+    pub saved_profile_id: Option<ProfileId>,
+    pub jump_profile_revision: Option<(ProfileId, u64)>,
 }
 
 impl AuthFingerprint {
@@ -544,6 +624,8 @@ impl AuthFingerprint {
             secret_ref: Some(secret_ref),
             private_key_path_hash: None,
             profile_revision,
+            saved_profile_id: None,
+            jump_profile_revision: None,
         }
     }
 
@@ -557,7 +639,41 @@ impl AuthFingerprint {
             secret_ref: passphrase_ref,
             private_key_path_hash: Some(private_key_path_hash.into()),
             profile_revision,
+            saved_profile_id: None,
+            jump_profile_revision: None,
         }
+    }
+
+    pub fn keyboard_interactive(profile_revision: u64) -> Self {
+        Self {
+            method: AuthMethodKind::KeyboardInteractive,
+            secret_ref: None,
+            private_key_path_hash: None,
+            profile_revision,
+            saved_profile_id: None,
+            jump_profile_revision: None,
+        }
+    }
+
+    pub fn ssh_agent(profile_revision: u64) -> Self {
+        Self {
+            method: AuthMethodKind::SshAgent,
+            secret_ref: None,
+            private_key_path_hash: None,
+            profile_revision,
+            saved_profile_id: None,
+            jump_profile_revision: None,
+        }
+    }
+
+    pub fn with_saved_profile(mut self, profile_id: ProfileId) -> Self {
+        self.saved_profile_id = Some(profile_id);
+        self
+    }
+
+    pub fn with_jump_profile(mut self, profile_id: ProfileId, revision: u64) -> Self {
+        self.jump_profile_revision = Some((profile_id, revision));
+        self
     }
 }
 
@@ -669,6 +785,9 @@ impl AppState {
                 ModalRequest::HostKey(prompt) => !tabs.accepts_remote_event(
                     &RemoteEventScope::new(prompt.tab_id, prompt.session_id, prompt.session_epoch),
                 ),
+                ModalRequest::KeyboardInteractive(prompt) => {
+                    !tabs.accepts_remote_event(&prompt.scope)
+                }
                 ModalRequest::TransferConflict(_) => false,
                 ModalRequest::Error(_) => false,
             };
@@ -1736,6 +1855,10 @@ pub enum AppCommand {
     RejectHostKey {
         request_id: TrustRequestId,
     },
+    RespondKeyboardInteractive(KeyboardInteractiveResponse),
+    CancelKeyboardInteractive {
+        request_id: KeyboardInteractiveRequestId,
+    },
     Shutdown,
 }
 
@@ -1793,6 +1916,44 @@ pub struct HostKeyDecisionCommand {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyboardInteractivePromptField {
+    pub prompt: String,
+    pub echo: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyboardInteractivePrompt {
+    pub request_id: KeyboardInteractiveRequestId,
+    pub scope: RemoteEventScope,
+    pub name: String,
+    pub instruction: String,
+    pub prompts: Vec<KeyboardInteractivePromptField>,
+}
+
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+pub struct KeyboardInteractiveResponse {
+    #[zeroize(skip)]
+    pub request_id: KeyboardInteractiveRequestId,
+    pub responses: Vec<String>,
+}
+
+impl std::fmt::Debug for KeyboardInteractiveResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("KeyboardInteractiveResponse")
+            .field("request_id", &self.request_id)
+            .field("responses", &"<redacted>")
+            .finish()
+    }
+}
+
+impl KeyboardInteractiveResponse {
+    pub fn take_responses(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.responses)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AppEvent {
     TabOpened(TabSnapshot),
     TabClosed {
@@ -1806,6 +1967,7 @@ pub enum AppEvent {
     TabConnected(RemoteScoped<TabConnected>),
     TabDisconnected(RemoteScoped<TabDisconnected>),
     AuthFailed(RemoteScoped<AuthFailure>),
+    KeyboardInteractivePrompt(KeyboardInteractivePrompt),
     RemoteDirLoading(RemoteScoped<RemoteDirLoading>),
     RemoteDirLoaded(RemoteScoped<RemoteDirSnapshot>),
     RemoteOperationFailed(RemoteScoped<RemoteOperationFailure>),
@@ -1901,6 +2063,7 @@ impl AppEvent {
             Self::TabConnected(scoped) => Some(scoped.scope.clone()),
             Self::TabDisconnected(scoped) => Some(scoped.scope.clone()),
             Self::AuthFailed(scoped) => Some(scoped.scope.clone()),
+            Self::KeyboardInteractivePrompt(prompt) => Some(prompt.scope.clone()),
             Self::RemoteDirLoading(scoped) => Some(scoped.scope.clone()),
             Self::RemoteDirLoaded(scoped) => Some(scoped.scope.clone()),
             Self::RemoteOperationFailed(scoped) => Some(scoped.scope.clone()),
@@ -2614,6 +2777,7 @@ impl TransferWarning {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModalRequest {
     HostKey(HostKeyPrompt),
+    KeyboardInteractive(KeyboardInteractivePrompt),
     TransferConflict(TransferConflictPrompt),
     Error(UserFacingError),
 }
@@ -2622,6 +2786,9 @@ impl ModalRequest {
     pub fn request_id(&self) -> Option<ModalRequestId> {
         match self {
             Self::HostKey(prompt) => Some(ModalRequestId::Trust(prompt.request_id)),
+            Self::KeyboardInteractive(prompt) => {
+                Some(ModalRequestId::KeyboardInteractive(prompt.request_id))
+            }
             Self::TransferConflict(prompt) => Some(ModalRequestId::Conflict(prompt.request_id)),
             Self::Error(_) => None,
         }
@@ -2631,6 +2798,7 @@ impl ModalRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ModalRequestId {
     Trust(TrustRequestId),
+    KeyboardInteractive(KeyboardInteractiveRequestId),
     Conflict(ConflictRequestId),
 }
 
@@ -2832,6 +3000,7 @@ mod tests {
             auth: AuthCredential::Password {
                 password: "never-hashed".into(),
             },
+            route: crate::ResolvedConnectionRoute::Direct,
         };
 
         let first = ConnectionKey::new(&settings, ConnectionPoolIdentity::Ephemeral(SessionId(1)));
@@ -3952,6 +4121,7 @@ mod tests {
             auth: AuthCredential::Password {
                 password: "super-secret".into(),
             },
+            route: crate::ResolvedConnectionRoute::Direct,
         };
         let profile = ConnectionProfile::from_connection_settings(
             ProfileId(1),
@@ -3977,6 +4147,7 @@ mod tests {
                 key_path: "/Users/alex/.ssh/id_ed25519".into(),
                 passphrase: Some("key-phrase".into()),
             },
+            route: crate::ResolvedConnectionRoute::Direct,
         };
         let key_profile =
             ConnectionProfile::from_connection_settings(ProfileId(2), "Jump", &key_settings);
@@ -3998,6 +4169,7 @@ mod tests {
                 key_path: "/Users/alex/.ssh/id_rsa".into(),
                 passphrase: None,
             },
+            route: crate::ResolvedConnectionRoute::Direct,
         };
         let no_pass_profile =
             ConnectionProfile::from_connection_settings(ProfileId(3), "Bare", &no_pass);
@@ -4276,12 +4448,15 @@ mod tests {
                 auth: AuthCredential::Password {
                     password: "unused".into(),
                 },
+                route: crate::ResolvedConnectionRoute::Direct,
             },
             ConnectionPoolIdentity::Saved(AuthFingerprint {
                 method: AuthMethodKind::Password,
                 secret_ref: Some(SecretRef::keychain_ref(ProfileId(1), "password")),
                 private_key_path_hash: None,
                 profile_revision: 1,
+                saved_profile_id: Some(ProfileId(1)),
+                jump_profile_revision: None,
             }),
         )
     }
@@ -4361,6 +4536,7 @@ mod tests {
                 auth: AuthCredential::Password {
                     password: "unused".into(),
                 },
+                route: crate::ResolvedConnectionRoute::Direct,
             },
             ConnectionPoolIdentity::Ephemeral(SessionId(9)),
         );
@@ -4380,6 +4556,7 @@ mod tests {
                 auth: AuthCredential::Password {
                     password: "unused".into(),
                 },
+                route: crate::ResolvedConnectionRoute::Direct,
             },
             ConnectionPoolIdentity::Ephemeral(SessionId(1)),
         );
@@ -4391,6 +4568,7 @@ mod tests {
                 auth: AuthCredential::Password {
                     password: "unused".into(),
                 },
+                route: crate::ResolvedConnectionRoute::Direct,
             },
             ConnectionPoolIdentity::Ephemeral(SessionId(2)),
         );
@@ -4733,5 +4911,52 @@ mod tests {
             history.push_navigating_from(Some(&format!("/{i}")), &format!("/{}", i + 1));
         }
         assert_eq!(history.back.len(), History::MAX);
+    }
+
+    #[test]
+    fn new_connection_capabilities_are_redacted_and_classified() {
+        let settings = crate::ConnectionSettings {
+            host: "target.example".into(),
+            port: 22,
+            username: "alex".into(),
+            auth: crate::AuthCredential::SshAgent { socket_path: None },
+            route: crate::ResolvedConnectionRoute::ProxyCommand {
+                command: "secret-proxy --token hidden".into(),
+            },
+        };
+        let debug = format!("{settings:?}");
+        assert!(!debug.contains("secret-proxy"));
+        assert!(!debug.contains("hidden"));
+        let route_debug = format!(
+            "{:?}",
+            crate::ConnectionRoute::ProxyCommand {
+                command: "proxy --token hidden".into(),
+            }
+        );
+        assert!(!route_debug.contains("hidden"));
+        assert_eq!(
+            crate::AuthMethod::KeyboardInteractive.kind(),
+            crate::AuthMethodKind::KeyboardInteractive
+        );
+        assert_eq!(
+            crate::AuthMethod::SshAgent { socket_path: None }.kind(),
+            crate::AuthMethodKind::SshAgent
+        );
+    }
+
+    #[test]
+    fn keyboard_interactive_prompt_is_remote_scoped() {
+        let scope = crate::RemoteEventScope::new(crate::TabId(2), crate::SessionId(3), 4);
+        let event = crate::AppEvent::KeyboardInteractivePrompt(crate::KeyboardInteractivePrompt {
+            request_id: crate::KeyboardInteractiveRequestId(5),
+            scope: scope.clone(),
+            name: "Verification".into(),
+            instruction: "Enter code".into(),
+            prompts: vec![crate::KeyboardInteractivePromptField {
+                prompt: "Code:".into(),
+                echo: false,
+            }],
+        });
+        assert_eq!(event.remote_scope(), Some(scope));
     }
 }

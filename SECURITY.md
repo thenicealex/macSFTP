@@ -41,3 +41,10 @@ patched version or commit is available.
 - Host-key fingerprints are shown only in the trust and mismatch UI. They must
   not be written to diagnostics or logs, and event payloads must never be
   formatted wholesale by tracing calls.
+- Keyboard-interactive responses are ephemeral secrets and follow the same
+  logging and persistence restrictions as passwords.
+- ProxyCommand is local command execution by explicit profile configuration.
+  Its command text and stderr must not be copied into diagnostics; profiles
+  must never embed passwords, passphrases, or tokens in the command.
+- Direct RSA client signatures use AWS-LC. The RustCrypto `rsa` feature
+  affected by RUSTSEC-2023-0071 must remain disabled.

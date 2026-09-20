@@ -1,6 +1,7 @@
 use macsftp_core::{
     AuthCredential, AuthFingerprint, AuthMethod, AuthMethodKind, ConnectionProfile,
-    ConnectionSettings, LocalPath, ProfileId, RemotePath, SecretRef,
+    ConnectionRoute, ConnectionSettings, LocalPath, ProfileId, RemotePath, ResolvedConnectionRoute,
+    SecretRef,
 };
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
@@ -73,6 +74,10 @@ pub enum ProfileAuthUpdate {
         key_path: LocalPath,
         passphrase: PrivateKeyPassphraseUpdate,
     },
+    KeyboardInteractive,
+    SshAgent {
+        socket_path: Option<LocalPath>,
+    },
 }
 
 impl std::fmt::Debug for ProfileAuthUpdate {
@@ -90,6 +95,11 @@ impl std::fmt::Debug for ProfileAuthUpdate {
                 .field("key_path", &"[REDACTED]")
                 .field("passphrase", passphrase)
                 .finish(),
+            Self::KeyboardInteractive => formatter.write_str("KeyboardInteractive"),
+            Self::SshAgent { socket_path } => formatter
+                .debug_struct("SshAgent")
+                .field("socket_path", &socket_path.as_ref().map(|_| "[REDACTED]"))
+                .finish(),
         }
     }
 }
@@ -100,6 +110,7 @@ impl Drop for ProfileAuthUpdate {
             Self::Password { password } => password.zeroize(),
             // The nested update zeroizes its own secret values.
             Self::PrivateKey { .. } => {}
+            Self::KeyboardInteractive | Self::SshAgent { .. } => {}
         }
     }
 }
@@ -112,6 +123,7 @@ pub struct ProfileSaveRequest {
     pub port: u16,
     pub username: String,
     pub auth: ProfileAuthUpdate,
+    pub route: ConnectionRoute,
     pub default_remote_path: Option<RemotePath>,
 }
 
@@ -122,6 +134,10 @@ pub enum ProfileMutationError {
     ProfileNotFound(ProfileId),
     ProfileIdOverflow,
     CredentialRequired(AuthMethodKind),
+    InvalidRoute {
+        profile_id: ProfileId,
+        message: &'static str,
+    },
     StorageRollback {
         storage: StorageError,
         rollback: KeychainError,
@@ -143,6 +159,23 @@ impl std::fmt::Display for ProfileMutationError {
             Self::CredentialRequired(AuthMethodKind::PrivateKey) => {
                 write!(formatter, "private-key credential is required")
             }
+            Self::CredentialRequired(AuthMethodKind::KeyboardInteractive) => {
+                write!(
+                    formatter,
+                    "keyboard-interactive answers are required during connection"
+                )
+            }
+            Self::CredentialRequired(AuthMethodKind::SshAgent) => {
+                write!(formatter, "an SSH agent is required")
+            }
+            Self::InvalidRoute {
+                profile_id,
+                message,
+            } => write!(
+                formatter,
+                "profile {} has an invalid route: {message}",
+                profile_id.0
+            ),
             Self::StorageRollback { storage, rollback } => write!(
                 formatter,
                 "{storage}; restoring the previous Keychain value also failed: {rollback}"
@@ -324,7 +357,7 @@ impl ProfileStore {
     /// part in connection reuse decisions.
     pub fn auth_fingerprint(&self, profile_id: ProfileId) -> Option<AuthFingerprint> {
         let profile = self.find_profile(profile_id)?;
-        match &profile.auth {
+        let fingerprint = match &profile.auth {
             AuthMethod::Password { secret_ref } => Some(AuthFingerprint::password(
                 secret_ref.clone(),
                 profile.revision,
@@ -341,6 +374,19 @@ impl ProfileStore {
                     profile.revision,
                 ))
             }
+            AuthMethod::KeyboardInteractive => {
+                Some(AuthFingerprint::keyboard_interactive(profile.revision))
+            }
+            AuthMethod::SshAgent { .. } => Some(AuthFingerprint::ssh_agent(profile.revision)),
+        }?
+        .with_saved_profile(profile_id);
+        match &profile.route {
+            ConnectionRoute::JumpHost {
+                profile_id: jump_id,
+            } => self
+                .find_profile(*jump_id)
+                .map(|jump| fingerprint.with_jump_profile(*jump_id, jump.revision)),
+            ConnectionRoute::Direct | ConnectionRoute::ProxyCommand { .. } => Some(fingerprint),
         }
     }
 
@@ -458,6 +504,21 @@ impl ProfileStore {
                 if next_profiles.find_profile(*profile_id).is_none() {
                     return Ok(TransactionOutcome::Unchanged);
                 }
+                if next_profiles.profiles.iter().any(|profile| {
+                    matches!(
+                        profile.route,
+                        ConnectionRoute::JumpHost {
+                            profile_id: jump_id
+                        } if jump_id == *profile_id
+                    )
+                }) {
+                    return Err((
+                        StorageError::ProfileInUse {
+                            profile_id: *profile_id,
+                        },
+                        warnings,
+                    ));
+                }
                 next_profiles
                     .profiles
                     .retain(|profile| profile.id != *profile_id);
@@ -534,6 +595,18 @@ impl ProfileStore {
                     None => PrivateKeyPassphraseUpdate::KeepExisting,
                 },
             },
+            AuthCredential::KeyboardInteractive => ProfileAuthUpdate::KeyboardInteractive,
+            AuthCredential::SshAgent { socket_path } => ProfileAuthUpdate::SshAgent {
+                socket_path: socket_path.as_ref().map(LocalPath::new),
+            },
+        };
+        let route = match &settings.route {
+            ResolvedConnectionRoute::JumpHost { .. } => previous
+                .as_ref()
+                .map(|profile| profile.route.clone())
+                .filter(|route| matches!(route, ConnectionRoute::JumpHost { .. }))
+                .unwrap_or(ConnectionRoute::Direct),
+            _ => settings.route.persisted_shape(),
         };
         let request = ProfileSaveRequest {
             profile_id,
@@ -542,6 +615,7 @@ impl ProfileStore {
             port: settings.port,
             username: settings.username.clone(),
             auth,
+            route,
             default_remote_path: previous
                 .as_ref()
                 .and_then(|profile| profile.default_remote_path.clone()),
@@ -580,6 +654,7 @@ impl ProfileStore {
         );
         profile.port = request.port;
         profile.default_remote_path = request.default_remote_path.clone();
+        profile.route = request.route.clone();
         if let Some(previous) = &previous {
             profile.group_id = previous.group_id;
         }
@@ -642,6 +717,21 @@ impl ProfileStore {
         &self,
         profile_id: ProfileId,
     ) -> Result<ConnectionSettings, ProfileMutationError> {
+        self.load_connection_settings_inner(profile_id, &mut Vec::new())
+    }
+
+    fn load_connection_settings_inner(
+        &self,
+        profile_id: ProfileId,
+        visited: &mut Vec<ProfileId>,
+    ) -> Result<ConnectionSettings, ProfileMutationError> {
+        if visited.contains(&profile_id) {
+            return Err(ProfileMutationError::InvalidRoute {
+                profile_id,
+                message: "jump-host cycle detected",
+            });
+        }
+        visited.push(profile_id);
         let profile = self
             .find_profile(profile_id)
             .ok_or(ProfileMutationError::ProfileNotFound(profile_id))?;
@@ -668,12 +758,52 @@ impl ProfileStore {
                     passphrase,
                 }
             }
+            AuthMethod::KeyboardInteractive => AuthCredential::KeyboardInteractive,
+            AuthMethod::SshAgent { socket_path } => AuthCredential::SshAgent {
+                socket_path: socket_path.as_ref().map(|path| path.as_str().to_string()),
+            },
         };
+        let route = match &profile.route {
+            ConnectionRoute::Direct => ResolvedConnectionRoute::Direct,
+            ConnectionRoute::ProxyCommand { command } => {
+                if command.trim().is_empty() {
+                    return Err(ProfileMutationError::InvalidRoute {
+                        profile_id,
+                        message: "ProxyCommand is empty",
+                    });
+                }
+                ResolvedConnectionRoute::ProxyCommand {
+                    command: command.clone(),
+                }
+            }
+            ConnectionRoute::JumpHost {
+                profile_id: jump_id,
+            } => {
+                let jump_profile =
+                    self.find_profile(*jump_id)
+                        .ok_or(ProfileMutationError::InvalidRoute {
+                            profile_id,
+                            message: "jump-host profile was not found",
+                        })?;
+                if !matches!(&jump_profile.route, ConnectionRoute::Direct) {
+                    return Err(ProfileMutationError::InvalidRoute {
+                        profile_id,
+                        message: "jump-host profiles must use a direct route",
+                    });
+                }
+                let jump = self.load_connection_settings_inner(*jump_id, visited)?;
+                ResolvedConnectionRoute::JumpHost {
+                    settings: Box::new(jump),
+                }
+            }
+        };
+        visited.pop();
         Ok(ConnectionSettings {
             host: profile.host.clone(),
             port: profile.port,
             username: profile.username.clone(),
             auth,
+            route,
         })
     }
 
@@ -684,6 +814,7 @@ impl ProfileStore {
         let secret_ref = match &profile.auth {
             AuthMethod::Password { secret_ref } => Some(secret_ref),
             AuthMethod::PrivateKey { passphrase_ref, .. } => passphrase_ref.as_ref(),
+            AuthMethod::KeyboardInteractive | AuthMethod::SshAgent { .. } => None,
         };
         match secret_ref {
             Some(secret_ref) => Ok(self.keychain.load(secret_ref)?.is_some()),
@@ -803,6 +934,16 @@ impl ProfileStore {
                     secret_update,
                 })
             }
+            ProfileAuthUpdate::KeyboardInteractive => Ok(ResolvedProfileAuth {
+                auth: AuthMethod::KeyboardInteractive,
+                secret_update: None,
+            }),
+            ProfileAuthUpdate::SshAgent { socket_path } => Ok(ResolvedProfileAuth {
+                auth: AuthMethod::SshAgent {
+                    socket_path: socket_path.clone(),
+                },
+                secret_update: None,
+            }),
         }
     }
 }
@@ -811,6 +952,7 @@ fn secret_refs_for_auth(auth: &AuthMethod) -> Vec<SecretRef> {
     match auth {
         AuthMethod::Password { secret_ref } => vec![secret_ref.clone()],
         AuthMethod::PrivateKey { passphrase_ref, .. } => passphrase_ref.iter().cloned().collect(),
+        AuthMethod::KeyboardInteractive | AuthMethod::SshAgent { .. } => Vec::new(),
     }
 }
 
@@ -851,8 +993,8 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use macsftp_core::{
-        AuthCredential, AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionSettings,
-        LocalPath, ProfileId, SecretRef,
+        AuthCredential, AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionRoute,
+        ConnectionSettings, LocalPath, ProfileId, SecretRef,
     };
 
     use crate::{ProfilesFile, StorageError, core_crate_name, crate_name};
@@ -902,6 +1044,7 @@ mod tests {
             auth: AuthCredential::Password {
                 password: password.into(),
             },
+            route: macsftp_core::ResolvedConnectionRoute::Direct,
         }
     }
 
@@ -919,6 +1062,7 @@ mod tests {
                 key_path: LocalPath::new("~/.ssh/id_ed25519"),
                 passphrase,
             },
+            route: macsftp_core::ConnectionRoute::Direct,
             default_remote_path: None,
         }
     }
@@ -1011,6 +1155,47 @@ mod tests {
         assert_eq!(second_fingerprint.profile_revision, 2);
         let debug = format!("{second_fingerprint:?}");
         assert!(!debug.contains("password-value"));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn auth_fingerprint_distinguishes_saved_profiles_with_different_routes() {
+        let path = temp_profiles_path("auth-fingerprint-route");
+        cleanup(&path);
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
+        let mut first = ConnectionProfile::new(
+            ProfileId(1),
+            "First",
+            "target.internal",
+            "alex",
+            AuthMethod::SshAgent { socket_path: None },
+        );
+        first.route = ConnectionRoute::ProxyCommand {
+            command: "proxy-one %h %p".into(),
+        };
+        let mut second = ConnectionProfile::new(
+            ProfileId(2),
+            "Second",
+            "target.internal",
+            "alex",
+            AuthMethod::SshAgent { socket_path: None },
+        );
+        second.route = ConnectionRoute::ProxyCommand {
+            command: "proxy-two %h %p".into(),
+        };
+        store.save_profile(first).expect("save first profile");
+        store.save_profile(second).expect("save second profile");
+
+        let first = store
+            .auth_fingerprint(ProfileId(1))
+            .expect("first profile has a fingerprint");
+        let second = store
+            .auth_fingerprint(ProfileId(2))
+            .expect("second profile has a fingerprint");
+
+        assert_eq!(first.saved_profile_id, Some(ProfileId(1)));
+        assert_eq!(second.saved_profile_id, Some(ProfileId(2)));
+        assert_ne!(first, second);
         cleanup(&path);
     }
 
@@ -1235,6 +1420,7 @@ mod tests {
                     key_path: LocalPath::new("~/.ssh/id_ed25519"),
                     passphrase: PrivateKeyPassphraseUpdate::KeepExisting,
                 },
+                route: macsftp_core::ConnectionRoute::Direct,
                 default_remote_path: None,
             })
             .expect("switch auth method");
@@ -1283,6 +1469,7 @@ mod tests {
             auth: AuthCredential::Password {
                 password: "hunter2-do-not-leak".into(),
             },
+            route: macsftp_core::ResolvedConnectionRoute::Direct,
         };
         let profile =
             ConnectionProfile::from_connection_settings(ProfileId(9), "Staging", &settings);
@@ -1486,7 +1673,7 @@ mod tests {
             .save_profile(password_profile(10, "Trigger Rewrite"))
             .expect("rewrite triggers format upgrade");
         let rewritten = std::fs::read_to_string(path.as_str()).expect("reread rewritten file");
-        assert!(rewritten.contains(r#""version": 3"#));
+        assert!(rewritten.contains(r#""version": 4"#));
         assert!(rewritten.contains(r#""has_passphrase": true"#));
         assert!(!rewritten.contains("remember_passphrase"));
         cleanup(&path);
@@ -1662,6 +1849,7 @@ mod tests {
                     key_path: LocalPath::new("~/.ssh/id_ed25519"),
                     passphrase: PrivateKeyPassphraseUpdate::KeepExisting,
                 },
+                route: macsftp_core::ConnectionRoute::Direct,
                 default_remote_path: None,
             })
             .expect("rename with untouched passphrase policy");
@@ -1740,7 +1928,7 @@ mod tests {
 
         let raw = std::fs::read_to_string(path.as_str()).expect("read saved store");
         assert!(
-            raw.contains(r#""version": 3"#),
+            raw.contains(r#""version": 4"#),
             "first save must persist as the current format, got: {raw}"
         );
         assert!(
@@ -1950,5 +2138,119 @@ mod tests {
         assert_eq!(found.name, "After");
         cleanup(&path);
         let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
+    }
+
+    #[test]
+    fn jump_profile_resolves_credentials_and_participates_in_pool_identity() {
+        let path = temp_profiles_path("jump-resolution");
+        cleanup(&path);
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
+        store
+            .save_connection_settings(
+                ProfileId(1),
+                "Jump".into(),
+                &password_settings("jump.example", "jump-secret"),
+            )
+            .expect("save direct jump profile");
+        store
+            .save_request(ProfileSaveRequest {
+                profile_id: ProfileId(2),
+                name: "Target".into(),
+                host: "target.internal".into(),
+                port: 22,
+                username: "deploy".into(),
+                auth: ProfileAuthUpdate::Password {
+                    password: Some("target-secret".into()),
+                },
+                route: macsftp_core::ConnectionRoute::JumpHost {
+                    profile_id: ProfileId(1),
+                },
+                default_remote_path: None,
+            })
+            .expect("save target with jump profile");
+
+        let resolved = store
+            .load_connection_settings(ProfileId(2))
+            .expect("resolve target and jump credentials");
+        let macsftp_core::ResolvedConnectionRoute::JumpHost { settings: jump } = &resolved.route
+        else {
+            panic!("target must resolve a jump-host route");
+        };
+        assert_eq!(jump.host, "jump.example");
+        let fingerprint = store
+            .auth_fingerprint(ProfileId(2))
+            .expect("saved target has pool identity");
+        assert_eq!(fingerprint.jump_profile_revision, Some((ProfileId(1), 1)));
+
+        store
+            .save_connection_settings(ProfileId(2), "Target renamed".into(), &resolved)
+            .expect("saving resolved settings preserves the saved jump reference");
+        assert!(matches!(
+            store
+                .find_profile(ProfileId(2))
+                .expect("target remains")
+                .route,
+            macsftp_core::ConnectionRoute::JumpHost {
+                profile_id: ProfileId(1)
+            }
+        ));
+
+        let delete_error = store
+            .delete_profile(ProfileId(1))
+            .expect_err("a referenced jump profile cannot be deleted");
+        assert!(matches!(
+            delete_error,
+            StorageError::ProfileInUse {
+                profile_id: ProfileId(1)
+            }
+        ));
+
+        store
+            .save_connection_settings(
+                ProfileId(1),
+                "Jump updated".into(),
+                &password_settings("jump.example", "new-jump-secret"),
+            )
+            .expect("update jump profile");
+        let updated = store
+            .auth_fingerprint(ProfileId(2))
+            .expect("target identity remains available");
+        assert_eq!(updated.jump_profile_revision, Some((ProfileId(1), 2)));
+        cleanup(&path);
+        let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
+    }
+
+    #[test]
+    fn version_three_profile_defaults_to_direct_route() {
+        let path = temp_profiles_path("v3-direct-route");
+        cleanup(&path);
+        std::fs::write(
+            path.as_str(),
+            r#"{
+                "version": 3,
+                "profiles": [{
+                    "id": 1,
+                    "revision": 1,
+                    "name": "Legacy",
+                    "host": "legacy.example",
+                    "port": 22,
+                    "username": "alex",
+                    "auth": {"Password": {"secret_ref": "keychain:macsftp:1:password"}},
+                    "default_remote_path": null,
+                    "group_id": null
+                }],
+                "next_profile_id": 2
+            }"#,
+        )
+        .expect("write v3 profile fixture");
+        let store = ProfileStore::open_or_empty_memory(path.clone());
+        assert!(matches!(
+            store
+                .find_profile(ProfileId(1))
+                .expect("legacy profile")
+                .route,
+            macsftp_core::ConnectionRoute::Direct
+        ));
+        cleanup(&path);
     }
 }

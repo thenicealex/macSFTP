@@ -6,8 +6,9 @@ use gpui::{
 };
 use macsftp_core::{
     AppCommand, AuthMethodKind, ConflictDecision, ConflictDecisionCommand, ConflictRequestId,
-    ConnectionState, DisconnectReason, HostKeyDecisionCommand, HostKeyPrompt, LocalPath,
-    ModalRequest, ModalRequestId, RemotePath, TransferConflictPrompt, TransferEndpoint,
+    ConnectionState, DisconnectReason, HostKeyDecisionCommand, HostKeyPrompt,
+    KeyboardInteractivePrompt, KeyboardInteractiveRequestId, KeyboardInteractiveResponse,
+    LocalPath, ModalRequest, ModalRequestId, RemotePath, TransferConflictPrompt, TransferEndpoint,
     TrustRequestId,
 };
 use macsftp_ui::{
@@ -19,10 +20,23 @@ use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::connect_form::*;
 use crate::workspace::helpers::*;
 use crate::workspace::profiles::{SettingsSection, profile_list_label};
+use crate::workspace::view_state::KeyboardInteractiveUi;
 use crate::workspace::*;
 use macsftp_core::HistoryOp;
 
 impl crate::workspace::Workspace {
+    pub(crate) fn drain_expired_modals(&mut self) -> bool {
+        let expired = self.state.drain_expired_modals();
+        for modal in &expired {
+            if let ModalRequest::KeyboardInteractive(prompt) = modal {
+                self.modal_inputs
+                    .keyboard_interactive
+                    .remove(&prompt.request_id);
+            }
+        }
+        !expired.is_empty()
+    }
+
     pub(crate) fn has_transfer_conflict_modal(&self, request_id: ConflictRequestId) -> bool {
         self.state
             .modals
@@ -63,6 +77,22 @@ impl crate::workspace::Workspace {
                 _ => None,
             })
     }
+    pub(crate) fn active_keyboard_interactive_prompt(&self) -> Option<&KeyboardInteractivePrompt> {
+        let active_tab_id = self.state.tabs.active_tab_id?;
+        self.state
+            .modals
+            .active
+            .iter()
+            .rev()
+            .find_map(|modal| match modal {
+                ModalRequest::KeyboardInteractive(prompt)
+                    if prompt.scope.tab_id == active_tab_id =>
+                {
+                    Some(prompt)
+                }
+                _ => None,
+            })
+    }
     pub(crate) fn active_transfer_conflict_prompt(&self) -> Option<&TransferConflictPrompt> {
         self.state
             .modals
@@ -79,6 +109,80 @@ impl crate::workspace::Workspace {
             .modals
             .active
             .retain(|modal| modal.request_id() != Some(ModalRequestId::Trust(request_id)));
+    }
+    fn remove_keyboard_interactive_modal(&mut self, request_id: KeyboardInteractiveRequestId) {
+        self.state.modals.active.retain(|modal| {
+            modal.request_id() != Some(ModalRequestId::KeyboardInteractive(request_id))
+        });
+        self.modal_inputs.keyboard_interactive.remove(&request_id);
+    }
+
+    pub(crate) fn present_keyboard_interactive(
+        &mut self,
+        prompt: KeyboardInteractivePrompt,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .state
+            .modals
+            .find_request(ModalRequestId::KeyboardInteractive(prompt.request_id))
+            .is_some()
+        {
+            return;
+        }
+        self.modal_inputs.keyboard_interactive.insert(
+            prompt.request_id,
+            KeyboardInteractiveUi::from_prompt(&prompt),
+        );
+        self.state
+            .modals
+            .active
+            .push(ModalRequest::KeyboardInteractive(prompt));
+        window.focus(&self.modal_focus);
+        cx.notify();
+    }
+
+    pub(crate) fn submit_keyboard_interactive(
+        &mut self,
+        request_id: KeyboardInteractiveRequestId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = self.modal_inputs.keyboard_interactive.get(&request_id) else {
+            return;
+        };
+        let responses = input
+            .inputs
+            .iter()
+            .map(|input| input.value().to_string())
+            .collect();
+        if !self.send_command(
+            AppCommand::RespondKeyboardInteractive(KeyboardInteractiveResponse {
+                request_id,
+                responses,
+            }),
+            cx,
+        ) {
+            return;
+        }
+        self.remove_keyboard_interactive_modal(request_id);
+        self.focus_pane(self.focused_side, window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_keyboard_interactive(
+        &mut self,
+        request_id: KeyboardInteractiveRequestId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.send_command(AppCommand::CancelKeyboardInteractive { request_id }, cx) {
+            return;
+        }
+        self.remove_keyboard_interactive_modal(request_id);
+        self.focus_pane(self.focused_side, window, cx);
+        cx.notify();
     }
     pub(crate) fn remove_conflict_modal(
         &mut self,
@@ -293,7 +397,10 @@ impl crate::workspace::Workspace {
             self.close_connect_form(window, cx);
             return;
         }
-        if let Some(prompt) = self.active_host_key_prompt() {
+        if let Some(prompt) = self.active_keyboard_interactive_prompt() {
+            let request_id = prompt.request_id;
+            self.cancel_keyboard_interactive(request_id, window, cx);
+        } else if let Some(prompt) = self.active_host_key_prompt() {
             let request_id = prompt.request_id;
             self.reject_host_key(request_id, window, cx);
         } else if let Some(prompt) = self.active_transfer_conflict_prompt().cloned() {
@@ -304,6 +411,7 @@ impl crate::workspace::Workspace {
     pub(crate) fn open_go_to_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.connect_form_ui.form.is_some()
             || self.active_host_key_prompt().is_some()
+            || self.active_keyboard_interactive_prompt().is_some()
             || self.active_transfer_conflict_prompt().is_some()
             || self.modal_inputs.delete_confirm.is_some()
             || self.modal_inputs.inline_edit.is_some()
@@ -814,6 +922,7 @@ impl crate::workspace::Workspace {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .gap_2()
                             .child(auth_toggle(
                                 "Password",
@@ -825,6 +934,18 @@ impl crate::workspace::Workspace {
                                 "Private Key",
                                 AuthMethodKind::PrivateKey,
                                 "auth-private-key",
+                                cx,
+                            ))
+                            .child(auth_toggle(
+                                "Interactive",
+                                AuthMethodKind::KeyboardInteractive,
+                                "auth-keyboard-interactive",
+                                cx,
+                            ))
+                            .child(auth_toggle(
+                                "SSH Agent",
+                                AuthMethodKind::SshAgent,
+                                "auth-agent",
                                 cx,
                             )),
                     ),
@@ -856,6 +977,27 @@ impl crate::workspace::Workspace {
                     true,
                     cx,
                 )),
+            AuthMethodKind::KeyboardInteractive => card.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme.colors.text_muted)
+                    .child("The server will ask for one or more responses after connecting."),
+            ),
+            AuthMethodKind::SshAgent => card
+                .child(field_row(
+                    "Agent socket",
+                    ConnectField::AgentSocket,
+                    &form.agent_socket,
+                    "SSH_AUTH_SOCK (optional)",
+                    false,
+                    cx,
+                ))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.colors.text_muted)
+                        .child("Uses agent identities, including RSA keys."),
+                ),
         };
 
         // Save as is collapsed by default so the form stays short for one-off
@@ -964,6 +1106,167 @@ impl crate::workspace::Workspace {
                 .into_any_element(),
         )
     }
+
+    fn handle_keyboard_interactive_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(prompt) = self.active_keyboard_interactive_prompt() else {
+            return;
+        };
+        let request_id = prompt.request_id;
+        let keystroke = &event.keystroke;
+        if keystroke.key == "escape" {
+            self.cancel_keyboard_interactive(request_id, window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        if keystroke.key == "enter" {
+            self.submit_keyboard_interactive(request_id, window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        let Some(inputs) = self.modal_inputs.keyboard_interactive.get_mut(&request_id) else {
+            return;
+        };
+        if keystroke.key == "tab" && !inputs.inputs.is_empty() {
+            let delta: isize = if keystroke.modifiers.shift { -1 } else { 1 };
+            inputs.focused_index = (inputs.focused_index as isize + delta)
+                .rem_euclid(inputs.inputs.len() as isize)
+                as usize;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        if let Some(input) = inputs.inputs.get_mut(inputs.focused_index)
+            && input.state_mut().handle_keystroke(keystroke) == InputKeyResult::Handled
+        {
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn render_keyboard_interactive_modal(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        let prompt = self.active_keyboard_interactive_prompt()?.clone();
+        let inputs = self
+            .modal_inputs
+            .keyboard_interactive
+            .get(&prompt.request_id)?;
+        let theme = cx.theme().clone();
+        let request_id = prompt.request_id;
+        let mut card = div()
+            .id("keyboard-interactive-card")
+            .key_context("KeyboardInteractive")
+            .track_focus(&self.modal_focus)
+            .on_key_down(cx.listener(Self::handle_keyboard_interactive_key))
+            .flex()
+            .flex_col()
+            .gap_3()
+            .w(px(520.0))
+            .max_w_full()
+            .p_5()
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(theme.colors.border)
+            .bg(theme.colors.surface)
+            .shadow_lg()
+            .child(
+                div()
+                    .text_size(px(16.0))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(theme.colors.text)
+                    .child(if prompt.name.is_empty() {
+                        "Additional authentication required".to_string()
+                    } else {
+                        prompt.name.clone()
+                    }),
+            );
+        if !prompt.instruction.is_empty() {
+            card = card.child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme.colors.text_muted)
+                    .child(prompt.instruction.clone()),
+            );
+        }
+        for (index, field) in prompt.prompts.iter().enumerate() {
+            let input = inputs.inputs.get(index)?;
+            card = card.child(
+                div()
+                    .id(("keyboard-interactive-field", index))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .on_click(cx.listener(move |workspace, _event, window, cx| {
+                        if let Some(inputs) = workspace
+                            .modal_inputs
+                            .keyboard_interactive
+                            .get_mut(&request_id)
+                        {
+                            inputs.focused_index = index;
+                        }
+                        window.focus(&workspace.modal_focus);
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme.colors.text_muted)
+                            .child(field.prompt.clone()),
+                    )
+                    .child(text_field(
+                        ("keyboard-interactive-input", index),
+                        TextFieldModel {
+                            state: input.state(),
+                            placeholder: "",
+                            focused: inputs.focused_index == index,
+                            masked: !field.echo,
+                        },
+                        cx,
+                    )),
+            );
+        }
+        card = card.child(
+            div()
+                .flex()
+                .justify_end()
+                .gap_2()
+                .child(
+                    text_button("keyboard-interactive-cancel", "Cancel").on_click(cx.listener(
+                        move |workspace, _event, window, cx| {
+                            workspace.cancel_keyboard_interactive(request_id, window, cx);
+                        },
+                    )),
+                )
+                .child(
+                    text_button("keyboard-interactive-submit", "Continue")
+                        .primary(true)
+                        .on_click(cx.listener(move |workspace, _event, window, cx| {
+                            workspace.submit_keyboard_interactive(request_id, window, cx);
+                        })),
+                ),
+        );
+        Some(
+            div()
+                .id("keyboard-interactive-scrim")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .p_4()
+                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
+                .child(card)
+                .into_any_element(),
+        )
+    }
+
     pub(crate) fn render_host_key_modal(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let prompt = self.active_host_key_prompt()?.clone();
         let theme = cx.theme().clone();

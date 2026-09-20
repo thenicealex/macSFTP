@@ -89,7 +89,7 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
-      - name: Run Docker-backed password gate
+      - name: Run Docker-backed password and keyboard-interactive gate
         run: bash scripts/test_password_auth.sh
 
   keychain:

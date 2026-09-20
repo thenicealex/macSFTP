@@ -61,13 +61,11 @@
 - ~~多窗口。~~ **→ 已于 2026-07-13 作为 post-MVP 能力交付（见 §1 更新说明）。**
 - 完整 OpenSSH config 解析。
 - 完整 OpenSSH known_hosts grammar。
-- jump host / ProxyCommand。
-- keyboard-interactive 完整交互认证。
-- ssh-agent 支持。
 - uid/gid 恢复。
 - 完整 VoiceOver/accessibility 达标。
 
-注意：keyboard-interactive 在真实环境中很常见，很多服务器将密码认证封装为 keyboard-interactive。第一版不承诺完整交互流程，但是认证模块需要保留扩展点。
+2026-09-16 更新：单跳 saved-profile jump host、显式 ProxyCommand、多轮
+keyboard-interactive、ssh-agent 和 RSA-SHA2 客户端私钥已经作为 post-MVP 能力交付。
 
 ## 4. Workspace 结构
 
@@ -971,6 +969,10 @@ pub enum AuthMethod {
         has_passphrase: bool,
         passphrase_ref: Option<SecretRef>,
     },
+    KeyboardInteractive,
+    SshAgent {
+        socket_path: Option<LocalPath>,
+    },
 }
 ```
 
@@ -1023,9 +1025,11 @@ secret，并把清理失败作为 warning 返回调用方。
 `Debug` 始终脱敏。第三方 SSH/IO 错误原文不直接进入 `UserFacingError` 或认证日志；
 私钥诊断最多记录文件名，不记录完整路径。
 
-**2026-07-15 RSA 边界策略：** `russh` 的完整 RSA feature 保持关闭，RSA 客户端私钥
-会在认证前被明确拒绝；建议使用 Ed25519 或 ECDSA。原因是当前传递的 RustCrypto
-`rsa` 仍受 RUSTSEC-2023-0071 timing advisory 影响。为兼容只提供 RSA host key 的
+**2026-09-16 RSA 边界策略：** `russh` 的完整 RSA feature 保持关闭，因为当前传递的
+RustCrypto `rsa` 仍受 RUSTSEC-2023-0071 timing advisory 影响。直接 RSA 客户端私钥
+由 `ssh-key` 只解析组件，再转换为 PKCS#1 DER，所有 RSA-SHA2 私钥签名均由 AWS-LC
+完成；客户端 key 小于 2048 bit 时拒绝。ssh-agent RSA 则把签名留在 agent 内。
+为兼容只提供 RSA host key 的
 堡垒机，仓库维护最小 `russh` 补丁：只使用 AWS-LC 验证服务端 `rsa-sha2-256/512`
 签名，不编译 RustCrypto RSA 私钥操作，也不启用 SHA-1 `ssh-rsa`。为兼容系统
 OpenSSH 默认仍接受的旧堡垒机，RSA host key 下限为 1024 bit；低于 2048 bit 必须记录
@@ -1041,19 +1045,22 @@ CI 对最终 `Info.plist` 做门禁。SFTP adapter 只按 `russh::Error` 的结�
 Local Network 的恢复入口并允许原 tab 直接重试。当前 unsigned 开发包的系统隐私身份可能随
 重建变化；稳定身份依赖后续 Developer ID 签名，不在本轮伪造 ad-hoc 签名方案。
 
-### keyboard-interactive 扩展点
+### keyboard-interactive
 
-第一版不做完整 keyboard-interactive UI，但认证流程要保留 challenge/response 扩展点：
+runtime 为服务器发起的每轮 challenge 分配
+`KeyboardInteractiveRequestId`，通过 bounded event channel 发送带
+`RemoteEventScope` 的 prompt。UI 对每个 request 分别保存临时输入并返回等量
+responses；隐藏字段使用可清零输入。tab 关闭、reconnect、超时和 shutdown 都会使
+registry 中的旧 request 失效，多轮 challenge 继续沿用同一连接但使用新 request id。
 
-```rust
-pub enum AuthFlow {
-    Password,
-    PrivateKey,
-    KeyboardInteractiveUnsupported,
-}
-```
+### jump host、ProxyCommand 与 ssh-agent
 
-如果服务器只接受 keyboard-interactive，MVP 显示明确错误：该服务器要求 keyboard-interactive，但是当前版本暂不支持。因此，不能将其表述为普通密码失败。
+- jump host 引用一个 direct saved profile；第一版限制为单跳并拒绝自引用或链式 jump；
+- jump 连接认证后打开 `direct-tcpip`，目标 SSH 仍独立执行 host-key 校验和认证；
+- ProxyCommand 仅由显式 profile 配置，通过 `/bin/sh -c` 执行，`%h/%p/%r/%%`
+  按 OpenSSH 语义展开；子进程随连接 drop 强制终止，命令和 stderr 不进入日志；
+- ssh-agent 默认读取 `SSH_AUTH_SOCK`，GUI 启动环境没有该变量时可在 profile 中指定
+  socket；identity comment、公钥和签名数据不进入连接日志。
 
 ### 私钥认证
 

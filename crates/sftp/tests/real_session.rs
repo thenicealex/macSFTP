@@ -13,7 +13,6 @@ use macsftp_core::{
     ConnectionSettings, DisconnectReason, EditCheckId, EditSessionId, ErrorCode, FileKind,
     ProfileId, RemoteEventScope, RemotePath, RuntimeBridgeConfig, SessionId, TabId, Timestamp,
     TransferDirection, TransferEndpoint, TransferId, TransferJob, TransferState, TrustDecision,
-    TrustRequestId,
 };
 use macsftp_sftp::pool::ConnectionManager;
 use macsftp_sftp::{
@@ -26,7 +25,6 @@ use tokio_util::sync::CancellationToken;
 const TAB: TabId = TabId(1);
 const SESSION: SessionId = SessionId(1);
 const EPOCH: u64 = 1;
-const TRUST_REQUEST: TrustRequestId = TrustRequestId(1);
 const SECOND_TAB: TabId = TabId(2);
 const SECOND_SESSION: SessionId = SessionId(2);
 
@@ -44,6 +42,20 @@ fn spawn_actor(
     server: &SshTestServer,
     auth: AuthCredential,
     prefill_host_key: Option<&str>,
+) -> ActorFixture {
+    spawn_actor_with_route(
+        server,
+        auth,
+        prefill_host_key,
+        macsftp_core::ResolvedConnectionRoute::Direct,
+    )
+}
+
+fn spawn_actor_with_route(
+    server: &SshTestServer,
+    auth: AuthCredential,
+    prefill_host_key: Option<&str>,
+    route: macsftp_core::ResolvedConnectionRoute,
 ) -> ActorFixture {
     let (event_tx, event_rx) = flume::bounded(64);
     let trust_registry = Arc::new(TrustRegistry::new());
@@ -65,6 +77,7 @@ fn spawn_actor(
         port: server.port,
         username: server.username.clone(),
         auth,
+        route,
     };
 
     let (requests, request_rx) = flume::bounded(16);
@@ -81,7 +94,6 @@ fn spawn_actor(
         &settings,
         &ConnectionPoolIdentity::Ephemeral(SESSION),
         &scope,
-        TRUST_REQUEST,
         known_hosts,
         trust_config,
         trust_registry.clone(),
@@ -195,6 +207,137 @@ fn client_key_auth(server: &SshTestServer) -> AuthCredential {
     AuthCredential::PrivateKey {
         key_path: server.client_key_path.display().to_string(),
         passphrase: None,
+    }
+}
+
+fn rsa_client_key_auth(server: &SshTestServer) -> AuthCredential {
+    AuthCredential::PrivateKey {
+        key_path: server.client_rsa_key_path.display().to_string(),
+        passphrase: None,
+    }
+}
+
+async fn expect_connected(fixture: &ActorFixture, label: &str) {
+    match next_event(fixture, label).await {
+        AppEvent::TabConnected(_) => {}
+        AppEvent::AuthFailed(failure) => {
+            panic!("authentication failed: {:?}", failure.payload.reason)
+        }
+        other => panic!("expected TabConnected, got {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rsa_private_key_authenticates_with_aws_lc_signing() {
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    let fixture = spawn_actor(
+        &server,
+        rsa_client_key_auth(&server),
+        Some(&server.host_public_key),
+    );
+    expect_connected(&fixture, "RSA client authentication").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn encrypted_rsa_private_key_authenticates_with_aws_lc_signing() {
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    let fixture = spawn_actor(
+        &server,
+        AuthCredential::PrivateKey {
+            key_path: server.encrypted_rsa_key_path.display().to_string(),
+            passphrase: Some(SshTestServer::ENCRYPTED_KEY_PASSPHRASE.into()),
+        },
+        Some(&server.host_public_key),
+    );
+    expect_connected(&fixture, "encrypted RSA client authentication").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn proxy_command_stream_reaches_sftp_server() {
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    let fixture = spawn_actor_with_route(
+        &server,
+        client_key_auth(&server),
+        Some(&server.host_public_key),
+        macsftp_core::ResolvedConnectionRoute::ProxyCommand {
+            command: "/usr/bin/nc %h %p".into(),
+        },
+    );
+    expect_connected(&fixture, "ProxyCommand connection").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn jump_host_direct_tcpip_reaches_target_sftp_server() {
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    let jump_settings = ConnectionSettings {
+        host: "127.0.0.1".into(),
+        port: server.port,
+        username: server.username.clone(),
+        auth: client_key_auth(&server),
+        route: macsftp_core::ResolvedConnectionRoute::Direct,
+    };
+    let fixture = spawn_actor_with_route(
+        &server,
+        client_key_auth(&server),
+        Some(&server.host_public_key),
+        macsftp_core::ResolvedConnectionRoute::JumpHost {
+            settings: Box::new(jump_settings),
+        },
+    );
+    expect_connected(&fixture, "jump-host connection").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ssh_agent_rsa_identity_authenticates() {
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    let socket = server.fixture_dir.join("agent.sock");
+    let mut agent = std::process::Command::new("/usr/bin/ssh-agent")
+        .arg("-D")
+        .arg("-a")
+        .arg(&socket)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("start isolated ssh-agent");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !socket.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(socket.exists(), "isolated ssh-agent socket must appear");
+    let added = std::process::Command::new("/usr/bin/ssh-add")
+        .arg(&server.client_rsa_key_path)
+        .env("SSH_AUTH_SOCK", &socket)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("run ssh-add");
+    assert!(added.success(), "RSA identity must be added to ssh-agent");
+
+    let fixture = spawn_actor(
+        &server,
+        AuthCredential::SshAgent {
+            socket_path: Some(socket.display().to_string()),
+        },
+        Some(&server.host_public_key),
+    );
+    expect_connected(&fixture, "SSH agent RSA authentication").await;
+    if let Err(error) = agent.kill() {
+        panic!("stop isolated ssh-agent: {error}");
+    }
+    if let Err(error) = agent.wait() {
+        panic!("wait for isolated ssh-agent: {error}");
     }
 }
 
@@ -930,6 +1073,7 @@ async fn runtime_plans_and_executes_single_file_upload_and_download() {
                 port: server.port,
                 username: server.username.clone(),
                 auth: client_key_auth(&server),
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
             },
         }))
         .expect("connect command should send");
@@ -1037,6 +1181,7 @@ async fn runtime_directory_upload_survives_browsing_tab_close() {
                 port: server.port,
                 username: server.username.clone(),
                 auth: client_key_auth(&server),
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
             },
         }))
         .expect("connect command should send");
@@ -1151,6 +1296,7 @@ async fn runtime_streams_and_executes_directory_download() {
                 port: server.port,
                 username: server.username.clone(),
                 auth: client_key_auth(&server),
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
             },
         }))
         .expect("connect command should send");
@@ -1255,6 +1401,7 @@ async fn remote_download_failure_after_progress_emits_plan_failure() {
                 port: server.port,
                 username: server.username.clone(),
                 auth: client_key_auth(&server),
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
             },
         }))
         .expect("connect command should send");
@@ -1394,6 +1541,7 @@ async fn runtime_routes_read_dir_to_real_actor() {
                 port: server.port,
                 username: server.username.clone(),
                 auth: client_key_auth(&server),
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
             },
         }))
         .expect("connect command should send");
@@ -1470,6 +1618,7 @@ async fn tabs_browse_independently_after_another_tab_disconnects() {
                     port: server.port,
                     username: server.username.clone(),
                     auth: client_key_auth(&server),
+                    route: macsftp_core::ResolvedConnectionRoute::Direct,
                 },
             }))
             .expect("connect command should send");
@@ -1620,6 +1769,7 @@ async fn pooled_host_key_mismatch_is_emitted_for_every_logical_session() {
         port: server.port,
         username: server.username.clone(),
         auth: client_key_auth(&server),
+        route: macsftp_core::ResolvedConnectionRoute::Direct,
     };
 
     let cm = Arc::new(ConnectionManager::new());
@@ -1637,7 +1787,6 @@ async fn pooled_host_key_mismatch_is_emitted_for_every_logical_session() {
         &settings,
         &identity,
         &scope_one,
-        TRUST_REQUEST,
         known_hosts.clone(),
         trust_config.clone(),
         trust_registry.clone(),
@@ -1647,7 +1796,6 @@ async fn pooled_host_key_mismatch_is_emitted_for_every_logical_session() {
         &settings,
         &identity,
         &scope_two,
-        TrustRequestId(2),
         known_hosts.clone(),
         trust_config.clone(),
         trust_registry.clone(),

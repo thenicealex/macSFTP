@@ -39,18 +39,22 @@ use crate::workspace::*;
 
 #[cfg(test)]
 mod tests {
-    use gpui::{App, Entity, TestAppContext, VisualTestContext};
+    use gpui::{
+        App, Entity, ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, point, px,
+        size,
+    };
     use macsftp_core::{
         AppCommand, AppEvent, AuthCredential, AuthMethod, AuthMethodKind, ConflictDecision,
         ConflictPolicy, ConflictRequestId, ConnectionKey, ConnectionPoolIdentity,
         ConnectionSettings, ConnectionState, DisconnectReason, EditPhase, EntryPath, ErrorCode,
-        FileKind, FileSortField, HostKeyPrompt, LocalPath, MetadataPolicy, ProfileId,
-        RemoteDirSnapshot, RemoteEntry, RemoteEventScope, RemoteOperationFailure, RemotePath,
-        RemoteScoped, RestoredTabTarget, RuntimeBridgeConfig, SessionId, SortDirection,
-        TabConnected, TabDisconnected, TabId, Timestamp, TransferConflictPrompt, TransferDirection,
-        TransferEndpoint, TransferId, TransferJob, TransferPlanId, TransferPlanProgress,
-        TransferPlanSnapshot, TransferPlanState, TransferState, TrustRequestId, UserFacingError,
-        WindowSessionId,
+        FileKind, FileSortField, HostKeyPrompt, KeyboardInteractivePrompt,
+        KeyboardInteractivePromptField, KeyboardInteractiveRequestId, LocalPath, MetadataPolicy,
+        ProfileId, RemoteDirSnapshot, RemoteEntry, RemoteEventScope, RemoteOperationFailure,
+        RemotePath, RemoteScoped, RestoredTabTarget, RuntimeBridgeConfig, SessionId, SortDirection,
+        TabConnected, TabDisconnected, TabId, TabState, Timestamp, TransferConflictPrompt,
+        TransferDirection, TransferEndpoint, TransferId, TransferJob, TransferPlanId,
+        TransferPlanProgress, TransferPlanSnapshot, TransferPlanState, TransferState,
+        TrustRequestId, UserFacingError, WindowSessionId,
     };
     use macsftp_core::{EditSession, EditSessionId, RemoteSnapshot};
     use macsftp_sftp::{BridgeChannels, EventReceiver, RuntimeClient};
@@ -75,7 +79,8 @@ mod tests {
     use crate::resources::{ActiveResources, ActiveTransfers};
     use crate::session_coordinator::SessionCoordinator;
     use crate::workspace::ConflictChoice;
-    use crate::workspace::profiles::PassphrasePolicy;
+    use crate::workspace::connect_form::ConnectForm;
+    use crate::workspace::profiles::{PassphrasePolicy, ProfileEditorState, ProfileRouteKind};
     use crate::workspace::profiles::{SettingsSection, profile_matches_filter};
     use macsftp_core::HistoryOp;
     use macsftp_ui::InputState;
@@ -199,6 +204,7 @@ mod tests {
             auth: AuthCredential::Password {
                 password: "secret".to_string(),
             },
+            route: macsftp_core::ResolvedConnectionRoute::Direct,
         }
     }
 
@@ -848,6 +854,100 @@ mod tests {
     }
 
     #[gpui::test]
+    fn profile_editor_saves_jump_and_proxy_routes(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            cx.resources_mut()
+                .profiles
+                .save_connection_settings(ProfileId(1), "Bastion".into(), &test_settings())
+                .expect("seed direct jump profile");
+            workspace.start_new_profile(cx);
+            let editor = workspace
+                .settings
+                .profile_editor
+                .as_mut()
+                .expect("new profile editor opens");
+            editor.name.set_value("Internal");
+            editor.host.set_value("internal.example");
+            editor.username.set_value("deploy");
+            editor.auth_method = AuthMethodKind::SshAgent;
+            editor.route_kind = ProfileRouteKind::JumpHost;
+            editor.jump_profile_id = Some(ProfileId(1));
+            workspace.save_profile_editor(cx);
+
+            let target_id = workspace
+                .settings
+                .selected_profile_id
+                .expect("saved target is selected");
+            assert!(matches!(
+                cx.resources()
+                    .profiles
+                    .find_profile(target_id)
+                    .expect("target saved")
+                    .route,
+                macsftp_core::ConnectionRoute::JumpHost {
+                    profile_id: ProfileId(1)
+                }
+            ));
+
+            workspace.load_profile_editor(target_id, cx);
+            let editor = workspace
+                .settings
+                .profile_editor
+                .as_mut()
+                .expect("target editor reloads");
+            editor.route_kind = ProfileRouteKind::ProxyCommand;
+            editor.proxy_command.set_value("ssh -W %h:%p gateway");
+            workspace.save_profile_editor(cx);
+            assert!(matches!(
+                &cx.resources()
+                    .profiles
+                    .find_profile(target_id)
+                    .expect("target updated")
+                    .route,
+                macsftp_core::ConnectionRoute::ProxyCommand { command }
+                    if command == "ssh -W %h:%p gateway"
+            ));
+        });
+    }
+
+    #[gpui::test]
+    fn profile_editor_scrolls_at_minimum_window_size(cx: &mut TestAppContext) {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        let scroll =
+            workspace.read_with(&cx, |workspace, _| workspace.settings.editor_scroll.clone());
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            let mut editor = ProfileEditorState::blank();
+            editor.host.set_value("internal.example");
+            editor.username.set_value("deploy");
+            editor.auth_method = AuthMethodKind::SshAgent;
+            editor.route_kind = ProfileRouteKind::ProxyCommand;
+            editor.proxy_command.set_value("ssh -W %h:%p bastion");
+            workspace.surface = WorkspaceSurface::Settings;
+            workspace.settings.section = SettingsSection::Profiles;
+            workspace.settings.profile_editor = Some(editor);
+            cx.notify();
+        });
+        cx.simulate_resize(size(px(720.0), px(480.0)));
+        cx.run_until_parked();
+        cx.run_until_parked();
+
+        let thumb_before = cx
+            .debug_bounds("settings-profile-editor-scroll-scrollbar-thumb")
+            .expect("minimum-height profile editor must expose its custom scrollbar");
+        cx.simulate_event(ScrollWheelEvent {
+            position: point(px(600.0), px(400.0)),
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-120.0))),
+            ..Default::default()
+        });
+        assert!(scroll.offset().y < px(0.0));
+        let thumb_after = cx
+            .debug_bounds("settings-profile-editor-scroll-scrollbar-thumb")
+            .expect("scrollbar thumb remains rendered after wheel input");
+        assert!(thumb_after.top() > thumb_before.top());
+    }
+
+    #[gpui::test]
     fn profile_editor_passphrase_policy_round_trip_to_ask_every_time(cx: &mut TestAppContext) {
         let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -860,6 +960,7 @@ mod tests {
                     key_path: "~/.ssh/id_ed25519".into(),
                     passphrase: Some("old-secret".into()),
                 },
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
             };
             match cx.resources_mut().profiles.save_connection_settings(
                 ProfileId(1),
@@ -930,6 +1031,7 @@ mod tests {
                 auth: AuthCredential::Password {
                     password: "original-pass".into(),
                 },
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
             };
             match cx.resources_mut().profiles.save_connection_settings(
                 profile_id,
@@ -1025,6 +1127,7 @@ mod tests {
                 auth: AuthCredential::Password {
                     password: "hunter2".into(),
                 },
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
             };
             match cx.resources_mut().profiles.save_connection_settings(
                 profile_id,
@@ -1104,6 +1207,7 @@ mod tests {
                 auth: AuthCredential::Password {
                     password: "hunter2".into(),
                 },
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
             };
             match cx.resources_mut().profiles.save_connection_settings(
                 profile_id,
@@ -1394,6 +1498,130 @@ mod tests {
                 }
             );
         });
+    }
+
+    #[gpui::test]
+    fn keyboard_interactive_prompt_submits_redacted_responses(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
+        });
+        let _ = channels.command_rx.try_recv();
+        let request_id = KeyboardInteractiveRequestId(7);
+        let prompt = KeyboardInteractivePrompt {
+            request_id,
+            scope: RemoteEventScope::new(TabId(1), SessionId(1), 1),
+            name: "Verification".into(),
+            instruction: "Enter the code".into(),
+            prompts: vec![KeyboardInteractivePromptField {
+                prompt: "Code:".into(),
+                echo: false,
+            }],
+        };
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                AppEvent::KeyboardInteractivePrompt(prompt.clone()),
+                window,
+                cx,
+            );
+            let inputs = workspace
+                .modal_inputs
+                .keyboard_interactive
+                .get_mut(&request_id)
+                .expect("prompt creates input state");
+            inputs.inputs[0].state_mut().set_value("123456");
+            assert!(
+                workspace.render_keyboard_interactive_modal(cx).is_some(),
+                "keyboard-interactive prompt must render an actionable modal"
+            );
+            workspace.submit_keyboard_interactive(request_id, window, cx);
+        });
+
+        let command = channels
+            .command_rx
+            .try_recv()
+            .expect("interactive response is dispatched");
+        match command {
+            AppCommand::RespondKeyboardInteractive(response) => {
+                assert_eq!(response.request_id, request_id);
+                assert_eq!(response.responses, vec!["123456"]);
+                assert!(!format!("{response:?}").contains("123456"));
+            }
+            other => panic!("expected keyboard-interactive response, got {other:?}"),
+        }
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(workspace.active_keyboard_interactive_prompt().is_none());
+            assert!(workspace.modal_inputs.keyboard_interactive.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn stale_keyboard_interactive_prompt_is_dropped(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.connect_with(test_settings(), None, window, cx);
+        });
+        let _ = channels.command_rx.try_recv();
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.handle_app_event(
+                AppEvent::KeyboardInteractivePrompt(KeyboardInteractivePrompt {
+                    request_id: KeyboardInteractiveRequestId(9),
+                    scope: RemoteEventScope::new(TabId(1), SessionId(99), 0),
+                    name: String::new(),
+                    instruction: String::new(),
+                    prompts: Vec::new(),
+                }),
+                window,
+                cx,
+            );
+        });
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(workspace.active_keyboard_interactive_prompt().is_none());
+            assert!(workspace.modal_inputs.keyboard_interactive.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn keyboard_interactive_inputs_are_isolated_per_tab(cx: &mut TestAppContext) {
+        let (workspace, mut cx, channels) = init_workspace(cx);
+        let prompt = |request_id, tab_id| KeyboardInteractivePrompt {
+            request_id: KeyboardInteractiveRequestId(request_id),
+            scope: RemoteEventScope::new(TabId(tab_id), SessionId(tab_id), 1),
+            name: String::new(),
+            instruction: String::new(),
+            prompts: vec![KeyboardInteractivePromptField {
+                prompt: "Code:".into(),
+                echo: false,
+            }],
+        };
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.present_keyboard_interactive(prompt(1, 1), window, cx);
+            workspace
+                .state
+                .tabs
+                .open_tab(TabState::new(TabId(2), "second"));
+            workspace.present_keyboard_interactive(prompt(2, 2), window, cx);
+            assert_eq!(workspace.modal_inputs.keyboard_interactive.len(), 2);
+            workspace.cancel_keyboard_interactive(KeyboardInteractiveRequestId(2), window, cx);
+            assert!(
+                workspace
+                    .modal_inputs
+                    .keyboard_interactive
+                    .contains_key(&KeyboardInteractiveRequestId(1))
+            );
+            assert!(
+                !workspace
+                    .modal_inputs
+                    .keyboard_interactive
+                    .contains_key(&KeyboardInteractiveRequestId(2))
+            );
+        });
+        assert!(matches!(
+            channels.command_rx.try_recv(),
+            Ok(AppCommand::CancelKeyboardInteractive {
+                request_id: KeyboardInteractiveRequestId(2)
+            })
+        ));
     }
 
     #[gpui::test]
@@ -3341,6 +3569,7 @@ mod tests {
                 auth: AuthCredential::Password {
                     password: "profile-pass".into(),
                 },
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
             };
             match cx.resources_mut().profiles.save_connection_settings(
                 ProfileId(1),
@@ -3362,6 +3591,7 @@ mod tests {
                 auth: AuthCredential::Password {
                     password: "profile-pass".into(),
                 },
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
             },
             Some(ProfileId(1)),
         );
@@ -3411,6 +3641,7 @@ mod tests {
                     auth: AuthCredential::Password {
                         password: "profile-pass".into(),
                     },
+                    route: macsftp_core::ResolvedConnectionRoute::Direct,
                 },
             ) {
                 Ok(_) => {}
@@ -3424,6 +3655,7 @@ mod tests {
                     auth: AuthCredential::Password {
                         password: "profile-pass".into(),
                     },
+                    route: macsftp_core::ResolvedConnectionRoute::Direct,
                 },
                 Some(ProfileId(1)),
                 window,
@@ -4765,6 +4997,7 @@ mod tests {
                 auth: AuthCredential::Password {
                     password: "secret".into(),
                 },
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
             };
             match cx.resources_mut().profiles.save_connection_settings(
                 ProfileId(1),
@@ -4955,6 +5188,33 @@ mod tests {
             );
         });
         assert!(channels.command_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn connect_form_builds_interactive_and_agent_credentials() {
+        let mut form = ConnectForm::empty();
+        form.host.set_value("server.example");
+        form.username.set_value("alex");
+        form.set_auth_method(AuthMethodKind::KeyboardInteractive);
+        let interactive = form
+            .build_settings()
+            .expect("keyboard-interactive requires no stored secret");
+        assert!(matches!(
+            interactive.auth,
+            AuthCredential::KeyboardInteractive
+        ));
+
+        form.set_auth_method(AuthMethodKind::SshAgent);
+        form.agent_socket.set_value("/tmp/test-agent.sock");
+        let agent = form
+            .build_settings()
+            .expect("agent socket is optional but valid when provided");
+        assert!(matches!(
+            agent.auth,
+            AuthCredential::SshAgent {
+                socket_path: Some(ref path)
+            } if path == "/tmp/test-agent.sock"
+        ));
     }
 
     #[gpui::test]
@@ -6280,6 +6540,7 @@ mod tests {
                 auth: AuthCredential::Password {
                     password: "not-persisted".into(),
                 },
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
             }));
             SessionFile {
                 version: SessionFile::CURRENT_VERSION,

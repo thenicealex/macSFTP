@@ -275,7 +275,6 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
         BigEndian::write_u32(&mut self.buf[..], len as u32);
 
         self.read_response().await?;
-        debug!("identities: {:?}", &self.buf[..]);
         let mut identities = Vec::new();
 
         #[allow(clippy::indexing_slicing)] // static length
@@ -348,7 +347,6 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
         hash_alg: Option<HashAlg>,
         mut data: Vec<u8>,
     ) -> Result<Vec<u8>, Error> {
-        debug!("sign_request: {data:?}");
         let hash = self.prepare_sign_request(public, hash_alg, &data)?;
 
         self.read_response().await?;
@@ -360,7 +358,7 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
             }
             Some((&msg::FAILURE, _)) => Err(Error::AgentFailure),
             _ => {
-                debug!("self.buf = {:?}", &self.buf[..]);
+                debug!("agent returned an unexpected signing response");
                 Err(Error::AgentProtocolError)
             }
         }
@@ -378,8 +376,6 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
         hash_alg: Option<HashAlg>,
         mut data: Vec<u8>,
     ) -> Result<Vec<u8>, Error> {
-        debug!("sign_request_cert: {data:?}");
-
         self.buf.clear();
         self.buf.resize(4, 0);
         msg::SIGN_REQUEST.encode(&mut self.buf)?;
@@ -410,7 +406,7 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
             }
             Some((&msg::FAILURE, _)) => Err(Error::AgentFailure),
             _ => {
-                debug!("self.buf = {:?}", &self.buf[..]);
+                debug!("agent returned an unexpected certificate signing response");
                 Err(Error::AgentProtocolError)
             }
         }
@@ -427,7 +423,6 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
         msg::SIGN_REQUEST.encode(&mut self.buf)?;
         public.key_data().encoded()?.encode(&mut self.buf)?;
         data.encode(&mut self.buf)?;
-        debug!("public = {public:?}");
 
         let hash = match public.algorithm() {
             Algorithm::Rsa { .. } => match hash_alg {
@@ -478,7 +473,6 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
         hash_alg: Option<HashAlg>,
         data: &[u8],
     ) -> impl futures::Future<Output = (Self, Result<String, Error>)> {
-        debug!("sign_request: {data:?}");
         let r = self.prepare_sign_request(public, hash_alg, data);
         async move {
             if let Err(e) = r {
@@ -507,8 +501,6 @@ impl<S: AgentStream + Unpin> AgentClient<S> {
         hash_alg: Option<HashAlg>,
         data: &[u8],
     ) -> Result<Signature, Error> {
-        debug!("sign_request: {data:?}");
-
         self.prepare_sign_request(public, hash_alg, data)?;
         self.read_response().await?;
 

@@ -1,4 +1,6 @@
-use macsftp_core::{AuthMethod, ConnectionProfile, LocalPath, ProfileId, SecretRef};
+use macsftp_core::{
+    AuthMethod, ConnectionProfile, ConnectionRoute, LocalPath, ProfileId, SecretRef,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::atomic_file::{AtomicWriteError, write_private_file_phased};
@@ -16,7 +18,7 @@ pub struct ProfilesFile {
 }
 
 impl ProfilesFile {
-    pub const CURRENT_VERSION: u32 = 3;
+    pub const CURRENT_VERSION: u32 = 4;
 
     pub fn new() -> Self {
         Self {
@@ -86,7 +88,7 @@ impl ProfilesFile {
             });
         }
         let mut file = parsed;
-        if file.version < Self::CURRENT_VERSION {
+        if file.version < 3 {
             // Pre-tri-state files spelled the passphrase state as
             // `remember_passphrase == passphrase_ref.is_some()`. The ref
             // implies the key needs a passphrase; serde already dropped the
@@ -145,6 +147,39 @@ impl ProfilesFile {
                 });
             }
             validate_auth(&profile.auth, profile.id)?;
+            match &profile.route {
+                ConnectionRoute::Direct => {}
+                ConnectionRoute::ProxyCommand { command } => {
+                    if command.trim().is_empty() {
+                        return Err(StorageError::Corrupt {
+                            message: format!("profile {} has an empty ProxyCommand", profile.id.0),
+                        });
+                    }
+                }
+                ConnectionRoute::JumpHost { profile_id } => {
+                    if *profile_id == profile.id {
+                        return Err(StorageError::Corrupt {
+                            message: format!("profile {} jumps to itself", profile.id.0),
+                        });
+                    }
+                    let Some(jump) = self.find_profile(*profile_id) else {
+                        return Err(StorageError::Corrupt {
+                            message: format!(
+                                "profile {} references missing jump profile {}",
+                                profile.id.0, profile_id.0
+                            ),
+                        });
+                    };
+                    if !matches!(&jump.route, ConnectionRoute::Direct) {
+                        return Err(StorageError::Corrupt {
+                            message: format!(
+                                "profile {} references non-direct jump profile {}",
+                                profile.id.0, profile_id.0
+                            ),
+                        });
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -185,6 +220,7 @@ impl ProfilesFile {
     }
 
     fn serialize(&self) -> Result<String, StorageError> {
+        self.validate()?;
         serde_json::to_string_pretty(self).map_err(|error| StorageError::Parse {
             message: error.to_string(),
         })
@@ -252,6 +288,7 @@ fn validate_auth(auth: &AuthMethod, profile_id: ProfileId) -> Result<(), Storage
             }
             Ok(())
         }
+        AuthMethod::KeyboardInteractive | AuthMethod::SshAgent { .. } => Ok(()),
     }
 }
 
@@ -282,6 +319,9 @@ pub enum StorageError {
     /// another store instance changed the file in between.
     ConcurrentModification {
         message: String,
+    },
+    ProfileInUse {
+        profile_id: ProfileId,
     },
 }
 
@@ -346,6 +386,11 @@ impl std::fmt::Display for StorageError {
             StorageError::ConcurrentModification { message } => {
                 write!(formatter, "profiles changed concurrently: {message}")
             }
+            StorageError::ProfileInUse { profile_id } => write!(
+                formatter,
+                "profile {} is used as a jump host by another profile",
+                profile_id.0
+            ),
             StorageError::Io { path, message } => {
                 write!(formatter, "could not access {path}: {message}")
             }
