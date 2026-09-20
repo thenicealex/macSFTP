@@ -7,20 +7,20 @@ use crate::atomic_file::{AtomicWriteError, write_private_file_phased};
 
 /// Versioned, non-secret representation persisted as `profiles.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProfilesFile {
-    pub version: u32,
-    pub profiles: Vec<ConnectionProfile>,
+pub(crate) struct ProfilesFile {
+    pub(crate) version: u32,
+    pub(crate) profiles: Vec<ConnectionProfile>,
     /// One past the highest profile id ever allocated. Persisted so ids are
     /// never reused after the highest-id profile is deleted (recents and
     /// session state hold `profile_id` as a stable identity).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_profile_id: Option<u64>,
+    pub(crate) next_profile_id: Option<u64>,
 }
 
 impl ProfilesFile {
-    pub const CURRENT_VERSION: u32 = 4;
+    pub(crate) const CURRENT_VERSION: u32 = 5;
 
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             version: Self::CURRENT_VERSION,
             profiles: Vec::new(),
@@ -28,7 +28,7 @@ impl ProfilesFile {
         }
     }
 
-    pub fn find_profile(&self, profile_id: ProfileId) -> Option<&ConnectionProfile> {
+    pub(crate) fn find_profile(&self, profile_id: ProfileId) -> Option<&ConnectionProfile> {
         self.profiles
             .iter()
             .find(|profile| profile.id == profile_id)
@@ -65,7 +65,7 @@ impl ProfilesFile {
     /// empty store (first launch); unsupported versions or structurally
     /// corrupt contents surface as `StorageError`. A v1 file is migrated in
     /// memory only — loading never rewrites the file on disk.
-    pub fn load(path: &LocalPath) -> Result<Self, StorageError> {
+    pub(crate) fn load(path: &LocalPath) -> Result<Self, StorageError> {
         match std::fs::read_to_string(path.as_str()) {
             Ok(contents) => Self::parse(&contents),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(ProfilesFile::new()),
@@ -184,16 +184,8 @@ impl ProfilesFile {
         Ok(())
     }
 
-    /// Atomically write `profiles.json` to `path` via a temp file + rename,
-    /// so a crash mid-write can't leave a truncated file.
-    pub fn save(&self, path: &LocalPath) -> Result<(), StorageError> {
-        self.save_phased(path)
-            .map_err(PhasedSaveError::into_storage_error)
-    }
-
-    /// Phase-aware variant of [`Self::save`]: callers that run compensating
-    /// actions on failure must be able to tell a not-committed failure from a
-    /// replaced-but-not-durable one.
+    /// Phase-aware save used by `ProfileStore`, whose compensating actions
+    /// must distinguish a non-committed write from an unproven durable one.
     pub(crate) fn save_phased(&self, path: &LocalPath) -> Result<(), PhasedSaveError> {
         let json = self.serialize().map_err(PhasedSaveError::NotCommitted)?;
         write_private_file_phased(std::path::Path::new(path.as_str()), json.as_bytes())

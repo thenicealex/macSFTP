@@ -235,14 +235,35 @@ impl RuntimeController {
         }
         self.shutdown_initiated = true;
 
-        // Best-effort: enqueue Shutdown so the dispatch loop can stop cleanly.
-        // If the channel is full or closed, the loop will still terminate
-        // because we abort its task below.
-        let _ = self.channels.command_tx.try_send(AppCommand::Shutdown);
+        // Let the dispatcher run its bounded actor/transfer cleanup. If the
+        // command cannot be queued, aborting remains the last-resort path.
+        let shutdown_enqueued = self
+            .channels
+            .command_tx
+            .try_send(AppCommand::Shutdown)
+            .is_ok();
 
-        if let Some(handle) = self.command_loop_handle.take() {
-            // Abort ensures we don't hang if the loop is stuck on a send.
-            handle.abort();
+        if let Some(mut handle) = self.command_loop_handle.take() {
+            if shutdown_enqueued {
+                let wait_result = self.runtime.as_ref().map(|runtime| {
+                    runtime.block_on(async {
+                        tokio::time::timeout(self.config.shutdown_timeout, &mut handle).await
+                    })
+                });
+                match wait_result {
+                    Some(Ok(Ok(()))) => {}
+                    Some(Ok(Err(error))) => {
+                        warn!(error = %error, "runtime command loop exited with an error");
+                    }
+                    Some(Err(_)) | None => {
+                        warn!("runtime command loop cleanup timed out");
+                        handle.abort();
+                    }
+                }
+            } else {
+                warn!("runtime shutdown command could not be queued");
+                handle.abort();
+            }
         }
         // Reject all pending trust requests so no actor hangs waiting.
         self.trust_registry.reject_all();
@@ -258,7 +279,7 @@ impl RuntimeController {
     ///
     /// Panics if called after shutdown — internal callers must not use it
     /// past the shutdown point. Used by actor dispatch and tests.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn runtime(&self) -> &Runtime {
         self.runtime
             .as_ref()
@@ -289,15 +310,49 @@ impl Drop for RuntimeController {
 
 /// Handle to a running browsing session actor.
 struct RemoteSessionHandle {
-    #[allow(dead_code)]
     session_id: SessionId,
     session_epoch: u64,
     /// Real actors receive directory requests through this bounded
     /// mailbox. Mock actors intentionally do not implement browsing.
     request_tx: Option<flume::Sender<RemoteSessionRequest>>,
     cancel: CancellationToken,
-    #[allow(dead_code)]
     join: JoinHandle<()>,
+}
+
+impl RemoteSessionHandle {
+    fn shutdown_in_background(self, timeout: Duration) {
+        std::mem::drop(tokio::spawn(shutdown_session_tasks(vec![self], timeout)));
+    }
+}
+
+async fn shutdown_session_tasks(handles: Vec<RemoteSessionHandle>, timeout: Duration) {
+    let mut joins = Vec::with_capacity(handles.len());
+    for handle in handles {
+        handle.cancel.cancel();
+        joins.push(handle.join);
+    }
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    for mut join in joins {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            join.abort();
+            continue;
+        }
+        match tokio::time::timeout(remaining, &mut join).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) if error.is_cancelled() => {}
+            Ok(Err(error)) => warn!(error = %error, "remote session task failed during shutdown"),
+            Err(_) => {
+                join.abort();
+                if let Err(error) = join.await
+                    && !error.is_cancelled()
+                {
+                    warn!(error = %error, "remote session task abort failed");
+                }
+            }
+        }
+    }
 }
 
 /// Route `AppCommand::Fs`. Local mutations are owned by the app (platform
@@ -410,7 +465,7 @@ async fn command_dispatch_loop(
     trust_registry: Arc<TrustRegistry>,
     keyboard_interactive_registry: Arc<KeyboardInteractiveRegistry>,
     backend: RuntimeBackend,
-    _config: RuntimeBridgeConfig,
+    config: RuntimeBridgeConfig,
 ) {
     let mut sessions: HashMap<TabId, RemoteSessionHandle> = HashMap::new();
     let next_trust_id = Arc::new(AtomicU64::new(1));
@@ -462,7 +517,7 @@ async fn command_dispatch_loop(
                 // Cancel the old session if the tab is reconnecting, and
                 // reject trust requests bound to any previous epoch.
                 if let Some(handle) = sessions.remove(&cmd.tab_id) {
-                    handle.cancel.cancel();
+                    handle.shutdown_in_background(config.shutdown_timeout);
                 }
                 trust_registry.reject_stale(cmd.tab_id, cmd.session_epoch);
                 keyboard_interactive_registry.reject_stale(cmd.tab_id, cmd.session_epoch);
@@ -515,9 +570,15 @@ async fn command_dispatch_loop(
                         let port = cmd.settings.port;
 
                         let join = tokio::spawn(async move {
-                            match receiver.recv().await {
+                            let connection_result = tokio::select! {
+                                _ = cancel_clone.cancelled() => return,
+                                result = receiver.recv() => result,
+                            };
+                            match connection_result {
                                 Ok(Ok(shared_connection)) => {
-                                    let channel_result = async {
+                                    let channel_result = tokio::select! {
+                                        _ = cancel_clone.cancelled() => return,
+                                        result = async {
                                         let channel = shared_connection.handle.channel_open_session().await.map_err(|error| {
                                             crate::physical_connection::ConnectFailure::Connection(
                                                 crate::physical_connection::sftp_connection_error(
@@ -545,7 +606,9 @@ async fn command_dispatch_loop(
                                                 ),
                                             )
                                         })
-                                    }.await;
+                                        }
+                                        => result,
+                                    };
 
                                     match channel_result {
                                         Ok(sftp) => {
@@ -670,7 +733,7 @@ async fn command_dispatch_loop(
 
             Ok(AppCommand::DisconnectTab { tab_id }) | Ok(AppCommand::CloseTab { tab_id }) => {
                 if let Some(handle) = sessions.remove(&tab_id) {
-                    handle.cancel.cancel();
+                    handle.shutdown_in_background(config.shutdown_timeout);
                 }
                 trust_registry.reject_all_for_tab(tab_id);
                 keyboard_interactive_registry.reject_all_for_tab(tab_id);
@@ -679,7 +742,7 @@ async fn command_dispatch_loop(
             Ok(AppCommand::CloseTabs { tab_ids }) => {
                 for tab_id in tab_ids {
                     if let Some(handle) = sessions.remove(&tab_id) {
-                        handle.cancel.cancel();
+                        handle.shutdown_in_background(config.shutdown_timeout);
                     }
                     trust_registry.reject_all_for_tab(tab_id);
                     keyboard_interactive_registry.reject_all_for_tab(tab_id);
@@ -692,13 +755,40 @@ async fn command_dispatch_loop(
                 path,
             }) => {
                 let Some(session) = sessions.get(&tab_id) else {
+                    warn!(
+                        tab_id = tab_id.0,
+                        transfer_id = transfer_id.0,
+                        failure = "missing_session",
+                        "residual temp cleanup could not be routed"
+                    );
                     continue;
                 };
                 let Some(request_tx) = &session.request_tx else {
+                    warn!(
+                        tab_id = tab_id.0,
+                        transfer_id = transfer_id.0,
+                        failure = "missing_actor_mailbox",
+                        "residual temp cleanup could not be routed"
+                    );
                     continue;
                 };
-                let _ = request_tx
-                    .try_send(RemoteSessionRequest::RemoveRemoteTempFile { transfer_id, path });
+                match request_tx
+                    .try_send(RemoteSessionRequest::RemoveRemoteTempFile { transfer_id, path })
+                {
+                    Ok(()) => {}
+                    Err(flume::TrySendError::Full(_)) => warn!(
+                        tab_id = tab_id.0,
+                        transfer_id = transfer_id.0,
+                        failure = "actor_mailbox_full",
+                        "residual temp cleanup deferred until the next connection"
+                    ),
+                    Err(flume::TrySendError::Disconnected(_)) => warn!(
+                        tab_id = tab_id.0,
+                        transfer_id = transfer_id.0,
+                        failure = "actor_mailbox_disconnected",
+                        "residual temp cleanup deferred until the next connection"
+                    ),
+                }
             }
             Ok(AppCommand::ReadRemoteDir { tab_id, path }) => {
                 let Some(session) = sessions.get(&tab_id) else {
@@ -1004,9 +1094,11 @@ async fn command_dispatch_loop(
     }
 
     // Shutdown cleanup: cancel all actors and reject all pending requests.
-    for (_, handle) in sessions.drain() {
-        handle.cancel.cancel();
-    }
+    shutdown_session_tasks(
+        sessions.drain().map(|(_, handle)| handle).collect(),
+        config.shutdown_timeout,
+    )
+    .await;
     drop(transfer_manager_tx);
     if let Err(error) = transfer_manager_handle.await {
         warn!(error = %error, "transfer manager did not shut down cleanly");
@@ -1341,6 +1433,38 @@ mod tests {
             elapsed < Duration::from_secs(3),
             "shutdown took too long: {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn session_shutdown_cancels_and_joins_actor_task() {
+        use std::sync::atomic::AtomicBool;
+
+        let controller = RuntimeController::start_mock(RuntimeBridgeConfig::default());
+        controller.runtime().block_on(async {
+            let cancel = CancellationToken::new();
+            let observed = Arc::new(AtomicBool::new(false));
+            let observed_in_task = observed.clone();
+            let cancel_in_task = cancel.clone();
+            let join = tokio::spawn(async move {
+                cancel_in_task.cancelled().await;
+                observed_in_task.store(true, Ordering::SeqCst);
+            });
+            let handle = RemoteSessionHandle {
+                session_id: SessionId(1),
+                session_epoch: 1,
+                request_tx: None,
+                cancel,
+                join,
+            };
+
+            shutdown_session_tasks(vec![handle], Duration::from_secs(1)).await;
+
+            assert!(
+                observed.load(Ordering::SeqCst),
+                "session shutdown must let the actor observe cancellation"
+            );
+        });
+        controller.shutdown();
     }
 
     #[test]

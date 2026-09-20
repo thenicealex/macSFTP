@@ -94,6 +94,8 @@ macOS 与本地文件系统边界：应用路径、本地目录读取、编辑�
 
 传输 event 只能在进程级边界 reduce 一次，再由所有窗口读取共享快照。tab event 可以广播到窗口，但必须先经过 core 的陈旧事件校验。
 
+process-owned 的 transfer、residual-temp 和远程编辑校验 event 不能在 `Workspace` 再保留第二套生产 reducer；新增 event 必须进入显式路由分支，不能依靠 wildcard 静默忽略。
+
 长期业务状态不得只存在 view struct；hover、输入草稿、popover 展开状态等短期状态可以放在 view。
 
 ## 4. GPUI 与 Tokio 桥接
@@ -119,6 +121,7 @@ GPUI action
 - event channel 满时由背压保护不可丢的状态转换；
 - progress 在生产端节流，不能通过 UI 侧随机丢事件降载；
 - runtime shutdown 必须取消 actor 和 transfer、拒绝 pending request，并在有界超时内结束；
+- tab 关闭或 reconnect 必须让仍在握手/channel 初始化阶段的 session task 观察 cancellation；`JoinHandle` 必须被有界等待或最终 abort，不能只 drop 后让任务脱离所有权；
 - command dispatcher 必须穷尽匹配，禁止兜底吞掉新增 command。
 
 ## 5. Command / Event 契约
@@ -186,6 +189,7 @@ ProxyCommand 是明确的代码执行能力。UI 必须显示风险提示，日�
 - retry 重新获得可用连接，不长期强持有失败连接；
 - `.macsftp-part-*` 不是正常目标冲突；
 - temp cleanup 失败写入 `ResidualTempStore`，后续只清理由 macSFTP 记录的路径；
+- residual cleanup command 无法路由到 live actor 时保留记录并写结构化 WARN，等待下一次连接重试，不能静默当作成功；
 - 权限或 mtime 保留失败通常产生 warning，不推翻已成功的数据传输；
 - symlink 默认复制 link 本身，不解引用。
 
@@ -232,6 +236,8 @@ Profile 更新由 `ProfileStore` 协调：
 Profile 写入只有一个产品入口：Settings → Profiles 将编辑草稿转换为 `ProfileSaveRequest`，storage 通过 `ProfileStore::save_request` 提交。Connect 表单只选择已有 Profile 或建立临时连接，不创建、更新或删除 Profile；它通过 “Manage…” 进入 Settings。禁止为 Connect 或其他 UI 再增加并行的保存适配器。
 
 `ProfileStore::save_request` 是唯一公开保存入口；更底层的 profile-file 写入只允许 storage 内部调用，测试夹具只能使用 `#[cfg(test)]` helper。Connect 中手工输入的 credential 只用于当前连接，不得因曾选择 Profile 而回写持久化状态。
+
+`profiles.json` v5 删除了从未有生产消费者的 `group_id` 预留字段；读取 v4 时忽略该字段，并在下一次成功写入时升级为 v5。未来真正实现 Profile group/folder 时必须重新设计模型和 migration，不能复用历史占位语义。
 
 损坏或未来版本文件不能被空默认值静默覆盖。session 文件恢复失败时必须先保存原始 corrupt backup，成功后才重新开放 checkpoint。
 

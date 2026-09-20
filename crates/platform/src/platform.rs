@@ -11,14 +11,6 @@ use std::os::unix::fs::PermissionsExt;
 pub const MACOS_LOCAL_NETWORK_SETTINGS_URL: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork";
 
-pub fn crate_name() -> &'static str {
-    "macsftp-platform"
-}
-
-pub fn core_crate_name() -> &'static str {
-    macsftp_core::crate_name()
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppPaths {
     pub config_file: LocalPath,
@@ -316,8 +308,8 @@ mod tests {
     use macsftp_core::{FileKind, LocalPath, Timestamp};
 
     use super::{
-        AppPaths, LocalEntryDraft, core_crate_name, crate_name, create_directory, delete_entry,
-        read_local_directory, rename_entry,
+        AppPaths, LocalEntryDraft, create_directory, delete_entry, read_local_directory,
+        rename_entry,
     };
 
     /// Per-process unique sequence so parallel test invocations never share a
@@ -330,12 +322,6 @@ mod tests {
             "macsftp-platform-test-{label}-{}-{sequence}",
             std::process::id()
         ))
-    }
-
-    #[test]
-    fn links_core_crate() {
-        assert_eq!(crate_name(), "macsftp-platform");
-        assert_eq!(core_crate_name(), "macsftp-core");
     }
 
     #[test]

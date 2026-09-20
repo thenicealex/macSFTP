@@ -27,7 +27,3 @@ pub use transfer_row::{TransferRow, transfer_row};
 pub use workspace_widgets::{
     DragPreview, connection_status, copy_name, section_header_static, transfer_title,
 };
-
-pub fn crate_name() -> &'static str {
-    "macsftp-ui"
-}

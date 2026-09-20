@@ -10,8 +10,8 @@ use crate::file_lock::FileLock;
 use crate::keychain::{KeychainError, KeychainStore};
 use crate::profile_file::{PhasedSaveError, ProfilesFile, StorageError, TransactionPhase};
 
-/// Disk-backed profile store: owns the `profiles.json` path and the
-/// in-memory `ProfilesFile`, keeping them in sync on every write.
+/// Disk-backed profile store that keeps its validated in-memory state,
+/// Keychain credentials, and `profiles.json` synchronized on every write.
 pub struct ProfileStore {
     path: LocalPath,
     profiles: ProfilesFile,
@@ -604,10 +604,6 @@ impl ProfileStore {
         profile.port = request.port;
         profile.default_remote_path = request.default_remote_path.clone();
         profile.route = request.route.clone();
-        if let Some(previous) = &previous {
-            profile.group_id = previous.group_id;
-        }
-
         let saved = match self.commit_transaction(TransactionKind::Save {
             profile: Box::new(profile),
         }) {
@@ -794,22 +790,6 @@ impl ProfileStore {
         })
     }
 
-    /// Remove the credential behind a profile while leaving its metadata.
-    /// This is used by recovery tests and is also suitable for a future
-    /// explicit "forget credential" action.
-    pub fn delete_profile_credentials(
-        &self,
-        profile_id: ProfileId,
-    ) -> Result<(), ProfileMutationError> {
-        let profile = self
-            .find_profile(profile_id)
-            .ok_or(ProfileMutationError::ProfileNotFound(profile_id))?;
-        for secret_ref in secret_refs_for_auth(&profile.auth) {
-            self.keychain.delete(&secret_ref)?;
-        }
-        Ok(())
-    }
-
     fn resolve_auth<'a>(
         request: &'a ProfileSaveRequest,
         previous: Option<&ConnectionProfile>,
@@ -942,11 +922,12 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use macsftp_core::{
-        AuthCredential, AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionRoute,
-        ConnectionSettings, LocalPath, ProfileId, SecretRef,
+        AuthCredential, AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionRoute, LocalPath,
+        ProfileId, SecretRef,
     };
 
-    use crate::{ProfilesFile, StorageError, core_crate_name, crate_name};
+    use crate::StorageError;
+    use crate::profile_file::ProfilesFile;
 
     use super::{
         PrivateKeyPassphraseUpdate, ProfileAuthUpdate, ProfileMutationError, ProfileSaveRequest,
@@ -1037,12 +1018,6 @@ mod tests {
             } => (*has_passphrase, passphrase_ref.clone()),
             other => panic!("expected private-key auth, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn links_core_crate() {
-        assert_eq!(crate_name(), "macsftp-storage");
-        assert_eq!(core_crate_name(), "macsftp-core");
     }
 
     #[test]
@@ -1427,20 +1402,15 @@ mod tests {
         let path = temp_profiles_path("no-secret");
         cleanup(&path);
 
-        let settings = ConnectionSettings {
-            host: "example.com".into(),
-            port: 2222,
-            username: "alex".into(),
-            auth: AuthCredential::Password {
-                password: "hunter2-do-not-leak".into(),
-            },
-            route: macsftp_core::ResolvedConnectionRoute::Direct,
-        };
-        let profile =
-            ConnectionProfile::from_connection_settings(ProfileId(9), "Staging", &settings);
-
-        let mut store = ProfileStore::open(path.clone()).expect("open store");
-        store.save_profile_for_test(profile).expect("save profile");
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
+        store
+            .save_request(password_save_request(
+                9,
+                "Staging",
+                "example.com",
+                "hunter2-do-not-leak",
+            ))
+            .expect("save profile through the canonical mutation boundary");
 
         let raw = std::fs::read_to_string(path.as_str()).expect("read profiles file");
         assert!(
@@ -1453,17 +1423,6 @@ mod tests {
         );
 
         cleanup(&path);
-    }
-
-    #[test]
-    fn save_to_uncreatable_path_returns_io_error() {
-        let path = LocalPath::new("/nonexistent-dir-xyz/macsftp/profiles.json");
-        let file = ProfilesFile::new();
-        let result = file.save(&path);
-        assert!(
-            matches!(result, Err(StorageError::Io { .. })),
-            "expected Io error, got {result:?}"
-        );
     }
 
     // --- Batch A regression tests ---
@@ -1638,7 +1597,7 @@ mod tests {
             .save_profile_for_test(password_profile(10, "Trigger Rewrite"))
             .expect("rewrite triggers format upgrade");
         let rewritten = std::fs::read_to_string(path.as_str()).expect("reread rewritten file");
-        assert!(rewritten.contains(r#""version": 4"#));
+        assert!(rewritten.contains(r#""version": 5"#));
         assert!(rewritten.contains(r#""has_passphrase": true"#));
         assert!(!rewritten.contains("remember_passphrase"));
         cleanup(&path);
@@ -1893,7 +1852,7 @@ mod tests {
 
         let raw = std::fs::read_to_string(path.as_str()).expect("read saved store");
         assert!(
-            raw.contains(r#""version": 4"#),
+            raw.contains(r#""version": 5"#),
             "first save must persist as the current format, got: {raw}"
         );
         assert!(
@@ -2231,6 +2190,46 @@ mod tests {
                 .route,
             macsftp_core::ConnectionRoute::Direct
         ));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn version_four_group_placeholder_is_dropped_on_next_save() {
+        let path = temp_profiles_path("v4-group-placeholder");
+        cleanup(&path);
+        std::fs::write(
+            path.as_str(),
+            r#"{
+                "version": 4,
+                "profiles": [{
+                    "id": 1,
+                    "revision": 1,
+                    "name": "Legacy grouped",
+                    "host": "legacy.example",
+                    "port": 22,
+                    "username": "alex",
+                    "auth": {"Password": {"secret_ref": "keychain:macsftp:1:password"}},
+                    "route": "Direct",
+                    "default_remote_path": null,
+                    "group_id": 7
+                }],
+                "next_profile_id": 2
+            }"#,
+        )
+        .expect("write v4 profile fixture");
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
+        let profile = store
+            .find_profile(ProfileId(1))
+            .expect("legacy profile loads")
+            .clone();
+
+        store
+            .save_profile_for_test(profile)
+            .expect("next save upgrades the profile file");
+
+        let rewritten = std::fs::read_to_string(path.as_str()).expect("read upgraded profile file");
+        assert!(rewritten.contains(r#""version": 5"#));
+        assert!(!rewritten.contains("group_id"));
         cleanup(&path);
     }
 }

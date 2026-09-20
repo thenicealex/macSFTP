@@ -90,7 +90,7 @@ fn spawn_actor_with_route(
     // concurrently with the connection task — so there is no deadlock.
     let cm = Arc::new(ConnectionManager::new());
     let scope = RemoteEventScope::new(TAB, SESSION, EPOCH);
-    let connect_rx = cm.connect_session(
+    let mut connect_rx = cm.get_or_connect(
         &settings,
         &ConnectionPoolIdentity::Ephemeral(SESSION),
         &scope,
@@ -102,7 +102,11 @@ fn spawn_actor_with_route(
 
     let actor_cancel = cancel.clone();
     tokio::spawn(async move {
-        if let Ok(Ok((shared, sftp))) = connect_rx.recv_async().await {
+        if let Ok(Ok(shared)) = connect_rx.recv().await
+            && let Ok(channel) = shared.handle.channel_open_session().await
+            && channel.request_subsystem(true, "sftp").await.is_ok()
+            && let Ok(sftp) = russh_sftp::client::SftpSession::new(channel.into_stream()).await
+        {
             let actor = RemoteSessionActor::new(
                 TAB,
                 SESSION,
@@ -1748,7 +1752,6 @@ async fn pooled_host_key_mismatch_is_emitted_for_every_logical_session() {
         return;
     };
 
-    let (event_tx, event_rx) = flume::bounded(64);
     let app_known_hosts_path = server.fixture_dir.join("app_known_hosts_pool");
 
     // Prefill with a DIFFERENT (wrong) host key so the handshake mismatches.
@@ -1756,13 +1759,6 @@ async fn pooled_host_key_mismatch_is_emitted_for_every_logical_session() {
         .expect("read client public key");
     let line = format!("[127.0.0.1]:{} {}\n", server.port, wrong_key.trim());
     std::fs::write(&app_known_hosts_path, line).expect("prefill app known_hosts");
-
-    let known_hosts = Arc::new(Mutex::new(KnownHostsStore::load(
-        &app_known_hosts_path,
-        None,
-    )));
-    let trust_config = Arc::new(HostTrustConfig::new(app_known_hosts_path.clone(), None));
-    let trust_registry = Arc::new(TrustRegistry::new());
 
     let settings = ConnectionSettings {
         host: "127.0.0.1".to_string(),
@@ -1772,68 +1768,47 @@ async fn pooled_host_key_mismatch_is_emitted_for_every_logical_session() {
         route: macsftp_core::ResolvedConnectionRoute::Direct,
     };
 
-    let cm = Arc::new(ConnectionManager::new());
-    // Both calls share the SAME identity, so they resolve to the SAME
+    let mut controller = RuntimeController::start(
+        RuntimeBridgeConfig::default(),
+        HostTrustConfig::new(app_known_hosts_path, None),
+    );
+    let client = controller.client();
+    let mut events = controller
+        .take_event_receiver()
+        .expect("event receiver should be available once");
+
+    // Both commands share the SAME identity, so they resolve to the SAME
     // ConnectionKey and therefore share one in-progress pooled handshake.
     let identity = ConnectionPoolIdentity::Ephemeral(SESSION);
     let scope_one = RemoteEventScope::new(TAB, SESSION, EPOCH);
     let scope_two = RemoteEventScope::new(SECOND_TAB, SECOND_SESSION, EPOCH);
 
-    // Issue both calls synchronously before awaiting either result, so the
-    // second call observes the in-progress pool entry and resubscribes to
-    // the same broadcast (get_or_connect inserts PoolEntry::Connecting
-    // before any .await and returns rx without yielding).
-    let rx_one = cm.connect_session(
-        &settings,
-        &identity,
-        &scope_one,
-        known_hosts.clone(),
-        trust_config.clone(),
-        trust_registry.clone(),
-        event_tx.clone(),
-    );
-    let rx_two = cm.connect_session(
-        &settings,
-        &identity,
-        &scope_two,
-        known_hosts.clone(),
-        trust_config.clone(),
-        trust_registry.clone(),
-        event_tx.clone(),
-    );
-
-    // Both connections must fail (the handshake mismatched).
-    let result_one = rx_one.recv_async().await;
-    let result_two = rx_two.recv_async().await;
-    assert!(
-        matches!(result_one, Ok(Err(_))),
-        "first connection must fail"
-    );
-    assert!(
-        matches!(result_two, Ok(Err(_))),
-        "second connection must fail"
-    );
-
-    let (requests_tx, _requests_rx) = flume::bounded::<RemoteSessionRequest>(1);
-    let fixture = ActorFixture {
-        events: event_rx,
-        requests: requests_tx,
-        trust_registry,
-        cancel: CancellationToken::new(),
-        app_known_hosts_path,
-    };
+    for (tab_id, session_id) in [(TAB, SESSION), (SECOND_TAB, SECOND_SESSION)] {
+        client
+            .try_send(AppCommand::ConnectTab(ConnectCommand {
+                tab_id,
+                session_id,
+                session_epoch: EPOCH,
+                profile_id: ProfileId(1),
+                pool_identity: identity.clone(),
+                settings: settings.clone(),
+            }))
+            .expect("pooled connect command should send");
+    }
 
     // Each logical waiter receives exactly one scoped mismatch event.
-    let mismatch_one = match next_event(&fixture, "HostKeyMismatch #1").await {
-        AppEvent::HostKeyMismatch(m) => m,
-        other => panic!("expected HostKeyMismatch, got {other:?}"),
-    };
-    let mismatch_two = match next_event(&fixture, "HostKeyMismatch #2").await {
-        AppEvent::HostKeyMismatch(m) => m,
-        other => panic!("expected HostKeyMismatch, got {other:?}"),
-    };
+    let mut mismatches = Vec::new();
+    while mismatches.len() < 2 {
+        if let AppEvent::HostKeyMismatch(mismatch) =
+            next_runtime_event(&mut events, "pooled HostKeyMismatch").await
+        {
+            mismatches.push(mismatch);
+        }
+    }
+    let mismatch_one = &mismatches[0];
+    let mismatch_two = &mismatches[1];
 
-    for m in [&mismatch_one, &mismatch_two] {
+    for m in [mismatch_one, mismatch_two] {
         assert!(
             m.actual_fingerprint_sha256.starts_with("SHA256:"),
             "actual fingerprint must be present"
@@ -1857,13 +1832,13 @@ async fn pooled_host_key_mismatch_is_emitted_for_every_logical_session() {
     );
 
     // No third mismatch or success event may arrive.
-    let follow_up =
-        tokio::time::timeout(Duration::from_millis(500), fixture.events.recv_async()).await;
+    let follow_up = tokio::time::timeout(Duration::from_millis(500), events.recv()).await;
     match follow_up {
         Err(_timeout) => {}
-        Ok(Err(_channel_closed)) => {}
-        Ok(Ok(event)) => panic!("only two mismatch events expected, got {event:?}"),
+        Ok(None) => {}
+        Ok(Some(event)) => panic!("only two mismatch events expected, got {event:?}"),
     }
+    controller.shutdown();
 }
 
 #[tokio::test(flavor = "multi_thread")]

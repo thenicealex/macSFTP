@@ -619,7 +619,7 @@ impl Workspace {
     /// authoritative edit-check (PR 3) no longer consults the cached listing,
     /// so this helper now exists mainly so the upload-back rebase round-trip
     /// can be asserted in tests.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn remote_entry_snapshot(
         &self,
         tab_id: TabId,

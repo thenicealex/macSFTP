@@ -4,10 +4,6 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-pub fn crate_name() -> &'static str {
-    "macsftp-test-support"
-}
-
 /// A real OpenSSH server for SFTP integration tests.
 ///
 /// Runs the local `/usr/sbin/sshd` as the current user on a loopback
@@ -266,12 +262,7 @@ fn free_loopback_port() -> Option<u16> {
 mod tests {
     use std::ffi::OsStr;
 
-    use super::{crate_name, integration_tests_required};
-
-    #[test]
-    fn exposes_crate_name() {
-        assert_eq!(crate_name(), "macsftp-test-support");
-    }
+    use super::integration_tests_required;
 
     #[test]
     fn integration_requirement_accepts_only_explicit_truthy_values() {

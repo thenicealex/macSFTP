@@ -4,10 +4,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-pub fn crate_name() -> &'static str {
-    "macsftp-core"
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct TabId(pub u64);
 
@@ -34,9 +30,6 @@ pub struct KeyboardInteractiveRequestId(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct ProfileId(pub u64);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-pub struct ProfileGroupId(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Timestamp(pub SystemTime);
@@ -346,8 +339,6 @@ impl UserFacingError {
 pub enum ErrorCode {
     AuthFailed,
     HostKeyMismatch,
-    TrustRequestTimeout,
-    UserCancelledTrustRequest,
     LocalNetworkPermissionDenied,
     PermissionDenied,
     FileExists,
@@ -377,7 +368,6 @@ pub struct ConnectionProfile {
     #[serde(default)]
     pub route: ConnectionRoute,
     pub default_remote_path: Option<RemotePath>,
-    pub group_id: Option<ProfileGroupId>,
 }
 
 impl ConnectionProfile {
@@ -398,45 +388,7 @@ impl ConnectionProfile {
             auth,
             route: ConnectionRoute::Direct,
             default_remote_path: None,
-            group_id: None,
         }
-    }
-
-    /// Build a persistable profile from a connection form. The in-memory
-    /// secret is mapped to a `SecretRef` handle (see `SecretRef::keychain_ref`)
-    /// and is never written into the profile — `profiles.json` stores only
-    /// the handle, not the credential. The actual secret is persisted to
-    /// the macOS Keychain by the storage layer (plan §11).
-    pub fn from_connection_settings(
-        id: ProfileId,
-        name: impl Into<String>,
-        settings: &ConnectionSettings,
-    ) -> Self {
-        let auth = match &settings.auth {
-            AuthCredential::Password { .. } => AuthMethod::Password {
-                secret_ref: SecretRef::keychain_ref(id, "password"),
-            },
-            AuthCredential::PrivateKey {
-                key_path,
-                passphrase,
-                ..
-            } => AuthMethod::PrivateKey {
-                key_path: LocalPath::new(key_path.clone()),
-                has_passphrase: passphrase.is_some(),
-                passphrase_ref: passphrase
-                    .as_ref()
-                    .map(|_| SecretRef::keychain_ref(id, "passphrase")),
-            },
-            AuthCredential::KeyboardInteractive => AuthMethod::KeyboardInteractive,
-            AuthCredential::SshAgent { socket_path } => AuthMethod::SshAgent {
-                socket_path: socket_path.as_ref().map(LocalPath::new),
-            },
-        };
-        let mut profile =
-            ConnectionProfile::new(id, name, &settings.host, &settings.username, auth);
-        profile.port = settings.port;
-        profile.route = settings.route.persisted_shape();
-        profile
     }
 }
 
@@ -2034,13 +1986,6 @@ impl AppEvent {
         }
     }
 
-    /// Returns `true` if this event is tab-scoped and must pass the
-    /// stale event guard. Transfer events return `false` — they flow
-    /// to the global `TransferStore` regardless of tab state.
-    pub fn is_remote_scoped(&self) -> bool {
-        self.remote_scope().is_some()
-    }
-
     /// Returns `true` if this event is a transfer event that does
     /// not depend on tab survival. The event drain task should route
     /// these directly to `TransferStore` without checking the stale
@@ -2130,7 +2075,6 @@ impl TrustRequest {
 pub enum TrustDecision {
     TrustAndSave,
     Reject,
-    TimedOut,
     RequestExpired,
 }
 
@@ -2740,8 +2684,6 @@ impl fmt::Display for ErrorCode {
         let code = match self {
             Self::AuthFailed => "auth_failed",
             Self::HostKeyMismatch => "host_key_mismatch",
-            Self::TrustRequestTimeout => "trust_request_timeout",
-            Self::UserCancelledTrustRequest => "user_cancelled_trust_request",
             Self::LocalNetworkPermissionDenied => "local_network_permission_denied",
             Self::PermissionDenied => "permission_denied",
             Self::FileExists => "file_exists",
@@ -2773,11 +2715,6 @@ mod tests {
         TransferDirection, TransferEndpoint, TransferId, TransferJob, TransferPlan, TransferPlanId,
         TransferPlanState, TransferState, TransferStore, TrustRequest, TrustRequestId,
     };
-
-    #[test]
-    fn exposes_crate_name() {
-        assert_eq!(super::crate_name(), "macsftp-core");
-    }
 
     #[test]
     fn path_join_and_parent_round_trip() {
@@ -3573,7 +3510,7 @@ mod tests {
             },
         ));
         assert_eq!(dir_loaded.remote_scope(), Some(scope));
-        assert!(dir_loaded.is_remote_scoped());
+        assert!(dir_loaded.remote_scope().is_some());
         assert!(!dir_loaded.is_transfer_event());
 
         let tab_connected = AppEvent::TabConnected(RemoteScoped::new(
@@ -3582,7 +3519,7 @@ mod tests {
                 remote_root: RemotePath::new("/home/alex"),
             },
         ));
-        assert!(tab_connected.is_remote_scoped());
+        assert!(tab_connected.remote_scope().is_some());
         assert!(!tab_connected.is_transfer_event());
     }
 
@@ -3606,7 +3543,7 @@ mod tests {
         assert_eq!(scope.tab_id, TabId(2));
         assert_eq!(scope.session_id, SessionId(4));
         assert_eq!(scope.session_epoch, 3);
-        assert!(event.is_remote_scoped());
+        assert!(event.remote_scope().is_some());
     }
 
     #[test]
@@ -3621,7 +3558,7 @@ mod tests {
         });
 
         assert_eq!(event.remote_scope(), Some(scope));
-        assert!(event.is_remote_scoped());
+        assert!(event.remote_scope().is_some());
         assert!(!event.is_transfer_event());
     }
 
@@ -3648,7 +3585,7 @@ mod tests {
                 "transfer events should be classified as such"
             );
             assert!(
-                !event.is_remote_scoped(),
+                event.remote_scope().is_none(),
                 "transfer events are not remote-scoped"
             );
         }
@@ -3953,81 +3890,6 @@ mod tests {
     }
 
     #[test]
-    fn from_connection_settings_maps_secret_to_keychain_ref() {
-        use super::{AuthCredential, ConnectionSettings};
-
-        // Password: the secret is never copied into the profile; only a
-        // keychain stub ref is stored.
-        let password_settings = ConnectionSettings {
-            host: "example.com".into(),
-            port: 2222,
-            username: "alex".into(),
-            auth: AuthCredential::Password {
-                password: "super-secret".into(),
-            },
-            route: crate::ResolvedConnectionRoute::Direct,
-        };
-        let profile = ConnectionProfile::from_connection_settings(
-            ProfileId(1),
-            "Production",
-            &password_settings,
-        );
-        assert_eq!(profile.host, "example.com");
-        assert_eq!(profile.port, 2222);
-        assert_eq!(
-            profile.auth,
-            AuthMethod::Password {
-                secret_ref: SecretRef::keychain_ref(ProfileId(1), "password")
-            }
-        );
-
-        // Private key with passphrase: key path is persisted (not secret),
-        // passphrase becomes a keychain ref only when provided.
-        let key_settings = ConnectionSettings {
-            host: "example.com".into(),
-            port: 22,
-            username: "alex".into(),
-            auth: AuthCredential::PrivateKey {
-                key_path: "/Users/alex/.ssh/id_ed25519".into(),
-                passphrase: Some("key-phrase".into()),
-            },
-            route: crate::ResolvedConnectionRoute::Direct,
-        };
-        let key_profile =
-            ConnectionProfile::from_connection_settings(ProfileId(2), "Jump", &key_settings);
-        assert_eq!(
-            key_profile.auth,
-            AuthMethod::PrivateKey {
-                key_path: LocalPath::new("/Users/alex/.ssh/id_ed25519"),
-                has_passphrase: true,
-                passphrase_ref: Some(SecretRef::keychain_ref(ProfileId(2), "passphrase")),
-            }
-        );
-
-        // Private key without passphrase: no keychain ref, nothing to remember.
-        let no_pass = ConnectionSettings {
-            host: "example.com".into(),
-            port: 22,
-            username: "alex".into(),
-            auth: AuthCredential::PrivateKey {
-                key_path: "/Users/alex/.ssh/id_rsa".into(),
-                passphrase: None,
-            },
-            route: crate::ResolvedConnectionRoute::Direct,
-        };
-        let no_pass_profile =
-            ConnectionProfile::from_connection_settings(ProfileId(3), "Bare", &no_pass);
-        assert_eq!(
-            no_pass_profile.auth,
-            AuthMethod::PrivateKey {
-                key_path: LocalPath::new("/Users/alex/.ssh/id_rsa"),
-                has_passphrase: false,
-                passphrase_ref: None,
-            }
-        );
-    }
-
-    #[test]
     fn timestamp_serializes_as_unix_seconds() {
         let ts = Timestamp::from_secs_since_epoch(1_234_567_890);
         let json = serde_json::to_string(&ts).expect("serialize");
@@ -4179,13 +4041,13 @@ mod tests {
 
         // The two actor outcomes carry the live scope and pass the stale guard.
         assert_eq!(checked.remote_scope(), Some(scope.clone()));
-        assert!(checked.is_remote_scoped());
+        assert!(checked.remote_scope().is_some());
         assert_eq!(failed.remote_scope(), Some(scope.clone()));
-        assert!(failed.is_remote_scoped());
+        assert!(failed.remote_scope().is_some());
         // The dispatch failure has no SessionId; it must not be treated as
         // remote-scoped (it is epoch-correlated instead).
         assert_eq!(dispatch_failed.remote_scope(), None);
-        assert!(!dispatch_failed.is_remote_scoped());
+        assert!(dispatch_failed.remote_scope().is_none());
         // None of the three are transfer events.
         assert!(!checked.is_transfer_event());
         assert!(!failed.is_transfer_event());

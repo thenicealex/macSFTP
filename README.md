@@ -3,9 +3,10 @@
 macSFTP is a native macOS SFTP client written in Rust. It uses GPUI for the
 interface and `russh`/`russh-sftp` for asynchronous SSH and SFTP operations.
 
-The project currently targets macOS and is distributed as an unsigned app
-bundle. App Store distribution, notarization, automatic updates, and protocols
-other than SFTP are outside the current scope.
+The project currently targets macOS and builds an unsigned app bundle for local
+testing. Public releases currently provide source only. App Store distribution,
+notarization, automatic updates, and protocols other than SFTP are outside the
+current scope.
 
 ## Current capabilities
 

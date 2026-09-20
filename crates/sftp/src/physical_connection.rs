@@ -230,7 +230,7 @@ impl client::Handler for ClientHandler {
                         // Clean up the registry entry so it can't be
                         // resolved later.
                         self.trust_registry
-                            .resolve(self.trust_request_id, TrustDecision::TimedOut);
+                            .resolve(self.trust_request_id, TrustDecision::RequestExpired);
                         self.record_rejection(HostKeyRejection::PromptTimeout);
                         Ok::<bool, russh::Error>(false)
                     }

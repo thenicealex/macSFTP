@@ -131,9 +131,7 @@ impl MockRemoteSessionActor {
                             tracing::warn!(error = %error, "mock actor event channel closed");
                         }
                     }
-                    Ok(TrustDecision::Reject)
-                    | Ok(TrustDecision::TimedOut)
-                    | Ok(TrustDecision::RequestExpired) => {
+                    Ok(TrustDecision::Reject) | Ok(TrustDecision::RequestExpired) => {
                         if let Err(error) = self
                             .event_tx
                             .send_async(AppEvent::TabDisconnected(RemoteScoped::new(

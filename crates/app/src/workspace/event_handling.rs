@@ -4,9 +4,11 @@ use macsftp_core::{
     RestoredTabTarget, TabId, UserFacingError, sort_entries,
 };
 
-use tracing::{debug, warn};
+use tracing::debug;
 
-use crate::resources::{ActiveResources, ActiveTransfers};
+use crate::resources::ActiveResources;
+#[cfg(test)]
+use crate::resources::ActiveTransfers;
 
 impl crate::workspace::Workspace {
     pub(crate) fn handle_app_event(
@@ -15,10 +17,9 @@ impl crate::workspace::Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Production transfer events are intercepted by AppEventCoordinator
-        // and reduced once process-wide. Keeping this small delegation makes
-        // direct Workspace tests exercise the same reducer without restoring
-        // per-window event ownership.
+        // Test-only adapter for older direct Workspace tests. Production
+        // transfer ownership lives exclusively in AppEventCoordinator.
+        #[cfg(test)]
         if event.is_transfer_event() {
             let conflict_prompt = match &event {
                 AppEvent::TransferConflict(prompt) => Some(prompt.clone()),
@@ -260,21 +261,25 @@ impl crate::workspace::Workspace {
                         Some(format!("{}: {}", failure.title, failure.message).into());
                 }
             }
-            AppEvent::ResidualTempCreated(record) => {
-                if let Err(error) = cx.resources_mut().residual_temps.add_and_save(record) {
-                    warn!(error = %error, "could not persist residual temp record");
-                }
+            AppEvent::TransferPlanStarted(_)
+            | AppEvent::TransferPlanProgress(_)
+            | AppEvent::TransferPlanCompleted { .. }
+            | AppEvent::TransferPlanCancelled { .. }
+            | AppEvent::TransferPlanFailed { .. }
+            | AppEvent::TransferConflict(_)
+            | AppEvent::TransferRunning(_)
+            | AppEvent::TransferProgress(_)
+            | AppEvent::TransferWarning(_)
+            | AppEvent::TransferCompleted { .. }
+            | AppEvent::TransferSkipped { .. }
+            | AppEvent::TransferFailed(_)
+            | AppEvent::ResidualTempCreated(_)
+            | AppEvent::ResidualTempCleared { .. }
+            | AppEvent::RemoteEditSnapshotChecked(_)
+            | AppEvent::RemoteEditSnapshotCheckFailed(_)
+            | AppEvent::RemoteEditSnapshotDispatchFailed(_) => {
+                debug_assert!(false, "process-owned event reached a Workspace")
             }
-            AppEvent::ResidualTempCleared { transfer_id, path } => {
-                if let Err(error) = cx
-                    .resources_mut()
-                    .residual_temps
-                    .remove_and_save(transfer_id, &path)
-                {
-                    warn!(error = %error, "could not update residual temp store");
-                }
-            }
-            _ => {}
         }
         cx.notify();
     }
