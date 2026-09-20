@@ -34,7 +34,7 @@ impl ProfilesFile {
             .find(|profile| profile.id == profile_id)
     }
 
-    pub fn save_profile(
+    pub(crate) fn save_profile(
         &mut self,
         mut profile: ConnectionProfile,
     ) -> Result<ConnectionProfile, StorageError> {

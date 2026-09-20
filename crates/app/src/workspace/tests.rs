@@ -46,8 +46,8 @@ mod tests {
     use macsftp_core::{
         AppCommand, AppEvent, AuthCredential, AuthMethod, AuthMethodKind, ConflictDecision,
         ConflictPolicy, ConflictRequestId, ConnectionKey, ConnectionPoolIdentity,
-        ConnectionSettings, ConnectionState, DisconnectReason, EditPhase, EntryPath, ErrorCode,
-        FileKind, FileSortField, HostKeyPrompt, KeyboardInteractivePrompt,
+        ConnectionProfile, ConnectionSettings, ConnectionState, DisconnectReason, EditPhase,
+        EntryPath, ErrorCode, FileKind, FileSortField, HostKeyPrompt, KeyboardInteractivePrompt,
         KeyboardInteractivePromptField, KeyboardInteractiveRequestId, LocalPath, MetadataPolicy,
         ProfileId, RemoteDirSnapshot, RemoteEntry, RemoteEventScope, RemoteOperationFailure,
         RemotePath, RemoteScoped, RestoredTabTarget, RuntimeBridgeConfig, SessionId, SortDirection,
@@ -59,7 +59,8 @@ mod tests {
     use macsftp_core::{EditSession, EditSessionId, RemoteSnapshot};
     use macsftp_sftp::{BridgeChannels, EventReceiver, RuntimeClient};
     use macsftp_storage::{
-        AppearancePreference, SessionFile, SessionStore, SessionTabSnapshot, SessionWindowSnapshot,
+        AppearancePreference, PrivateKeyPassphraseUpdate, ProfileAuthUpdate, ProfileSaveRequest,
+        SessionFile, SessionStore, SessionTabSnapshot, SessionWindowSnapshot,
     };
     use macsftp_ui::{Appearance, Theme};
 
@@ -86,6 +87,88 @@ mod tests {
     use macsftp_ui::InputState;
 
     const TEST_REMOTE_ROOT: &str = "/home/tester";
+
+    fn save_profile_fixture(cx: &mut App, profile: ConnectionProfile) -> ConnectionProfile {
+        let auth = match &profile.auth {
+            AuthMethod::Password { .. } => ProfileAuthUpdate::Password {
+                password: Some("test-password".into()),
+            },
+            AuthMethod::PrivateKey { key_path, .. } => ProfileAuthUpdate::PrivateKey {
+                key_path: key_path.clone(),
+                passphrase: PrivateKeyPassphraseUpdate::NoPassphrase,
+            },
+            AuthMethod::KeyboardInteractive => ProfileAuthUpdate::KeyboardInteractive,
+            AuthMethod::SshAgent { socket_path } => ProfileAuthUpdate::SshAgent {
+                socket_path: socket_path.clone(),
+            },
+        };
+        cx.resources_mut()
+            .profiles
+            .save_request(ProfileSaveRequest {
+                profile_id: profile.id,
+                name: profile.name,
+                host: profile.host,
+                port: profile.port,
+                username: profile.username,
+                auth,
+                route: profile.route,
+                default_remote_path: profile.default_remote_path,
+            })
+            .expect("save profile fixture")
+            .profile
+    }
+
+    fn save_settings_fixture(
+        cx: &mut App,
+        profile_id: ProfileId,
+        name: &str,
+        settings: &ConnectionSettings,
+    ) -> ConnectionProfile {
+        let auth = match &settings.auth {
+            AuthCredential::Password { password } => ProfileAuthUpdate::Password {
+                password: Some(password.clone()),
+            },
+            AuthCredential::PrivateKey {
+                key_path,
+                passphrase,
+            } => ProfileAuthUpdate::PrivateKey {
+                key_path: LocalPath::new(key_path.clone()),
+                passphrase: passphrase
+                    .as_ref()
+                    .map(|passphrase| PrivateKeyPassphraseUpdate::Remember(passphrase.clone()))
+                    .unwrap_or(PrivateKeyPassphraseUpdate::NoPassphrase),
+            },
+            AuthCredential::KeyboardInteractive => ProfileAuthUpdate::KeyboardInteractive,
+            AuthCredential::SshAgent { socket_path } => ProfileAuthUpdate::SshAgent {
+                socket_path: socket_path.as_ref().map(LocalPath::new),
+            },
+        };
+        let route = match &settings.route {
+            macsftp_core::ResolvedConnectionRoute::Direct => macsftp_core::ConnectionRoute::Direct,
+            macsftp_core::ResolvedConnectionRoute::ProxyCommand { command } => {
+                macsftp_core::ConnectionRoute::ProxyCommand {
+                    command: command.clone(),
+                }
+            }
+            macsftp_core::ResolvedConnectionRoute::JumpHost { .. } => {
+                panic!("test fixtures must save jump routes through ProfileSaveRequest")
+            }
+        };
+        cx.resources_mut()
+            .profiles
+            .save_request(ProfileSaveRequest {
+                profile_id,
+                name: name.into(),
+                host: settings.host.clone(),
+                port: settings.port,
+                username: settings.username.clone(),
+                auth,
+                route,
+                default_remote_path: None,
+            })
+            .expect("save settings fixture")
+            .profile
+    }
 
     /// Per-process unique sequence so parallel test invocations never share a
     /// temp directory (AGENTS.md §9; audit TEST-001).
@@ -769,10 +852,7 @@ mod tests {
                     secret_ref: macsftp_core::SecretRef::keychain_ref(ProfileId(1), "password"),
                 },
             );
-            match cx.resources_mut().profiles.save_profile(profile) {
-                Ok(_) => {}
-                Err(error) => panic!("save profile for settings list test: {error}"),
-            }
+            save_profile_fixture(cx, profile);
             ws.surface = WorkspaceSurface::Settings;
             ws.set_settings_section(SettingsSection::Profiles, cx);
             assert_eq!(ws.settings.section, SettingsSection::Profiles);
@@ -858,10 +938,7 @@ mod tests {
     fn profile_editor_saves_jump_and_proxy_routes(cx: &mut TestAppContext) {
         let (workspace, mut cx, _channels) = init_workspace(cx);
         workspace.update_in(&mut cx, |workspace, _window, cx| {
-            cx.resources_mut()
-                .profiles
-                .save_connection_settings(ProfileId(1), "Bastion".into(), &test_settings())
-                .expect("seed direct jump profile");
+            save_settings_fixture(cx, ProfileId(1), "Bastion", &test_settings());
             workspace.start_new_profile(cx);
             let editor = workspace
                 .settings
@@ -963,14 +1040,7 @@ mod tests {
                 },
                 route: macsftp_core::ResolvedConnectionRoute::Direct,
             };
-            match cx.resources_mut().profiles.save_connection_settings(
-                ProfileId(1),
-                "Keyed".into(),
-                &settings,
-            ) {
-                Ok(_) => {}
-                Err(error) => panic!("seed private-key profile: {error}"),
-            }
+            save_settings_fixture(cx, ProfileId(1), "Keyed", &settings);
 
             ws.surface = WorkspaceSurface::Settings;
             ws.load_profile_editor(ProfileId(1), cx);
@@ -1034,14 +1104,7 @@ mod tests {
                 },
                 route: macsftp_core::ResolvedConnectionRoute::Direct,
             };
-            match cx.resources_mut().profiles.save_connection_settings(
-                profile_id,
-                "Work".into(),
-                &settings,
-            ) {
-                Ok(_) => {}
-                Err(error) => panic!("seed profile and credential: {error}"),
-            }
+            save_settings_fixture(cx, profile_id, "Work", &settings);
 
             ws.surface = WorkspaceSurface::Settings;
             ws.load_profile_editor(profile_id, cx);
@@ -1130,14 +1193,7 @@ mod tests {
                 },
                 route: macsftp_core::ResolvedConnectionRoute::Direct,
             };
-            match cx.resources_mut().profiles.save_connection_settings(
-                profile_id,
-                "Work Server".into(),
-                &settings,
-            ) {
-                Ok(_) => {}
-                Err(error) => panic!("seed profile and credential: {error}"),
-            }
+            save_settings_fixture(cx, profile_id, "Work Server", &settings);
 
             ws.surface = WorkspaceSurface::Settings;
             ws.set_settings_section(SettingsSection::Profiles, cx);
@@ -1210,14 +1266,7 @@ mod tests {
                 },
                 route: macsftp_core::ResolvedConnectionRoute::Direct,
             };
-            match cx.resources_mut().profiles.save_connection_settings(
-                profile_id,
-                "Prod".into(),
-                &settings,
-            ) {
-                Ok(_) => {}
-                Err(error) => panic!("seed profile: {error}"),
-            }
+            save_settings_fixture(cx, profile_id, "Prod", &settings);
             match cx
                 .resources_mut()
                 .recents
@@ -1308,14 +1357,8 @@ mod tests {
                     secret_ref: macsftp_core::SecretRef::keychain_ref(ProfileId(2), "password"),
                 },
             );
-            match cx.resources_mut().profiles.save_profile(work) {
-                Ok(_) => {}
-                Err(error) => panic!("seed work profile: {error}"),
-            }
-            match cx.resources_mut().profiles.save_profile(home) {
-                Ok(_) => {}
-                Err(error) => panic!("seed home profile: {error}"),
-            }
+            save_profile_fixture(cx, work);
+            save_profile_fixture(cx, home);
 
             let all = cx.resources().profiles.profiles().to_vec();
             assert_eq!(all.len(), 2);
@@ -2301,21 +2344,21 @@ mod tests {
     fn open_recent_with_profile_and_keychain_connects(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
 
-        workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.open_connect_form(window, cx);
-        });
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            let form = workspace
-                .connect_form_ui
-                .form
-                .as_mut()
-                .expect("form is open");
-            form.host.set_value("profile.example.com");
-            form.port.set_value("22");
-            form.username.set_value("deploy");
-            form.password.set_value("s3cret");
-            form.profile_name.set_value("Deploy box");
-            workspace.save_current_profile(cx);
+        workspace.update_in(&mut cx, |_workspace, _window, cx| {
+            save_settings_fixture(
+                cx,
+                ProfileId(1),
+                "Deploy box",
+                &ConnectionSettings {
+                    host: "profile.example.com".into(),
+                    port: 22,
+                    username: "deploy".into(),
+                    auth: AuthCredential::Password {
+                        password: "s3cret".into(),
+                    },
+                    route: macsftp_core::ResolvedConnectionRoute::Direct,
+                },
+            );
         });
 
         let (saved_id, recent_id) = workspace.update_in(&mut cx, |_workspace, _window, cx| {
@@ -2381,21 +2424,21 @@ mod tests {
     fn open_recent_with_missing_keychain_password_keeps_form_open(cx: &mut TestAppContext) {
         let (workspace, mut cx, channels) = init_workspace(cx);
 
-        workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.open_connect_form(window, cx);
-        });
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            let form = workspace
-                .connect_form_ui
-                .form
-                .as_mut()
-                .expect("form is open");
-            form.host.set_value("missing-secret.example.com");
-            form.port.set_value("22");
-            form.username.set_value("deploy");
-            form.password.set_value("s3cret");
-            form.profile_name.set_value("Missing secret box");
-            workspace.save_current_profile(cx);
+        workspace.update_in(&mut cx, |_workspace, _window, cx| {
+            save_settings_fixture(
+                cx,
+                ProfileId(1),
+                "Missing secret box",
+                &ConnectionSettings {
+                    host: "missing-secret.example.com".into(),
+                    port: 22,
+                    username: "deploy".into(),
+                    auth: AuthCredential::Password {
+                        password: "s3cret".into(),
+                    },
+                    route: macsftp_core::ResolvedConnectionRoute::Direct,
+                },
+            );
         });
 
         let recent_id = workspace.update_in(&mut cx, |_workspace, _window, cx| {
@@ -3641,14 +3684,7 @@ mod tests {
                 },
                 route: macsftp_core::ResolvedConnectionRoute::Direct,
             };
-            match cx.resources_mut().profiles.save_connection_settings(
-                ProfileId(1),
-                "Prod".into(),
-                &profile_settings,
-            ) {
-                Ok(_) => {}
-                Err(error) => panic!("seed profile: {error}"),
-            }
+            save_settings_fixture(cx, ProfileId(1), "Prod", &profile_settings);
         });
         connect_and_drain_with(
             &workspace,
@@ -3698,22 +3734,16 @@ mod tests {
         // The profile is re-pointed at another host mid-life; the tab then
         // reconnects with the same profile id.
         workspace.update_in(&mut cx, |workspace, window, cx| {
-            match cx.resources_mut().profiles.save_connection_settings(
-                ProfileId(1),
-                "Prod".into(),
-                &ConnectionSettings {
-                    host: "new.example.com".into(),
-                    port: 22,
-                    username: "alex".into(),
-                    auth: AuthCredential::Password {
-                        password: "profile-pass".into(),
-                    },
-                    route: macsftp_core::ResolvedConnectionRoute::Direct,
+            let updated_profile_settings = ConnectionSettings {
+                host: "new.example.com".into(),
+                port: 22,
+                username: "alex".into(),
+                auth: AuthCredential::Password {
+                    password: "profile-pass".into(),
                 },
-            ) {
-                Ok(_) => {}
-                Err(error) => panic!("re-point profile: {error}"),
-            }
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
+            };
+            save_settings_fixture(cx, ProfileId(1), "Prod", &updated_profile_settings);
             workspace.connect_with(
                 ConnectionSettings {
                     host: "new.example.com".into(),
@@ -4768,13 +4798,12 @@ mod tests {
     }
 
     #[gpui::test]
-    fn open_connect_form_resets_picker_and_save_as_flags(cx: &mut TestAppContext) {
+    fn open_connect_form_resets_profile_picker(cx: &mut TestAppContext) {
         let (workspace, mut cx, _) = init_workspace(cx);
         workspace.update_in(&mut cx, |ws, window, cx| {
             ws.open_connect_form(window, cx);
             let form = ws.connect_form_ui.form.as_mut().expect("form opens");
             form.profile_picker_open = true;
-            form.save_as_expanded = true;
             form.profile_picker_filter.set_value("partial");
             ws.close_connect_form(window, cx);
             ws.open_connect_form(window, cx);
@@ -4784,66 +4813,8 @@ mod tests {
                 "reopening connect form must reset profile_picker_open"
             );
             assert!(
-                !form.save_as_expanded,
-                "reopening connect form must reset save_as_expanded"
-            );
-            assert!(
                 form.profile_picker_filter.value().is_empty(),
                 "reopening connect form must clear profile_picker_filter"
-            );
-        });
-    }
-
-    #[gpui::test]
-    fn connect_save_as_collapsed_by_default(cx: &mut TestAppContext) {
-        let (workspace, mut cx, _) = init_workspace(cx);
-        workspace.update_in(&mut cx, |ws, window, cx| {
-            ws.open_connect_form(window, cx);
-            let form = ws.connect_form_ui.form.as_ref().expect("form opens");
-            assert!(
-                !form.save_as_expanded,
-                "Save as profile must start collapsed"
-            );
-        });
-    }
-
-    #[gpui::test]
-    fn connect_save_as_expand_and_save_still_works(cx: &mut TestAppContext) {
-        let (workspace, mut cx, _channels) = init_workspace(cx);
-
-        workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.open_connect_form(window, cx);
-            let form = workspace
-                .connect_form_ui
-                .form
-                .as_mut()
-                .expect("form is open");
-            assert!(!form.save_as_expanded);
-            form.save_as_expanded = true;
-            form.host.set_value("save-as.example.com");
-            form.port.set_value("22");
-            form.username.set_value("deploy");
-            form.password.set_value("s3cret");
-            form.profile_name.set_value("Save As Box");
-            workspace.save_current_profile(cx);
-        });
-
-        workspace.read_with(&cx, |workspace, cx| {
-            let profiles = cx.resources().profiles.profiles();
-            assert_eq!(profiles.len(), 1, "profile saved to store");
-            assert_eq!(profiles[0].name, "Save As Box");
-            assert_eq!(profiles[0].host, "save-as.example.com");
-            assert_eq!(profiles[0].username, "deploy");
-            let form = workspace
-                .connect_form_ui
-                .form
-                .as_ref()
-                .expect("form stays open after save");
-            assert!(!form.save_as_expanded, "successful save collapses Save as");
-            assert_eq!(
-                form.source_profile_id,
-                Some(profiles[0].id),
-                "form links to the saved profile"
             );
         });
     }
@@ -4855,17 +4826,21 @@ mod tests {
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.open_connect_form(window, cx);
         });
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            let form = workspace
-                .connect_form_ui
-                .form
-                .as_mut()
-                .expect("form is open");
-            form.host.set_value("example.com");
-            form.username.set_value("alex");
-            form.password.set_value("hunter2");
-            form.profile_name.set_value("Work");
-            workspace.save_current_profile(cx);
+        workspace.update_in(&mut cx, |_workspace, _window, cx| {
+            save_settings_fixture(
+                cx,
+                ProfileId(1),
+                "Work",
+                &ConnectionSettings {
+                    host: "example.com".into(),
+                    port: 22,
+                    username: "alex".into(),
+                    auth: AuthCredential::Password {
+                        password: "hunter2".into(),
+                    },
+                    route: macsftp_core::ResolvedConnectionRoute::Direct,
+                },
+            );
         });
 
         let saved_id = workspace.read_with(&cx, |_workspace, cx| {
@@ -4937,14 +4912,8 @@ mod tests {
                     secret_ref: macsftp_core::SecretRef::keychain_ref(ProfileId(2), "password"),
                 },
             );
-            match cx.resources_mut().profiles.save_profile(work) {
-                Ok(_) => {}
-                Err(error) => panic!("seed work profile: {error}"),
-            }
-            match cx.resources_mut().profiles.save_profile(home) {
-                Ok(_) => {}
-                Err(error) => panic!("seed home profile: {error}"),
-            }
+            save_profile_fixture(cx, work);
+            save_profile_fixture(cx, home);
 
             workspace.open_connect_form(window, cx);
             {
@@ -5034,14 +5003,8 @@ mod tests {
                     secret_ref: macsftp_core::SecretRef::keychain_ref(ProfileId(2), "password"),
                 },
             );
-            match cx.resources_mut().profiles.save_profile(work) {
-                Ok(_) => {}
-                Err(error) => panic!("seed work: {error}"),
-            }
-            match cx.resources_mut().profiles.save_profile(home) {
-                Ok(_) => {}
-                Err(error) => panic!("seed home: {error}"),
-            }
+            save_profile_fixture(cx, work);
+            save_profile_fixture(cx, home);
             let settings = ConnectionSettings {
                 host: "work.example.com".into(),
                 port: 22,
@@ -5051,14 +5014,7 @@ mod tests {
                 },
                 route: macsftp_core::ResolvedConnectionRoute::Direct,
             };
-            match cx.resources_mut().profiles.save_connection_settings(
-                ProfileId(1),
-                "Work".into(),
-                &settings,
-            ) {
-                Ok(_) => {}
-                Err(error) => panic!("seed work credential: {error}"),
-            }
+            save_settings_fixture(cx, ProfileId(1), "Work", &settings);
 
             workspace.open_connect_form(window, cx);
             {
@@ -5135,17 +5091,21 @@ mod tests {
         workspace.update_in(&mut cx, |workspace, window, cx| {
             workspace.open_connect_form(window, cx);
         });
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            let form = workspace
-                .connect_form_ui
-                .form
-                .as_mut()
-                .expect("form is open");
-            form.host.set_value("example.com");
-            form.username.set_value("alex");
-            form.password.set_value("hunter2");
-            form.profile_name.set_value("Work");
-            workspace.save_current_profile(cx);
+        workspace.update_in(&mut cx, |_workspace, _window, cx| {
+            save_settings_fixture(
+                cx,
+                ProfileId(1),
+                "Work",
+                &ConnectionSettings {
+                    host: "example.com".into(),
+                    port: 22,
+                    username: "alex".into(),
+                    auth: AuthCredential::Password {
+                        password: "hunter2".into(),
+                    },
+                    route: macsftp_core::ResolvedConnectionRoute::Direct,
+                },
+            );
         });
 
         let saved_id = workspace.read_with(&cx, |_workspace, cx| {
@@ -5283,107 +5243,6 @@ mod tests {
                 "escape must close the connect form"
             );
         });
-    }
-
-    /// Saving, reusing, updating, and deleting profiles through the
-    /// connect form must persist to disk and round-trip (current architecture §11).
-    #[gpui::test]
-    fn connect_form_save_use_update_and_delete_profile(cx: &mut TestAppContext) {
-        let (workspace, mut cx, _channels) = init_workspace(cx);
-
-        workspace.update_in(&mut cx, |workspace, window, cx| {
-            workspace.open_connect_form(window, cx);
-        });
-        // Fill a valid connection (including a password) and save it.
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            let form = workspace
-                .connect_form_ui
-                .form
-                .as_mut()
-                .expect("form is open");
-            form.host.set_value("example.com");
-            form.username.set_value("alex");
-            form.password.set_value("hunter2");
-            form.profile_name.set_value("My Server");
-            workspace.save_current_profile(cx);
-        });
-
-        let saved_id = workspace.read_with(&cx, |_workspace, cx| {
-            let profiles = cx.resources().profiles.profiles();
-            assert_eq!(profiles.len(), 1, "one profile saved");
-            assert_eq!(profiles[0].name, "My Server");
-            assert_eq!(profiles[0].host, "example.com");
-            assert_eq!(profiles[0].username, "alex");
-            profiles[0].id
-        });
-
-        // The save also flushed to disk: reopening the store reads it back.
-        let path =
-            workspace.read_with(&cx, |_workspace, cx| cx.resources().profiles.path().clone());
-        let reloaded =
-            macsftp_storage::ProfileStore::open(path).expect("reload saved profiles.json");
-        assert_eq!(reloaded.profiles().len(), 1, "profile persisted to disk");
-
-        // The secret was written to the Keychain, not just the profile
-        // file (plan §11). The profile on disk holds only the SecretRef.
-        let stored = workspace.read_with(&cx, |_workspace, cx| {
-            cx.resources()
-                .profiles
-                .load_connection_settings(saved_id)
-                .expect("load secret")
-        });
-        let AuthCredential::Password { password } = &stored.auth else {
-            panic!("expected password auth");
-        };
-        assert_eq!(password, "hunter2", "secret stored in Keychain");
-
-        // "Use" prefills the form (including the restored secret) and
-        // remembers the source profile id.
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            workspace.use_profile(saved_id, cx);
-        });
-        workspace.read_with(&cx, |workspace, _| {
-            let form = workspace
-                .connect_form_ui
-                .form
-                .as_ref()
-                .expect("form open after use");
-            assert_eq!(form.host.value(), "example.com");
-            assert_eq!(form.source_profile_id, Some(saved_id));
-            assert_eq!(form.auth_method, AuthMethodKind::Password);
-            assert_eq!(
-                form.password.value(),
-                "hunter2",
-                "secret restored from Keychain into the form"
-            );
-        });
-
-        // Re-saving the used form updates the same entry, not a duplicate.
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            workspace.save_current_profile(cx);
-        });
-        workspace.read_with(&cx, |_workspace, cx| {
-            assert_eq!(
-                cx.resources().profiles.profiles().len(),
-                1,
-                "re-save updates, does not duplicate"
-            );
-        });
-
-        // Deleting removes it from store and disk.
-        workspace.update_in(&mut cx, |workspace, _window, cx| {
-            workspace.delete_profile(saved_id, cx);
-        });
-        workspace.read_with(&cx, |_workspace, cx| {
-            assert!(
-                cx.resources().profiles.profiles().is_empty(),
-                "profile deleted from store"
-            );
-        });
-        let path =
-            workspace.read_with(&cx, |_workspace, cx| cx.resources().profiles.path().clone());
-        let reloaded = macsftp_storage::ProfileStore::open(path).expect("reload after delete");
-        assert!(reloaded.profiles().is_empty(), "profile deleted from disk");
     }
 
     #[gpui::test]

@@ -385,6 +385,18 @@ impl crate::workspace::Workspace {
         cx.notify();
     }
 
+    /// Allocate a fresh stable profile id from the persisted high-water mark.
+    pub(crate) fn next_profile_id(&mut self, cx: &App) -> Option<ProfileId> {
+        match cx.resources().profiles.next_profile_id() {
+            Ok(profile_id) => Some(profile_id),
+            Err(error) => {
+                self.status_message =
+                    Some(format!("Could not allocate profile id: {error}").into());
+                None
+            }
+        }
+    }
+
     /// Validate the profile editor and submit one storage transaction. An
     /// empty password on edit asks storage to keep the existing credential.
     pub(crate) fn save_profile_editor(&mut self, cx: &mut Context<Self>) {
@@ -614,6 +626,50 @@ impl crate::workspace::Workspace {
             .iter()
             .filter(|profile| profile_matches_filter(profile, self.settings.profile_filter.value()))
             .collect()
+    }
+
+    /// Remove a saved profile and its credentials, then decouple non-secret
+    /// references held by recents and live tabs.
+    pub(crate) fn delete_profile(&mut self, profile_id: ProfileId, cx: &mut Context<Self>) {
+        match cx
+            .resources_mut()
+            .profiles
+            .delete_profile_and_credentials(profile_id)
+        {
+            Ok(outcome) => {
+                for error in outcome.cleanup_warnings {
+                    warn!(
+                        ?profile_id,
+                        %error,
+                        "could not remove Keychain secret for deleted profile"
+                    );
+                }
+                if outcome.deleted {
+                    if let Err(error) = cx.resources_mut().recents.forget_profile(profile_id.0) {
+                        warn!(
+                            ?profile_id,
+                            %error,
+                            "could not decouple recents from deleted profile"
+                        );
+                    }
+                    for tab in self.state.tabs.tabs.iter_mut() {
+                        if tab.profile_id == Some(profile_id) {
+                            tab.profile_id = None;
+                        }
+                        if let Some(target) = tab.restored_target.as_mut()
+                            && target.profile_id == Some(profile_id)
+                        {
+                            target.profile_id = None;
+                        }
+                    }
+                    self.status_message = Some("Deleted profile.".into());
+                }
+            }
+            Err(error) => {
+                self.status_message = Some(format!("Could not delete profile: {error}").into());
+            }
+        }
+        cx.notify();
     }
 
     /// Focus the Profiles list filter field (click or explicit focus).

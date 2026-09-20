@@ -229,6 +229,8 @@ Profile 更新由 `ProfileStore` 协调：
 4. 在未提交失败时补偿回滚 Keychain；
 5. 提交成功后 best-effort 删除孤立 secret，并将失败作为 warning 返回。
 
+Profile 写入只有一个产品入口：Settings → Profiles 将编辑草稿转换为 `ProfileSaveRequest`，storage 通过 `ProfileStore::save_request` 提交。Connect 表单只选择已有 Profile 或建立临时连接，不创建、更新或删除 Profile；它通过 “Manage…” 进入 Settings。禁止为 Connect 或其他 UI 再增加并行的保存适配器。
+
 损坏或未来版本文件不能被空默认值静默覆盖。session 文件恢复失败时必须先保存原始 corrupt backup，成功后才重新开放 checkpoint。
 
 跨启动只恢复窗口、tab 和非敏感连接元数据；不恢复 transfer catalog 或 secret。
