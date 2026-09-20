@@ -16,7 +16,7 @@ macSFTP 是使用 GPUI 和 `russh + russh-sftp` 构建的 macOS 原生 SFTP 客�
 - 密码、私钥、keyboard-interactive、SSH agent；
 - 单跳 saved-profile jump host 和显式 ProxyCommand；
 - OpenSSH-compatible `known_hosts` 子集；
-- 外部编辑器远程编辑与保存回传；
+- 外部编辑器远程编辑与显式保存回传；
 - Profile、最近连接、窗口会话和残留临时文件持久化。
 
 当前非目标：
@@ -231,6 +231,8 @@ Profile 更新由 `ProfileStore` 协调：
 
 Profile 写入只有一个产品入口：Settings → Profiles 将编辑草稿转换为 `ProfileSaveRequest`，storage 通过 `ProfileStore::save_request` 提交。Connect 表单只选择已有 Profile 或建立临时连接，不创建、更新或删除 Profile；它通过 “Manage…” 进入 Settings。禁止为 Connect 或其他 UI 再增加并行的保存适配器。
 
+`ProfileStore::save_request` 是唯一公开保存入口；更底层的 profile-file 写入只允许 storage 内部调用，测试夹具只能使用 `#[cfg(test)]` helper。Connect 中手工输入的 credential 只用于当前连接，不得因曾选择 Profile 而回写持久化状态。
+
 损坏或未来版本文件不能被空默认值静默覆盖。session 文件恢复失败时必须先保存原始 corrupt backup，成功后才重新开放 checkpoint。
 
 跨启动只恢复窗口、tab 和非敏感连接元数据；不恢复 transfer catalog 或 secret。
@@ -239,6 +241,7 @@ Profile 写入只有一个产品入口：Settings → Profiles 将编辑草稿�
 
 - 第一屏是可操作的文件工作区；
 - 目录列表必须虚拟化，10k entries 不创建长期 row entity；
+- 可滚动 surface 使用统一的 theme-aware scrollbar；虚拟列表和普通 scroll container 分别绑定各自 handle，但共享 overflow、drag、track paging 和 resize 语义；
 - selection 存稳定 path，不存易漂移的 row index；
 - icon-only button 必须有 tooltip 或 label；
 - modal 必须有标题、主操作、取消路径和 request 绑定；

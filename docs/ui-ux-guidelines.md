@@ -157,6 +157,13 @@ remote pane 必须覆盖这些状态：
 - `Loaded`：显示列表、排序、selection、路径。
 - `Error`：展示用户可以理解的错误信息和恢复操作。
 
+### 6.4 滚动条
+
+- 文件 pane 使用与虚拟列表绑定的自定义滚动条；普通列表、Profile picker、Settings 编辑器、command palette、tab switcher 和 transfer drawer 使用与各自 scroll handle 绑定的同一套组件。
+- 仅在内容溢出时显示 track/thumb；thumb 必须支持拖动，track 点击必须按 viewport 翻页，滚轮与键盘滚动后位置必须同步。
+- 自定义滚动条必须使用 theme token 表达 resting、hover、active 和 track 状态，并在内容区隐藏原生滚动条，避免出现双滚动条。
+- 窄 pane、短窗口和动态内容变化后，thumb 大小与位置必须重新反映真实 viewport，不能遮挡主要操作或造成列表宽度跳变。
+
 ## 7. Transfer Drawer 设计
 
 - transfer drawer 是传输任务的唯一主视图，因此不得在多个无关位置分别显示完整进度。
@@ -193,8 +200,17 @@ remote pane 必须覆盖这些状态：
 - 外观选择必须立即预览；`System` 跟随窗口 appearance，但是固定为 Light 或 Dark 时不得被系统
   外观变化覆盖。
 - 配置保存失败必须在 Settings 内行内展示，因此不能使用 toast，也不能静默丢弃错误。
+- Settings → Profiles 是创建、编辑和删除保存 Profile 的唯一入口。Connect modal 只能选择已有 Profile 或填写临时连接；`Manage…` 必须关闭 Connect 并进入 Settings → Profiles。
+- Profile editor 必须明确显示认证与 route 字段；密码和 passphrase 输入必须遮罩，保存失败不得清空用户仍可修正的草稿。
 - About 是非阻塞的简洁浮层，因此只显示图标、应用名、从构建元数据派生的版本、简短说明和
   复制版本信息操作；但是不得包含设置功能或营销页面内容。
+
+### 9.2 远程编辑
+
+- 双击远端文件只负责下载临时副本并打开外部编辑器；应用不得监视本地保存，也不得自动上传。
+- 用户重新选中该远端文件时，status bar 必须提供明确的 **Upload Modified File** 操作，并在 checking、uploading 和 conflict 阶段显示不可歧义的状态。
+- 上传前必须读取实时远端 metadata；缓存目录 listing 不能授权覆盖。远端发生变化时必须进入冲突决策，不能静默覆盖。
+- 校验或上传失败后必须保留本地临时副本并允许重试。tab 或窗口关闭后必须结束其编辑 session 并清理临时目录。
 
 ## 10. 错误与恢复
 
@@ -254,5 +270,8 @@ remote pane 必须覆盖这些状态：
 - 是否为 icon-only button 提供 tooltip/label？
 - 是否没有泄露 secret、私钥完整路径或内部 debug 字符串？
 - 是否覆盖了 request id/session epoch 相关 modal 过期场景？
+- Profile 写入是否仍然只发生在 Settings → Profiles？
+- 远程编辑是否仍由用户明确触发回传，并在上传前执行实时冲突检查？
+- 所有可滚动区域是否在溢出、拖动、track 点击、滚轮和窗口 resize 下保持同步？
 
 如果未满足以上任一项，那么必须在 PR 中说明取舍；但是，涉及安全、阻塞、secret 泄露或 modal 过期误确认的项目不得豁免。

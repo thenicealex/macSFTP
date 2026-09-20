@@ -14,6 +14,7 @@ Use only local fixtures or non-sensitive test servers in screenshots and notes.
 - [ ] Password-authentication Docker gate
 - [ ] Isolated macOS Keychain gate
 - [ ] `bash scripts/build_app.sh` and `plutil` validation
+- [ ] Current documentation and `CHANGELOG.md` match this release
 
 Notes:
 

@@ -23,14 +23,17 @@ gates passed; it does not make the bundle suitable for public distribution.
 2. Move the relevant `CHANGELOG.md` entries from `Unreleased` into
    `## [X.Y.Z] - YYYY-MM-DD` for a final release. Release candidates may keep
    the entries under `Unreleased`.
-3. Copy `docs/release-evidence/template.md` to
+3. Confirm that `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, and the current
+   documents indexed by `docs/README.md` describe the release candidate. Do
+   not rewrite evidence files for already published versions.
+4. Copy `docs/release-evidence/template.md` to
    `docs/release-evidence/vX.Y.Z.md`, complete every check, and set
    `Status: PASS`.
-4. Run the automated gates documented in the evidence. Native GUI manual
+5. Run the automated gates documented in the evidence. Native GUI manual
    acceptance is not a release gate; optional manual checks may be recorded
    separately and must not be reported as performed when skipped.
-5. Run `bash scripts/check_release.sh vX.Y.Z` (or the release-candidate tag).
-6. Commit the release metadata, then create an annotated tag.
+6. Run `bash scripts/check_release.sh vX.Y.Z` (or the release-candidate tag).
+7. Commit the release metadata, then create an annotated tag.
 
 Never edit a published tag. Fix the issue, increment the version, and produce a
 new release candidate or patch release.

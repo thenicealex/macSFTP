@@ -48,3 +48,15 @@ patched version or commit is available.
   must never embed passwords, passphrases, or tokens in the command.
 - Direct RSA client signatures use AWS-LC. The RustCrypto `rsa` feature
   affected by RUSTSEC-2023-0071 must remain disabled.
+- Profile mutations must pass through `ProfileStore::save_request`, which
+  coordinates Keychain and profile-file writes with rollback. The Connect
+  dialog must not introduce a second persistence path.
+- Remote-edit uploads require an explicit user action and a live remote
+  metadata check. Cached directory listings must never authorize overwriting a
+  remote file.
+- Remote-edit temporary copies can contain sensitive data. They use a
+  per-process namespace and must be removed when their owning tab or window is
+  closed; cleanup failures must remain diagnosable without logging paths or
+  file contents.
+- Mock SSH backends and constructors are test-only and must not be present in
+  the production public API.

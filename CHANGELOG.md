@@ -15,6 +15,20 @@ based on Keep a Changelog, and releases use semantic versioning.
   without enabling the RustCrypto RSA implementation affected by
   RUSTSEC-2023-0071.
 
+### Changed
+
+- Make remote-edit uploads explicit. Saving in the external editor no longer
+  triggers a background watcher; users choose **Upload Modified File**, after
+  which macSFTP performs the same live remote-snapshot and conflict checks
+  before uploading.
+- Make **Settings → Profiles** the only place that creates, edits, or deletes
+  saved profiles. The Connect dialog now only selects a saved profile or starts
+  a temporary connection, with **Manage…** linking to Settings.
+- Expose only the real SSH backend from the production SFTP runtime; mock
+  actors and constructors now compile only for crate unit tests.
+- Remove protocol commands, events, states, and historical implementation
+  documents that no longer had production consumers.
+
 ## [0.2.1] - 2026-09-13
 
 ### Fixed

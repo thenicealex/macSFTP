@@ -53,6 +53,18 @@ refactor(app): isolate transfer drawer rendering
 Keep GPUI callbacks non-blocking. Tokio tasks communicate through bounded
 commands and events and must never retain GPUI contexts or entities.
 
+Keep these current ownership rules intact:
+
+- **Settings → Profiles** is the only product UI that creates, updates, or
+  deletes profiles. The Connect dialog only selects a profile or creates a
+  temporary connection.
+- `ProfileStore::save_request` is the only public profile-save API. Do not add
+  UI-specific storage adapters around it.
+- Remote editing never watches local saves. **Upload Modified File** explicitly
+  starts the authoritative remote metadata check and upload flow.
+- Production runtime constructors always use the real SSH backend. Mock actors
+  and mock constructors remain private and test-only.
+
 ## Security expectations
 
 - Never commit or log passwords, passphrases, private keys, tokens, or test
@@ -63,6 +75,21 @@ commands and events and must never retain GPUI contexts or entities.
 - Use unique temporary paths in tests that can run concurrently.
 
 Report vulnerabilities according to `SECURITY.md`, not through a public issue.
+
+## Documentation
+
+Update documentation in the same change when behavior or an architectural
+boundary changes:
+
+- `README.md` for supported user workflows and build prerequisites;
+- `CHANGELOG.md` for unreleased user-visible, security, or compatibility
+  changes;
+- `docs/gpui-russh-plan.md` for ownership and runtime contracts;
+- `docs/ui-ux-guidelines.md` for durable interaction rules;
+- `docs/release-process.md` or the evidence template for release-policy changes.
+
+Published files under `docs/release-evidence/` are historical records. Do not
+rewrite them to describe current behavior.
 
 ## Pull requests
 
