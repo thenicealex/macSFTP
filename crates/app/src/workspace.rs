@@ -408,7 +408,7 @@ impl Workspace {
         }
         // Modals bound to the closed tab's session are now stale; drop
         // them so their confirm buttons can never act (plan §7).
-        self.state.drain_expired_modals();
+        self.drain_expired_modals();
         if self.state.tabs.tabs.is_empty() {
             window.focus(&self.workspace_focus);
         }
@@ -783,7 +783,7 @@ impl Workspace {
             tab.connection_settings = Some(Box::new(settings));
         }
         // The epoch bump invalidates any modal from a previous session.
-        self.state.drain_expired_modals();
+        self.drain_expired_modals();
         cx.notify();
     }
     pub(crate) fn set_appearance(
@@ -981,7 +981,7 @@ impl Render for Workspace {
         };
 
         let workspace_content = if self.surface == WorkspaceSurface::Settings {
-            self.render_settings(cx)
+            self.render_settings(window, cx)
         } else {
             div()
                 .flex()
@@ -1144,6 +1144,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|workspace, _: &OpenSettings, window, cx| {
                 if workspace.connect_form_ui.form.is_none()
                     && workspace.active_host_key_prompt().is_none()
+                    && workspace.active_keyboard_interactive_prompt().is_none()
                     && workspace.active_transfer_conflict_prompt().is_none()
                     && workspace.modal_inputs.delete_confirm.is_none()
                     && !workspace.go_to_path.open
@@ -1158,6 +1159,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|workspace, _: &OpenProfiles, window, cx| {
                 if workspace.connect_form_ui.form.is_none()
                     && workspace.active_host_key_prompt().is_none()
+                    && workspace.active_keyboard_interactive_prompt().is_none()
                     && workspace.active_transfer_conflict_prompt().is_none()
                     && workspace.modal_inputs.delete_confirm.is_none()
                     && !workspace.go_to_path.open
@@ -1172,6 +1174,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|workspace, _: &ShowAbout, _window, cx| {
                 if workspace.connect_form_ui.form.is_none()
                     && workspace.active_host_key_prompt().is_none()
+                    && workspace.active_keyboard_interactive_prompt().is_none()
                     && workspace.active_transfer_conflict_prompt().is_none()
                     && workspace.modal_inputs.delete_confirm.is_none()
                     && !workspace.go_to_path.open
@@ -1201,6 +1204,7 @@ impl Render for Workspace {
             .font_family(theme.fonts.ui_family.clone())
             .child(workspace_content)
             .children(self.render_connect_form_modal(window, cx))
+            .children(self.render_keyboard_interactive_modal(cx))
             .children(self.render_host_key_modal(cx))
             .children(self.render_transfer_conflict_modal(cx))
             .children(self.render_delete_confirm_modal(cx))

@@ -5,6 +5,16 @@ based on Keep a Changelog, and releases use semantic versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Add one-hop saved-profile jump hosts and explicit OpenSSH-style
+  ProxyCommand transports.
+- Add multi-round keyboard-interactive and SSH-agent authentication, with an
+  optional explicit agent socket for apps launched outside a shell.
+- Add RSA-SHA2 client private-key authentication using AWS-LC for signing,
+  without enabling the RustCrypto RSA implementation affected by
+  RUSTSEC-2023-0071.
+
 ## [0.2.1] - 2026-09-13
 
 ### Fixed

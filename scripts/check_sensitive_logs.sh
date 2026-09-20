@@ -7,7 +7,7 @@ cd "$repo_root"
 status=0
 
 if rg -n -U \
-    '(?s)(trace|debug|info|warn|error)!\([^;]{0,800}\b(password|passphrase|fingerprint|key_path)\b' \
+    '(?s)(trace|debug|info|warn|error)!\([^;]{0,800}\b(password|passphrase|fingerprint|key_path|proxy_command|agent_socket|keyboard_response)\b' \
     crates --glob '*.rs'; then
     echo "error: tracing call references sensitive credential or fingerprint data" >&2
     status=1

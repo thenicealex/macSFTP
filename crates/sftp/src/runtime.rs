@@ -15,6 +15,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::keyboard_interactive::KeyboardInteractiveRegistry;
 use crate::known_hosts::KnownHostsStore;
 use crate::mock_actor::{MockRemoteSessionActor, MockSessionConfig};
 use crate::session_actor::{HostTrustConfig, RemoteSessionActor, RemoteSessionRequest};
@@ -150,6 +151,7 @@ pub struct RuntimeController {
     command_loop_handle: Option<JoinHandle<()>>,
     event_receiver: Option<EventReceiver>,
     trust_registry: Arc<TrustRegistry>,
+    keyboard_interactive_registry: Arc<KeyboardInteractiveRegistry>,
     config: RuntimeBridgeConfig,
     shutdown_initiated: bool,
 }
@@ -172,15 +174,18 @@ impl RuntimeController {
         let channels = BridgeChannels::new(&config);
         let event_receiver = Some(EventReceiver::new(channels.event_rx.clone()));
         let trust_registry = Arc::new(TrustRegistry::new());
+        let keyboard_interactive_registry = Arc::new(KeyboardInteractiveRegistry::new());
 
         let command_rx = channels.command_rx.clone();
         let event_tx = channels.event_tx.clone();
         let loop_config = config;
         let registry_clone = trust_registry.clone();
+        let keyboard_registry_clone = keyboard_interactive_registry.clone();
         let command_loop_handle = runtime.spawn(command_dispatch_loop(
             command_rx,
             event_tx,
             registry_clone,
+            keyboard_registry_clone,
             backend,
             loop_config,
         ));
@@ -191,6 +196,7 @@ impl RuntimeController {
             command_loop_handle: Some(command_loop_handle),
             event_receiver,
             trust_registry,
+            keyboard_interactive_registry,
             config,
             shutdown_initiated: false,
         }
@@ -231,6 +237,7 @@ impl RuntimeController {
         }
         // Reject all pending trust requests so no actor hangs waiting.
         self.trust_registry.reject_all();
+        self.keyboard_interactive_registry.reject_all();
 
         // Explicit timeout-based shutdown — never rely on Runtime's default Drop.
         if let Some(runtime) = self.runtime.take() {
@@ -263,6 +270,7 @@ impl Drop for RuntimeController {
                 handle.abort();
             }
             self.trust_registry.reject_all();
+            self.keyboard_interactive_registry.reject_all();
             if let Some(runtime) = self.runtime.take() {
                 runtime.shutdown_timeout(self.config.shutdown_timeout);
             }
@@ -391,15 +399,21 @@ async fn command_dispatch_loop(
     command_rx: flume::Receiver<AppCommand>,
     event_tx: flume::Sender<AppEvent>,
     trust_registry: Arc<TrustRegistry>,
+    keyboard_interactive_registry: Arc<KeyboardInteractiveRegistry>,
     backend: SessionBackend,
     _config: RuntimeBridgeConfig,
 ) {
     let mut sessions: HashMap<TabId, RemoteSessionHandle> = HashMap::new();
-    let mut next_trust_id: u64 = 1;
+    let next_trust_id = Arc::new(AtomicU64::new(1));
+    let next_keyboard_interactive_id = Arc::new(AtomicU64::new(1));
     let mut next_plan_id: u64 = 1;
     let next_transfer_id = Arc::new(AtomicU64::new(1));
     let next_conflict_id = Arc::new(AtomicU64::new(1));
-    let connection_manager = Arc::new(crate::pool::ConnectionManager::new());
+    let connection_manager = Arc::new(crate::pool::ConnectionManager::with_keyboard_interactive(
+        keyboard_interactive_registry.clone(),
+        next_keyboard_interactive_id.clone(),
+        next_trust_id.clone(),
+    ));
     let (transfer_manager_tx, transfer_manager_rx) = flume::bounded(64);
     let transfer_manager = TransferManager::new(
         event_tx.clone(),
@@ -441,9 +455,10 @@ async fn command_dispatch_loop(
                     handle.cancel.cancel();
                 }
                 trust_registry.reject_stale(cmd.tab_id, cmd.session_epoch);
+                keyboard_interactive_registry.reject_stale(cmd.tab_id, cmd.session_epoch);
 
-                let trust_request_id = TrustRequestId(next_trust_id);
-                next_trust_id += 1;
+                let trust_request_id =
+                    TrustRequestId(next_trust_id.fetch_add(1, Ordering::Relaxed));
 
                 let cancel = CancellationToken::new();
                 let (join, request_tx) = match (&backend, &known_hosts) {
@@ -456,6 +471,10 @@ async fn command_dispatch_loop(
                         let authentication_method = match &cmd.settings.auth {
                             macsftp_core::AuthCredential::Password { .. } => "password",
                             macsftp_core::AuthCredential::PrivateKey { .. } => "private_key",
+                            macsftp_core::AuthCredential::KeyboardInteractive => {
+                                "keyboard_interactive"
+                            }
+                            macsftp_core::AuthCredential::SshAgent { .. } => "ssh_agent",
                         };
                         info!(
                             target: "macsftp_sftp::connection",
@@ -472,7 +491,6 @@ async fn command_dispatch_loop(
                             &cmd.settings,
                             &cmd.pool_identity,
                             &scope,
-                            trust_request_id,
                             store.clone(),
                             trust_config.clone(),
                             trust_registry.clone(),
@@ -633,11 +651,20 @@ async fn command_dispatch_loop(
                 trust_registry.resolve(request_id, TrustDecision::Reject);
             }
 
+            Ok(AppCommand::RespondKeyboardInteractive(response)) => {
+                keyboard_interactive_registry.resolve(response);
+            }
+
+            Ok(AppCommand::CancelKeyboardInteractive { request_id }) => {
+                keyboard_interactive_registry.cancel(request_id);
+            }
+
             Ok(AppCommand::DisconnectTab { tab_id }) | Ok(AppCommand::CloseTab { tab_id }) => {
                 if let Some(handle) = sessions.remove(&tab_id) {
                     handle.cancel.cancel();
                 }
                 trust_registry.reject_all_for_tab(tab_id);
+                keyboard_interactive_registry.reject_all_for_tab(tab_id);
             }
 
             Ok(AppCommand::CloseTabs { tab_ids }) => {
@@ -646,6 +673,7 @@ async fn command_dispatch_loop(
                         handle.cancel.cancel();
                     }
                     trust_registry.reject_all_for_tab(tab_id);
+                    keyboard_interactive_registry.reject_all_for_tab(tab_id);
                 }
             }
 
@@ -978,6 +1006,7 @@ async fn command_dispatch_loop(
         warn!(error = %error, "transfer manager did not shut down cleanly");
     }
     trust_registry.reject_all();
+    keyboard_interactive_registry.reject_all();
 }
 
 /// A simple source-side throttle for progress events.
@@ -1230,6 +1259,7 @@ mod tests {
             auth: AuthCredential::Password {
                 password: "unused".to_string(),
             },
+            route: macsftp_core::ResolvedConnectionRoute::Direct,
         }
     }
     use std::time::Duration;
@@ -2470,5 +2500,39 @@ mod tests {
             .await
             .expect("a dispatch failure event should be emitted for a disconnected actor queue");
         assert_dispatch_failure(event, &command);
+    }
+
+    #[test]
+    fn runtime_routes_keyboard_interactive_response_once() {
+        let controller = RuntimeController::start(
+            RuntimeBridgeConfig::default(),
+            SessionBackend::Mock(MockSessionConfig::default()),
+        );
+        let request_id = macsftp_core::KeyboardInteractiveRequestId(42);
+        let (responder, receiver) = tokio::sync::oneshot::channel();
+        controller.keyboard_interactive_registry.register(
+            request_id,
+            crate::KeyboardInteractiveRegistryEntry {
+                tab_id: TabId(1),
+                session_epoch: 1,
+                responder,
+            },
+        );
+        controller
+            .client()
+            .try_send(AppCommand::RespondKeyboardInteractive(
+                macsftp_core::KeyboardInteractiveResponse {
+                    request_id,
+                    responses: vec!["secret-answer".into()],
+                },
+            ))
+            .expect("response command enters bounded runtime queue");
+        let response = receiver
+            .blocking_recv()
+            .expect("runtime wakes registered response receiver")
+            .expect("response is not cancellation");
+        assert_eq!(response.responses, vec!["secret-answer"]);
+        assert_eq!(controller.keyboard_interactive_registry.pending_count(), 0);
+        controller.shutdown();
     }
 }

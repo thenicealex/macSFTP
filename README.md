@@ -10,7 +10,9 @@ other than SFTP are outside the current scope.
 ## Current capabilities
 
 - Multiple windows and connection tabs
-- Password and Ed25519/ECDSA private-key authentication backed by macOS Keychain
+- Password, multi-round keyboard-interactive, SSH-agent, and private-key authentication
+- Ed25519/ECDSA plus RSA-SHA2 client keys; direct RSA signing uses AWS-LC
+- Saved-profile jump hosts and explicit OpenSSH-style ProxyCommand routes
 - OpenSSH-compatible host-key verification
 - Local and remote browsing, navigation, filtering, sorting, and file operations
 - Upload/download plans with progress, conflict handling, cancellation, and retry
@@ -19,7 +21,7 @@ other than SFTP are outside the current scope.
 ## Requirements
 
 - macOS
-- Xcode Command Line Tools
+- Xcode with the Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`)
 - Rust `1.96.1` or newer with `rustfmt` and `clippy`
 - `/usr/sbin/sshd`, `ssh-keygen`, and `ssh-keyscan` for real-session tests
 
@@ -33,10 +35,10 @@ bash scripts/build_app.sh
 
 The last command creates the unsigned bundle at `build/macSFTP.app`.
 
-RSA private-key authentication remains disabled because the current upstream
-implementation is affected by RUSTSEC-2023-0071. RSA-SHA2 server host keys are
-verified separately with AWS-LC, including legacy 1024-bit gateway keys; SHA-1
-`ssh-rsa` is not negotiated. Use Ed25519 or ECDSA for client private keys.
+RSA-SHA2 server host keys and direct RSA client signatures are handled with
+AWS-LC. The affected RustCrypto RSA private-key path covered by
+RUSTSEC-2023-0071 remains disabled. Client RSA keys must be at least 2048 bits;
+SHA-1 `ssh-rsa` signatures are not negotiated.
 
 ## Architecture
 

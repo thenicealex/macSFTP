@@ -646,6 +646,7 @@ mod tests {
                 auth: AuthCredential::Password {
                     password: "unused".into(),
                 },
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
             },
             ConnectionPoolIdentity::Ephemeral(SessionId(1)),
         )

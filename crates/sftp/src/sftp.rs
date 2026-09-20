@@ -1,3 +1,4 @@
+mod keyboard_interactive;
 mod known_hosts;
 mod mock_actor;
 mod physical_connection;
@@ -8,6 +9,7 @@ mod transfer_manager;
 mod transfer_planner;
 mod trust;
 
+pub use keyboard_interactive::{KeyboardInteractiveRegistry, KeyboardInteractiveRegistryEntry};
 pub use known_hosts::{
     HostKeyCheckResult, KnownHostsStore, fingerprint_sha256, host_pattern, key_algorithm,
 };

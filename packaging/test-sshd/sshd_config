@@ -2,9 +2,9 @@ Port 2222
 ListenAddress 0.0.0.0
 PidFile /run/sshd_macsftp.pid
 PasswordAuthentication yes
-KbdInteractiveAuthentication no
+KbdInteractiveAuthentication yes
 PubkeyAuthentication no
-UsePAM no
+UsePAM yes
 PermitRootLogin no
 PermitEmptyPasswords no
 StrictModes yes

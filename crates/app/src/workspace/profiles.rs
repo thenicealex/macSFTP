@@ -1,6 +1,7 @@
 use gpui::{App, Context, KeyDownEvent, SharedString, Window};
 use macsftp_core::{
-    AuthMethod, AuthMethodKind, ConnectionProfile, LocalPath, ProfileId, RemotePath,
+    AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionRoute, LocalPath, ProfileId,
+    RemotePath,
 };
 use macsftp_storage::{
     PrivateKeyPassphraseUpdate, ProfileAuthUpdate, ProfileMutationError, ProfileSaveRequest,
@@ -30,7 +31,16 @@ pub(crate) enum ProfileEditorField {
     Password,
     KeyPath,
     Passphrase,
+    AgentSocket,
     DefaultRemotePath,
+    ProxyCommand,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProfileRouteKind {
+    Direct,
+    JumpHost,
+    ProxyCommand,
 }
 
 /// Which passphrase state the profile editor is editing toward. Mirrors the
@@ -59,7 +69,11 @@ pub(crate) struct ProfileEditorState {
     pub password: SecretInputState,
     pub key_path: InputState,
     pub passphrase: SecretInputState,
+    pub agent_socket: InputState,
     pub passphrase_policy: PassphrasePolicy,
+    pub route_kind: ProfileRouteKind,
+    pub jump_profile_id: Option<ProfileId>,
+    pub proxy_command: InputState,
     pub default_remote_path: InputState,
     pub error: Option<SharedString>,
     pub secret_present_hint: bool,
@@ -79,7 +93,11 @@ impl ProfileEditorState {
             password: SecretInputState::new(),
             key_path: InputState::new(),
             passphrase: SecretInputState::new(),
+            agent_socket: InputState::new(),
             passphrase_policy: PassphrasePolicy::Remember,
+            route_kind: ProfileRouteKind::Direct,
+            jump_profile_id: None,
+            proxy_command: InputState::new(),
             default_remote_path: InputState::new(),
             error: None,
             secret_present_hint: false,
@@ -117,13 +135,42 @@ impl ProfileEditorState {
                     (false, None) => PassphrasePolicy::NoPassphrase,
                 };
             }
+            AuthMethod::KeyboardInteractive => {
+                editor.auth_method = AuthMethodKind::KeyboardInteractive;
+            }
+            AuthMethod::SshAgent { socket_path } => {
+                editor.auth_method = AuthMethodKind::SshAgent;
+                if let Some(socket_path) = socket_path {
+                    editor.agent_socket = InputState::with_value(socket_path.as_str().to_string());
+                }
+            }
+        }
+        match &profile.route {
+            ConnectionRoute::Direct => {}
+            ConnectionRoute::JumpHost { profile_id } => {
+                editor.route_kind = ProfileRouteKind::JumpHost;
+                editor.jump_profile_id = Some(*profile_id);
+            }
+            ConnectionRoute::ProxyCommand { command } => {
+                editor.route_kind = ProfileRouteKind::ProxyCommand;
+                editor.proxy_command = InputState::with_value(command.clone());
+            }
         }
         editor
     }
 
     fn field_order(&self) -> &'static [ProfileEditorField] {
-        match self.auth_method {
-            AuthMethodKind::Password => &[
+        match (self.auth_method, self.route_kind) {
+            (AuthMethodKind::Password, ProfileRouteKind::ProxyCommand) => &[
+                ProfileEditorField::Name,
+                ProfileEditorField::Host,
+                ProfileEditorField::Port,
+                ProfileEditorField::Username,
+                ProfileEditorField::Password,
+                ProfileEditorField::ProxyCommand,
+                ProfileEditorField::DefaultRemotePath,
+            ],
+            (AuthMethodKind::Password, _) => &[
                 ProfileEditorField::Name,
                 ProfileEditorField::Host,
                 ProfileEditorField::Port,
@@ -131,13 +178,55 @@ impl ProfileEditorState {
                 ProfileEditorField::Password,
                 ProfileEditorField::DefaultRemotePath,
             ],
-            AuthMethodKind::PrivateKey => &[
+            (AuthMethodKind::PrivateKey, ProfileRouteKind::ProxyCommand) => &[
                 ProfileEditorField::Name,
                 ProfileEditorField::Host,
                 ProfileEditorField::Port,
                 ProfileEditorField::Username,
                 ProfileEditorField::KeyPath,
                 ProfileEditorField::Passphrase,
+                ProfileEditorField::ProxyCommand,
+                ProfileEditorField::DefaultRemotePath,
+            ],
+            (AuthMethodKind::PrivateKey, _) => &[
+                ProfileEditorField::Name,
+                ProfileEditorField::Host,
+                ProfileEditorField::Port,
+                ProfileEditorField::Username,
+                ProfileEditorField::KeyPath,
+                ProfileEditorField::Passphrase,
+                ProfileEditorField::DefaultRemotePath,
+            ],
+            (AuthMethodKind::KeyboardInteractive, ProfileRouteKind::ProxyCommand) => &[
+                ProfileEditorField::Name,
+                ProfileEditorField::Host,
+                ProfileEditorField::Port,
+                ProfileEditorField::Username,
+                ProfileEditorField::ProxyCommand,
+                ProfileEditorField::DefaultRemotePath,
+            ],
+            (AuthMethodKind::KeyboardInteractive, _) => &[
+                ProfileEditorField::Name,
+                ProfileEditorField::Host,
+                ProfileEditorField::Port,
+                ProfileEditorField::Username,
+                ProfileEditorField::DefaultRemotePath,
+            ],
+            (AuthMethodKind::SshAgent, ProfileRouteKind::ProxyCommand) => &[
+                ProfileEditorField::Name,
+                ProfileEditorField::Host,
+                ProfileEditorField::Port,
+                ProfileEditorField::Username,
+                ProfileEditorField::AgentSocket,
+                ProfileEditorField::ProxyCommand,
+                ProfileEditorField::DefaultRemotePath,
+            ],
+            (AuthMethodKind::SshAgent, _) => &[
+                ProfileEditorField::Name,
+                ProfileEditorField::Host,
+                ProfileEditorField::Port,
+                ProfileEditorField::Username,
+                ProfileEditorField::AgentSocket,
                 ProfileEditorField::DefaultRemotePath,
             ],
         }
@@ -152,7 +241,9 @@ impl ProfileEditorState {
             ProfileEditorField::Password => self.password.as_input_state_mut(),
             ProfileEditorField::KeyPath => &mut self.key_path,
             ProfileEditorField::Passphrase => self.passphrase.as_input_state_mut(),
+            ProfileEditorField::AgentSocket => &mut self.agent_socket,
             ProfileEditorField::DefaultRemotePath => &mut self.default_remote_path,
+            ProfileEditorField::ProxyCommand => &mut self.proxy_command,
         }
     }
 
@@ -162,6 +253,9 @@ impl ProfileEditorState {
             self.focused_field = match method {
                 AuthMethodKind::Password => ProfileEditorField::Password,
                 AuthMethodKind::PrivateKey => ProfileEditorField::KeyPath,
+                AuthMethodKind::KeyboardInteractive | AuthMethodKind::SshAgent => {
+                    ProfileEditorField::Username
+                }
             };
         }
     }
@@ -170,6 +264,17 @@ impl ProfileEditorState {
     /// kept as-is so switching back to Remember restores what was entered.
     pub(crate) fn set_passphrase_policy(&mut self, policy: PassphrasePolicy) {
         self.passphrase_policy = policy;
+    }
+
+    pub(crate) fn set_route_kind(&mut self, route_kind: ProfileRouteKind) {
+        self.route_kind = route_kind;
+        if !self.field_order().contains(&self.focused_field) {
+            self.focused_field = ProfileEditorField::Host;
+        }
+    }
+
+    pub(crate) fn set_jump_profile(&mut self, profile_id: ProfileId) {
+        self.jump_profile_id = Some(profile_id);
     }
 
     fn cycle_focus(&mut self, backwards: bool) {
@@ -263,6 +368,7 @@ impl crate::workspace::Workspace {
         self.settings.profile_filter_focused = false;
         self.settings.selected_profile_id = None;
         self.settings.profile_editor = Some(ProfileEditorState::blank());
+        self.settings.editor_scroll = gpui::ScrollHandle::new();
         cx.notify();
     }
 
@@ -275,6 +381,7 @@ impl crate::workspace::Workspace {
         self.settings.selected_profile_id = Some(id);
         self.settings.profile_editor =
             Some(ProfileEditorState::from_profile(&profile, secret_present));
+        self.settings.editor_scroll = gpui::ScrollHandle::new();
         cx.notify();
     }
 
@@ -294,6 +401,10 @@ impl crate::workspace::Workspace {
             key_path_raw,
             passphrase,
             passphrase_policy,
+            agent_socket_raw,
+            route_kind,
+            jump_profile_id,
+            proxy_command,
         ) = {
             let Some(editor) = self.settings.profile_editor.as_ref() else {
                 return;
@@ -311,6 +422,10 @@ impl crate::workspace::Workspace {
                 editor.key_path.value().trim().to_string(),
                 editor.passphrase.value().to_string(),
                 editor.passphrase_policy,
+                editor.agent_socket.value().trim().to_string(),
+                editor.route_kind,
+                editor.jump_profile_id,
+                editor.proxy_command.value().trim().to_string(),
             )
         };
 
@@ -404,6 +519,48 @@ impl crate::workspace::Workspace {
                     },
                 }
             }
+            AuthMethodKind::KeyboardInteractive => ProfileAuthUpdate::KeyboardInteractive,
+            AuthMethodKind::SshAgent => {
+                let socket_path = expand_home(&agent_socket_raw);
+                ProfileAuthUpdate::SshAgent {
+                    socket_path: (!socket_path.is_empty()).then(|| LocalPath::new(socket_path)),
+                }
+            }
+        };
+
+        let route = match route_kind {
+            ProfileRouteKind::Direct => ConnectionRoute::Direct,
+            ProfileRouteKind::JumpHost => {
+                let Some(jump_profile_id) = jump_profile_id else {
+                    if let Some(editor) = self.settings.profile_editor.as_mut() {
+                        editor.error = Some("Select a jump-host profile.".into());
+                    }
+                    cx.notify();
+                    return;
+                };
+                if jump_profile_id == profile_id {
+                    if let Some(editor) = self.settings.profile_editor.as_mut() {
+                        editor.error = Some("A profile cannot jump through itself.".into());
+                    }
+                    cx.notify();
+                    return;
+                }
+                ConnectionRoute::JumpHost {
+                    profile_id: jump_profile_id,
+                }
+            }
+            ProfileRouteKind::ProxyCommand => {
+                if proxy_command.is_empty() {
+                    if let Some(editor) = self.settings.profile_editor.as_mut() {
+                        editor.error = Some("ProxyCommand is required.".into());
+                    }
+                    cx.notify();
+                    return;
+                }
+                ConnectionRoute::ProxyCommand {
+                    command: proxy_command,
+                }
+            }
         };
 
         let request = ProfileSaveRequest {
@@ -413,6 +570,7 @@ impl crate::workspace::Workspace {
             port,
             username,
             auth,
+            route,
             default_remote_path,
         };
         match cx.resources_mut().profiles.save_request(request) {

@@ -553,6 +553,7 @@ impl crate::workspace::Workspace {
             || self.modal_inputs.delete_confirm.is_some()
             || self.modal_inputs.inline_edit.is_some()
             || self.active_host_key_prompt().is_some()
+            || self.active_keyboard_interactive_prompt().is_some()
             || self.active_transfer_conflict_prompt().is_some()
             || self.modal_inputs.about_open
             || self.surface != WorkspaceSurface::Files
@@ -880,7 +881,7 @@ impl crate::workspace::Workspace {
             tab.remote.is_refreshing = false;
             tab.remote.error = None;
         }
-        self.state.drain_expired_modals();
+        self.drain_expired_modals();
         self.focus_pane(self.focused_side, window, cx);
         cx.notify();
     }

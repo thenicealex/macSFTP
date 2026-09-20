@@ -161,6 +161,10 @@ pub(crate) struct ModalInputsUi {
     pub(crate) context_menu: Option<crate::workspace::file_ops::ContextMenuState>,
     /// Confirmation before opening very large remote files for edit.
     pub(crate) large_edit_confirm: Option<crate::workspace::remote_edit::PendingEdit>,
+    pub(crate) keyboard_interactive: std::collections::HashMap<
+        macsftp_core::KeyboardInteractiveRequestId,
+        KeyboardInteractiveUi,
+    >,
     pub(crate) about_open: bool,
 }
 
@@ -173,7 +177,57 @@ impl ModalInputsUi {
             inline_edit: None,
             context_menu: None,
             large_edit_confirm: None,
+            keyboard_interactive: std::collections::HashMap::new(),
             about_open: false,
+        }
+    }
+}
+
+pub(crate) enum KeyboardInteractiveInput {
+    Plain(macsftp_ui::SecretInputState),
+    Secret(macsftp_ui::SecretInputState),
+}
+
+impl KeyboardInteractiveInput {
+    pub(crate) fn state(&self) -> &InputState {
+        match self {
+            Self::Plain(state) => state.as_input_state(),
+            Self::Secret(state) => state.as_input_state(),
+        }
+    }
+
+    pub(crate) fn state_mut(&mut self) -> &mut InputState {
+        match self {
+            Self::Plain(state) => state.as_input_state_mut(),
+            Self::Secret(state) => state.as_input_state_mut(),
+        }
+    }
+
+    pub(crate) fn value(&self) -> &str {
+        self.state().value()
+    }
+}
+
+pub(crate) struct KeyboardInteractiveUi {
+    pub(crate) inputs: Vec<KeyboardInteractiveInput>,
+    pub(crate) focused_index: usize,
+}
+
+impl KeyboardInteractiveUi {
+    pub(crate) fn from_prompt(prompt: &macsftp_core::KeyboardInteractivePrompt) -> Self {
+        Self {
+            inputs: prompt
+                .prompts
+                .iter()
+                .map(|field| {
+                    if field.echo {
+                        KeyboardInteractiveInput::Plain(macsftp_ui::SecretInputState::new())
+                    } else {
+                        KeyboardInteractiveInput::Secret(macsftp_ui::SecretInputState::new())
+                    }
+                })
+                .collect(),
+            focused_index: 0,
         }
     }
 }
@@ -199,6 +253,8 @@ pub(crate) struct SettingsUi {
     pub(crate) profile_delete_confirm: Option<macsftp_core::ProfileId>,
     pub(crate) picker_scroll: gpui::ScrollHandle,
     pub(crate) picker_scrollbar: ScrollbarState,
+    pub(crate) editor_scroll: gpui::ScrollHandle,
+    pub(crate) editor_scrollbar: ScrollbarState,
 }
 
 impl SettingsUi {
@@ -214,6 +270,8 @@ impl SettingsUi {
             profile_delete_confirm: None,
             picker_scroll: gpui::ScrollHandle::new(),
             picker_scrollbar: ScrollbarState::new(),
+            editor_scroll: gpui::ScrollHandle::new(),
+            editor_scrollbar: ScrollbarState::new(),
         }
     }
 }

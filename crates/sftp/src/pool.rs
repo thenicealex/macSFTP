@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -13,6 +13,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+use crate::keyboard_interactive::KeyboardInteractiveRegistry;
 use crate::known_hosts::KnownHostsStore;
 use crate::physical_connection::{
     ClientHandler, ConnectFailure, PhysicalDisconnectCause, establish_physical_connection,
@@ -57,13 +58,31 @@ pub enum PoolEntry {
 pub struct ConnectionManager {
     pool: Mutex<HashMap<ConnectionKey, PoolEntry>>,
     idle_timeout: Duration,
+    keyboard_interactive_registry: Arc<KeyboardInteractiveRegistry>,
+    next_keyboard_interactive_id: Arc<AtomicU64>,
+    next_trust_id: Arc<AtomicU64>,
 }
 
 impl ConnectionManager {
     pub fn new() -> Self {
+        Self::with_keyboard_interactive(
+            Arc::new(KeyboardInteractiveRegistry::new()),
+            Arc::new(AtomicU64::new(1)),
+            Arc::new(AtomicU64::new(1)),
+        )
+    }
+
+    pub fn with_keyboard_interactive(
+        keyboard_interactive_registry: Arc<KeyboardInteractiveRegistry>,
+        next_keyboard_interactive_id: Arc<AtomicU64>,
+        next_trust_id: Arc<AtomicU64>,
+    ) -> Self {
         Self {
             pool: Mutex::new(HashMap::new()),
             idle_timeout: Duration::from_secs(30),
+            keyboard_interactive_registry,
+            next_keyboard_interactive_id,
+            next_trust_id,
         }
     }
 
@@ -74,7 +93,6 @@ impl ConnectionManager {
         settings: &ConnectionSettings,
         pool_identity: &ConnectionPoolIdentity,
         scope: &RemoteEventScope,
-        trust_request_id: TrustRequestId,
         known_hosts: Arc<Mutex<KnownHostsStore>>,
         trust_config: Arc<HostTrustConfig>,
         trust_registry: Arc<TrustRegistry>,
@@ -129,6 +147,14 @@ impl ConnectionManager {
 
         let settings = settings.clone();
         let scope = scope.clone();
+        let trust_request_id = TrustRequestId(
+            self.next_trust_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        );
+        let jump_trust_request_id = TrustRequestId(
+            self.next_trust_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        );
 
         let manager = self.clone();
         let key_clone = key.clone();
@@ -140,9 +166,12 @@ impl ConnectionManager {
                     &settings,
                     &scope,
                     trust_request_id,
+                    jump_trust_request_id,
                     known_hosts,
                     trust_config,
                     trust_registry,
+                    manager.keyboard_interactive_registry.clone(),
+                    manager.next_keyboard_interactive_id.clone(),
                     event_tx,
                     connection_lost.clone(),
                     disconnect_cause.clone(),
@@ -226,7 +255,6 @@ impl ConnectionManager {
         settings: &ConnectionSettings,
         pool_identity: &ConnectionPoolIdentity,
         scope: &RemoteEventScope,
-        trust_request_id: TrustRequestId,
         known_hosts: Arc<Mutex<KnownHostsStore>>,
         trust_config: Arc<HostTrustConfig>,
         trust_registry: Arc<TrustRegistry>,
@@ -258,7 +286,6 @@ impl ConnectionManager {
             &settings,
             &pool_identity,
             &scope,
-            trust_request_id,
             known_hosts,
             trust_config,
             trust_registry,

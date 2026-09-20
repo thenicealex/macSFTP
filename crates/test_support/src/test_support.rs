@@ -28,6 +28,10 @@ pub struct SshTestServer {
     pub fixture_dir: PathBuf,
     /// Unencrypted ed25519 client key accepted by the server.
     pub client_key_path: PathBuf,
+    /// Unencrypted 2048-bit RSA client key accepted by the server.
+    pub client_rsa_key_path: PathBuf,
+    /// Encrypted RSA key with [`Self::ENCRYPTED_KEY_PASSPHRASE`].
+    pub encrypted_rsa_key_path: PathBuf,
     /// Same key type, encrypted with [`Self::ENCRYPTED_KEY_PASSPHRASE`].
     /// Not in authorized_keys — only for key-loading tests.
     pub encrypted_key_path: PathBuf,
@@ -59,9 +63,13 @@ impl SshTestServer {
 
         let host_key_path = fixture_dir.join("host_ed25519");
         let client_key_path = fixture_dir.join("client_ed25519");
+        let client_rsa_key_path = fixture_dir.join("client_rsa");
+        let encrypted_rsa_key_path = fixture_dir.join("client_encrypted_rsa");
         let encrypted_key_path = fixture_dir.join("client_encrypted_ed25519");
         if !generate_key(&host_key_path, "")
             || !generate_key(&client_key_path, "")
+            || !generate_rsa_key(&client_rsa_key_path, "")
+            || !generate_rsa_key(&encrypted_rsa_key_path, Self::ENCRYPTED_KEY_PASSPHRASE)
             || !generate_key(&encrypted_key_path, Self::ENCRYPTED_KEY_PASSPHRASE)
         {
             return Self::unavailable("ssh-keygen failed");
@@ -71,13 +79,32 @@ impl SshTestServer {
             Ok(content) => content,
             Err(error) => return Self::unavailable(format!("cannot read client key: {error}")),
         };
+        let client_rsa_public =
+            match std::fs::read_to_string(client_rsa_key_path.with_extension("pub")) {
+                Ok(content) => content,
+                Err(error) => {
+                    return Self::unavailable(format!("cannot read RSA client key: {error}"));
+                }
+            };
+        let encrypted_rsa_public =
+            match std::fs::read_to_string(encrypted_rsa_key_path.with_extension("pub")) {
+                Ok(content) => content,
+                Err(error) => {
+                    return Self::unavailable(format!(
+                        "cannot read encrypted RSA client key: {error}"
+                    ));
+                }
+            };
         let host_public_key = match std::fs::read_to_string(host_key_path.with_extension("pub")) {
             Ok(content) => content.trim().to_string(),
             Err(error) => return Self::unavailable(format!("cannot read host key: {error}")),
         };
 
         let authorized_keys_path = fixture_dir.join("authorized_keys");
-        if let Err(error) = std::fs::write(&authorized_keys_path, client_public) {
+        if let Err(error) = std::fs::write(
+            &authorized_keys_path,
+            format!("{client_public}{client_rsa_public}{encrypted_rsa_public}"),
+        ) {
             return Self::unavailable(format!("cannot write authorized_keys: {error}"));
         }
 
@@ -129,6 +156,8 @@ impl SshTestServer {
             username,
             fixture_dir,
             client_key_path,
+            client_rsa_key_path,
+            encrypted_rsa_key_path,
             encrypted_key_path,
             host_public_key,
         };
@@ -195,6 +224,25 @@ fn generate_key(path: &std::path::Path, passphrase: &str) -> bool {
         .arg("-q")
         .arg("-t")
         .arg("ed25519")
+        .arg("-N")
+        .arg(passphrase)
+        .arg("-f")
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn generate_rsa_key(path: &std::path::Path, passphrase: &str) -> bool {
+    Command::new("/usr/bin/ssh-keygen")
+        .arg("-q")
+        .arg("-t")
+        .arg("rsa")
+        .arg("-b")
+        .arg("2048")
         .arg("-N")
         .arg(passphrase)
         .arg("-f")

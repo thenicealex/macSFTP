@@ -2,7 +2,7 @@ use gpui::{
     Context, FontWeight, IntoElement, KeyDownEvent, ParentElement, Styled, Window,
     WindowControlArea, div, prelude::*, px,
 };
-use macsftp_core::AuthMethodKind;
+use macsftp_core::{AuthMethodKind, ConnectionRoute};
 use macsftp_ui::{
     ActiveTheme, InputKeyResult, InputState, TextFieldModel, empty_state, text_button, text_field,
 };
@@ -10,12 +10,16 @@ use tracing::warn;
 
 use crate::resources::ActiveResources;
 use crate::workspace::profiles::{
-    PassphrasePolicy, ProfileEditorField, SettingsSection, profile_list_label,
+    PassphrasePolicy, ProfileEditorField, ProfileRouteKind, SettingsSection, profile_list_label,
 };
 use macsftp_storage::AppearancePreference;
 
 impl crate::workspace::Workspace {
-    pub(crate) fn render_settings(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_settings(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let theme = cx.theme().clone();
         let selected_section = self.settings.section;
         let selected_appearance = cx.resources().config.config().appearance;
@@ -224,7 +228,7 @@ impl crate::workspace::Workspace {
                         ),
                 )
                 .into_any_element(),
-            SettingsSection::Profiles => self.render_settings_profiles(cx),
+            SettingsSection::Profiles => self.render_settings_profiles(window, cx),
         };
 
         div()
@@ -363,7 +367,11 @@ impl crate::workspace::Workspace {
     }
 
     /// Settings → Profiles: list on the left, editor form on the right.
-    pub(crate) fn render_settings_profiles(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_settings_profiles(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
         let theme = cx.theme().clone();
         let profiles = cx.resources().profiles.profiles().to_vec();
         let total_count = profiles.len();
@@ -487,7 +495,16 @@ impl crate::workspace::Workspace {
                     )
                     .child(list_body),
             )
-            .child(div().flex_1().min_w_0().p_6().child(detail))
+            .child(div().flex().flex_col().flex_1().min_w_0().min_h_0().child(
+                macsftp_ui::scroll_area(
+                    "settings-profile-editor-scroll",
+                    div().flex_none().w_full().p_6().child(detail),
+                    &self.settings.editor_scroll,
+                    &self.settings.editor_scrollbar,
+                    window,
+                    cx,
+                ),
+            ))
             .into_any_element()
     }
 
@@ -496,6 +513,17 @@ impl crate::workspace::Workspace {
             return div().into_any_element();
         };
         let theme = cx.theme().clone();
+        let jump_candidates = cx
+            .resources()
+            .profiles
+            .profiles()
+            .iter()
+            .filter(|profile| {
+                Some(profile.id) != editor.profile_id
+                    && matches!(profile.route, ConnectionRoute::Direct)
+            })
+            .map(|profile| (profile.id, profile.name.clone()))
+            .collect::<Vec<_>>();
 
         let field_row = |label: &'static str,
                          field: ProfileEditorField,
@@ -567,6 +595,21 @@ impl crate::workspace::Workspace {
                         }
                     }))
             };
+
+        let route_toggle = |label: &'static str,
+                            route_kind: ProfileRouteKind,
+                            id: &'static str,
+                            active: ProfileRouteKind,
+                            cx: &mut Context<Self>| {
+            text_button(id, label)
+                .primary(active == route_kind)
+                .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                    if let Some(editor) = workspace.settings.profile_editor.as_mut() {
+                        editor.set_route_kind(route_kind);
+                        cx.notify();
+                    }
+                }))
+        };
 
         let focused = editor.focused_field;
         let auth_method = editor.auth_method;
@@ -656,6 +699,7 @@ impl crate::workspace::Workspace {
                     .child(
                         div()
                             .flex()
+                            .flex_wrap()
                             .gap_2()
                             .child(auth_toggle(
                                 "Password",
@@ -668,6 +712,20 @@ impl crate::workspace::Workspace {
                                 "Private Key",
                                 AuthMethodKind::PrivateKey,
                                 "profile-auth-private-key",
+                                auth_method,
+                                cx,
+                            ))
+                            .child(auth_toggle(
+                                "Interactive",
+                                AuthMethodKind::KeyboardInteractive,
+                                "profile-auth-keyboard-interactive",
+                                auth_method,
+                                cx,
+                            ))
+                            .child(auth_toggle(
+                                "SSH Agent",
+                                AuthMethodKind::SshAgent,
+                                "profile-auth-agent",
                                 auth_method,
                                 cx,
                             )),
@@ -757,7 +815,130 @@ impl crate::workspace::Workspace {
                     ))
                 })
             }
+            AuthMethodKind::KeyboardInteractive => form,
+            AuthMethodKind::SshAgent => form.child(field_row(
+                "Agent socket",
+                ProfileEditorField::AgentSocket,
+                &editor.agent_socket,
+                "SSH_AUTH_SOCK (optional)",
+                false,
+                focused,
+                cx,
+            )),
         };
+
+        let route_kind = editor.route_kind;
+        form = form.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(120.0))
+                        .flex_none()
+                        .text_size(px(11.0))
+                        .text_color(theme.colors.text_muted)
+                        .child("Route"),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(route_toggle(
+                            "Direct",
+                            ProfileRouteKind::Direct,
+                            "profile-route-direct",
+                            route_kind,
+                            cx,
+                        ))
+                        .child(route_toggle(
+                            "Jump host",
+                            ProfileRouteKind::JumpHost,
+                            "profile-route-jump",
+                            route_kind,
+                            cx,
+                        ))
+                        .child(route_toggle(
+                            "ProxyCommand",
+                            ProfileRouteKind::ProxyCommand,
+                            "profile-route-command",
+                            route_kind,
+                            cx,
+                        )),
+                ),
+        );
+        match route_kind {
+            ProfileRouteKind::Direct => {}
+            ProfileRouteKind::ProxyCommand => {
+                form = form.child(field_row(
+                    "Command",
+                    ProfileEditorField::ProxyCommand,
+                    &editor.proxy_command,
+                    "ssh -W %h:%p bastion",
+                    false,
+                    focused,
+                    cx,
+                ));
+                form = form.child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(div().w(px(120.0)).flex_none())
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(11.0))
+                                .text_color(theme.colors.text_muted)
+                                .child(
+                                    "Shell command; %h, %p and %r expand to the target. Never include secrets.",
+                                ),
+                        ),
+                );
+            }
+            ProfileRouteKind::JumpHost => {
+                let mut choices = div().flex().flex_wrap().gap_2();
+                for (profile_id, label) in &jump_candidates {
+                    let profile_id = *profile_id;
+                    let selected = editor.jump_profile_id == Some(profile_id);
+                    choices = choices.child(
+                        text_button(("jump-profile", profile_id.0), label.clone())
+                            .primary(selected)
+                            .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                                if let Some(editor) = workspace.settings.profile_editor.as_mut() {
+                                    editor.set_jump_profile(profile_id);
+                                    cx.notify();
+                                }
+                            })),
+                    );
+                }
+                if jump_candidates.is_empty() {
+                    choices = choices.child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(theme.colors.text_muted)
+                            .child("Create a direct profile first."),
+                    );
+                }
+                form = form.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .w(px(120.0))
+                                .flex_none()
+                                .text_size(px(11.0))
+                                .text_color(theme.colors.text_muted)
+                                .child("Jump profile"),
+                        )
+                        .child(choices),
+                );
+            }
+        }
 
         form = form.child(field_row(
             "Remote path",

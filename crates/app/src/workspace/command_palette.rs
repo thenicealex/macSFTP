@@ -99,6 +99,7 @@ impl Workspace {
             "OpenSettings" => {
                 if self.connect_form_ui.form.is_none()
                     && self.active_host_key_prompt().is_none()
+                    && self.active_keyboard_interactive_prompt().is_none()
                     && self.active_transfer_conflict_prompt().is_none()
                     && self.modal_inputs.delete_confirm.is_none()
                     && !self.go_to_path.open
@@ -113,6 +114,7 @@ impl Workspace {
             "OpenProfiles" => {
                 if self.connect_form_ui.form.is_none()
                     && self.active_host_key_prompt().is_none()
+                    && self.active_keyboard_interactive_prompt().is_none()
                     && self.active_transfer_conflict_prompt().is_none()
                     && self.modal_inputs.delete_confirm.is_none()
                     && !self.go_to_path.open
@@ -130,6 +132,7 @@ impl Workspace {
             "ShowAbout" => {
                 if self.connect_form_ui.form.is_none()
                     && self.active_host_key_prompt().is_none()
+                    && self.active_keyboard_interactive_prompt().is_none()
                     && self.active_transfer_conflict_prompt().is_none()
                     && self.modal_inputs.delete_confirm.is_none()
                     && !self.go_to_path.open
