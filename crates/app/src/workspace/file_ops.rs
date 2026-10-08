@@ -11,7 +11,7 @@ use macsftp_core::{
     TabId, UserFacingError,
 };
 use macsftp_platform::{create_directory, delete_entry, local_fs_error, rename_entry};
-use macsftp_ui::{ActiveTheme, IconName, InputKeyResult, InputState, icon, text_button};
+use macsftp_ui::{ActiveTheme, IconName, InputState, icon, text_button};
 use tracing::warn;
 
 use crate::resources::ActiveResources;
@@ -166,7 +166,7 @@ impl crate::workspace::Workspace {
                 entries,
                 dont_ask_again: false,
             });
-            window.focus(&self.modal_focus);
+            window.focus(&self.modal_focus, cx);
             cx.notify();
         } else {
             self.dispatch_fs(
@@ -233,13 +233,14 @@ impl crate::workspace::Workspace {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         self.modal_inputs.context_menu = None;
+        self.text_inputs.remove(&TextInputTarget::InlineEdit);
         self.modal_inputs.inline_edit = Some(InlineEditState {
             side,
             kind: InlineEditKind::Rename { entry },
             input: InputState::with_value(name),
             error: None,
         });
-        window.focus(self.pane_focus(side));
+        window.focus(self.pane_focus(side), cx);
         cx.notify();
     }
 
@@ -266,13 +267,14 @@ impl crate::workspace::Workspace {
             return;
         };
         self.modal_inputs.context_menu = None;
+        self.text_inputs.remove(&TextInputTarget::InlineEdit);
         self.modal_inputs.inline_edit = Some(InlineEditState {
             side,
             kind: InlineEditKind::NewFolder { parent },
             input: InputState::with_value("Untitled Folder"),
             error: None,
         });
-        window.focus(self.pane_focus(side));
+        window.focus(self.pane_focus(side), cx);
         cx.notify();
     }
 
@@ -353,23 +355,6 @@ impl crate::workspace::Workspace {
         if keystroke.key == "enter" && !keystroke.modifiers.modified() {
             cx.stop_propagation();
             self.submit_inline_edit(window, cx);
-            return;
-        }
-        if let Some(edit) = &mut self.modal_inputs.inline_edit {
-            if keystroke.modifiers.platform && keystroke.key == "v" {
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    edit.input.insert(&text);
-                    edit.error = None;
-                    cx.stop_propagation();
-                    cx.notify();
-                }
-                return;
-            }
-            if edit.input.handle_keystroke(keystroke) == InputKeyResult::Handled {
-                edit.error = None;
-                cx.stop_propagation();
-                cx.notify();
-            }
         }
     }
 

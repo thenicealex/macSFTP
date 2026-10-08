@@ -53,7 +53,7 @@ impl crate::workspace::Workspace {
                 if let Some(tab) = self.state.tabs.find_tab_mut(prompt.tab_id) {
                     tab.await_host_key(prompt.session_id, prompt.request_id);
                     self.state.modals.active.push(ModalRequest::HostKey(prompt));
-                    window.focus(&self.modal_focus);
+                    window.focus(&self.modal_focus, cx);
                 }
             }
             AppEvent::KeyboardInteractivePrompt(prompt) => {

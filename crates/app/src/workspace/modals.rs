@@ -13,7 +13,7 @@ use macsftp_core::{
 };
 use macsftp_ui::{
     ActiveTheme, InputKeyResult, InputState, TextFieldModel, copy_name, format_size,
-    format_timestamp, text_button, text_field,
+    format_timestamp, plain_text_field, text_button, text_field,
 };
 
 use crate::resources::{ActiveResources, ActiveTransfers};
@@ -61,7 +61,7 @@ impl crate::workspace::Workspace {
             .push(ModalRequest::TransferConflict(prompt));
         self.modal_inputs.conflict_rename.set_value(default_rename);
         self.modal_inputs.conflict_rename_error = None;
-        window.focus(&self.modal_focus);
+        window.focus(&self.modal_focus, cx);
         cx.notify();
     }
 
@@ -139,7 +139,7 @@ impl crate::workspace::Workspace {
             .modals
             .active
             .push(ModalRequest::KeyboardInteractive(prompt));
-        window.focus(&self.modal_focus);
+        window.focus(&self.modal_focus, cx);
         cx.notify();
     }
 
@@ -265,26 +265,6 @@ impl crate::workspace::Workspace {
         if keystroke.key == "enter" && !keystroke.modifiers.modified() {
             cx.stop_propagation();
             self.submit_transfer_rename(false, window, cx);
-            return;
-        }
-        if keystroke.modifiers.platform && keystroke.key == "v" {
-            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                self.modal_inputs.conflict_rename.insert(&text);
-                self.modal_inputs.conflict_rename_error = None;
-                cx.stop_propagation();
-                cx.notify();
-            }
-            return;
-        }
-        if self
-            .modal_inputs
-            .conflict_rename
-            .handle_keystroke(keystroke)
-            == InputKeyResult::Handled
-        {
-            self.modal_inputs.conflict_rename_error = None;
-            cx.stop_propagation();
-            cx.notify();
         }
     }
     pub(crate) fn accept_host_key(
@@ -419,10 +399,11 @@ impl crate::workspace::Workspace {
             return;
         }
         self.modal_inputs.about_open = false;
+        self.text_inputs.remove(&TextInputTarget::GoToPath);
         self.go_to_path.open = true;
         self.go_to_path.input.clear();
         self.go_to_path.error = None;
-        window.focus(&self.modal_focus);
+        window.focus(&self.modal_focus, cx);
         cx.notify();
     }
 
@@ -497,21 +478,6 @@ impl crate::workspace::Workspace {
         if keystroke.key == "enter" && !keystroke.modifiers.modified() {
             cx.stop_propagation();
             self.submit_go_to_path(window, cx);
-            return;
-        }
-        if keystroke.modifiers.platform && keystroke.key == "v" {
-            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                self.go_to_path.input.insert(&text);
-                self.go_to_path.error = None;
-                cx.stop_propagation();
-                cx.notify();
-            }
-            return;
-        }
-        if self.go_to_path.input.handle_keystroke(keystroke) == InputKeyResult::Handled {
-            self.go_to_path.error = None;
-            cx.stop_propagation();
-            cx.notify();
         }
     }
 
@@ -566,16 +532,7 @@ impl crate::workspace::Workspace {
                                 .text_color(theme.colors.text_muted)
                                 .child("Enter a full folder path. Press Enter to open or Esc to cancel."),
                         )
-                        .child(text_field(
-                            "go-to-path-input",
-                            TextFieldModel {
-                                state: &self.go_to_path.input,
-                                placeholder: "Full folder path",
-                                focused: true,
-                                masked: false,
-                            },
-                            cx,
-                        ))
+                        .child(self.render_text_input(TextInputTarget::GoToPath, "go-to-path-input", cx))
                         .when_some(self.go_to_path.error.clone(), |card, error| {
                             card.child(
                                 div()
@@ -624,9 +581,14 @@ impl crate::workspace::Workspace {
                 .flex()
                 .items_center()
                 .gap_2()
-                .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                .on_click(cx.listener(move |workspace, _event, window, cx| {
                     if let Some(form) = &mut workspace.connect_form_ui.form {
                         form.focused_field = field;
+                        if let Some(input) = form.inputs.get(&field) {
+                            input.focus(window, cx);
+                        } else {
+                            window.focus(&workspace.connect_form_ui.focus, cx);
+                        }
                         cx.notify();
                     }
                 }))
@@ -638,16 +600,28 @@ impl crate::workspace::Workspace {
                         .text_color(theme.colors.text_muted)
                         .child(label),
                 )
-                .child(div().flex_1().min_w_0().child(text_field(
-                    ("connect-input", field as usize),
-                    TextFieldModel {
-                        state,
-                        placeholder,
-                        focused: form.focused_field == field,
-                        masked,
-                    },
-                    cx,
-                )))
+                .child(div().flex_1().min_w_0().child(if masked {
+                    text_field(
+                        ("connect-input", field as usize),
+                        TextFieldModel {
+                            state,
+                            placeholder,
+                            focused: form.focused_field == field,
+                            masked,
+                        },
+                        cx,
+                    )
+                    .into_any_element()
+                } else {
+                    plain_text_field(
+                        ("connect-input", field as usize),
+                        form.inputs
+                            .get(&field)
+                            .expect("visible ordinary fields must have prepared component inputs"),
+                        cx,
+                    )
+                    .into_any_element()
+                }))
         };
 
         let auth_toggle = |label: &'static str,
@@ -656,16 +630,27 @@ impl crate::workspace::Workspace {
                            cx: &mut Context<Self>| {
             text_button(id, label)
                 .primary(form.auth_method == method)
-                .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                .on_click(cx.listener(move |workspace, _event, window, cx| {
                     if let Some(form) = &mut workspace.connect_form_ui.form {
                         form.set_auth_method(method);
                         cx.notify();
                     }
+                    workspace.focus_connect_field(window, cx);
                 }))
         };
 
         let mut card = div()
-            .key_context("ConnectForm")
+            .key_context(crate::app_actions::CONNECT_FORM_CONTEXT)
+            .on_action(cx.listener(
+                |workspace, _: &crate::app_actions::FocusNextField, window, cx| {
+                    workspace.cycle_connect_focus(false, window, cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |workspace, _: &crate::app_actions::FocusPreviousField, window, cx| {
+                    workspace.cycle_connect_focus(true, window, cx);
+                },
+            ))
             .track_focus(&self.connect_form_ui.focus)
             .on_key_down(cx.listener(Self::handle_connect_form_key))
             .flex()
@@ -759,7 +744,7 @@ impl crate::workspace::Workspace {
                             workspace.modal_inputs.about_open = false;
                             workspace.surface = WorkspaceSurface::Settings;
                             workspace.set_settings_section(SettingsSection::Profiles, cx);
-                            workspace.workspace_focus.focus(window);
+                            workspace.workspace_focus.focus(window, cx);
                             cx.notify();
                         }),
                     ),
@@ -776,14 +761,11 @@ impl crate::workspace::Workspace {
                     .py_1()
                     .border_b_1()
                     .border_color(theme.colors.border)
-                    .child(text_field(
+                    .child(plain_text_field(
                         "profile-picker-filter-input",
-                        TextFieldModel {
-                            state: &form.profile_picker_filter,
-                            placeholder: "Filter saved connections…",
-                            focused: true,
-                            masked: false,
-                        },
+                        form.inputs
+                            .get(&ConnectField::ProfileFilter)
+                            .expect("open picker must prepare its filter input"),
                         cx,
                     )),
             );
@@ -887,7 +869,7 @@ impl crate::workspace::Workspace {
                 "Server Address",
                 ConnectField::Host,
                 &form.host,
-                "example.com",
+                ConnectField::Host.placeholder(),
                 false,
                 cx,
             ))
@@ -895,7 +877,7 @@ impl crate::workspace::Workspace {
                 "Port",
                 ConnectField::Port,
                 &form.port,
-                "22",
+                ConnectField::Port.placeholder(),
                 false,
                 cx,
             ))
@@ -903,7 +885,7 @@ impl crate::workspace::Workspace {
                 "Username",
                 ConnectField::Username,
                 &form.username,
-                "user",
+                ConnectField::Username.placeholder(),
                 false,
                 cx,
             ))
@@ -957,7 +939,7 @@ impl crate::workspace::Workspace {
                 "Password",
                 ConnectField::Password,
                 form.password.as_input_state(),
-                "",
+                ConnectField::Password.placeholder(),
                 true,
                 cx,
             )),
@@ -966,7 +948,7 @@ impl crate::workspace::Workspace {
                     "Key File Path",
                     ConnectField::KeyPath,
                     &form.key_path,
-                    "~/.ssh/id_ed25519",
+                    ConnectField::KeyPath.placeholder(),
                     false,
                     cx,
                 ))
@@ -974,7 +956,7 @@ impl crate::workspace::Workspace {
                     "Key Password",
                     ConnectField::Passphrase,
                     form.passphrase.as_input_state(),
-                    "",
+                    ConnectField::Passphrase.placeholder(),
                     true,
                     cx,
                 )),
@@ -989,7 +971,7 @@ impl crate::workspace::Workspace {
                     "Agent Location",
                     ConnectField::AgentSocket,
                     &form.agent_socket,
-                    "SSH_AUTH_SOCK (optional)",
+                    ConnectField::AgentSocket.placeholder(),
                     false,
                     cx,
                 ))
@@ -1141,7 +1123,7 @@ impl crate::workspace::Workspace {
                         {
                             inputs.focused_index = index;
                         }
-                        window.focus(&workspace.modal_focus);
+                        window.focus(&workspace.modal_focus, cx);
                         cx.notify();
                     }))
                     .child(
@@ -1428,16 +1410,7 @@ impl crate::workspace::Workspace {
                                         .text_color(theme.colors.text_muted)
                                         .child("New Name"),
                                 )
-                                .child(div().flex_1().min_w_0().child(text_field(
-                                    "conflict-rename-input",
-                                    TextFieldModel {
-                                        state: &self.modal_inputs.conflict_rename,
-                                        placeholder: "new file name",
-                                        focused: true,
-                                        masked: false,
-                                    },
-                                    cx,
-                                ))),
+                                .child(div().flex_1().min_w_0().child(self.render_text_input(TextInputTarget::ConflictRename(prompt.request_id), "conflict-rename-input", cx))),
                         )
                         .when_some(
                             self.modal_inputs.conflict_rename_error.clone(),

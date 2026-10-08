@@ -1,7 +1,8 @@
 // Tests use unwrap/expect for fixtures; production keeps unwrap_used deny.
 #![allow(clippy::unwrap_used)]
 use gpui::{
-    App, Entity, ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext, point, px, size,
+    App, AppContext as _, Entity, ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext,
+    point, px, size,
 };
 use macsftp_core::{
     AppCommand, AppEvent, AuthCredential, AuthMethod, AuthMethodKind, ConflictDecision,
@@ -199,7 +200,7 @@ fn init_workspace_with_paths(
         .unwrap_or_else(|| session_coordinator.allocate_window_id());
     session_coordinator.register_window(window_session_id);
     cx.update(|cx| {
-        cx.set_global(Theme::dark());
+        Theme::dark().install(cx);
         app_actions::init(cx);
         // Shared globals must exist before `Workspace::new` (which reads
         // them). A fresh `AppResources` per test → fresh tab-id counter
@@ -213,11 +214,15 @@ fn init_workspace_with_paths(
     let channels = BridgeChannels::new(&RuntimeBridgeConfig::default());
     let client = RuntimeClient::new(channels.command_tx.clone());
     let window = cx.add_window(|window, cx| {
-        Workspace::new(client, window_session_id, restore_snapshot, window, cx)
+        let workspace =
+            cx.new(|cx| Workspace::new(client, window_session_id, restore_snapshot, window, cx));
+        gpui_component::Root::new(workspace, window, cx)
     });
     let workspace = window
         .root(cx)
-        .expect("workspace root view should be available");
+        .expect("component root view should be available")
+        .read_with(cx, |root, _| root.view().clone().downcast::<Workspace>())
+        .expect("component root must retain Workspace content");
     let visual_cx = VisualTestContext::from_window(window.into(), cx);
     (workspace, visual_cx, channels)
 }
@@ -1398,7 +1403,7 @@ fn about_escape_restores_pane_focus(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |ws, window, cx| {
         // Simulate focus having left the pane (e.g. after interacting with About).
-        window.focus(&ws.modal_focus);
+        window.focus(&ws.modal_focus, cx);
         ws.modal_inputs.about_open = true;
         ws.cancel_active_modal(window, cx);
         assert!(!ws.modal_inputs.about_open, "Esc must close About");
@@ -1414,7 +1419,7 @@ fn about_escape_restores_pane_focus(cx: &mut TestAppContext) {
 fn about_close_button_restores_pane_focus(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |ws, window, cx| {
-        window.focus(&ws.modal_focus);
+        window.focus(&ws.modal_focus, cx);
         ws.modal_inputs.about_open = true;
         ws.close_about(window, cx);
         assert!(!ws.modal_inputs.about_open, "Close must dismiss About");
@@ -3431,19 +3436,10 @@ fn settings_external_editor_typing_persists_and_round_trips(cx: &mut TestAppCont
     cx.dispatch_action(OpenSettings);
     let config_path = workspace.update_in(&mut cx, |workspace, window, cx| {
         workspace.focus_external_editor(window, cx);
-        for ch in ["v", "i", "m"] {
-            let event = gpui::KeyDownEvent {
-                keystroke: gpui::Keystroke {
-                    modifiers: gpui::Modifiers::default(),
-                    key: ch.to_string(),
-                    key_char: Some(ch.to_string()),
-                },
-                is_held: false,
-            };
-            workspace.handle_external_editor_key(&event, window, cx);
-        }
         cx.resources().app_paths.config_file.clone()
     });
+
+    cx.simulate_keystrokes("v i m");
 
     // Committed to the in-memory config on every keystroke.
     workspace.read_with(&cx, |_workspace, cx| {
@@ -3464,10 +3460,7 @@ fn settings_external_editor_typing_persists_and_round_trips(cx: &mut TestAppCont
     );
 
     // Clearing the field (empty → None) removes the override and round-trips.
-    workspace.update(&mut cx, |workspace, cx| {
-        workspace.settings.external_editor_input.set_value("");
-        workspace.commit_external_editor(cx);
-    });
+    cx.simulate_keystrokes("cmd-a backspace");
     workspace.read_with(&cx, |_workspace, cx| {
         assert_eq!(
             cx.resources().config.config().external_editor,
@@ -3482,6 +3475,44 @@ fn settings_external_editor_typing_persists_and_round_trips(cx: &mut TestAppCont
         None,
         "cleared override must persist to disk"
     );
+}
+
+#[gpui::test]
+fn component_input_keeps_unicode_and_focus_across_redraws(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.dispatch_action(OpenSettings);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.focus_external_editor(window, cx);
+    });
+    cx.simulate_input("编辑器");
+    workspace.update(&mut cx, |_workspace, cx| cx.notify());
+    cx.simulate_input(" app");
+    workspace.read_with(&cx, |workspace, cx| {
+        assert_eq!(
+            workspace.settings.external_editor_input.read(cx).value(),
+            "编辑器 app"
+        );
+        assert_eq!(
+            cx.resources().config.config().external_editor.as_deref(),
+            Some("编辑器 app")
+        );
+    });
+    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_input("vim");
+    workspace.read_with(&cx, |_workspace, cx| {
+        assert_eq!(
+            cx.resources().config.config().external_editor.as_deref(),
+            Some("vim")
+        );
+    });
+    cx.simulate_keystrokes("escape");
+    workspace.read_with(&cx, |workspace, _cx| {
+        assert_eq!(
+            workspace.surface,
+            WorkspaceSurface::Files,
+            "Escape must leave Settings when the input has focus"
+        );
+    });
 }
 
 /// Register a `RemoteConflict` edit session directly in the store and return
@@ -4845,6 +4876,208 @@ fn request_connect_opens_form_then_reuses_session_credentials(cx: &mut TestAppCo
 }
 
 #[gpui::test]
+fn connect_component_inputs_support_clipboard_and_mixed_secret_focus(cx: &mut TestAppContext) {
+    use crate::workspace::connect_form::ConnectField;
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.open_connect_form(window, cx)
+    });
+    cx.simulate_input("server.example");
+    cx.simulate_keystrokes("cmd-a cmd-c tab cmd-a cmd-v");
+    workspace.read_with(&cx, |workspace, _| {
+        let form = workspace
+            .connect_form_ui
+            .form
+            .as_ref()
+            .expect("Connect form must remain open");
+        assert_eq!(form.host.value(), "server.example");
+        assert_eq!(
+            form.port.value(),
+            "server.example",
+            "clipboard paste must replace the selection in the focused field"
+        );
+        assert_eq!(form.focused_field, ConnectField::Port);
+    });
+    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_input("2222");
+    cx.simulate_keystrokes("tab");
+    cx.simulate_input("deploy");
+    workspace.update(&mut cx, |_workspace, cx| cx.notify());
+    cx.simulate_keystrokes("tab s e c r e t");
+    workspace.read_with(&cx, |workspace, _| {
+        let form = workspace
+            .connect_form_ui
+            .form
+            .as_ref()
+            .expect("Connect form must remain open");
+        assert_eq!(form.focused_field, ConnectField::Password);
+        assert_eq!(form.password.value(), "secret");
+        assert!(
+            !form.inputs.contains_key(&ConnectField::Password),
+            "secrets must never enter a component input"
+        );
+        assert!(!form.inputs.contains_key(&ConnectField::Passphrase));
+    });
+    cx.simulate_keystrokes("shift-tab cmd-a");
+    cx.simulate_input("new-user");
+    cx.simulate_keystrokes("enter");
+    let command = channels
+        .command_rx
+        .try_recv()
+        .expect("Enter must submit the existing Connect action");
+    let AppCommand::ConnectTab(connect) = command else {
+        panic!("Connect form must submit ConnectTab");
+    };
+    assert_eq!(connect.settings.host, "server.example");
+    assert_eq!(connect.settings.port, 2222);
+    assert_eq!(connect.settings.username, "new-user");
+}
+
+#[gpui::test]
+fn profile_component_input_preserves_invalid_draft_and_clears_error_on_edit(
+    cx: &mut TestAppContext,
+) {
+    use crate::workspace::profiles::{ProfileEditorField, SettingsSection};
+    let (workspace, mut cx, _) = init_workspace(cx);
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.surface = WorkspaceSurface::Settings;
+        workspace.settings.section = SettingsSection::Profiles;
+        workspace.start_new_profile(cx);
+    });
+    cx.simulate_input("example.com");
+    cx.simulate_keystrokes("tab cmd-a");
+    cx.simulate_input("99999");
+    cx.simulate_keystrokes("enter");
+    workspace.read_with(&cx, |workspace, cx| {
+        let editor = workspace
+            .settings
+            .profile_editor
+            .as_ref()
+            .expect("invalid draft must remain editable");
+        assert_eq!(editor.port.value(), "99999");
+        assert_eq!(editor.focused_field, ProfileEditorField::Port);
+        assert!(editor.error.is_some());
+        assert!(
+            cx.resources().profiles.profiles().is_empty(),
+            "invalid forms must not persist a profile"
+        );
+    });
+    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_input("2200");
+    workspace.read_with(&cx, |workspace, _| {
+        let editor = workspace
+            .settings
+            .profile_editor
+            .as_ref()
+            .expect("draft remains open");
+        assert_eq!(editor.port.value(), "2200");
+        assert!(
+            editor.error.is_none(),
+            "editing an ordinary field must clear the stale form error"
+        );
+    });
+}
+
+#[gpui::test]
+fn ordinary_modal_input_keeps_selection_across_redraw_and_supports_undo(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _) = init_workspace(cx);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.open_go_to_path(window, cx)
+    });
+    cx.simulate_input("/目录/path");
+    cx.simulate_keystrokes("cmd-a");
+    workspace.update(&mut cx, |_workspace, cx| cx.notify());
+    cx.update(|_window, cx| {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("/replacement".into()))
+    });
+    cx.simulate_keystrokes("cmd-v");
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(workspace.go_to_path.input.value(), "/replacement")
+    });
+    cx.simulate_keystrokes("cmd-z");
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(workspace.go_to_path.input.value(), "/目录/path")
+    });
+    cx.simulate_keystrokes("escape");
+    workspace.read_with(&cx, |workspace, _| assert!(!workspace.go_to_path.open));
+}
+
+#[gpui::test]
+fn ordinary_input_preserves_ime_composition_across_parent_redraw(cx: &mut TestAppContext) {
+    use super::TextInputTarget;
+    use gpui::EntityInputHandler as _;
+    let (workspace, mut cx, _) = init_workspace(cx);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.open_go_to_path(window, cx)
+    });
+    let input = workspace.read_with(&cx, |workspace, _| {
+        workspace
+            .text_inputs
+            .get(&TextInputTarget::GoToPath)
+            .expect("open path dialog must own a component input")
+            .state()
+            .clone()
+    });
+    input.update_in(&mut cx, |input, window, cx| {
+        input.replace_and_mark_text_in_range(None, "zhong", None, window, cx)
+    });
+    workspace.update(&mut cx, |_workspace, cx| cx.notify());
+    input.update_in(&mut cx, |input, window, cx| {
+        assert!(
+            input.marked_text_range(window, cx).is_some(),
+            "unrelated redraw must preserve the IME preedit range"
+        );
+        input.replace_text_in_range(None, "中文", window, cx);
+    });
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(workspace.go_to_path.input.value(), "中文")
+    });
+}
+
+#[gpui::test]
+fn replaced_connect_form_ignores_changes_from_its_old_component(cx: &mut TestAppContext) {
+    use crate::workspace::connect_form::{ConnectField, ConnectForm};
+    let (workspace, mut cx, _) = init_workspace(cx);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.open_connect_form(window, cx)
+    });
+    let old_input = workspace.read_with(&cx, |workspace, _| {
+        workspace
+            .connect_form_ui
+            .form
+            .as_ref()
+            .expect("Connect form must be open")
+            .inputs
+            .get(&ConnectField::Host)
+            .expect("host field must own a component input")
+            .state()
+            .clone()
+    });
+    workspace.update(&mut cx, |workspace, cx| {
+        let mut replacement = ConnectForm::empty();
+        replacement.host.set_value("replacement.example");
+        workspace.connect_form_ui.form = Some(replacement);
+        cx.notify();
+    });
+    old_input.update_in(&mut cx, |input, window, cx| {
+        input.set_value("stale.example", window, cx);
+        cx.emit(gpui_component::input::InputEvent::Change);
+    });
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace
+                .connect_form_ui
+                .form
+                .as_ref()
+                .expect("replacement form must remain open")
+                .host
+                .value(),
+            "replacement.example"
+        )
+    });
+}
+
+#[gpui::test]
 fn open_connect_form_resets_profile_picker(cx: &mut TestAppContext) {
     let (workspace, mut cx, _) = init_workspace(cx);
     workspace.update_in(&mut cx, |ws, window, cx| {
@@ -5445,7 +5678,7 @@ fn full_command_channel_eventually_releases_closed_tab(cx: &mut TestAppContext) 
 fn window_release_notifies_runtime_for_all_remaining_tabs(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     cx.cx.update(|cx| {
-        cx.on_window_closed(crate::session_coordinator::checkpoint_after_window_closed)
+        cx.on_window_closed(|cx, _| crate::session_coordinator::checkpoint_after_window_closed(cx))
             .detach();
     });
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -6185,7 +6418,7 @@ fn window_closed_callback_reaps_orphaned_edit_session(cx: &mut TestAppContext) {
     let (workspace, mut cx, _) = init_workspace(cx);
     let app = cx.cx.clone();
     cx.update(|_window, cx| {
-        cx.on_window_closed(crate::workspace::cleanup_orphaned_edit_sessions)
+        cx.on_window_closed(|cx, _| crate::workspace::cleanup_orphaned_edit_sessions(cx))
             .detach();
     });
     let session_dir =

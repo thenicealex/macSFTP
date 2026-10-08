@@ -11,12 +11,13 @@ name = "macsftp_ui"
 path = "src/ui.rs"
 
 [dependencies]
-gpui = "=0.2.2"
+gpui.workspace = true
+gpui-component.workspace = true
 macsftp-core = { path = "../core" }
 zeroize = "1"
 
 [dev-dependencies]
-gpui = { version = "=0.2.2", features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

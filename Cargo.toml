@@ -18,6 +18,12 @@ publish = false
 rust-version = "1.96.1"
 version = "0.3.0"
 
+[workspace.dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.8" }
+gpui-component = "=0.7.1"
+gpui-kit-assets = "=0.7.1"
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit"] }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

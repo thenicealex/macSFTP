@@ -121,8 +121,19 @@ fn collect_session(cx: &App) -> SessionFile {
         .windows()
         .into_iter()
         .filter_map(|window| {
-            let workspace = window.downcast::<Workspace>()?;
-            let snapshot = workspace.read(cx).ok()?.build_session_snapshot();
+            let snapshot = if let Some(workspace) = window.downcast::<Workspace>() {
+                workspace.read(cx).ok()?.build_session_snapshot()
+            } else {
+                let root = window.downcast::<gpui_component::Root>()?;
+                let workspace = root
+                    .read(cx)
+                    .ok()?
+                    .view()
+                    .clone()
+                    .downcast::<Workspace>()
+                    .ok()?;
+                workspace.read(cx).build_session_snapshot()
+            };
             Some((window, snapshot))
         })
         .collect::<Vec<_>>();
@@ -245,12 +256,13 @@ mod tests {
         coordinator.register_window(WindowSessionId(10));
         coordinator.register_window(WindowSessionId(20));
         cx.update(|cx| {
-            cx.set_global(Theme::dark());
+            Theme::dark().install(cx);
             app_actions::init(cx);
             cx.set_global(coordinator);
             cx.set_global(AppResources::load_for_test(app_paths.clone(), config));
             cx.set_global(SharedTransfers::default());
-            cx.on_window_closed(checkpoint_after_window_closed).detach();
+            cx.on_window_closed(|cx, _| checkpoint_after_window_closed(cx))
+                .detach();
         });
 
         let channels = BridgeChannels::new(&RuntimeBridgeConfig::default());

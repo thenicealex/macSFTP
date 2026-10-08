@@ -3,6 +3,11 @@ use gpui::{
     RenderOnce, SharedString, Styled, Window, div, prelude::*, px,
 };
 
+use gpui_component::{
+    Disableable, Sizable,
+    button::{Button, ButtonCustomVariant, ButtonVariants},
+};
+
 use crate::icon::{IconName, icon_with_size};
 use crate::theme::ActiveTheme;
 
@@ -10,7 +15,6 @@ type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
 const ICON_BUTTON_ICON_SIZE: gpui::Pixels = px(16.0);
 const ICON_BUTTON_OPACITY: f32 = 0.65;
-const ICON_BUTTON_HOVER_OPACITY: f32 = 0.9;
 const ICON_BUTTON_DISABLED_OPACITY: f32 = 0.25;
 
 /// Minimal text tooltip view used by icon-only buttons, which must all
@@ -98,35 +102,31 @@ impl RenderOnce for IconButton {
         let theme = cx.theme();
         let icon_color = self.icon_color.unwrap_or(theme.colors.text);
         let hover_background = theme.colors.element_hover;
-        let active_background = theme.colors.element_active;
 
-        div()
-            .id(self.id)
+        Button::new(self.id)
+            .custom(
+                ButtonCustomVariant::new(cx)
+                    .color(gpui::hsla(0.0, 0.0, 0.0, 0.0))
+                    .foreground(icon_color)
+                    .hover(hover_background)
+                    .active(theme.colors.element_active)
+                    .shadow(false),
+            )
+            .compact()
             .size(px(22.0))
-            .flex()
-            .flex_none()
-            .items_center()
-            .justify_center()
             .rounded_sm()
+            .disabled(self.disabled)
+            .accessibility_label(self.tooltip_label.clone())
+            .tooltip(self.tooltip_label)
             .opacity(if self.disabled {
                 ICON_BUTTON_DISABLED_OPACITY
             } else {
                 ICON_BUTTON_OPACITY
             })
-            .tooltip(text_tooltip(self.tooltip_label))
-            .when(!self.disabled, |element| {
-                element
-                    .hover(|style| {
-                        style
-                            .bg(hover_background)
-                            .opacity(ICON_BUTTON_HOVER_OPACITY)
-                    })
-                    .active(|style| style.bg(active_background))
-            })
             .when_some(
                 self.on_click.filter(|_| !self.disabled),
-                |element, handler| {
-                    element.on_click(move |event, window, cx| handler(event, window, cx))
+                |button, handler| {
+                    button.on_click(move |event, window, cx| handler(event, window, cx))
                 },
             )
             .child(icon_with_size(self.icon, icon_color, ICON_BUTTON_ICON_SIZE))
@@ -180,7 +180,6 @@ impl RenderOnce for TextButton {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let hover_background = theme.colors.element_hover;
-        let active_background = theme.colors.element_active;
         let (background, border_color, text_color) = if self.danger {
             (
                 Some(theme.colors.error),
@@ -197,29 +196,38 @@ impl RenderOnce for TextButton {
             (None, theme.colors.border, theme.colors.text)
         };
 
-        div()
-            .id(self.id)
+        Button::new(self.id)
+            .small()
+            .compact()
+            .label(self.label)
+            .custom(
+                ButtonCustomVariant::new(cx)
+                    .color(background.unwrap_or(theme.colors.surface))
+                    .foreground(text_color)
+                    .hover(if self.primary || self.danger {
+                        border_color
+                    } else {
+                        hover_background
+                    })
+                    .active(if self.primary || self.danger {
+                        border_color
+                    } else {
+                        theme.colors.element_active
+                    })
+                    .shadow(false),
+            )
             .px_3()
-            .py_1()
-            .rounded_sm()
+            .h(px(26.0))
             .border_1()
+            .rounded_sm()
             .border_color(border_color)
             .text_size(px(13.0))
             .text_color(text_color)
             .font_family(theme.fonts.ui_family.clone())
             .when_some(background, |button, background| button.bg(background))
-            .when(!self.primary && !self.danger, |button| {
-                button
-                    .hover(|style| style.bg(hover_background))
-                    .active(|style| style.bg(active_background))
+            .when_some(self.on_click, |button, handler| {
+                button.on_click(move |event, window, cx| handler(event, window, cx))
             })
-            .when(self.primary || self.danger, |button| {
-                button.hover(|style| style.opacity(0.9))
-            })
-            .when_some(self.on_click, |element, handler| {
-                element.on_click(move |event, window, cx| handler(event, window, cx))
-            })
-            .child(self.label)
     }
 }
 

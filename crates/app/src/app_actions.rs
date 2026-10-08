@@ -58,9 +58,22 @@ actions!(
     ]
 );
 
+// Scoped controls are not application commands exposed in the palette.
+actions!(form, [FocusNextField, FocusPreviousField]);
+pub(crate) const CONNECT_FORM_CONTEXT: &str = "ConnectForm";
+pub(crate) const PROFILE_EDITOR_CONTEXT: &str = "ProfileEditor";
+
 /// Register the default keymap. Bindings live in one place so tests and
 /// `main` agree on them.
 pub fn init(cx: &mut App) {
+    for context in [CONNECT_FORM_CONTEXT, PROFILE_EDITOR_CONTEXT] {
+        for predicate in [context.to_string(), format!("{context} > Input")] {
+            cx.bind_keys([
+                KeyBinding::new("tab", FocusNextField, Some(&predicate)),
+                KeyBinding::new("shift-tab", FocusPreviousField, Some(&predicate)),
+            ]);
+        }
+    }
     cx.bind_keys([
         KeyBinding::new("cmd-n", NewWindow, None),
         KeyBinding::new("cmd-t", NewTab, Some("Workspace")),

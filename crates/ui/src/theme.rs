@@ -73,6 +73,39 @@ pub struct ThemeSizes {
 }
 
 impl Theme {
+    /// Keep component tokens derived from the application's visual system.
+    pub fn install(self, cx: &mut App) {
+        if !cx.has_global::<gpui_component::Theme>() {
+            gpui_component::init(cx);
+        }
+        let mode = match self.appearance {
+            Appearance::Dark => gpui_component::ThemeMode::Dark,
+            Appearance::Light => gpui_component::ThemeMode::Light,
+        };
+        gpui_component::Theme::change(mode, None, cx);
+        gpui_component::Theme::update(cx, |component| {
+            component.font_family = self.fonts.ui_family.clone();
+            component.mono_font_family = self.fonts.mono_family.clone();
+            component.font_size = px(13.0);
+            component.radius = px(3.0);
+            component.shadow = false;
+            component.colors.background = self.colors.background;
+            component.colors.foreground = self.colors.text;
+            component.colors.border = self.colors.border;
+            component.colors.input = self.colors.background;
+            component.colors.ring = self.colors.border_focused;
+            component.colors.primary = self.colors.accent;
+            component.colors.primary_foreground = self.colors.background;
+            component.colors.danger = self.colors.error;
+            component.colors.danger_foreground = self.colors.background;
+            component.colors.button = self.colors.surface;
+            component.colors.button_foreground = self.colors.text;
+            component.colors.button_hover = self.colors.element_hover;
+            component.colors.button_active = self.colors.element_active;
+        });
+        cx.set_global(self);
+    }
+
     /// One Dark is the default palette for every dark appearance mode.
     pub fn one_dark() -> Self {
         Self {

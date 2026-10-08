@@ -18,7 +18,7 @@ pub struct ThumbGeometry {
 }
 
 /// Compute thumb geometry from viewport height, scrollable distance
-/// (`max_offset().height`), and current scrolled distance (`-offset().y`,
+/// (`max_offset().y`), and current scrolled distance (`-offset().y`,
 /// clamped to `[0, scrollable]`). Returns `None` when content fits viewport.
 ///
 /// `Pixels / Pixels` yields `f32` and `Pixels * Pixels` is unsupported, so the
@@ -161,7 +161,7 @@ fn render_scrollbar<V: 'static>(
         state.layout_sync_scheduled.set(false);
     }
 
-    let scrollable = handle.max_offset().height;
+    let scrollable = handle.max_offset().y;
     let scrolled = (-handle.offset().y).max(px(0.0));
     let Some(geometry) = thumb_geometry(viewport_h, scrollable, scrolled) else {
         return div().into_any_element();
@@ -173,7 +173,7 @@ fn render_scrollbar<V: 'static>(
     let thumb_hover = theme.colors.scrollbar_thumb_hover;
     let thumb_active = theme.colors.scrollbar_thumb_active;
     let track_color = theme.colors.scrollbar_track;
-    let thumb_id = ElementId::NamedChild(Box::new(id.clone()), "thumb".into());
+    let thumb_id = ElementId::NamedChild(std::sync::Arc::new(id.clone()), "thumb".into());
     let track_debug_selector = id.to_string();
     let thumb_debug_selector = thumb_id.to_string();
     let click_handle = handle.clone();
@@ -197,7 +197,7 @@ fn render_scrollbar<V: 'static>(
             MouseButton::Left,
             cx.listener(move |_view, event: &MouseDownEvent, _window, cx| {
                 let viewport = click_handle.bounds().size.height;
-                let scrollable = click_handle.max_offset().height;
+                let scrollable = click_handle.max_offset().y;
                 let scrolled = (-click_handle.offset().y).max(px(0.0));
                 let Some(geometry) = thumb_geometry(viewport, scrollable, scrolled) else {
                     return;
@@ -222,7 +222,7 @@ fn render_scrollbar<V: 'static>(
                     )
                 };
                 let viewport = handle.bounds().size.height;
-                let scrollable = handle.max_offset().height;
+                let scrollable = handle.max_offset().y;
                 let scrolled = dragged_scroll_position(
                     viewport,
                     scrollable,
@@ -277,7 +277,7 @@ fn dragged_scroll_position(
 /// Page the scroll handle by ~90% of the viewport in the given direction.
 fn page(handle: &ScrollHandle, viewport: Pixels, down: bool) {
     let cur = (-handle.offset().y).max(px(0.0));
-    let scrollable = handle.max_offset().height;
+    let scrollable = handle.max_offset().y;
     let step = viewport * 0.9;
     let next = if down { cur + step } else { cur - step };
     let clamped = next.max(px(0.0)).min(scrollable);
@@ -295,7 +295,8 @@ pub fn scroll_area<V: 'static>(
     cx: &mut Context<V>,
 ) -> impl IntoElement {
     let content_id = id.into();
-    let scrollbar_id = ElementId::NamedChild(Box::new(content_id.clone()), "scrollbar".into());
+    let scrollbar_id =
+        ElementId::NamedChild(std::sync::Arc::new(content_id.clone()), "scrollbar".into());
     let scrollbar = Scrollbar::vertical(scrollbar_id, handle.clone(), state, window, cx);
     div()
         .flex()
@@ -388,7 +389,7 @@ mod tests {
                         .collect()
                 }),
             )
-            .track_scroll(self.handle.clone())
+            .track_scroll(&self.handle)
             .h_full()
             .w_full();
             list.style().scrollbar_width = Some(px(0.0).into());

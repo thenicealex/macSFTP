@@ -13,7 +13,7 @@ use macsftp_sftp::RuntimeClient;
 use macsftp_storage::{
     AppearancePreference, RecentEntryInput, SessionTabSnapshot, SessionWindowSnapshot,
 };
-use macsftp_ui::{ActiveTheme, InputState, ScrollbarState, Theme, empty_state, text_button};
+use macsftp_ui::{ActiveTheme, ScrollbarState, Theme, empty_state, text_button};
 use tracing::warn;
 
 use crate::app_actions::{
@@ -62,6 +62,7 @@ pub struct Workspace {
     focused_side: PaneSide,
     surface: WorkspaceSurface,
     settings: view_state::SettingsUi,
+    text_inputs: std::collections::HashMap<TextInputTarget, macsftp_ui::PlainInput>,
     /// Pending large-file edit confirmation. Holds the edit params until the
     /// user accepts the size warning; accepting starts the download.
     transfer_drawer: view_state::TransferDrawerUi,
@@ -114,7 +115,6 @@ impl Workspace {
         let log_file = cx.resources().app_paths.log_file.clone();
 
         let external_editor_input = {
-            let mut input = InputState::new();
             let current = cx
                 .resources()
                 .config
@@ -122,14 +122,27 @@ impl Workspace {
                 .external_editor
                 .clone()
                 .unwrap_or_default();
-            input.set_value(current);
-            input
+            cx.new(|cx| {
+                gpui_component::input::InputState::new(window, cx)
+                    .placeholder("Default app")
+                    .default_value(current)
+            })
         };
+        let external_editor_subscription = cx.subscribe_in(
+            &external_editor_input,
+            window,
+            |workspace, _input, event, _window, cx| {
+                if matches!(event, gpui_component::input::InputEvent::Change) {
+                    workspace.commit_external_editor(cx);
+                    cx.notify();
+                }
+            },
+        );
 
         let appearance_subscription =
             cx.observe_window_appearance(window, |_workspace, window, cx| {
                 if cx.resources().config.config().appearance == AppearancePreference::System {
-                    cx.set_global(Theme::for_appearance(window.appearance()));
+                    Theme::for_appearance(window.appearance()).install(cx);
                     cx.notify();
                 }
             });
@@ -146,7 +159,11 @@ impl Workspace {
 
             transfer_drawer: view_state::TransferDrawerUi::new(),
 
-            settings: view_state::SettingsUi::new(external_editor_input),
+            text_inputs: std::collections::HashMap::new(),
+            settings: view_state::SettingsUi::new(
+                external_editor_input,
+                external_editor_subscription,
+            ),
 
             default_local_path,
             status_message: None,
@@ -409,7 +426,7 @@ impl Workspace {
         // them so their confirm buttons can never act (current architecture §6).
         self.drain_expired_modals();
         if self.state.tabs.tabs.is_empty() {
-            window.focus(&self.workspace_focus);
+            window.focus(&self.workspace_focus, cx);
         }
         self.reset_scroll_positions();
         cx.notify();
@@ -468,7 +485,7 @@ impl Workspace {
             self.tab_switcher.open = true;
             // First press targets the previous tab (MRU[1]), matching OS switchers.
             self.tab_switcher.index = if self.tab_mru.len() > 1 { 1 } else { 0 };
-            window.focus(&self.modal_focus);
+            window.focus(&self.modal_focus, cx);
         } else {
             let count = self.tab_mru.len();
             self.tab_switcher.index = (self.tab_switcher.index + 1) % count;
@@ -482,7 +499,7 @@ impl Workspace {
         if !self.tab_switcher.open {
             self.tab_switcher.open = true;
             self.tab_switcher.index = self.tab_mru.len() - 1;
-            window.focus(&self.modal_focus);
+            window.focus(&self.modal_focus, cx);
         } else {
             let count = self.tab_mru.len() as isize;
             self.tab_switcher.index =
@@ -571,7 +588,7 @@ impl Workspace {
                 .await
             {
                 Ok(()) => {
-                    let _ = cx.update(|cx| {
+                    cx.update(|cx| {
                         if cx.has_global::<SessionCoordinator>() {
                             cx.global_mut::<SessionCoordinator>()
                                 .mark_runtime_tab_released(window_session_id, tab_id);
@@ -791,7 +808,7 @@ impl Workspace {
             AppearancePreference::Light => Theme::one_light(),
             AppearancePreference::Dark => Theme::one_dark(),
         };
-        cx.set_global(theme);
+        theme.install(cx);
         cx.notify();
     }
     pub(crate) fn open_log_folder(&self, cx: &mut Context<Self>) {
@@ -920,7 +937,7 @@ impl Workspace {
                 self.submit_connect_form(window, cx);
                 return;
             }
-            window.focus(&self.connect_form_ui.focus);
+            window.focus(&self.connect_form_ui.focus, cx);
             cx.notify();
             return;
         }
@@ -935,6 +952,9 @@ impl Focusable for Workspace {
 }
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.prepare_connect_inputs(window, cx);
+        self.prepare_profile_inputs(window, cx);
+        self.prepare_text_inputs(window, cx);
         let theme = cx.theme().clone();
         let has_tabs = !self.state.tabs.tabs.is_empty();
 
@@ -1137,7 +1157,7 @@ impl Render for Workspace {
                     workspace.modal_inputs.about_open = false;
                     workspace.surface = WorkspaceSurface::Settings;
                     workspace.settings.section = SettingsSection::General;
-                    workspace.workspace_focus.focus(window);
+                    workspace.workspace_focus.focus(window, cx);
                     cx.notify();
                 }
             }))
@@ -1152,7 +1172,7 @@ impl Render for Workspace {
                     workspace.modal_inputs.about_open = false;
                     workspace.surface = WorkspaceSurface::Settings;
                     workspace.set_settings_section(SettingsSection::Profiles, cx);
-                    workspace.workspace_focus.focus(window);
+                    workspace.workspace_focus.focus(window, cx);
                     cx.notify();
                 }
             }))
@@ -1219,9 +1239,11 @@ mod render;
 mod settings_render;
 #[cfg(test)]
 mod tests;
+mod text_inputs;
 mod transfer_render;
 mod transfers;
 pub(crate) mod view_state;
+use text_inputs::TextInputTarget;
 mod visible_entries;
 
 #[cfg(test)]

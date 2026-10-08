@@ -88,7 +88,7 @@ impl RenderOnce for TransferRow {
 
         let cancel_button = self.on_cancel.map(|handler| {
             icon_button(
-                ElementId::NamedChild(Box::new(self.id.clone()), "cancel".into()),
+                ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "cancel".into()),
                 IconName::Close,
                 "Cancel Transfer",
             )
@@ -96,7 +96,7 @@ impl RenderOnce for TransferRow {
         });
         let retry_button = self.on_retry.map(|handler| {
             icon_button(
-                ElementId::NamedChild(Box::new(self.id.clone()), "retry".into()),
+                ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "retry".into()),
                 IconName::Refresh,
                 "Retry Transfer",
             )

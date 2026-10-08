@@ -17,7 +17,10 @@ pub use file_list::{
     format_size, format_size_label, format_timestamp,
 };
 pub use icon::{ICON_SIZE, IconName, icon};
-pub use input::{InputKeyResult, InputState, SecretInputState, TextFieldModel, text_field};
+pub use input::{
+    InputKeyResult, InputState, PlainInput, SecretInputState, TextFieldModel, plain_text_field,
+    text_field,
+};
 pub use scrollbar::{
     MIN_THUMB, Scrollbar, ScrollbarState, ThumbGeometry, scroll_area, thumb_geometry,
 };

@@ -44,14 +44,23 @@ embedded_icons!(
 
 impl AssetSource for Assets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
-        Ok(lookup(path).map(Cow::Borrowed))
+        if let Some(icon) = lookup(path) {
+            Ok(Some(Cow::Borrowed(icon)))
+        } else {
+            gpui_kit_assets::Assets.load(path)
+        }
     }
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
-        Ok(icon_paths()
-            .into_iter()
-            .filter(|icon_path| icon_path.starts_with(path))
-            .collect())
+        let mut paths = gpui_kit_assets::Assets.list(path)?;
+        paths.extend(
+            icon_paths()
+                .into_iter()
+                .filter(|icon_path| icon_path.starts_with(path)),
+        );
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
     }
 }
 

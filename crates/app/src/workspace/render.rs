@@ -1,12 +1,13 @@
+use crate::workspace::TextInputTarget;
 use gpui::{
     AppContext, ClickEvent, Context, FontWeight, IntoElement, ParentElement, SharedString, Styled,
     Window, WindowControlArea, div, prelude::*, px, uniform_list,
 };
 use macsftp_core::{ConnectionState, EntryPath, LocalPath, RemotePath};
 use macsftp_ui::{
-    ActiveTheme, DragPreview, FileRowModel, IconName, TextFieldModel, connection_status,
-    empty_state, file_row, file_table_header, format_size_label, format_timestamp, icon_button,
-    loading_state, tab, text_button, text_field, text_tooltip,
+    ActiveTheme, DragPreview, FileRowModel, IconName, connection_status, empty_state, file_row,
+    file_table_header, format_size_label, format_timestamp, icon_button, loading_state, tab,
+    text_button, text_tooltip,
 };
 
 use crate::palette_commands::labeled_shortcut;
@@ -977,7 +978,7 @@ impl crate::workspace::Workspace {
                         .collect()
                 },
             )
-            .track_scroll(self.scroll_handle(side).clone())
+            .track_scroll(self.scroll_handle(side))
             .h_full()
             .w_full();
             list.style().scrollbar_width = Some(px(0.0).into());
@@ -1079,14 +1080,13 @@ impl crate::workspace::Workspace {
                                 .flex_1()
                                 .min_w_0()
                                 .when(explicit_focus, |row| {
-                                    row.child(text_field(
-                                        filter_field_id,
-                                        TextFieldModel {
-                                            state: &self.pane_filter(side).input,
-                                            placeholder: "Filter by name…",
-                                            focused: true,
-                                            masked: false,
+                                    row.child(self.render_text_input(
+                                        if side == PaneSide::Local {
+                                            TextInputTarget::LocalFilter
+                                        } else {
+                                            TextInputTarget::RemoteFilter
                                         },
+                                        filter_field_id,
                                         cx,
                                     ))
                                 })
@@ -1145,17 +1145,12 @@ impl crate::workspace::Workspace {
                             .text_color(theme.colors.text_muted)
                             .child(label),
                     )
-                    .child(div().flex_1().min_w_0().child(text_field(
+                    .child(div().flex_1().min_w_0().child(self.render_text_input(
+                        TextInputTarget::InlineEdit,
                         if side == PaneSide::Local {
                             "local-inline-edit"
                         } else {
                             "remote-inline-edit"
-                        },
-                        TextFieldModel {
-                            state: &edit.input,
-                            placeholder: "Enter a name",
-                            focused: true,
-                            masked: false,
                         },
                         cx,
                     )))

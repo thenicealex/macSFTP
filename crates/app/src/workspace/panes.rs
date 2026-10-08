@@ -7,7 +7,6 @@ use macsftp_core::{
     RemotePath, SortDirection, TabId,
 };
 use macsftp_platform::read_local_directory;
-use macsftp_ui::InputKeyResult;
 
 use tracing::warn;
 
@@ -27,7 +26,7 @@ impl crate::workspace::Workspace {
         cx: &mut Context<Self>,
     ) {
         self.focused_side = side;
-        window.focus(self.pane_focus(side));
+        window.focus(self.pane_focus(side), cx);
         cx.notify();
     }
 
@@ -526,11 +525,16 @@ impl crate::workspace::Workspace {
 
     pub(crate) fn clear_filter(&mut self, side: PaneSide) {
         self.pane_filter_mut(side).clear();
+        self.text_inputs.remove(&if side == PaneSide::Local {
+            TextInputTarget::LocalFilter
+        } else {
+            TextInputTarget::RemoteFilter
+        });
     }
 
     pub(crate) fn clear_filters(&mut self) {
-        self.local.filter.clear();
-        self.remote.filter.clear();
+        self.clear_filter(PaneSide::Local);
+        self.clear_filter(PaneSide::Remote);
     }
 
     /// `cmd-f`: show the filter bar and route keys into the filter input.
@@ -543,6 +547,15 @@ impl crate::workspace::Workspace {
         filter.explicit_focus = true;
         filter.input.set_value(filter.query.clone());
         self.focus_pane(side, window, cx);
+        self.focus_text_input(
+            if side == PaneSide::Local {
+                TextInputTarget::LocalFilter
+            } else {
+                TextInputTarget::RemoteFilter
+            },
+            window,
+            cx,
+        );
         cx.notify();
     }
 
@@ -578,29 +591,13 @@ impl crate::workspace::Workspace {
             if self.pane_filter(side).is_active() {
                 cx.stop_propagation();
                 self.clear_filter(side);
-                window.focus(self.pane_focus(side));
+                window.focus(self.pane_focus(side), cx);
                 cx.notify();
             }
             return;
         }
 
         if self.pane_filter(side).explicit_focus {
-            if keystroke.modifiers.platform && keystroke.key == "v" {
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    let filter = self.pane_filter_mut(side);
-                    filter.input.insert(&text);
-                    filter.query = filter.input.value().to_string();
-                    cx.stop_propagation();
-                    cx.notify();
-                }
-                return;
-            }
-            let filter = self.pane_filter_mut(side);
-            if filter.input.handle_keystroke(keystroke) == InputKeyResult::Handled {
-                filter.query = filter.input.value().to_string();
-                cx.stop_propagation();
-                cx.notify();
-            }
             return;
         }
 

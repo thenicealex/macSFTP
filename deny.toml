@@ -7,6 +7,7 @@ all-features = true
 
 [advisories]
 ignore = [
+    { id = "RUSTSEC-2024-0384", reason = "gpui-base/gpui-component 0.7.1 transitive UI timing dependency; this advisory reports unmaintained status rather than a specific vulnerability, and macOS Instant/SystemTime alias std::time, so current assessed risk is low. Reassess on the next gpui-component upgrade; remove this exception once instant is absent from Cargo.lock." },
     { id = "RUSTSEC-2024-0436", reason = "GPUI transitive dependency; no maintained paste replacement is selectable from macSFTP" },
     { id = "RUSTSEC-2025-0052", reason = "GPUI HTTP transitive dependency; remove when GPUI no longer depends on async-std" },
     { id = "RUSTSEC-2025-0134", reason = "GPUI HTTP transitive dependency; remove when GPUI migrates to rustls-pki-types PEM APIs" },
@@ -30,6 +31,11 @@ allow = [
 ]
 confidence-threshold = 0.8
 exceptions = [
+    # GPUI Component enum helpers; reviewed BSD Zero Clause license.
+    { allow = ["0BSD"], crate = "enum-iterator@2.3.0" },
+    { allow = ["0BSD"], crate = "enum-iterator-derive@1.5.0" },
+    # gpui-pre HTTP decompression; retain the upstream copyright and license.
+    { allow = ["bzip2-1.0.6"], crate = "libbz2-rs-sys@0.2.5" },
     # GPUI build dependency; MPL terms apply to this unmodified crate only.
     { allow = ["MPL-2.0"], crate = "cbindgen@0.28.0" },
     # GPUI font-stack dependency; MPL terms apply to this unmodified crate only.

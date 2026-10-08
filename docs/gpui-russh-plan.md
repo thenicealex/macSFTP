@@ -58,7 +58,7 @@ GPUI 入口、窗口、Entity、Action、事件协调和 UI 状态。它可以�
 
 ### `crates/ui`
 
-主题和可复用 GPUI 组件。它只接收展示模型，不拥有远端 session 或持久化状态。
+主题和可复用 GPUI 组件。普通控件逐步采用 `gpui-component`，保留 macSFTP 的紧凑布局和主题 token；组件只拥有交互状态，业务状态仍由 app/core 管理。敏感输入继续使用脱敏、不可 Clone 的 `SecretInputState` 和 zeroize 清理，未经安全验证不能替换为通用输入。它只接收展示模型，不拥有远端 session 或持久化状态。
 
 ### `crates/sftp`
 
@@ -245,6 +245,12 @@ Profile 写入只有一个产品入口：Settings → Saved Connections 将编�
 
 ## 12. UI 约束
 
+- app/ui 共同使用 workspace 锁定的 `gpui-pre` snapshot，组件和 GPUI 类型不能来自不同版本；
+- 每个生产窗口以 `gpui-component::Root` 承载 `Workspace`，Root 只管理组件浮层和交互；事件分发、远程编辑清理和会话 checkpoint 必须读取其中的 Workspace，不能仅按窗口根类型筛选；
+- `Theme::install` 从 macSFTP 的主题 token 派生组件主题，明暗切换只通过该入口更新，避免两套视觉系统独立演化；
+- 普通输入和按钮使用 `gpui-component`：Connect、Saved Connections、路径跳转、重命名、文件/Profile 筛选和 command palette 的普通文本编辑复用组件 Entity；虚拟文件列表、自定义滚动条和安全 modal 的业务决策保留现有实现；
+- 表单草稿仍由 Workspace 持有；`PlainInput` 仅保留选区、撤销和 IME 编辑状态，Change 事件写回草稿，程序修改草稿时只在文本不同的情况下同步控件；关闭 surface 时释放相应绑定，替换表单或冲突请求后旧控件事件必须被忽略；
+- Connect/Profile 表单的 Tab 使用 scoped action 跨普通和敏感字段移动实际焦点，普通字段的 Enter 通过组件 `PressEnter` 转发原有提交入口；端口、路径、名称及认证校验仍由原有业务入口统一执行，无效提交不能清空草稿；
 - 第一屏是可操作的文件工作区；
 - 目录列表必须虚拟化，10k entries 不创建长期 row entity；
 - 可滚动 surface 使用统一的 theme-aware scrollbar；虚拟列表和普通 scroll container 分别绑定各自 handle，但共享 overflow、drag、track paging 和 resize 语义；

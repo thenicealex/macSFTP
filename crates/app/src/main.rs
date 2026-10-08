@@ -9,8 +9,8 @@ mod session_coordinator;
 mod workspace;
 
 use gpui::{
-    App, AppContext, Application, Bounds, Global, Menu, MenuItem, SystemMenuType, TitlebarOptions,
-    WindowBounds, WindowHandle, WindowOptions, point, px, size,
+    App, AppContext, Bounds, Global, Menu, MenuItem, SystemMenuType, TitlebarOptions, WindowBounds,
+    WindowHandle, WindowOptions, point, px, size,
 };
 use macsftp_core::RuntimeBridgeConfig;
 use macsftp_platform::{AppPaths, prune_log_files, write_crash_marker};
@@ -147,7 +147,7 @@ fn clear_edit_temps_dir(edits_dir: &macsftp_core::LocalPath) {
 }
 
 fn main() {
-    let app = Application::new().with_assets(Assets);
+    let app = gpui_platform::application().with_assets(Assets);
     // Native macOS behavior: the app stays alive with no windows open;
     // clicking the Dock icon opens a fresh window. gpui only fires this
     // when zero windows are open. Registered on the builder (not `App`);
@@ -162,6 +162,7 @@ fn main() {
         }
     });
     app.run(|cx: &mut App| {
+        gpui_component::init(cx);
         app_actions::init(cx);
 
         // Host trust files (plan §10): read the user's known_hosts if
@@ -185,7 +186,7 @@ fn main() {
             AppearancePreference::Light => Theme::one_light(),
             AppearancePreference::Dark => Theme::one_dark(),
         };
-        cx.set_global(initial_theme);
+        initial_theme.install(cx);
         let user_known_hosts = std::path::PathBuf::from(format!("{home_dir}/.ssh/known_hosts"));
         let trust_config = HostTrustConfig::new(
             std::path::PathBuf::from(app_paths.known_hosts_file.as_str()),
@@ -229,7 +230,7 @@ fn main() {
         cx.set_global(event_coordinator);
         // Long-lived loop that stats each open edit's temp file every second
         // and uploads saved changes back (or flags a remote conflict).
-        cx.on_window_closed(|cx| {
+        cx.on_window_closed(|cx, _window_id| {
             checkpoint_after_window_closed(cx);
             crate::workspace::cleanup_orphaned_edit_sessions(cx);
             present_orphaned_transfer_conflicts(cx);
@@ -247,6 +248,7 @@ fn main() {
 
         cx.set_menus(vec![
             Menu {
+                disabled: false,
                 name: "macSFTP".into(),
                 items: vec![
                     MenuItem::action("About macSFTP", ShowAbout),
@@ -262,6 +264,7 @@ fn main() {
                 ],
             },
             Menu {
+                disabled: false,
                 name: "File".into(),
                 items: vec![
                     MenuItem::action("New Window", NewWindow),
@@ -273,6 +276,7 @@ fn main() {
                 ],
             },
             Menu {
+                disabled: false,
                 name: "View".into(),
                 items: vec![
                     MenuItem::action("Select Local Files", FocusLocalPane),
@@ -286,6 +290,7 @@ fn main() {
                 ],
             },
             Menu {
+                disabled: false,
                 name: "Window".into(),
                 items: vec![
                     MenuItem::action("Minimize", MinimizeWindow),
@@ -293,6 +298,7 @@ fn main() {
                 ],
             },
             Menu {
+                disabled: false,
                 name: "Help".into(),
                 items: vec![
                     MenuItem::action("Show Logs", OpenLogFolder),
@@ -319,7 +325,7 @@ fn main() {
 fn open_workspace_window(
     cx: &mut App,
     restore_session: Option<SessionWindowSnapshot>,
-) -> gpui::Result<WindowHandle<Workspace>> {
+) -> gpui::Result<WindowHandle<gpui_component::Root>> {
     let runtime_client = {
         let handle = cx.global::<RuntimeHandle>();
         let controller = handle
@@ -364,7 +370,7 @@ fn open_workspace_window(
             ..Default::default()
         },
         |window, cx| {
-            cx.new(|cx| {
+            let workspace = cx.new(|cx| {
                 Workspace::new(
                     runtime_client,
                     window_session_id,
@@ -372,7 +378,8 @@ fn open_workspace_window(
                     window,
                     cx,
                 )
-            })
+            });
+            cx.new(|cx| gpui_component::Root::new(workspace, window, cx))
         },
     )?;
     cx.global_mut::<SessionCoordinator>()

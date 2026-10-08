@@ -24,11 +24,11 @@ assert_no_direct_dependency() {
     done
 }
 
-assert_no_direct_dependency macsftp-core gpui russh russh-sftp tokio security-framework
+assert_no_direct_dependency macsftp-core gpui gpui-pre gpui-component gpui-base gpui-kit gpui-pre-platform russh russh-sftp tokio security-framework
 assert_no_direct_dependency macsftp-ui macsftp-app macsftp-sftp macsftp-storage macsftp-platform russh russh-sftp tokio security-framework
-assert_no_direct_dependency macsftp-sftp gpui macsftp-app macsftp-ui
-assert_no_direct_dependency macsftp-storage gpui macsftp-app macsftp-ui macsftp-sftp russh russh-sftp tokio
-assert_no_direct_dependency macsftp-platform gpui macsftp-app macsftp-ui macsftp-sftp macsftp-storage russh russh-sftp tokio
+assert_no_direct_dependency macsftp-sftp gpui gpui-pre gpui-component gpui-base gpui-kit gpui-pre-platform macsftp-app macsftp-ui
+assert_no_direct_dependency macsftp-storage gpui gpui-pre gpui-component gpui-base gpui-kit gpui-pre-platform macsftp-app macsftp-ui macsftp-sftp russh russh-sftp tokio
+assert_no_direct_dependency macsftp-platform gpui gpui-pre gpui-component gpui-base gpui-kit gpui-pre-platform macsftp-app macsftp-ui macsftp-sftp macsftp-storage russh russh-sftp tokio
 
 broad_import_allows="$(
     find crates/app/src/workspace -type f -name '*.rs' ! -name 'tests.rs' \

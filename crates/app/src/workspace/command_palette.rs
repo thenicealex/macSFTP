@@ -1,11 +1,13 @@
 //! Command palette overlay: open/filter/navigate/execute explicit registry ids.
 
+use crate::workspace::TextInputTarget;
+
 use gpui::{
     Context, FontWeight, IntoElement, KeyDownEvent, ParentElement, SharedString, Styled, Window,
     div, prelude::*, px,
 };
 use macsftp_core::ConnectionState;
-use macsftp_ui::{ActiveTheme, InputKeyResult, TextFieldModel, text_field};
+use macsftp_ui::ActiveTheme;
 
 use crate::palette_commands::{PaletteCommand, PaletteContext, filter_palette_commands};
 use crate::workspace::{PaneSide, Workspace, WorkspaceSurface};
@@ -27,10 +29,11 @@ impl Workspace {
     }
 
     pub(crate) fn open_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.text_inputs.remove(&TextInputTarget::CommandPalette);
         self.palette.open = true;
         self.palette.input.clear();
         self.palette.selected = 0;
-        window.focus(&self.modal_focus);
+        window.focus(&self.modal_focus, cx);
         cx.notify();
     }
 
@@ -107,7 +110,7 @@ impl Workspace {
                     self.modal_inputs.about_open = false;
                     self.surface = WorkspaceSurface::Settings;
                     self.settings.section = crate::workspace::profiles::SettingsSection::General;
-                    self.workspace_focus.focus(window);
+                    self.workspace_focus.focus(window, cx);
                     cx.notify();
                 }
             }
@@ -125,7 +128,7 @@ impl Workspace {
                         crate::workspace::profiles::SettingsSection::Profiles,
                         cx,
                     );
-                    self.workspace_focus.focus(window);
+                    self.workspace_focus.focus(window, cx);
                     cx.notify();
                 }
             }
@@ -181,21 +184,6 @@ impl Workspace {
         if keystroke.key == "down" && !keystroke.modifiers.modified() {
             cx.stop_propagation();
             self.move_palette_selection(1, cx);
-            return;
-        }
-        if keystroke.modifiers.platform && keystroke.key == "v" {
-            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                self.palette.input.insert(&text);
-                self.palette.selected = 0;
-                cx.stop_propagation();
-                cx.notify();
-            }
-            return;
-        }
-        if self.palette.input.handle_keystroke(keystroke) == InputKeyResult::Handled {
-            self.palette.selected = 0;
-            cx.stop_propagation();
-            cx.notify();
         }
     }
 
@@ -290,6 +278,18 @@ impl Workspace {
                 .child(
                     div()
                         .key_context("CommandPalette")
+                        .capture_action(cx.listener(
+                            |workspace, _: &gpui_component::input::MoveUp, _window, cx| {
+                                cx.stop_propagation();
+                                workspace.move_palette_selection(-1, cx);
+                            },
+                        ))
+                        .capture_action(cx.listener(
+                            |workspace, _: &gpui_component::input::MoveDown, _window, cx| {
+                                cx.stop_propagation();
+                                workspace.move_palette_selection(1, cx);
+                            },
+                        ))
                         .track_focus(&self.modal_focus)
                         .on_key_down(cx.listener(Self::handle_command_palette_key))
                         .flex()
@@ -323,14 +323,9 @@ impl Workspace {
                                         .child("⌘⇧P"),
                                 ),
                         )
-                        .child(text_field(
+                        .child(self.render_text_input(
+                            TextInputTarget::CommandPalette,
                             "command-palette-input",
-                            TextFieldModel {
-                                state: &self.palette.input,
-                                placeholder: "Find an action…",
-                                focused: true,
-                                masked: false,
-                            },
                             cx,
                         ))
                         .child({
