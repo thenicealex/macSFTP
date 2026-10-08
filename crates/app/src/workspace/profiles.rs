@@ -1,4 +1,5 @@
 use gpui::{App, Context, KeyDownEvent, SharedString, Window};
+use gpui_component::input::InputEvent;
 use macsftp_core::{
     AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionRoute, LocalPath, ProfileId,
     RemotePath,
@@ -6,7 +7,7 @@ use macsftp_core::{
 use macsftp_storage::{
     PrivateKeyPassphraseUpdate, ProfileAuthUpdate, ProfileMutationError, ProfileSaveRequest,
 };
-use macsftp_ui::{InputKeyResult, InputState, SecretInputState};
+use macsftp_ui::{InputKeyResult, InputState, PlainInput, SecretInputState};
 use tracing::warn;
 
 use crate::resources::ActiveResources;
@@ -22,7 +23,7 @@ pub(crate) enum SettingsSection {
 }
 
 /// Focusable fields in the Settings → Profiles editor (Tab order).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ProfileEditorField {
     Name,
     Host,
@@ -43,6 +44,22 @@ pub(crate) enum ProfileRouteKind {
     ProxyCommand,
 }
 
+impl ProfileEditorField {
+    pub(crate) fn placeholder(self) -> &'static str {
+        match self {
+            Self::Name => "optional",
+            Self::Host => "example.com",
+            Self::Port => "22",
+            Self::Username => "user",
+            Self::KeyPath => "~/.ssh/id_ed25519",
+            Self::AgentSocket => "SSH_AUTH_SOCK (optional)",
+            Self::ProxyCommand => "ssh -W %h:%p bastion",
+            Self::DefaultRemotePath => "/home/user",
+            Self::Password | Self::Passphrase => "",
+        }
+    }
+}
+
 /// Which passphrase state the profile editor is editing toward. Mirrors the
 /// three states `AuthMethod::PrivateKey` can hold; replaces the old model
 /// where typing a passphrase always remembered it.
@@ -59,6 +76,7 @@ pub(crate) enum PassphrasePolicy {
 /// Editable profile draft shown in Settings → Profiles (right pane).
 /// Secrets are never prefilled from Keychain; leave password blank on edit to keep.
 pub(crate) struct ProfileEditorState {
+    pub(crate) inputs: std::collections::HashMap<ProfileEditorField, PlainInput>,
     pub is_new: bool,
     pub profile_id: Option<ProfileId>,
     pub name: InputState,
@@ -83,6 +101,7 @@ pub(crate) struct ProfileEditorState {
 impl ProfileEditorState {
     pub fn blank() -> Self {
         Self {
+            inputs: std::collections::HashMap::new(),
             is_new: true,
             profile_id: None,
             name: InputState::new(),
@@ -159,7 +178,7 @@ impl ProfileEditorState {
         editor
     }
 
-    fn field_order(&self) -> &'static [ProfileEditorField] {
+    pub(crate) fn field_order(&self) -> &'static [ProfileEditorField] {
         match (self.auth_method, self.route_kind) {
             (AuthMethodKind::Password, ProfileRouteKind::ProxyCommand) => &[
                 ProfileEditorField::Name,
@@ -232,7 +251,7 @@ impl ProfileEditorState {
         }
     }
 
-    fn field_state_mut(&mut self, field: ProfileEditorField) -> &mut InputState {
+    pub(crate) fn field_state_mut(&mut self, field: ProfileEditorField) -> &mut InputState {
         match field {
             ProfileEditorField::Name => &mut self.name,
             ProfileEditorField::Host => &mut self.host,
@@ -321,6 +340,110 @@ fn profile_secret_present(profile_id: ProfileId, cx: &App) -> bool {
 }
 
 impl crate::workspace::Workspace {
+    pub(crate) fn prepare_profile_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.surface != WorkspaceSurface::Settings
+            || self.settings.section != SettingsSection::Profiles
+        {
+            return;
+        }
+        let Some(editor) = self.settings.profile_editor.as_mut() else {
+            return;
+        };
+        let fresh = editor.inputs.is_empty();
+        for field in editor.field_order().to_vec() {
+            if matches!(
+                field,
+                ProfileEditorField::Password | ProfileEditorField::Passphrase
+            ) {
+                continue;
+            }
+            let value = editor.field_state_mut(field).value().to_string();
+            let input = editor.inputs.entry(field).or_insert_with(|| {
+                PlainInput::new(
+                    &value,
+                    field.placeholder(),
+                    window,
+                    cx,
+                    move |workspace, input, event, window, cx| {
+                        let Some(editor) = workspace.settings.profile_editor.as_mut() else {
+                            return;
+                        };
+                        if editor
+                            .inputs
+                            .get(&field)
+                            .is_none_or(|binding| binding.state() != input)
+                        {
+                            return;
+                        }
+                        match event {
+                            InputEvent::Change => {
+                                editor
+                                    .field_state_mut(field)
+                                    .set_value(input.read(cx).value().to_string());
+                                editor.error = None;
+                                editor.focused_field = field;
+                            }
+                            InputEvent::PressEnter {
+                                secondary: false,
+                                shift: false,
+                            } => workspace.save_profile_editor(cx),
+                            InputEvent::Focus
+                                if editor
+                                    .inputs
+                                    .get(&field)
+                                    .is_some_and(|binding| binding.is_focused(window, cx)) =>
+                            {
+                                editor.focused_field = field;
+                                workspace.settings.profile_filter_focused = false;
+                            }
+                            _ => {}
+                        }
+                        cx.notify();
+                    },
+                )
+            });
+            input.sync(&value, window, cx);
+        }
+        if !self.settings.profile_filter_focused
+            && (fresh || self.modal_focus.is_focused(window))
+            && let Some(input) = editor.inputs.get(&editor.focused_field)
+        {
+            input.focus(window, cx);
+        }
+    }
+
+    pub(crate) fn cycle_profile_focus(
+        &mut self,
+        backwards: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.settings.profile_editor.as_mut() else {
+            return;
+        };
+        if let Some((&field, _)) = editor
+            .inputs
+            .iter()
+            .find(|(_, input)| input.is_focused(window, cx))
+        {
+            editor.focused_field = field;
+        }
+        editor.cycle_focus(backwards);
+        self.focus_profile_field(window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn focus_profile_field(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.settings.profile_editor.as_ref() else {
+            return;
+        };
+        if let Some(input) = editor.inputs.get(&editor.focused_field) {
+            input.focus(window, cx);
+        } else {
+            window.focus(&self.modal_focus, cx);
+        }
+    }
+
     pub(crate) fn set_settings_section(
         &mut self,
         section: SettingsSection,
@@ -678,34 +801,8 @@ impl crate::workspace::Workspace {
     /// Focus the Profiles list filter field (click or explicit focus).
     pub(crate) fn focus_profile_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings.profile_filter_focused = true;
-        window.focus(&self.workspace_focus);
+        self.focus_text_input(super::TextInputTarget::ProfileFilter, window, cx);
         cx.notify();
-    }
-
-    pub(crate) fn handle_profile_filter_key(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.settings.profile_filter_focused {
-            return;
-        }
-        let keystroke = &event.keystroke;
-        if keystroke.modifiers.platform && keystroke.key == "v" {
-            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                self.settings.profile_filter.insert(&text);
-                self.settings.profile_list_scroll = gpui::ScrollHandle::new();
-                cx.stop_propagation();
-                cx.notify();
-            }
-            return;
-        }
-        if self.settings.profile_filter.handle_keystroke(keystroke) == InputKeyResult::Handled {
-            self.settings.profile_list_scroll = gpui::ScrollHandle::new();
-            cx.stop_propagation();
-            cx.notify();
-        }
     }
 
     /// Arm the profile-delete confirmation modal. Does not remove anything yet.
@@ -716,7 +813,7 @@ impl crate::workspace::Workspace {
         cx: &mut Context<Self>,
     ) {
         self.settings.profile_delete_confirm = Some(id);
-        window.focus(&self.modal_focus);
+        window.focus(&self.modal_focus, cx);
         cx.notify();
     }
 
@@ -747,13 +844,13 @@ impl crate::workspace::Workspace {
 
     /// After dismissing the delete confirm, return keyboard focus to Connect
     /// or Settings when those surfaces are still open (not always the file pane).
-    fn restore_focus_after_profile_delete(&mut self, window: &mut Window, _cx: &mut Context<Self>) {
+    fn restore_focus_after_profile_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.connect_form_ui.form.is_some() {
-            window.focus(&self.connect_form_ui.focus);
+            window.focus(&self.connect_form_ui.focus, cx);
         } else if self.surface == WorkspaceSurface::Settings {
-            window.focus(&self.workspace_focus);
+            window.focus(&self.workspace_focus, cx);
         } else {
-            window.focus(self.pane_focus(self.focused_side));
+            window.focus(self.pane_focus(self.focused_side), cx);
         }
     }
 
@@ -774,7 +871,7 @@ impl crate::workspace::Workspace {
     pub(crate) fn handle_profile_editor_key(
         &mut self,
         event: &KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.settings.profile_filter_focused {
@@ -791,9 +888,15 @@ impl crate::workspace::Workspace {
             return;
         }
         if keystroke.key == "tab" {
-            editor.cycle_focus(keystroke.modifiers.shift);
+            self.cycle_profile_focus(keystroke.modifiers.shift, window, cx);
             cx.stop_propagation();
             cx.notify();
+            return;
+        }
+        if !matches!(
+            editor.focused_field,
+            ProfileEditorField::Password | ProfileEditorField::Passphrase
+        ) {
             return;
         }
         if keystroke.modifiers.platform && keystroke.key == "v" {

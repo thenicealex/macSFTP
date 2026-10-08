@@ -77,7 +77,7 @@ impl RenderOnce for Tab {
             theme.colors.text_muted
         };
         let hover_background = theme.colors.element_hover;
-        let close_id = ElementId::NamedChild(Box::new(self.id.clone()), "close".into());
+        let close_id = ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "close".into());
 
         div()
             .id(self.id)

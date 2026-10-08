@@ -1,10 +1,11 @@
 use gpui::{App, Context, KeyDownEvent, SharedString, Window};
+use gpui_component::input::InputEvent;
 use macsftp_core::{
     AuthCredential, AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionSettings, ProfileId,
     ResolvedConnectionRoute,
 };
 use macsftp_storage::ProfileMutationError;
-use macsftp_ui::{InputKeyResult, InputState, SecretInputState};
+use macsftp_ui::{InputKeyResult, InputState, PlainInput, SecretInputState};
 use tracing::warn;
 
 use crate::resources::ActiveResources;
@@ -12,7 +13,7 @@ use crate::workspace::helpers::expand_home;
 use crate::workspace::profiles::profile_matches_filter;
 
 /// One field of the connect form, in Tab-cycle order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ConnectField {
     Host,
     Port,
@@ -21,12 +22,29 @@ pub(crate) enum ConnectField {
     KeyPath,
     Passphrase,
     AgentSocket,
+    ProfileFilter,
+}
+
+impl ConnectField {
+    pub(crate) fn placeholder(self) -> &'static str {
+        match self {
+            Self::Host => "example.com",
+            Self::Port => "22",
+            Self::Username => "user",
+            Self::Password => "",
+            Self::KeyPath => "~/.ssh/id_ed25519",
+            Self::Passphrase => "",
+            Self::AgentSocket => "SSH_AUTH_SOCK (optional)",
+            Self::ProfileFilter => "Filter saved connections…",
+        }
+    }
 }
 
 /// Connect form state. Secrets live in the input fields only while the
 /// form is open; submitting moves them into a zeroized
 /// `ConnectionSettings` and drops the form.
 pub(crate) struct ConnectForm {
+    pub(crate) inputs: std::collections::HashMap<ConnectField, PlainInput>,
     pub(crate) host: InputState,
     pub(crate) port: InputState,
     pub(crate) username: InputState,
@@ -50,6 +68,7 @@ pub(crate) struct ConnectForm {
 impl ConnectForm {
     pub(crate) fn empty() -> Self {
         Self {
+            inputs: std::collections::HashMap::new(),
             host: InputState::new(),
             port: InputState::with_value("22"),
             username: InputState::new(),
@@ -133,7 +152,7 @@ impl ConnectForm {
         form
     }
 
-    fn field_order(&self) -> &'static [ConnectField] {
+    pub(crate) fn field_order(&self) -> &'static [ConnectField] {
         match self.auth_method {
             AuthMethodKind::Password => &[
                 ConnectField::Host,
@@ -171,6 +190,7 @@ impl ConnectForm {
             ConnectField::KeyPath => &mut self.key_path,
             ConnectField::Passphrase => self.passphrase.as_input_state_mut(),
             ConnectField::AgentSocket => &mut self.agent_socket,
+            ConnectField::ProfileFilter => &mut self.profile_picker_filter,
         }
     }
 
@@ -292,6 +312,121 @@ impl ConnectForm {
 }
 
 impl crate::workspace::Workspace {
+    pub(crate) fn prepare_connect_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(form) = self.connect_form_ui.form.as_mut() else {
+            return;
+        };
+        let fresh = form.inputs.is_empty();
+        let mut fields = form.field_order().to_vec();
+        if form.profile_picker_open {
+            fields.push(ConnectField::ProfileFilter);
+        }
+        for field in fields {
+            if matches!(field, ConnectField::Password | ConnectField::Passphrase) {
+                continue;
+            }
+            let value = form.field_state_mut(field).value().to_string();
+            let input = form.inputs.entry(field).or_insert_with(|| {
+                PlainInput::new(
+                    &value,
+                    field.placeholder(),
+                    window,
+                    cx,
+                    move |workspace, input, event, window, cx| {
+                        let Some(form) = workspace.connect_form_ui.form.as_mut() else {
+                            return;
+                        };
+                        if form
+                            .inputs
+                            .get(&field)
+                            .is_none_or(|binding| binding.state() != input)
+                        {
+                            return;
+                        }
+                        match event {
+                            InputEvent::Change => {
+                                form.field_state_mut(field)
+                                    .set_value(input.read(cx).value().to_string());
+                                form.error = None;
+                                if field != ConnectField::ProfileFilter {
+                                    form.focused_field = field;
+                                }
+                            }
+                            InputEvent::Focus
+                                if field != ConnectField::ProfileFilter
+                                    && form
+                                        .inputs
+                                        .get(&field)
+                                        .is_some_and(|binding| binding.is_focused(window, cx)) =>
+                            {
+                                form.focused_field = field
+                            }
+                            InputEvent::PressEnter {
+                                secondary: false,
+                                shift: false,
+                            } => {
+                                if field == ConnectField::ProfileFilter {
+                                    let first_id = workspace
+                                        .filtered_connect_profiles(cx)
+                                        .first()
+                                        .map(|profile| profile.id);
+                                    if let Some(profile_id) = first_id {
+                                        workspace.select_connect_profile(profile_id, cx);
+                                    }
+                                } else {
+                                    workspace.submit_connect_form(window, cx);
+                                }
+                            }
+                            _ => {}
+                        }
+                        cx.notify();
+                    },
+                )
+            });
+            input.sync(&value, window, cx);
+        }
+        if fresh || form.profile_picker_open || self.connect_form_ui.focus.is_focused(window) {
+            let field = if form.profile_picker_open {
+                ConnectField::ProfileFilter
+            } else {
+                form.focused_field
+            };
+            if let Some(input) = form.inputs.get(&field) {
+                input.focus(window, cx);
+            }
+        }
+    }
+
+    pub(crate) fn cycle_connect_focus(
+        &mut self,
+        backwards: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(form) = self.connect_form_ui.form.as_mut() else {
+            return;
+        };
+        if let Some((&field, _)) = form.inputs.iter().find(|(field, input)| {
+            **field != ConnectField::ProfileFilter && input.is_focused(window, cx)
+        }) {
+            form.focused_field = field;
+        }
+        form.cycle_focus(backwards);
+        self.focus_connect_field(window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn focus_connect_field(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(form) = self.connect_form_ui.form.as_ref() else {
+            return;
+        };
+        if let Some(input) = form.inputs.get(&form.focused_field) {
+            input.focus(window, cx);
+        } else {
+            window.focus(&self.connect_form_ui.focus, cx);
+        }
+    }
+
     /// Open the connect form for the active tab, prefilling any cached
     /// session credentials or restored non-secret connection metadata.
     pub(crate) fn open_connect_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -323,7 +458,7 @@ impl crate::workspace::Workspace {
         }
         .unwrap_or_else(ConnectForm::empty);
         self.connect_form_ui.form = Some(form);
-        window.focus(&self.connect_form_ui.focus);
+        window.focus(&self.connect_form_ui.focus, cx);
         cx.notify();
     }
 
@@ -471,26 +606,18 @@ impl crate::workspace::Workspace {
             return;
         }
         if keystroke.key == "tab" {
-            form.cycle_focus(keystroke.modifiers.shift);
+            self.cycle_connect_focus(keystroke.modifiers.shift, window, cx);
             cx.stop_propagation();
             cx.notify();
             return;
         }
 
-        // While the picker is open, typeahead goes to the filter field.
-        if form.profile_picker_open {
-            if keystroke.modifiers.platform && keystroke.key == "v" {
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    form.profile_picker_filter.insert(&text);
-                    cx.stop_propagation();
-                    cx.notify();
-                }
-                return;
-            }
-            if form.profile_picker_filter.handle_keystroke(keystroke) == InputKeyResult::Handled {
-                cx.stop_propagation();
-                cx.notify();
-            }
+        if form.profile_picker_open
+            || !matches!(
+                form.focused_field,
+                ConnectField::Password | ConnectField::Passphrase
+            )
+        {
             return;
         }
 

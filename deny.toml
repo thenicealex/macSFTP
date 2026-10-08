@@ -30,6 +30,11 @@ allow = [
 ]
 confidence-threshold = 0.8
 exceptions = [
+    # GPUI Component enum helpers; reviewed BSD Zero Clause license.
+    { allow = ["0BSD"], crate = "enum-iterator@2.3.0" },
+    { allow = ["0BSD"], crate = "enum-iterator-derive@1.5.0" },
+    # gpui-pre HTTP decompression; retain the upstream copyright and license.
+    { allow = ["bzip2-1.0.6"], crate = "libbz2-rs-sys@0.2.5" },
     # GPUI build dependency; MPL terms apply to this unmodified crate only.
     { allow = ["MPL-2.0"], crate = "cbindgen@0.28.0" },
     # GPUI font-stack dependency; MPL terms apply to this unmodified crate only.

@@ -1,10 +1,12 @@
+use crate::workspace::TextInputTarget;
 use gpui::{
-    Context, FontWeight, IntoElement, KeyDownEvent, ParentElement, Styled, Window,
-    WindowControlArea, div, prelude::*, px,
+    Context, FontWeight, IntoElement, ParentElement, Styled, Window, WindowControlArea, div,
+    prelude::*, px,
 };
+use gpui_component::{Sizable, input::Input};
 use macsftp_core::{AuthMethodKind, ConnectionRoute};
 use macsftp_ui::{
-    ActiveTheme, IconName, InputKeyResult, InputState, TextFieldModel, empty_state, icon,
+    ActiveTheme, IconName, InputState, TextFieldModel, empty_state, icon, plain_text_field,
     text_button, text_field, text_tooltip,
 };
 use tracing::warn;
@@ -94,7 +96,6 @@ impl crate::workspace::Workspace {
                 .min_w_0()
                 .p_6()
                 .track_focus(&self.workspace_focus)
-                .on_key_down(cx.listener(Self::handle_external_editor_key))
                 .child(
                     div()
                         .max_w(px(560.0))
@@ -180,16 +181,8 @@ impl crate::workspace::Workspace {
                                         .on_click(cx.listener(|workspace, _event, window, cx| {
                                             workspace.focus_external_editor(window, cx);
                                         }))
-                                        .child(text_field(
-                                            ("settings-external-editor-input", 0usize),
-                                            TextFieldModel {
-                                                state: &self.settings.external_editor_input,
-                                                placeholder: "Default app",
-                                                focused: self.settings.external_editor_focused,
-                                                masked: false,
-                                            },
-                                            cx,
-                                        )),
+                                        .child(Input::new(&self.settings.external_editor_input)
+                                            .small().h(px(26.0)).border_1().border_color(theme.colors.border)),
                                 ),
                         )
                         .child(div().h(px(1.0)).bg(theme.colors.border))
@@ -305,40 +298,10 @@ impl crate::workspace::Workspace {
 
     /// Focus the Settings → General external-editor field (click or key entry).
     pub(crate) fn focus_external_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings.external_editor_focused = true;
-        window.focus(&self.workspace_focus);
-        cx.notify();
-    }
-
-    pub(crate) fn handle_external_editor_key(
-        &mut self,
-        event: &KeyDownEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.settings.external_editor_focused {
-            return;
-        }
-        let keystroke = &event.keystroke;
-        if keystroke.modifiers.platform && keystroke.key == "v" {
-            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                self.settings.external_editor_input.insert(&text);
-                self.commit_external_editor(cx);
-                cx.stop_propagation();
-                cx.notify();
-            }
-            return;
-        }
-        if self
-            .settings
+        self.settings
             .external_editor_input
-            .handle_keystroke(keystroke)
-            == InputKeyResult::Handled
-        {
-            self.commit_external_editor(cx);
-            cx.stop_propagation();
-            cx.notify();
-        }
+            .update(cx, |input, cx| input.focus(window, cx));
+        cx.notify();
     }
 
     /// Persist the External editor field to config on every edit. An empty
@@ -348,6 +311,7 @@ impl crate::workspace::Workspace {
         let trimmed = self
             .settings
             .external_editor_input
+            .read(cx)
             .value()
             .trim()
             .to_string();
@@ -384,7 +348,6 @@ impl crate::workspace::Workspace {
             .profile_editor
             .as_ref()
             .is_some_and(|editor| editor.is_new);
-        let filter_focused = self.settings.profile_filter_focused;
 
         // Materialize rows before the editor borrow of `cx` (listeners capture).
         let list_rows: Vec<_> = filtered
@@ -545,7 +508,6 @@ impl crate::workspace::Workspace {
                     .border_r_1()
                     .border_color(theme.colors.border)
                     .track_focus(&self.workspace_focus)
-                    .on_key_down(cx.listener(Self::handle_profile_filter_key))
                     .child(
                         text_button("settings-new-profile", "Add Connection").on_click(
                             cx.listener(|workspace, _event, _window, cx| {
@@ -559,14 +521,9 @@ impl crate::workspace::Workspace {
                             .on_click(cx.listener(|workspace, _event, window, cx| {
                                 workspace.focus_profile_filter(window, cx);
                             }))
-                            .child(text_field(
+                            .child(self.render_text_input(
+                                TextInputTarget::ProfileFilter,
                                 "settings-profile-filter-input",
-                                TextFieldModel {
-                                    state: &self.settings.profile_filter,
-                                    placeholder: "Filter saved connections…",
-                                    focused: filter_focused,
-                                    masked: false,
-                                },
                                 cx,
                             )),
                     )
@@ -641,7 +598,16 @@ impl crate::workspace::Workspace {
                     if let Some(editor) = workspace.settings.profile_editor.as_mut() {
                         editor.focused_field = field;
                     }
-                    window.focus(&workspace.modal_focus);
+                    if let Some(input) = workspace
+                        .settings
+                        .profile_editor
+                        .as_ref()
+                        .and_then(|editor| editor.inputs.get(&field))
+                    {
+                        input.focus(window, cx);
+                    } else {
+                        window.focus(&workspace.modal_focus, cx);
+                    }
                     cx.notify();
                 }))
                 .child(
@@ -652,16 +618,29 @@ impl crate::workspace::Workspace {
                         .text_color(theme.colors.text_muted)
                         .child(label),
                 )
-                .child(div().flex_1().min_w_0().child(text_field(
-                    ("profile-editor-input", field as usize),
-                    TextFieldModel {
-                        state,
-                        placeholder,
-                        focused: focused == field,
-                        masked,
-                    },
-                    cx,
-                )))
+                .child(div().flex_1().min_w_0().child(if masked {
+                    text_field(
+                        ("profile-editor-input", field as usize),
+                        TextFieldModel {
+                            state,
+                            placeholder,
+                            focused: focused == field,
+                            masked,
+                        },
+                        cx,
+                    )
+                    .into_any_element()
+                } else {
+                    plain_text_field(
+                        ("profile-editor-input", field as usize),
+                        editor
+                            .inputs
+                            .get(&field)
+                            .expect("visible ordinary fields must have prepared component inputs"),
+                        cx,
+                    )
+                    .into_any_element()
+                }))
         };
 
         let auth_toggle = |label: &'static str,
@@ -671,11 +650,12 @@ impl crate::workspace::Workspace {
                            cx: &mut Context<Self>| {
             text_button(id, label)
                 .primary(active == method)
-                .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                .on_click(cx.listener(move |workspace, _event, window, cx| {
                     if let Some(editor) = workspace.settings.profile_editor.as_mut() {
                         editor.set_auth_method(method);
                         cx.notify();
                     }
+                    workspace.focus_profile_field(window, cx);
                 }))
         };
 
@@ -702,11 +682,12 @@ impl crate::workspace::Workspace {
                             cx: &mut Context<Self>| {
             text_button(id, label)
                 .primary(active == route_kind)
-                .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                .on_click(cx.listener(move |workspace, _event, window, cx| {
                     if let Some(editor) = workspace.settings.profile_editor.as_mut() {
                         editor.set_route_kind(route_kind);
                         cx.notify();
                     }
+                    workspace.focus_profile_field(window, cx);
                 }))
         };
 
@@ -720,7 +701,17 @@ impl crate::workspace::Workspace {
 
         let mut form = div()
             .id("profile-editor")
-            .key_context("ProfileEditor")
+            .key_context(crate::app_actions::PROFILE_EDITOR_CONTEXT)
+            .on_action(cx.listener(
+                |workspace, _: &crate::app_actions::FocusNextField, window, cx| {
+                    workspace.cycle_profile_focus(false, window, cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |workspace, _: &crate::app_actions::FocusPreviousField, window, cx| {
+                    workspace.cycle_profile_focus(true, window, cx);
+                },
+            ))
             .track_focus(&self.modal_focus)
             .on_key_down(cx.listener(Self::handle_profile_editor_key))
             .flex()
@@ -750,7 +741,7 @@ impl crate::workspace::Workspace {
                 "Connection Name",
                 ProfileEditorField::Name,
                 &editor.name,
-                "optional",
+                ProfileEditorField::Name.placeholder(),
                 false,
                 focused,
                 cx,
@@ -759,7 +750,7 @@ impl crate::workspace::Workspace {
                 "Server Address",
                 ProfileEditorField::Host,
                 &editor.host,
-                "example.com",
+                ProfileEditorField::Host.placeholder(),
                 false,
                 focused,
                 cx,
@@ -768,7 +759,7 @@ impl crate::workspace::Workspace {
                 "Port",
                 ProfileEditorField::Port,
                 &editor.port,
-                "22",
+                ProfileEditorField::Port.placeholder(),
                 false,
                 focused,
                 cx,
@@ -777,7 +768,7 @@ impl crate::workspace::Workspace {
                 "Username",
                 ProfileEditorField::Username,
                 &editor.username,
-                "user",
+                ProfileEditorField::Username.placeholder(),
                 false,
                 focused,
                 cx,
@@ -851,7 +842,7 @@ impl crate::workspace::Workspace {
                     "Key File Path",
                     ProfileEditorField::KeyPath,
                     &editor.key_path,
-                    "~/.ssh/id_ed25519",
+                    ProfileEditorField::KeyPath.placeholder(),
                     false,
                     focused,
                     cx,
@@ -919,7 +910,7 @@ impl crate::workspace::Workspace {
                 "Agent Location",
                 ProfileEditorField::AgentSocket,
                 &editor.agent_socket,
-                "SSH_AUTH_SOCK (optional)",
+                ProfileEditorField::AgentSocket.placeholder(),
                 false,
                 focused,
                 cx,
@@ -975,7 +966,7 @@ impl crate::workspace::Workspace {
                     "Connection Command",
                     ProfileEditorField::ProxyCommand,
                     &editor.proxy_command,
-                    "ssh -W %h:%p bastion",
+                    ProfileEditorField::ProxyCommand.placeholder(),
                     false,
                     focused,
                     cx,
@@ -1044,7 +1035,7 @@ impl crate::workspace::Workspace {
             "Starting Folder",
             ProfileEditorField::DefaultRemotePath,
             &editor.default_remote_path,
-            "/home/user",
+            ProfileEditorField::DefaultRemotePath.placeholder(),
             false,
             focused,
             cx,

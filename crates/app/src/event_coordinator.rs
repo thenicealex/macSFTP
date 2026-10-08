@@ -1,4 +1,5 @@
-use gpui::{App, Global, Task, WindowHandle};
+use gpui::{AnyWindowHandle, App, Context, Global, Task, Window, WindowHandle};
+use gpui_component::Root;
 use macsftp_core::{
     AppCommand, AppEvent, ConflictRequest, EditPhase, EditSessionId, LocalPath, ProfileId,
     RemotePath, RemoteSnapshot, TabId, Timestamp, TransferConflictPrompt, TransferDirection,
@@ -62,14 +63,7 @@ impl AppEventCoordinator {
     pub fn start(mut event_receiver: EventReceiver, cx: &mut App) -> Self {
         let event_drain = cx.spawn(async move |cx| {
             while let Some(event) = event_receiver.recv().await {
-                if cx
-                    .update(|cx| {
-                        dispatch_event(event, cx);
-                    })
-                    .is_err()
-                {
-                    break;
-                }
+                cx.update(|cx| dispatch_event(event, cx));
             }
         });
         Self {
@@ -598,16 +592,70 @@ pub fn present_orphaned_transfer_conflicts(cx: &mut App) {
     }
 }
 
-pub(crate) fn workspace_windows(cx: &App) -> Vec<WindowHandle<Workspace>> {
+/// Routes events to application content even when the component Root owns the window.
+#[derive(Clone, Copy)]
+pub(crate) enum WorkspaceWindow {
+    Content(WindowHandle<Workspace>),
+    Root(WindowHandle<Root>),
+}
+
+impl WorkspaceWindow {
+    fn from_handle(window: AnyWindowHandle, cx: &App) -> Option<Self> {
+        if let Some(content) = window.downcast::<Workspace>() {
+            return Some(Self::Content(content));
+        }
+        let root = window.downcast::<Root>()?;
+        root.read(cx)
+            .ok()?
+            .view()
+            .clone()
+            .downcast::<Workspace>()
+            .ok()?;
+        Some(Self::Root(root))
+    }
+
+    pub(crate) fn read<'a>(&self, cx: &'a App) -> gpui::Result<&'a Workspace> {
+        match self {
+            Self::Content(window) => window.read(cx),
+            Self::Root(window) => Ok(window
+                .read(cx)?
+                .view()
+                .clone()
+                .downcast::<Workspace>()
+                .expect("workspace window must contain Workspace content")
+                .read(cx)),
+        }
+    }
+
+    pub(crate) fn update<R>(
+        &self,
+        cx: &mut App,
+        update: impl FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>) -> R,
+    ) -> gpui::Result<R> {
+        match self {
+            Self::Content(window) => window.update(cx, update),
+            Self::Root(window) => window.update(cx, |root, window, cx| {
+                let workspace = root
+                    .view()
+                    .clone()
+                    .downcast::<Workspace>()
+                    .expect("workspace window must contain Workspace content");
+                workspace.update(cx, |workspace, cx| update(workspace, window, cx))
+            }),
+        }
+    }
+}
+
+pub(crate) fn workspace_windows(cx: &App) -> Vec<WorkspaceWindow> {
     cx.windows()
         .into_iter()
-        .filter_map(|window| window.downcast::<Workspace>())
+        .filter_map(|window| WorkspaceWindow::from_handle(window, cx))
         .collect()
 }
 
-fn active_workspace_window(cx: &App) -> Option<WindowHandle<Workspace>> {
+fn active_workspace_window(cx: &App) -> Option<WorkspaceWindow> {
     cx.active_window()
-        .and_then(|window| window.downcast::<Workspace>())
+        .and_then(|window| WorkspaceWindow::from_handle(window, cx))
 }
 
 /// The trailing path component of a remote path, for user-facing messages.
@@ -858,7 +906,7 @@ mod tests {
         let app_paths = test_app_paths(label);
         let config = ConfigStore::with_defaults(app_paths.config_file.clone());
         cx.update(|cx| {
-            cx.set_global(Theme::dark());
+            Theme::dark().install(cx);
             app_actions::init(cx);
             cx.set_global(AppResources::load_for_test(app_paths, config));
             cx.set_global(SharedTransfers::default());
@@ -1185,7 +1233,7 @@ mod tests {
         let app_paths = test_app_paths("single-owner");
         let config = ConfigStore::with_defaults(app_paths.config_file.clone());
         cx.update(|cx| {
-            cx.set_global(Theme::dark());
+            Theme::dark().install(cx);
             app_actions::init(cx);
             cx.set_global(AppResources::load_for_test(app_paths, config));
             cx.set_global(SharedTransfers::default());

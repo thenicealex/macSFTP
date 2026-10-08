@@ -1,19 +1,90 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, ElementId, InteractiveElement, IntoElement, Keystroke, ParentElement, SharedString,
-    Styled, div, px,
+    App, AppContext as _, Context, ElementId, Entity, EntityInputHandler as _, Focusable as _,
+    InteractiveElement, IntoElement, Keystroke, ParentElement, SharedString, Styled, Subscription,
+    Window, div, px,
 };
 use zeroize::Zeroize;
 
 use crate::theme::ActiveTheme;
 
-/// Minimal single-line text editing state: value + cursor. Pure logic,
-/// no GPUI entities, so the form owner keeps one per field and routes
-/// key events to the focused one.
-///
-/// Current scope: character input via `key_char`, backspace/delete,
-/// arrow/home/end movement, insert-at-cursor paste. No selection, no
-/// IME composition — those come with a real input component later.
+/// Retains component editing state while the caller owns the authoritative draft.
+/// Programmatic draft changes synchronize only when text differs, preserving
+/// selection, undo history, and IME composition through unrelated redraws.
+pub struct PlainInput {
+    state: Entity<gpui_component::input::InputState>,
+    _subscription: Subscription,
+}
+
+impl PlainInput {
+    pub fn new<V: 'static>(
+        value: &str,
+        placeholder: &'static str,
+        window: &mut Window,
+        cx: &mut Context<V>,
+        on_event: impl Fn(
+            &mut V,
+            &Entity<gpui_component::input::InputState>,
+            &gpui_component::input::InputEvent,
+            &mut Window,
+            &mut Context<V>,
+        ) + 'static,
+    ) -> Self {
+        let state = cx.new(|cx| {
+            gpui_component::input::InputState::new(window, cx)
+                .placeholder(placeholder)
+                .default_value(value.to_string())
+        });
+        let subscription = cx.subscribe_in(&state, window, on_event);
+        Self {
+            state,
+            _subscription: subscription,
+        }
+    }
+
+    pub fn state(&self) -> &Entity<gpui_component::input::InputState> {
+        &self.state
+    }
+
+    pub fn sync(&self, value: &str, window: &mut Window, cx: &mut App) {
+        if self.state.read(cx).value().as_ref() != value {
+            self.state.update(cx, |state, cx| {
+                // IME preedit may not have emitted Change yet; a passive
+                // parent redraw must not replace the marked text with the draft.
+                if state.marked_text_range(window, cx).is_none() {
+                    state.set_value(value.to_string(), window, cx);
+                }
+            });
+        }
+    }
+
+    pub fn focus(&self, window: &mut Window, cx: &mut App) {
+        self.state.update(cx, |state, cx| state.focus(window, cx));
+    }
+
+    pub fn is_focused(&self, window: &Window, cx: &App) -> bool {
+        self.state.read(cx).focus_handle(cx).is_focused(window)
+    }
+}
+
+pub fn plain_text_field(
+    id: impl Into<ElementId>,
+    input: &PlainInput,
+    cx: &App,
+) -> impl IntoElement {
+    use gpui_component::Sizable as _;
+    let theme = cx.theme();
+    div().id(id).w_full().min_w_0().child(
+        gpui_component::input::Input::new(input.state())
+            .small()
+            .h(px(26.0))
+            .border_1()
+            .border_color(theme.colors.border),
+    )
+}
+
+/// Pure single-line draft state. Ordinary fields render through `PlainInput`;
+/// this editing path remains for sensitive fields and file-list type-to-filter.
 #[derive(Default, Clone, PartialEq, Eq)]
 pub struct InputState {
     value: String,
