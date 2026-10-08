@@ -31,8 +31,8 @@ pub struct PaletteContext {
 static PALETTE_COMMANDS: &[PaletteCommand] = &[
     PaletteCommand {
         id: "NewTab",
-        title: "New Tab",
-        keywords: &["connection", "open", "connect"],
+        title: "New Connection",
+        keywords: &["connection", "open", "connect", "tab", "new tab"],
         keybinding: Some("⌘T"),
         when: PaletteWhen::Always,
     },
@@ -52,50 +52,57 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
     },
     PaletteCommand {
         id: "FocusLocalPane",
-        title: "Focus Local Pane",
-        keywords: &["left", "local", "side"],
+        title: "Select Local Files",
+        keywords: &["left", "local", "side", "focus local pane"],
         keybinding: Some("⌘1"),
         when: PaletteWhen::HasActiveTab,
     },
     PaletteCommand {
         id: "FocusRemotePane",
-        title: "Focus Remote Pane",
-        keywords: &["right", "remote", "side", "server"],
+        title: "Select Server Files",
+        keywords: &["right", "remote", "side", "server", "focus remote pane"],
         keybinding: Some("⌘2"),
         when: PaletteWhen::HasActiveTab,
     },
     PaletteCommand {
         id: "UploadSelection",
-        title: "Upload Selection",
-        keywords: &["put", "send", "transfer"],
+        title: "Upload",
+        keywords: &["put", "send", "transfer", "upload selection"],
         keybinding: Some("⌘U"),
         when: PaletteWhen::HasActiveTab,
     },
     PaletteCommand {
         id: "DownloadSelection",
-        title: "Download Selection",
-        keywords: &["get", "receive", "transfer"],
+        title: "Download",
+        keywords: &["get", "receive", "transfer", "download selection"],
         keybinding: Some("⌘D"),
         when: PaletteWhen::ConnectedRemote,
     },
     PaletteCommand {
         id: "ShowTransferDrawer",
-        title: "Toggle Transfers",
-        keywords: &["queue", "jobs", "progress"],
+        title: "Transfers",
+        keywords: &[
+            "queue",
+            "jobs",
+            "progress",
+            "show transfers",
+            "hide transfers",
+            "toggle transfers",
+        ],
         keybinding: Some("⌘J"),
         when: PaletteWhen::Always,
     },
     PaletteCommand {
         id: "OpenSettings",
-        title: "Open Settings",
-        keywords: &["preferences", "options", "config"],
+        title: "Settings…",
+        keywords: &["preferences", "options", "config", "open settings"],
         keybinding: Some("⌘,"),
         when: PaletteWhen::Always,
     },
     PaletteCommand {
         id: "OpenProfiles",
-        title: "Manage Profiles",
-        keywords: &["profile", "credentials", "settings"],
+        title: "Manage Connections…",
+        keywords: &["profile", "credentials", "settings", "manage profiles"],
         keybinding: None,
         when: PaletteWhen::Always,
     },
@@ -108,8 +115,8 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
     },
     PaletteCommand {
         id: "DeleteSelection",
-        title: "Delete Selection",
-        keywords: &["remove", "trash", "rm"],
+        title: "Delete",
+        keywords: &["remove", "trash", "rm", "delete selection"],
         keybinding: Some("⌘⌫"),
         when: PaletteWhen::HasActiveTab,
     },
@@ -129,15 +136,15 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
     },
     PaletteCommand {
         id: "FilterPane",
-        title: "Filter Pane",
-        keywords: &["search", "find", "narrow"],
+        title: "Filter Files",
+        keywords: &["search", "find", "narrow", "filter pane"],
         keybinding: Some("⌘F"),
         when: PaletteWhen::HasActiveTab,
     },
     PaletteCommand {
         id: "GoToPath",
-        title: "Go to Path",
-        keywords: &["jump", "cd", "location"],
+        title: "Go to Folder",
+        keywords: &["jump", "cd", "location", "go to path"],
         keybinding: Some("⌘⇧G"),
         when: PaletteWhen::HasActiveTab,
     },
@@ -159,8 +166,8 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
     // truth for path-bar tooltips via `labeled_shortcut`.
     PaletteCommand {
         id: "ParentDirectory",
-        title: "Parent Directory",
-        keywords: &["up", "cd..", "parent", "folder"],
+        title: "Up One Level",
+        keywords: &["up", "cd..", "parent", "folder", "parent directory"],
         keybinding: Some("⌘↑"),
         when: PaletteWhen::HasActiveTab,
     },
@@ -187,15 +194,15 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
     },
     PaletteCommand {
         id: "OpenLogFolder",
-        title: "Open Log Folder",
-        keywords: &["logs", "diagnostics", "debug"],
+        title: "Show Logs",
+        keywords: &["logs", "diagnostics", "debug", "open log folder"],
         keybinding: None,
         when: PaletteWhen::Always,
     },
     PaletteCommand {
         id: "OpenCommandPalette",
-        title: "Command Palette",
-        keywords: &["commands", "actions", "search"],
+        title: "Find an Action",
+        keywords: &["commands", "actions", "search", "command palette"],
         keybinding: Some("⌘⇧P"),
         when: PaletteWhen::Always,
     },
@@ -271,7 +278,7 @@ mod tests {
             has_active_tab: true,
             remote_connected: false,
         };
-        let hits = filter_palette_commands("new ta", &ctx);
+        let hits = filter_palette_commands("new con", &ctx);
         assert!(hits.iter().any(|c| c.id == "NewTab"));
     }
 
@@ -356,25 +363,17 @@ mod tests {
         // Path-bar / status-bar tooltips (Task 5 discoverability) must show the
         // same chords as palette rows. Keep this table in sync with render.rs.
         let cases = [
-            ("New Tab", "NewTab", "New Tab (⌘T)"),
+            ("New Connection", "NewTab", "New Connection (⌘T)"),
             ("Refresh", "RefreshPane", "Refresh (⌘R)"),
-            (
-                "Parent Directory",
-                "ParentDirectory",
-                "Parent Directory (⌘↑)",
-            ),
+            ("Up One Level", "ParentDirectory", "Up One Level (⌘↑)"),
             ("Back", "NavigateBack", "Back (⌘[)"),
             ("Forward", "NavigateForward", "Forward (⌘])"),
             ("New Folder", "NewFolder", "New Folder (⌘⇧N)"),
+            ("Delete", "DeleteSelection", "Delete (⌘⌫)"),
             (
-                "Delete Selection",
-                "DeleteSelection",
-                "Delete Selection (⌘⌫)",
-            ),
-            (
-                "Toggle Transfers",
+                "Show Transfers",
                 "ShowTransferDrawer",
-                "Toggle Transfers (⌘J)",
+                "Show Transfers (⌘J)",
             ),
             (
                 "Show Hidden Files",
@@ -386,16 +385,8 @@ mod tests {
                 "ToggleHiddenFiles",
                 "Hide Hidden Files (⌘⇧.)",
             ),
-            (
-                "Upload Selection",
-                "UploadSelection",
-                "Upload Selection (⌘U)",
-            ),
-            (
-                "Download Selection",
-                "DownloadSelection",
-                "Download Selection (⌘D)",
-            ),
+            ("Upload", "UploadSelection", "Upload (⌘U)"),
+            ("Download", "DownloadSelection", "Download (⌘D)"),
             ("Copy Path", "CopyPath", "Copy Path (⌘⇧C)"),
             ("Reconnect", "ReconnectTab", "Reconnect (⌘⇧R)"),
         ];

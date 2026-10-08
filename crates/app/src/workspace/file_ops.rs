@@ -48,23 +48,20 @@ fn delete_confirm_presentation(entries: &[FsEntryRef]) -> DeleteConfirmPresentat
         .collect();
     let directory_count = entries.iter().filter(|entry| entry.is_dir).count();
     let title = if count == 1 {
-        format!(
-            "Delete “{}”?",
-            names.first().map_or("item", |entry| &entry.name)
-        )
+        "Delete This Item?".to_string()
     } else {
         format!("Delete {count} items?")
     };
     let risk_message = match (count, directory_count) {
-        (1, 1) => "This folder and all of its contents will be permanently deleted.".to_string(),
-        (1, _) => "This item will be permanently deleted.".to_string(),
-        (_, 0) => "These items will be permanently deleted.".to_string(),
+        (1, 1) => "This folder and everything inside it will be permanently deleted.".to_string(),
+        (1, _) => "This item will be permanently deleted. You can’t undo this.".to_string(),
+        (_, 0) => "These items will be permanently deleted. You can’t undo this.".to_string(),
         (_, 1) => {
-            "This selection includes 1 folder. All selected items and folder contents will be permanently deleted."
+            "Selected items and everything inside the selected folder will be permanently deleted."
                 .to_string()
         }
         (_, directory_count) => format!(
-            "This selection includes {directory_count} folders. All selected items and folder contents will be permanently deleted."
+            "Selected items and everything inside {directory_count} selected folders will be permanently deleted."
         ),
     };
 
@@ -153,12 +150,12 @@ impl crate::workspace::Workspace {
         let side = self.focused_side;
         let entries = self.selected_fs_entries(side);
         if entries.is_empty() {
-            self.status_message = Some("Select one or more items to delete".into());
+            self.status_message = Some("Select files or folders to delete.".into());
             cx.notify();
             return;
         }
         let Some(scope) = self.fs_scope_for_side(side) else {
-            self.status_message = Some("Connect before deleting remote items".into());
+            self.status_message = Some("Connect to the server before deleting files.".into());
             cx.notify();
             return;
         };
@@ -193,7 +190,7 @@ impl crate::workspace::Workspace {
                 Err(error) => {
                     warn!(error = %error, "could not save confirm_delete");
                     self.config_error =
-                        Some("Could not write config.json. Check file permissions.".into());
+                        Some("Settings couldn’t be saved. Check file permissions.".into());
                 }
             }
         }
@@ -221,12 +218,12 @@ impl crate::workspace::Workspace {
         let side = self.focused_side;
         let mut entries = self.selected_fs_entries(side);
         if entries.len() != 1 {
-            self.status_message = Some("Select a single item to rename".into());
+            self.status_message = Some("Select one file or folder to rename.".into());
             cx.notify();
             return;
         }
         if side == PaneSide::Remote && self.fs_scope_for_side(side).is_none() {
-            self.status_message = Some("Connect before renaming remote items".into());
+            self.status_message = Some("Connect to the server before renaming files.".into());
             cx.notify();
             return;
         }
@@ -255,7 +252,8 @@ impl crate::workspace::Workspace {
             PaneSide::Local => tab.local.path.clone().map(FsPath::Local),
             PaneSide::Remote => {
                 if self.fs_scope_for_side(side).is_none() {
-                    self.status_message = Some("Connect before creating a remote folder".into());
+                    self.status_message =
+                        Some("Connect to the server before creating a folder.".into());
                     cx.notify();
                     return;
                 }
@@ -263,7 +261,7 @@ impl crate::workspace::Workspace {
             }
         };
         let Some(parent) = parent else {
-            self.status_message = Some("No current directory".into());
+            self.status_message = Some("No folder is open.".into());
             cx.notify();
             return;
         };
@@ -290,7 +288,7 @@ impl crate::workspace::Workspace {
         let name = edit.input.value().trim().to_string();
         if name.is_empty() || name == "." || name == ".." || name.contains('/') {
             if let Some(edit) = &mut self.modal_inputs.inline_edit {
-                edit.error = Some("Enter a name without path separators.".into());
+                edit.error = Some("Enter a name without slashes.".into());
             }
             cx.notify();
             return;
@@ -303,14 +301,14 @@ impl crate::workspace::Workspace {
             };
             if collision {
                 if let Some(edit) = &mut self.modal_inputs.inline_edit {
-                    edit.error = Some("An item with that name already exists.".into());
+                    edit.error = Some("A file or folder with this name already exists.".into());
                 }
                 cx.notify();
                 return;
             }
         }
         let Some(scope) = self.fs_scope_for_side(edit.side) else {
-            self.status_message = Some("Not connected".into());
+            self.status_message = Some("Not Connected".into());
             cx.notify();
             return;
         };
@@ -320,7 +318,7 @@ impl crate::workspace::Workspace {
                     Some(parent) => parent,
                     None => {
                         if let Some(edit) = &mut self.modal_inputs.inline_edit {
-                            edit.error = Some("Cannot rename the filesystem root.".into());
+                            edit.error = Some("The top-level folder can’t be renamed.".into());
                         }
                         cx.notify();
                         return;
@@ -629,7 +627,7 @@ impl crate::workspace::Workspace {
                         div()
                             .text_size(px(12.0))
                             .text_color(theme.colors.text_muted)
-                            .child("Don't ask again before deleting items"),
+                            .child("Don’t ask before deleting"),
                     ),
             );
         }
@@ -646,7 +644,7 @@ impl crate::workspace::Workspace {
                     },
                 )))
                 .child(
-                    text_button("delete-confirm", "Delete")
+                    text_button("delete-confirm", "Delete Permanently")
                         .danger(true)
                         .on_click(cx.listener(|workspace, _event, window, cx| {
                             workspace.confirm_delete(window, cx);
@@ -722,7 +720,7 @@ impl crate::workspace::Workspace {
                     .into_any_element(),
             );
             items.push(
-                text_button("ctx-reveal", "Reveal in Finder")
+                text_button("ctx-reveal", "Show in Finder")
                     .on_click(cx.listener(|workspace, _event, _window, cx| {
                         workspace.modal_inputs.context_menu = None;
                         workspace.reveal_local_selection(cx);
@@ -732,7 +730,7 @@ impl crate::workspace::Workspace {
         }
         if has_entry && !is_local && connected {
             items.push(
-                text_button("ctx-edit", "Edit")
+                text_button("ctx-edit", "Open for Editing")
                     .on_click(cx.listener(|workspace, _event, _window, cx| {
                         workspace.modal_inputs.context_menu = None;
                         workspace.focused_side = PaneSide::Remote;
@@ -816,7 +814,7 @@ fn execute_local_fs_operation(op: &FsOp) -> Result<(), UserFacingError> {
                     ));
                 };
                 delete_entry(path, entry.is_dir)
-                    .map_err(|error| local_fs_error("Could not delete", &error))?;
+                    .map_err(|error| local_fs_error("The item couldn’t be deleted.", &error))?;
             }
             Ok(())
         }
@@ -828,7 +826,8 @@ fn execute_local_fs_operation(op: &FsOp) -> Result<(), UserFacingError> {
                     "Rename paths must be local.",
                 ));
             };
-            rename_entry(from, to).map_err(|error| local_fs_error("Could not rename", &error))
+            rename_entry(from, to)
+                .map_err(|error| local_fs_error("The item couldn’t be renamed.", &error))
         }
         FsOp::CreateDirectory { parent, name } => {
             let Some(parent) = parent.as_local() else {
@@ -840,7 +839,7 @@ fn execute_local_fs_operation(op: &FsOp) -> Result<(), UserFacingError> {
             };
             create_directory(parent, name)
                 .map(|_| ())
-                .map_err(|error| local_fs_error("Could not create folder", &error))
+                .map_err(|error| local_fs_error("The folder couldn’t be created.", &error))
         }
     }
 }
@@ -862,14 +861,14 @@ mod delete_confirm_presentation_tests {
     fn single_folder_uses_its_name_and_recursive_delete_warning() {
         let presentation = delete_confirm_presentation(&[local_entry("/tmp/project-assets", true)]);
 
-        assert_eq!(presentation.title, "Delete “project-assets”?");
+        assert_eq!(presentation.title, "Delete This Item?");
         assert_eq!(presentation.names.len(), 1);
         assert_eq!(presentation.names[0].name, "project-assets");
         assert!(presentation.names[0].is_dir);
         assert_eq!(presentation.overflow, 0);
         assert_eq!(
             presentation.risk_message,
-            "This folder and all of its contents will be permanently deleted."
+            "This folder and everything inside it will be permanently deleted."
         );
     }
 
@@ -885,7 +884,7 @@ mod delete_confirm_presentation_tests {
         assert_eq!(presentation.overflow, 2);
         assert_eq!(
             presentation.risk_message,
-            "This selection includes 2 folders. All selected items and folder contents will be permanently deleted."
+            "Selected items and everything inside 2 selected folders will be permanently deleted."
         );
     }
 }

@@ -200,7 +200,7 @@ remote pane 必须覆盖这些状态：
 - 外观选择必须立即预览；`System` 跟随窗口 appearance，但是固定为 Light 或 Dark 时不得被系统
   外观变化覆盖。
 - 配置保存失败必须在 Settings 内行内展示，因此不能使用 toast，也不能静默丢弃错误。
-- Settings → Profiles 是创建、编辑和删除保存 Profile 的唯一入口。Connect modal 只能选择已有 Profile 或填写临时连接；`Manage…` 必须关闭 Connect 并进入 Settings → Profiles。
+- Settings → Saved Connections 是创建、编辑和删除保存 Profile 的唯一入口。Connect modal 只能选择已有 Profile 或填写临时连接；`Manage Connections…` 必须关闭 Connect 并进入 Settings → Saved Connections。
 - Profile 列表使用紧凑双行条目：名称是主层级，`username@host` 是可截断的次层级，port 独立显示；选中、hover 和焦点不能改变条目高度或挤压地址文本。
 - Profile editor 必须明确显示认证与 route 字段；密码和 passphrase 输入必须遮罩，保存失败不得清空用户仍可修正的草稿。
 - About 是非阻塞的简洁浮层，因此只显示图标、应用名、从构建元数据派生的版本、简短说明和
@@ -209,7 +209,7 @@ remote pane 必须覆盖这些状态：
 ### 9.2 远程编辑
 
 - 双击远端文件只负责下载临时副本并打开外部编辑器；应用不得监视本地保存，也不得自动上传。
-- 用户重新选中该远端文件时，status bar 必须提供明确的 **Upload Modified File** 操作，并在 checking、uploading 和 conflict 阶段显示不可歧义的状态。
+- 用户重新选中该远端文件时，status bar 必须提供明确的 **Upload Changes** 操作，并在 checking、uploading 和 conflict 阶段显示不可歧义的状态。
 - 上传前必须读取实时远端 metadata；缓存目录 listing 不能授权覆盖。远端发生变化时必须进入冲突决策，不能静默覆盖。
 - 校验或上传失败后必须保留本地临时副本并允许重试。tab 或窗口关闭后必须结束其编辑 session 并清理临时目录。
 
@@ -271,7 +271,7 @@ remote pane 必须覆盖这些状态：
 - 是否为 icon-only button 提供 tooltip/label？
 - 是否没有泄露 secret、私钥完整路径或内部 debug 字符串？
 - 是否覆盖了 request id/session epoch 相关 modal 过期场景？
-- Profile 写入是否仍然只发生在 Settings → Profiles？
+- Profile 写入是否仍然只发生在 Settings → Saved Connections？
 - 远程编辑是否仍由用户明确触发回传，并在上传前执行实时冲突检查？
 - 所有可滚动区域是否在溢出、拖动、track 点击、滚轮和窗口 resize 下保持同步？
 

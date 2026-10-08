@@ -13,17 +13,17 @@ impl crate::workspace::Workspace {
             return;
         };
         let Some((session_epoch, profile_id)) = connected_transfer_session(tab) else {
-            self.status_message = Some("Connect before starting an upload".into());
+            self.status_message = Some("Connect to the server before uploading.".into());
             cx.notify();
             return;
         };
         let Some(remote_directory) = tab.remote.path.clone() else {
-            self.status_message = Some("Choose a remote destination directory".into());
+            self.status_message = Some("Choose a destination folder on the server.".into());
             cx.notify();
             return;
         };
         if sources.is_empty() {
-            self.status_message = Some("Select local files or directories to upload".into());
+            self.status_message = Some("Select files or folders on your Mac to upload.".into());
             cx.notify();
             return;
         }
@@ -39,7 +39,7 @@ impl crate::workspace::Workspace {
                 Some(path) => path,
                 None => {
                     self.status_message =
-                        Some("Selected upload source has no usable file name".into());
+                        Some("The selected upload item has no usable name.".into());
                     cx.notify();
                     return;
                 }
@@ -60,7 +60,7 @@ impl crate::workspace::Workspace {
         });
         if self.send_command(command, cx) {
             self.transfer_drawer.open = true;
-            self.status_message = Some("Planning upload…".into());
+            self.status_message = Some("Preparing upload…".into());
             cx.notify();
         }
     }
@@ -69,22 +69,22 @@ impl crate::workspace::Workspace {
             return;
         };
         let Some((session_epoch, profile_id)) = connected_transfer_session(tab) else {
-            self.status_message = Some("Connect before starting a download".into());
+            self.status_message = Some("Connect to the server before downloading.".into());
             cx.notify();
             return;
         };
         let Some(local_directory) = tab.local.path.clone() else {
-            self.status_message = Some("Choose a local destination directory".into());
+            self.status_message = Some("Choose a destination folder on your Mac.".into());
             cx.notify();
             return;
         };
         if sources.len() != 1 {
-            self.status_message = Some("Select one remote file or directory to download".into());
+            self.status_message = Some("Select one server file or folder to download.".into());
             cx.notify();
             return;
         }
         let Some(destination) = append_local_name(&local_directory, &sources[0]) else {
-            self.status_message = Some("Selected download source has no usable file name".into());
+            self.status_message = Some("The selected download item has no usable name.".into());
             cx.notify();
             return;
         };
@@ -101,7 +101,7 @@ impl crate::workspace::Workspace {
         });
         if self.send_command(command, cx) {
             self.transfer_drawer.open = true;
-            self.status_message = Some("Planning download…".into());
+            self.status_message = Some("Preparing download…".into());
             cx.notify();
         }
     }

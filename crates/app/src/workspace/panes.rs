@@ -352,7 +352,7 @@ impl crate::workspace::Workspace {
             Err(error) => {
                 warn!(error = %error, "could not save show_hidden_files");
                 self.config_error =
-                    Some("Could not write config.json. Check file permissions.".into());
+                    Some("Settings couldn’t be saved. Check file permissions.".into());
             }
         }
         cx.notify();
@@ -387,7 +387,7 @@ impl crate::workspace::Workspace {
         };
         let request_epoch = tab.local.begin_local_read();
         if self.state.tabs.active_tab_id == Some(tab_id) {
-            self.status_message = Some("Loading local directory…".into());
+            self.status_message = Some("Loading files on your Mac…".into());
         }
         let read_path = path.clone();
         let read_task = cx
@@ -415,7 +415,7 @@ impl crate::workspace::Workspace {
                     Err(error) => {
                         tab.local.entries.clear();
                         let failure = macsftp_platform::local_fs_error(
-                            "Could not read local directory",
+                            "The folder on your Mac couldn’t be loaded.",
                             &error,
                         );
                         if is_active {
@@ -831,7 +831,7 @@ impl crate::workspace::Workspace {
         };
         if let Some(path_text) = path_text {
             cx.write_to_clipboard(ClipboardItem::new_string(path_text.clone()));
-            self.status_message = Some(format!("Copied {path_text}").into());
+            self.status_message = Some(format!("Path copied: {path_text}").into());
             cx.notify();
         }
     }

@@ -74,7 +74,7 @@ impl ConnectForm {
         {
             return profile.name.clone();
         }
-        "Manual entry".into()
+        "Enter Details".into()
     }
 
     pub(crate) fn prefilled(settings: &ConnectionSettings) -> Self {
@@ -204,7 +204,7 @@ impl ConnectForm {
     pub(crate) fn build_settings(&self) -> Result<ConnectionSettings, SharedString> {
         let host = self.host.value().trim().to_string();
         if host.is_empty() {
-            return Err("Host is required.".into());
+            return Err("Enter a server address.".into());
         }
         let port_text = self.port.value().trim();
         let port: u16 = if port_text.is_empty() {
@@ -212,12 +212,12 @@ impl ConnectForm {
         } else {
             match port_text.parse() {
                 Ok(port) if port > 0 => port,
-                _ => return Err("Port must be a number between 1 and 65535.".into()),
+                _ => return Err("Enter a whole number from 1 to 65535.".into()),
             }
         };
         let username = self.username.value().trim().to_string();
         if username.is_empty() {
-            return Err("Username is required.".into());
+            return Err("Enter a username.".into());
         }
 
         let auth = match self.auth_method {
@@ -227,7 +227,7 @@ impl ConnectForm {
             AuthMethodKind::PrivateKey => {
                 let key_path = expand_home(self.key_path.value().trim());
                 if key_path.is_empty() {
-                    return Err("Private key path is required.".into());
+                    return Err("Enter the full path to your key file.".into());
                 }
                 let passphrase = self.passphrase.value();
                 AuthCredential::PrivateKey {
@@ -381,15 +381,17 @@ impl crate::workspace::Workspace {
                 }
             }
             Err(ProfileMutationError::CredentialRequired(AuthMethodKind::Password)) => {
-                self.status_message = Some("Saved password not found — re-enter it.".into());
+                self.status_message =
+                    Some("Your saved password wasn’t found. Enter it again.".into());
             }
             Err(ProfileMutationError::CredentialRequired(AuthMethodKind::PrivateKey)) => {
-                self.status_message = Some("Saved passphrase not found — re-enter it.".into());
+                self.status_message =
+                    Some("Your saved key password wasn’t found. Enter it again.".into());
             }
             Err(error) => {
                 warn!(?profile_id, %error, "could not load saved profile credential");
                 self.status_message =
-                    Some("Could not read saved credentials — re-enter them.".into());
+                    Some("Your saved sign-in details couldn’t be read. Enter them again.".into());
             }
         }
         // from_profile starts from empty() which already closes the picker;

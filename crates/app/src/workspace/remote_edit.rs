@@ -77,7 +77,7 @@ impl Workspace {
                 EntryPath::Local(_) => None,
             });
         let Some((remote_path, size, modified_at)) = selected else {
-            self.status_message = Some("Select one remote file to edit".into());
+            self.status_message = Some("Select one server file to edit.".into());
             cx.notify();
             return;
         };
@@ -105,17 +105,18 @@ impl Workspace {
 
     pub(crate) fn upload_selected_edit(&mut self, cx: &mut Context<Self>) {
         let Some((session_id, phase)) = self.selected_edit_session(cx) else {
-            self.status_message = Some("Select a remote file opened for editing".into());
+            self.status_message =
+                Some("Select a server file you’ve already opened for editing.".into());
             cx.notify();
             return;
         };
         if phase != EditPhase::Editing {
             self.status_message = Some(match phase {
-                EditPhase::Downloading => "The editable copy is still downloading".into(),
-                EditPhase::CheckingRemote => "The remote file is already being checked".into(),
-                EditPhase::UploadingBack => "The modified file is already uploading".into(),
-                EditPhase::RemoteConflict => "Resolve the remote edit conflict first".into(),
-                EditPhase::Editing => "The editable copy is ready".into(),
+                EditPhase::Downloading => "Your copy is still downloading.".into(),
+                EditPhase::CheckingRemote => "The server file is already being checked.".into(),
+                EditPhase::UploadingBack => "Your changes are already uploading.".into(),
+                EditPhase::RemoteConflict => "Review the server file’s changes first.".into(),
+                EditPhase::Editing => "Your copy is ready to edit.".into(),
             });
             cx.notify();
             return;
@@ -128,13 +129,13 @@ impl Workspace {
             return;
         };
         let Some((session_epoch, connection_key)) = connected_edit_session(tab) else {
-            self.status_message = Some("Reconnect before uploading the modified file".into());
+            self.status_message = Some("Reconnect before uploading your changes.".into());
             cx.notify();
             return;
         };
         if connection_key != session.connection_key {
             self.status_message =
-                Some("Connection changed — reconnect the original server before uploading".into());
+                Some("Reconnect to the original server before uploading your changes.".into());
             cx.notify();
             return;
         }
@@ -150,8 +151,10 @@ impl Workspace {
                     session.pending_check_id = None;
                     session.checking_local_mtime = None;
                 }
-                self.status_message =
-                    Some("Could not read the edited file — restore access and try again".into());
+                self.status_message = Some(
+                    "Your edited copy couldn’t be read. Check file permissions and try again."
+                        .into(),
+                );
                 cx.notify();
                 return;
             }
@@ -172,7 +175,7 @@ impl Workspace {
             path: session.remote_path,
         });
         if self.send_command(command, cx) {
-            self.status_message = Some("Checking remote file before upload…".into());
+            self.status_message = Some("Checking the server file before uploading…".into());
         } else if let Some(session) = cx.resources_mut().edit_sessions.get_mut(session_id) {
             session.phase = EditPhase::Editing;
             session.pending_check_id = None;
@@ -192,7 +195,7 @@ impl Workspace {
             return;
         };
         let Some((session_epoch, connection_key)) = connected_edit_session(tab) else {
-            self.status_message = Some("Connect before editing".into());
+            self.status_message = Some("Connect to the server before editing.".into());
             cx.notify();
             return;
         };
@@ -225,17 +228,19 @@ impl Workspace {
                     EditPhase::Editing | EditPhase::UploadingBack => {
                         let editor = cx.resources().config.config().external_editor.clone();
                         match open_edit_temp(&existing_temp_path, editor.as_deref()) {
-                            Ok(()) => "Reopened file for editing".into(),
+                            Ok(()) => "Your copy is open for editing.".into(),
                             Err(error) => {
                                 warn!(error = %error, "could not reopen editor for remote edit");
-                                "Could not open file for editing".into()
+                                "Your copy couldn’t be opened for editing.".into()
                             }
                         }
                     }
-                    EditPhase::Downloading => "File is still downloading for editing".into(),
-                    EditPhase::CheckingRemote => "Checking the remote file before saving".into(),
+                    EditPhase::Downloading => "Your copy is still downloading.".into(),
+                    EditPhase::CheckingRemote => {
+                        "Checking the server file before uploading…".into()
+                    }
                     EditPhase::RemoteConflict => {
-                        "Resolve the remote edit conflict before reopening".into()
+                        "Review the server file’s changes before reopening.".into()
                     }
                 });
                 cx.notify();
@@ -317,7 +322,7 @@ impl Workspace {
             conflict_policy: ConflictPolicy::OverwriteAll,
         });
         if self.send_command(command, cx) {
-            self.status_message = Some("Opening for edit…".into());
+            self.status_message = Some("Opening your copy…".into());
             cx.notify();
         } else {
             // The command never entered the channel (full/closed). The
@@ -345,12 +350,12 @@ impl Workspace {
         };
         let Some(tab) = self.state.tabs.find_tab(pending.tab_id) else {
             // The tab closed while the modal was open; nothing to edit into.
-            self.status_message = Some("Connect before editing".into());
+            self.status_message = Some("Connect to the server before editing.".into());
             cx.notify();
             return;
         };
         let Some((session_epoch, connection_key)) = connected_edit_session(tab) else {
-            self.status_message = Some("Connect before editing".into());
+            self.status_message = Some("Connect to the server before editing.".into());
             cx.notify();
             return;
         };
@@ -446,10 +451,10 @@ impl Workspace {
         let theme = cx.theme().clone();
         let body = match size {
             Some(size) => format!(
-                "This file is large ({}). Download it for editing?",
+                "This is a large file ({}). Download a copy to edit?",
                 format_size(Some(size))
             ),
-            None => "This file is large. Download it for editing?".to_string(),
+            None => "This is a large file. Download a copy to edit?".to_string(),
         };
 
         let card = div()
@@ -468,7 +473,7 @@ impl Workspace {
                     .text_size(px(14.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.colors.text)
-                    .child("Edit large file?"),
+                    .child("Edit Large File?"),
             )
             .child(
                 div()
@@ -490,7 +495,7 @@ impl Workspace {
                         )),
                     )
                     .child(
-                        text_button("large-edit-confirm", "Edit")
+                        text_button("large-edit-confirm", "Open for Editing")
                             .primary(true)
                             .on_click(cx.listener(|workspace, _event, _window, cx| {
                                 workspace.confirm_large_edit(cx);
@@ -542,15 +547,14 @@ impl Workspace {
                     .text_size(px(14.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.colors.text)
-                    .child("Remote file changed"),
+                    .child("Server File Changed"),
             )
             .child(
                 div()
                     .text_size(px(12.0))
                     .text_color(theme.colors.text_muted)
                     .child(
-                        "The remote file changed since you opened it for editing. \
-                         Overwriting will discard the remote changes.",
+                        "The server file changed after you opened it. Replacing it will discard those changes.",
                     ),
             )
             .child(
@@ -560,14 +564,14 @@ impl Workspace {
                     .justify_end()
                     .gap_2()
                     .child(
-                        text_button("edit-conflict-later", "Later").on_click(cx.listener(
+                        text_button("edit-conflict-later", "Decide Later").on_click(cx.listener(
                             move |workspace, _event, _window, cx| {
                                 workspace.resolve_edit_conflict(id, ConflictChoice::Later, cx);
                             },
                         )),
                     )
                     .child(
-                        text_button("edit-conflict-discard", "Discard local changes").on_click(
+                        text_button("edit-conflict-discard", "Discard My Changes").on_click(
                             cx.listener(move |workspace, _event, _window, cx| {
                                 workspace.resolve_edit_conflict(
                                     id,
@@ -578,7 +582,7 @@ impl Workspace {
                         ),
                     )
                     .child(
-                        text_button("edit-conflict-overwrite", "Overwrite remote")
+                        text_button("edit-conflict-overwrite", "Replace Server File")
                             .danger(true)
                             .on_click(cx.listener(move |workspace, _event, _window, cx| {
                                 workspace.resolve_edit_conflict(id, ConflictChoice::Overwrite, cx);
@@ -662,7 +666,7 @@ pub(crate) fn build_edit_upload_command(
         destination: TransferEndpoint::Remote(remote_path.clone()),
         metadata_policy: MetadataPolicy::default(),
         // The edit layer already ran its own (size, mtime) divergence check, or
-        // the user explicitly chose "Overwrite remote". The pipeline-level
+        // the user explicitly chose "Replace Server File". The pipeline-level
         // existence prompt would be redundant (the origin file always exists),
         // so overwrite unconditionally rather than emitting a TransferConflict.
         conflict_policy: ConflictPolicy::OverwriteAll,

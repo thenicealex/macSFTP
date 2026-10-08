@@ -19,17 +19,17 @@ pub fn section_header_static(label: &str, count: usize, theme: &Theme) -> impl I
 /// Returns the color and label to display for a tab's connection state.
 pub fn connection_status(connection: &ConnectionState, theme: &Theme) -> (Hsla, SharedString) {
     match connection {
-        ConnectionState::Empty => (theme.colors.text_disabled, "Not connected".into()),
+        ConnectionState::Empty => (theme.colors.text_disabled, "Not Connected".into()),
         ConnectionState::Connecting { .. } => (theme.colors.warning, "Connecting…".into()),
         ConnectionState::AwaitingHostKey { .. } => {
-            (theme.colors.warning, "Awaiting host key".into())
+            (theme.colors.warning, "Verify Server Identity".into())
         }
         ConnectionState::Connected { .. } => (theme.colors.success, "Connected".into()),
         ConnectionState::Reconnecting { .. } => (theme.colors.warning, "Reconnecting…".into()),
         ConnectionState::Disconnected { .. } => (theme.colors.text_disabled, "Disconnected".into()),
         ConnectionState::Failed { error } => (
             theme.colors.error,
-            format!("Failed — {}", error.title).into(),
+            format!("Connection Failed — {}", error.title).into(),
         ),
     }
 }

@@ -237,7 +237,7 @@ impl crate::workspace::Workspace {
         let new_name = self.modal_inputs.conflict_rename.value().trim().to_string();
         if new_name.is_empty() || new_name == "." || new_name == ".." || new_name.contains('/') {
             self.modal_inputs.conflict_rename_error =
-                Some("Enter a file name without path separators or parent-directory names.".into());
+                Some("Enter a name without slashes. Don’t use “.” or “..” as the name.".into());
             cx.notify();
             return;
         }
@@ -447,7 +447,7 @@ impl crate::workspace::Workspace {
     pub(crate) fn submit_go_to_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let raw = self.go_to_path.input.value().trim().to_string();
         if raw.is_empty() {
-            self.go_to_path.error = Some("Enter a path".into());
+            self.go_to_path.error = Some("Enter a full folder path.".into());
             cx.notify();
             return;
         }
@@ -459,9 +459,9 @@ impl crate::workspace::Workspace {
                 let fs_path = Path::new(path.as_str());
                 if !fs_path.is_dir() {
                     let message = if fs_path.exists() {
-                        "Not a directory"
+                        "This location isn’t a folder."
                     } else {
-                        "Path not found"
+                        "This location wasn’t found."
                     };
                     self.go_to_path.error = Some(message.into());
                     self.status_message = Some(message.into());
@@ -524,8 +524,8 @@ impl crate::workspace::Workspace {
         }
         let theme = cx.theme().clone();
         let side_label = match self.focused_side {
-            PaneSide::Local => "Local",
-            PaneSide::Remote => "Remote",
+            PaneSide::Local => "My Mac",
+            PaneSide::Remote => "Server",
         };
 
         Some(
@@ -558,19 +558,19 @@ impl crate::workspace::Workspace {
                                 .text_size(px(14.0))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.colors.text)
-                                .child(format!("Go to Path ({side_label})")),
+                                .child(format!("Go to Folder ({side_label})")),
                         )
                         .child(
                             div()
                                 .text_size(px(12.0))
                                 .text_color(theme.colors.text_muted)
-                                .child("Enter an absolute path. Enter navigates · Esc cancels"),
+                                .child("Enter a full folder path. Press Enter to open or Esc to cancel."),
                         )
                         .child(text_field(
                             "go-to-path-input",
                             TextFieldModel {
                                 state: &self.go_to_path.input,
-                                placeholder: "Absolute path",
+                                placeholder: "Full folder path",
                                 focused: true,
                                 masked: false,
                             },
@@ -699,59 +699,59 @@ impl crate::workspace::Workspace {
         let trigger_label = form.profile_trigger_label(&profiles);
         let profile_picker_open = form.profile_picker_open;
 
-        card =
-            card.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .w(px(96.0))
-                            .flex_none()
-                            .text_size(px(11.0))
-                            .text_color(theme.colors.text_muted)
-                            .child("Profile"),
-                    )
-                    .child(
-                        div()
-                            .id("profile-picker-trigger")
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap_2()
-                            .px_2()
-                            .py_1()
-                            .border_1()
-                            .border_color(theme.colors.border)
-                            .rounded_md()
-                            .cursor_pointer()
-                            .on_click(cx.listener(|workspace, _event, _window, cx| {
-                                if let Some(form) = &mut workspace.connect_form_ui.form {
-                                    form.profile_picker_open = !form.profile_picker_open;
-                                    cx.notify();
-                                }
-                            }))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(px(12.0))
-                                    .text_color(theme.colors.text)
-                                    .child(trigger_label),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_size(px(10.0))
-                                    .text_color(theme.colors.text_muted)
-                                    .child(if profile_picker_open { "▴" } else { "▾" }),
-                            ),
-                    )
-                    .child(text_button("connect-manage-profiles", "Manage…").on_click(
+        card = card.child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .w(px(96.0))
+                        .flex_none()
+                        .text_size(px(11.0))
+                        .text_color(theme.colors.text_muted)
+                        .child("Saved Connection"),
+                )
+                .child(
+                    div()
+                        .id("profile-picker-trigger")
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .border_1()
+                        .border_color(theme.colors.border)
+                        .rounded_md()
+                        .cursor_pointer()
+                        .on_click(cx.listener(|workspace, _event, _window, cx| {
+                            if let Some(form) = &mut workspace.connect_form_ui.form {
+                                form.profile_picker_open = !form.profile_picker_open;
+                                cx.notify();
+                            }
+                        }))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(12.0))
+                                .text_color(theme.colors.text)
+                                .child(trigger_label),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(10.0))
+                                .text_color(theme.colors.text_muted)
+                                .child(if profile_picker_open { "▴" } else { "▾" }),
+                        ),
+                )
+                .child(
+                    text_button("connect-manage-profiles", "Manage Connections…").on_click(
                         cx.listener(|workspace, _event, window, cx| {
                             // OpenProfiles is gated on connect_form being closed;
                             // dismiss Connect first so Settings Profiles can open.
@@ -762,8 +762,9 @@ impl crate::workspace::Workspace {
                             workspace.workspace_focus.focus(window);
                             cx.notify();
                         }),
-                    )),
-            );
+                    ),
+                ),
+        );
 
         if profile_picker_open {
             let filtered = self.filtered_connect_profiles(cx);
@@ -779,7 +780,7 @@ impl crate::workspace::Workspace {
                         "profile-picker-filter-input",
                         TextFieldModel {
                             state: &form.profile_picker_filter,
-                            placeholder: "Filter profiles…",
+                            placeholder: "Filter saved connections…",
                             focused: true,
                             masked: false,
                         },
@@ -793,7 +794,7 @@ impl crate::workspace::Workspace {
                         .py_1()
                         .text_size(px(12.0))
                         .text_color(theme.colors.text_muted)
-                        .child("No saved profiles — manage in Settings"),
+                        .child("No saved connections. Add one in Settings."),
                 );
             } else if filtered.is_empty() {
                 picker_content = picker_content.child(
@@ -802,7 +803,7 @@ impl crate::workspace::Workspace {
                         .py_1()
                         .text_size(px(12.0))
                         .text_color(theme.colors.text_muted)
-                        .child("No matches"),
+                        .child("No matching items"),
                 );
             } else {
                 picker_content = picker_content.children(filtered.into_iter().map(|profile| {
@@ -838,7 +839,7 @@ impl crate::workspace::Workspace {
                             cx.notify();
                         }
                     }))
-                    .child("Manual entry"),
+                    .child("Enter Details"),
             );
             let picker_panel = div()
                 .id("profile-picker-panel")
@@ -877,13 +878,13 @@ impl crate::workspace::Workspace {
                 div()
                     .text_size(px(10.0))
                     .text_color(theme.colors.text_muted)
-                    .child("Saved profile — credentials are restored from the Keychain."),
+                    .child("Saved sign-in details are loaded from your Mac’s Keychain."),
             );
         }
 
         card = card
             .child(field_row(
-                "Host",
+                "Server Address",
                 ConnectField::Host,
                 &form.host,
                 "example.com",
@@ -917,7 +918,7 @@ impl crate::workspace::Workspace {
                             .flex_none()
                             .text_size(px(11.0))
                             .text_color(theme.colors.text_muted)
-                            .child("Auth"),
+                            .child("Sign-In Method"),
                     )
                     .child(
                         div()
@@ -931,13 +932,13 @@ impl crate::workspace::Workspace {
                                 cx,
                             ))
                             .child(auth_toggle(
-                                "Private Key",
+                                "Key File",
                                 AuthMethodKind::PrivateKey,
                                 "auth-private-key",
                                 cx,
                             ))
                             .child(auth_toggle(
-                                "Interactive",
+                                "Server Prompts",
                                 AuthMethodKind::KeyboardInteractive,
                                 "auth-keyboard-interactive",
                                 cx,
@@ -962,7 +963,7 @@ impl crate::workspace::Workspace {
             )),
             AuthMethodKind::PrivateKey => card
                 .child(field_row(
-                    "Key path",
+                    "Key File Path",
                     ConnectField::KeyPath,
                     &form.key_path,
                     "~/.ssh/id_ed25519",
@@ -970,7 +971,7 @@ impl crate::workspace::Workspace {
                     cx,
                 ))
                 .child(field_row(
-                    "Passphrase",
+                    "Key Password",
                     ConnectField::Passphrase,
                     form.passphrase.as_input_state(),
                     "",
@@ -981,11 +982,11 @@ impl crate::workspace::Workspace {
                 div()
                     .text_size(px(11.0))
                     .text_color(theme.colors.text_muted)
-                    .child("The server will ask for one or more responses after connecting."),
+                    .child("After connecting, answer the server’s sign-in prompts."),
             ),
             AuthMethodKind::SshAgent => card
                 .child(field_row(
-                    "Agent socket",
+                    "Agent Location",
                     ConnectField::AgentSocket,
                     &form.agent_socket,
                     "SSH_AUTH_SOCK (optional)",
@@ -996,7 +997,7 @@ impl crate::workspace::Workspace {
                     div()
                         .text_size(px(11.0))
                         .text_color(theme.colors.text_muted)
-                        .child("Uses agent identities, including RSA keys."),
+                        .child("Uses keys from your SSH agent, including RSA keys."),
                 ),
         };
 
@@ -1111,7 +1112,7 @@ impl crate::workspace::Workspace {
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.colors.text)
                     .child(if prompt.name.is_empty() {
-                        "Additional authentication required".to_string()
+                        "Complete Sign-In".to_string()
                     } else {
                         prompt.name.clone()
                     }),
@@ -1257,30 +1258,29 @@ impl crate::workspace::Workspace {
                                 .text_size(px(14.0))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.colors.text)
-                                .child("Unknown Host Key"),
+                                .child("Verify Server"),
                         )
                         .child(
                             div()
                                 .text_size(px(12.0))
                                 .text_color(theme.colors.text_muted)
                                 .child(
-                                    "The authenticity of this server can't be established. \
-                                     Verify the fingerprint before trusting it.",
+                                    "This server’s identity isn’t verified. Check its fingerprint with your administrator before trusting it.",
                                 ),
                         )
                         .child(info_row(
-                            "Host",
+                            "Server Address",
                             format!("{}:{}", prompt.host, prompt.port).into(),
                             false,
                         ))
-                        .child(info_row("Key type", prompt.algorithm.clone().into(), false))
+                        .child(info_row("Key Type", prompt.algorithm.clone().into(), false))
                         .child(info_row(
-                            "Fingerprint",
+                            "Server Fingerprint",
                             prompt.fingerprint_sha256.clone().into(),
                             true,
                         ))
                         .child(info_row(
-                            "Saves to",
+                            "Save Location",
                             "~/Library/Application Support/macSFTP/known_hosts".into(),
                             true,
                         ))
@@ -1388,32 +1388,32 @@ impl crate::workspace::Workspace {
                                 .text_size(px(14.0))
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.colors.text)
-                                .child("File already exists"),
+                                .child("File Already Exists"),
                         )
                         .child(
                             div()
                                 .text_size(px(12.0))
                                 .text_color(theme.colors.text_muted)
-                                .child("Choose how to handle the existing destination."),
+                                .child("A file with this name already exists. Choose what to do."),
                         )
-                        .child(detail_row("Source", source.into()))
+                        .child(detail_row("Incoming File", source.into()))
                         .child(detail_row("Destination", destination.into()))
                         .child(detail_row("Size", format_size(prompt.source_size)))
                         .child(detail_row(
-                            "Modified",
+                            "Last Modified",
                             format_timestamp(prompt.source_modified_at),
                         ))
                         .child(
                             div()
                                 .text_size(px(11.0))
                                 .text_color(theme.colors.text_muted)
-                                .child("All applies to remaining conflicts in this transfer."),
+                                .child("“All” applies only to remaining name conflicts in this transfer."),
                         )
                         .child(
                             div()
                                 .text_size(px(11.0))
                                 .text_color(theme.colors.text_muted)
-                                .child("Enter renames · Esc cancels"),
+                                .child("Press Enter to rename or Esc to cancel."),
                         )
                         .child(
                             div()
@@ -1426,7 +1426,7 @@ impl crate::workspace::Workspace {
                                         .flex_none()
                                         .text_size(px(11.0))
                                         .text_color(theme.colors.text_muted)
-                                        .child("New name"),
+                                        .child("New Name"),
                                 )
                                 .child(div().flex_1().min_w_0().child(text_field(
                                     "conflict-rename-input",
@@ -1500,7 +1500,7 @@ impl crate::workspace::Workspace {
                                 ))
                                 .child(decision_button(
                                     "conflict-overwrite",
-                                    "Overwrite",
+                                    "Replace",
                                     ConflictDecision::Overwrite {
                                         apply_to_all: false,
                                     },
@@ -1509,7 +1509,7 @@ impl crate::workspace::Workspace {
                                 ))
                                 .child(decision_button(
                                     "conflict-overwrite-all",
-                                    "Overwrite All",
+                                    "Replace All",
                                     ConflictDecision::Overwrite { apply_to_all: true },
                                     false,
                                     cx,
@@ -1529,7 +1529,7 @@ impl crate::workspace::Workspace {
         let body = {
             let profile = cx.resources().profiles.find_profile(profile_id)?;
             format!(
-                "Delete \"{}\" ({}@{})? This cannot be undone.",
+                "Delete \"{}\" ({}@{})? You can’t undo this.",
                 profile.name, profile.username, profile.host
             )
         };
@@ -1562,7 +1562,7 @@ impl crate::workspace::Workspace {
                     .text_size(px(14.0))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(theme.colors.text)
-                    .child("Delete Profile?"),
+                    .child("Delete Saved Connection?"),
             )
             .child(
                 div()
@@ -1584,7 +1584,7 @@ impl crate::workspace::Workspace {
                             })),
                     )
                     .child(
-                        text_button("profile-delete-confirm", "Delete")
+                        text_button("profile-delete-confirm", "Delete Connection")
                             .danger(true)
                             .on_click(cx.listener(|workspace, _event, window, cx| {
                                 workspace.confirm_delete_profile(window, cx);
