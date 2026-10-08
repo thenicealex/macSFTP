@@ -391,7 +391,7 @@ impl crate::workspace::Workspace {
             Ok(profile_id) => Some(profile_id),
             Err(error) => {
                 self.status_message =
-                    Some(format!("Could not allocate profile id: {error}").into());
+                    Some(format!("A saved connection couldn’t be created: {error}").into());
                 None
             }
         }
@@ -443,7 +443,7 @@ impl crate::workspace::Workspace {
 
         if host.is_empty() {
             if let Some(editor) = self.settings.profile_editor.as_mut() {
-                editor.error = Some("Host is required.".into());
+                editor.error = Some("Enter a server address.".into());
             }
             cx.notify();
             return;
@@ -455,7 +455,7 @@ impl crate::workspace::Workspace {
                 Ok(port) if port > 0 => port,
                 _ => {
                     if let Some(editor) = self.settings.profile_editor.as_mut() {
-                        editor.error = Some("Port must be a number between 1 and 65535.".into());
+                        editor.error = Some("Enter a whole number from 1 to 65535.".into());
                     }
                     cx.notify();
                     return;
@@ -464,7 +464,7 @@ impl crate::workspace::Workspace {
         };
         if username.is_empty() {
             if let Some(editor) = self.settings.profile_editor.as_mut() {
-                editor.error = Some("Username is required.".into());
+                editor.error = Some("Enter a username.".into());
             }
             cx.notify();
             return;
@@ -500,7 +500,7 @@ impl crate::workspace::Workspace {
                 let key_path = expand_home(&key_path_raw);
                 if key_path.is_empty() {
                     if let Some(editor) = self.settings.profile_editor.as_mut() {
-                        editor.error = Some("Private key path is required.".into());
+                        editor.error = Some("Enter the full path to your key file.".into());
                     }
                     cx.notify();
                     return;
@@ -545,14 +545,16 @@ impl crate::workspace::Workspace {
             ProfileRouteKind::JumpHost => {
                 let Some(jump_profile_id) = jump_profile_id else {
                     if let Some(editor) = self.settings.profile_editor.as_mut() {
-                        editor.error = Some("Select a jump-host profile.".into());
+                        editor.error =
+                            Some("Select a saved connection for the intermediate server.".into());
                     }
                     cx.notify();
                     return;
                 };
                 if jump_profile_id == profile_id {
                     if let Some(editor) = self.settings.profile_editor.as_mut() {
-                        editor.error = Some("A profile cannot jump through itself.".into());
+                        editor.error =
+                            Some("A connection can’t use itself as an intermediate server.".into());
                     }
                     cx.notify();
                     return;
@@ -564,7 +566,7 @@ impl crate::workspace::Workspace {
             ProfileRouteKind::ProxyCommand => {
                 if proxy_command.is_empty() {
                     if let Some(editor) = self.settings.profile_editor.as_mut() {
-                        editor.error = Some("ProxyCommand is required.".into());
+                        editor.error = Some("Enter a connection command.".into());
                     }
                     cx.notify();
                     return;
@@ -600,14 +602,14 @@ impl crate::workspace::Workspace {
                     &outcome.profile,
                     secret_present,
                 ));
-                self.status_message = Some(format!("Saved profile '{}'.", name).into());
+                self.status_message = Some(format!("Connection saved: '{}'.", name).into());
             }
             Err(error) => {
                 let message = match error {
                     ProfileMutationError::CredentialRequired(AuthMethodKind::Password) => {
-                        "Password is required.".to_string()
+                        "Enter a password.".to_string()
                     }
-                    other => format!("Could not save profile: {other}"),
+                    other => format!("The connection couldn’t be saved: {other}"),
                 };
                 if let Some(editor) = self.settings.profile_editor.as_mut() {
                     editor.error = Some(message.clone().into());
@@ -662,11 +664,12 @@ impl crate::workspace::Workspace {
                             target.profile_id = None;
                         }
                     }
-                    self.status_message = Some("Deleted profile.".into());
+                    self.status_message = Some("Saved connection deleted.".into());
                 }
             }
             Err(error) => {
-                self.status_message = Some(format!("Could not delete profile: {error}").into());
+                self.status_message =
+                    Some(format!("The saved connection couldn’t be deleted: {error}").into());
             }
         }
         cx.notify();

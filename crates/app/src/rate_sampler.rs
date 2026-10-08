@@ -204,14 +204,14 @@ pub fn format_running_detail(done: u64, total: Option<u64>, snap: &RateSnapshot)
     let done_s = format_size(Some(done)).to_string();
     if snap.stalled {
         return match total {
-            Some(t) => format!("{} / {} · Stalled", done_s, format_size(Some(t))),
-            None => format!("{done_s} · Stalled"),
+            Some(t) => format!("{} / {} · No recent progress", done_s, format_size(Some(t))),
+            None => format!("{done_s} · No recent progress"),
         };
     }
     let speed_s = format_speed(snap.speed_bps);
     match total {
         Some(t) => format!(
-            "{} / {} · {} · ETA {}",
+            "{} / {} · {} · Time Remaining {}",
             done_s,
             format_size(Some(t)),
             speed_s,
@@ -289,8 +289,8 @@ mod tests {
             eta_secs: None,
         };
         let s = format_running_detail(1_000_000, Some(2_000_000), &stalled);
-        assert!(s.contains("Stalled"), "{s}");
-        assert!(!s.contains("— MB/s") || s.contains("Stalled"));
+        assert!(s.contains("No recent progress"), "{s}");
+        assert!(!s.contains("— MB/s") || s.contains("No recent progress"));
 
         let normal = RateSnapshot {
             speed_bps: Some(1_048_576.0),
@@ -299,8 +299,8 @@ mod tests {
         };
         let s = format_running_detail(1_000_000, Some(2_000_000), &normal);
         assert!(s.contains("MB/s") || s.contains("KB/s"), "{s}");
-        assert!(s.contains("ETA"), "{s}");
-        assert!(!s.contains("— MB/s · ETA —"), "{s}");
+        assert!(s.contains("Time Remaining"), "{s}");
+        assert!(!s.contains("— MB/s · Time Remaining —"), "{s}");
     }
 
     #[test]

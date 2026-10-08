@@ -32,9 +32,10 @@ use crate::workspace::profiles::SettingsSection;
 use macsftp_core::{HistoryOp, RestoredTabTarget};
 
 /// Status bar copy when the command channel is full (non-blocking drop).
-pub(crate) const STATUS_BUSY_TRY_AGAIN: &str = "Busy — try again in a moment.";
+pub(crate) const STATUS_BUSY_TRY_AGAIN: &str = "Busy. Try again in a moment.";
 /// Status bar copy when the connection service can no longer accept commands.
-pub(crate) const STATUS_CONNECTION_SERVICE_UNAVAILABLE: &str = "Connection service is unavailable.";
+pub(crate) const STATUS_CONNECTION_SERVICE_UNAVAILABLE: &str =
+    "The connection service is unavailable.";
 
 /// Which file pane an action targets. Local is the default focus side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,11 +108,9 @@ impl Workspace {
             LocalPath::new(std::env::var("HOME").unwrap_or_else(|_| "/Users/alex".to_string()));
 
         let state = AppState::new();
-        let config_error = cx
-            .resources()
-            .config
-            .initial_error()
-            .map(|_| SharedString::from("Could not load config.json; using defaults."));
+        let config_error = cx.resources().config.initial_error().map(|_| {
+            SharedString::from("Settings couldn’t be loaded. Default settings are being used.")
+        });
         let log_file = cx.resources().app_paths.log_file.clone();
 
         let external_editor_input = {
@@ -783,7 +782,7 @@ impl Workspace {
             Err(error) => {
                 warn!(error = %error, "could not save app config");
                 self.config_error =
-                    Some("Could not write config.json. Check file permissions.".into());
+                    Some("Settings couldn’t be saved. Check file permissions.".into());
             }
         }
 
@@ -953,13 +952,13 @@ impl Render for Workspace {
                 .flex_1()
                 .min_h_0()
                 .child(empty_state(
-                    "No connections",
+                    "No connections yet",
                     vec![
-                        text_button("open-connection", "New Tab (⌘T)").on_click(cx.listener(
-                            |workspace, _event, window, cx| {
+                        text_button("open-connection", "New Connection (⌘T)").on_click(
+                            cx.listener(|workspace, _event, window, cx| {
                                 workspace.open_new_tab(window, cx);
-                            },
-                        )),
+                            }),
+                        ),
                     ],
                     cx,
                 ))

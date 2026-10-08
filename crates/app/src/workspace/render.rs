@@ -70,7 +70,7 @@ impl crate::workspace::Workspace {
                     icon_button(
                         "new-tab",
                         IconName::Plus,
-                        labeled_shortcut("New Tab", "NewTab"),
+                        labeled_shortcut("New Connection", "NewTab"),
                     )
                     .on_click(cx.listener(|workspace, _event, window, cx| {
                         workspace.open_new_tab(window, cx);
@@ -182,7 +182,7 @@ impl crate::workspace::Workspace {
                             div()
                                 .text_size(px(12.0))
                                 .text_color(theme.colors.text_muted)
-                                .child("Switch Tab · Enter confirm · Esc cancel"),
+                                .child("Switch Tabs · Enter to select · Esc to cancel"),
                         )
                         .child({
                             let scrollbar = macsftp_ui::Scrollbar::vertical(
@@ -262,7 +262,7 @@ impl crate::workspace::Workspace {
         let (pane_name, back_id, forward_id, up_id, refresh_id, copy_id, list_container_id) =
             match side {
                 PaneSide::Local => (
-                    "Local",
+                    "My Mac",
                     "local-back",
                     "local-forward",
                     "local-up",
@@ -271,7 +271,7 @@ impl crate::workspace::Workspace {
                     "local-list-container",
                 ),
                 PaneSide::Remote => (
-                    "Remote",
+                    "Server",
                     "remote-back",
                     "remote-forward",
                     "remote-up",
@@ -351,7 +351,7 @@ impl crate::workspace::Workspace {
                 icon_button(
                     up_id,
                     IconName::ArrowUp,
-                    labeled_shortcut("Parent Directory", "ParentDirectory"),
+                    labeled_shortcut("Up One Level", "ParentDirectory"),
                 )
                 .on_click(cx.listener(move |workspace, _event, window, cx| {
                     workspace.focused_side = side;
@@ -553,7 +553,7 @@ impl crate::workspace::Workspace {
                         "remote-delete"
                     },
                     IconName::Close,
-                    labeled_shortcut("Delete Selection", "DeleteSelection"),
+                    labeled_shortcut("Delete", "DeleteSelection"),
                 )
                 .on_click(cx.listener(move |workspace, _event, window, cx| {
                     workspace.focused_side = side;
@@ -565,7 +565,7 @@ impl crate::workspace::Workspace {
                     icon_button(
                         "local-upload",
                         IconName::Upload,
-                        labeled_shortcut("Upload Selection", "UploadSelection"),
+                        labeled_shortcut("Upload", "UploadSelection"),
                     )
                     .disabled(!can_upload)
                     .on_click(cx.listener(
@@ -581,7 +581,7 @@ impl crate::workspace::Workspace {
                     icon_button(
                         "remote-download",
                         IconName::Download,
-                        labeled_shortcut("Download Selection", "DownloadSelection"),
+                        labeled_shortcut("Download", "DownloadSelection"),
                     )
                     .disabled(!can_download)
                     .on_click(cx.listener(
@@ -609,14 +609,14 @@ impl crate::workspace::Workspace {
             ))
         };
         let open_local_network_settings_button = |id: &'static str| {
-            text_button(id, "Open Local Network Settings").on_click(cx.listener(
+            text_button(id, "Open Network Settings").on_click(cx.listener(
                 |workspace, _event, _window, cx| {
                     workspace.open_local_network_settings(cx);
                 },
             ))
         };
         let retry_directory_button = |id: &'static str| {
-            text_button(id, "Retry").on_click(cx.listener(|workspace, _event, window, cx| {
+            text_button(id, "Try Again").on_click(cx.listener(|workspace, _event, window, cx| {
                 let Some(tab) = workspace.active_tab() else {
                     return;
                 };
@@ -712,7 +712,7 @@ impl crate::workspace::Workspace {
                                                 .text_size(px(11.0))
                                                 .text_color(theme.colors.text_muted)
                                                 .opacity(0.5)
-                                                .child("RECENT CONNECTIONS"),
+                                                .child("Recent Connections"),
                                         )
                                         .children(rows.into_iter().map(|(id, label)| {
                                             div()
@@ -798,7 +798,7 @@ impl crate::workspace::Workspace {
                 }
                 Some(ConnectionState::AwaitingHostKey { .. }) => Some(
                     empty_state(
-                        format!("Waiting for host key · {target_host}"),
+                        format!("Verify Server Identity · {target_host}"),
                         vec![
                             text_button("cancel-host-key", "Cancel").on_click(cx.listener(
                                 |workspace, _event, window, cx| {
@@ -822,7 +822,7 @@ impl crate::workspace::Workspace {
                         ),
                         vec![
                             open_local_network_settings_button("open-local-network-settings"),
-                            connect_button("retry-connect-remote", "Retry"),
+                            connect_button("retry-connect-remote", "Try Again"),
                         ],
                         cx,
                     )
@@ -856,7 +856,7 @@ impl crate::workspace::Workspace {
                     empty_state(
                         format!("{} — {}", error.title, error.message),
                         vec![
-                            connect_button("retry-connect-remote", "Retry"),
+                            connect_button("retry-connect-remote", "Try Again"),
                             edit_connection_button("edit-connection-failed"),
                         ],
                         cx,
@@ -883,11 +883,11 @@ impl crate::workspace::Workspace {
         let list: gpui::AnyElement = if let Some(placeholder) = connection_placeholder {
             placeholder
         } else if entry_count == 0 && is_remote_refreshing {
-            loading_state("Loading…", cx).into_any_element()
+            loading_state("Loading files…", cx).into_any_element()
         } else if entry_count == 0 && !self.filter_query(side).is_empty() {
-            empty_state("No matches", vec![], cx).into_any_element()
+            empty_state("No matching items", vec![], cx).into_any_element()
         } else if entry_count == 0 {
-            empty_state("Empty directory", vec![], cx).into_any_element()
+            empty_state("This folder is empty", vec![], cx).into_any_element()
         } else {
             let workspace = cx.entity();
             let mut list = uniform_list(
@@ -1072,7 +1072,7 @@ impl crate::workspace::Workspace {
                             div()
                                 .text_size(px(11.0))
                                 .text_color(theme.colors.text_muted)
-                                .child("Filter:"),
+                                .child("Filter Files:"),
                         )
                         .child(
                             div()
@@ -1153,7 +1153,7 @@ impl crate::workspace::Workspace {
                         },
                         TextFieldModel {
                             state: &edit.input,
-                            placeholder: "name",
+                            placeholder: "Enter a name",
                             focused: true,
                             masked: false,
                         },
@@ -1166,7 +1166,7 @@ impl crate::workspace::Workspace {
                             } else {
                                 "remote-inline-ok"
                             },
-                            "OK",
+                            "Confirm",
                         )
                         .on_click(cx.listener(
                             |workspace, _event, window, cx| {
@@ -1279,7 +1279,7 @@ impl crate::workspace::Workspace {
                             div()
                                 .text_size(px(12.0))
                                 .text_color(theme.colors.text_muted)
-                                .child("A fast, native SFTP client for macOS"),
+                                .child("Browse and transfer server files from your Mac."),
                         )
                         .child(
                             div()

@@ -53,16 +53,16 @@ pub fn plan_local_upload(
     let TransferEndpoint::Remote(destination_root) = planner.command.destination.clone() else {
         planner.fail(UserFacingError::new(
             ErrorCode::Unknown,
-            "Invalid upload destination",
-            "Uploads must target a remote directory.",
+            "Invalid Upload Destination",
+            "Choose a destination folder on the server.",
         ));
         return None;
     };
     if planner.command.sources.is_empty() {
         planner.fail(UserFacingError::new(
             ErrorCode::NotFound,
-            "No upload source selected",
-            "Select at least one local file or directory and try again.",
+            "Nothing Selected",
+            "Select at least one file or folder on your Mac and try again.",
         ));
         return None;
     }
@@ -71,8 +71,8 @@ pub fn plan_local_upload(
         let TransferEndpoint::Local(source_path) = source else {
             planner.fail(UserFacingError::new(
                 ErrorCode::Unknown,
-                "Invalid upload source",
-                "Uploads can only plan local files or directories.",
+                "Invalid Upload Source",
+                "Select files or folders on your Mac to upload.",
             ));
             return None;
         };
@@ -152,8 +152,8 @@ impl LocalUploadPlanner {
         let Some(source) = self.command.sources.first() else {
             return Err(UserFacingError::new(
                 ErrorCode::NotFound,
-                "No download source selected",
-                "Select a remote file and try again.",
+                "Nothing Selected",
+                "Select a server file and try again.",
             ));
         };
         let (TransferEndpoint::Remote(source), TransferEndpoint::Local(destination)) =
@@ -191,13 +191,13 @@ impl LocalUploadPlanner {
         self.ensure_not_cancelled()?;
         let source_path = PathBuf::from(source.as_str());
         let metadata = fs::symlink_metadata(&source_path)
-            .map_err(|error| planning_io_error("Could not read upload source", &error))?;
+            .map_err(|error| planning_io_error("Upload Item Unavailable", &error))?;
         if metadata.file_type().is_dir() {
             let name = source_path.file_name().ok_or_else(|| {
                 UserFacingError::new(
                     ErrorCode::NotFound,
-                    "Upload directory has no name",
-                    "Choose a directory with a valid name and try again.",
+                    "Folder Has No Name",
+                    "Choose a folder with a valid name and try again.",
                 )
             })?;
             let directory_destination = join_remote_path(destination_root, Path::new(name));
@@ -210,8 +210,8 @@ impl LocalUploadPlanner {
                 let name = source_path.file_name().ok_or_else(|| {
                     UserFacingError::new(
                         ErrorCode::NotFound,
-                        "Upload source has no file name",
-                        "Choose a file or directory with a valid name and try again.",
+                        "Item Has No Name",
+                        "Choose a file or folder with a valid name and try again.",
                     )
                 })?;
                 join_remote_path(destination_root, Path::new(name))
@@ -227,20 +227,19 @@ impl LocalUploadPlanner {
         destination_root: &RemotePath,
     ) -> Result<(), UserFacingError> {
         let entries = fs::read_dir(current)
-            .map_err(|error| planning_io_error("Could not read upload directory", &error))?;
+            .map_err(|error| planning_io_error("Folder Couldn’t Be Read", &error))?;
         for entry in entries {
             self.ensure_not_cancelled()?;
-            let entry = entry.map_err(|error| {
-                planning_io_error("Could not read upload directory entry", &error)
-            })?;
+            let entry =
+                entry.map_err(|error| planning_io_error("Item Couldn’t Be Read", &error))?;
             let path = entry.path();
             let metadata = fs::symlink_metadata(&path)
-                .map_err(|error| planning_io_error("Could not inspect upload entry", &error))?;
+                .map_err(|error| planning_io_error("Item Couldn’t Be Checked", &error))?;
             let relative_path = path.strip_prefix(root).map_err(|_| {
                 UserFacingError::new(
                     ErrorCode::Unknown,
-                    "Could not plan upload",
-                    "The upload source changed while it was being scanned. Try again.",
+                    "Upload Preparation Failed",
+                    "The upload item changed during preparation. Try again.",
                 )
             })?;
             let destination = join_remote_path(destination_root, relative_path);
@@ -301,8 +300,8 @@ impl LocalUploadPlanner {
             .map_err(|_| {
                 UserFacingError::new(
                     ErrorCode::ChannelClosed,
-                    "Transfer planning stopped",
-                    "The application stopped receiving planning updates.",
+                    "Preparation Stopped",
+                    "Transfer preparation updates stopped arriving.",
                 )
             })
     }
@@ -352,8 +351,8 @@ impl LocalUploadPlanner {
         if self.cancel.is_cancelled() {
             Err(UserFacingError::new(
                 ErrorCode::Cancelled,
-                "Transfer planning cancelled",
-                "The transfer plan was cancelled.",
+                "Preparation Cancelled",
+                "Transfer preparation was cancelled.",
             ))
         } else {
             Ok(())

@@ -408,18 +408,17 @@ impl PhysicalDisconnectCause {
         let (code, title, message) = match self {
             Self::ServerClosed => (
                 ErrorCode::ServerDisconnected,
-                "Server closed the connection",
-                "The remote server ended the SSH session.",
+                "Server Disconnected",
+                "The server ended the connection.",
             ),
             Self::NetworkTimeout => (
                 ErrorCode::NetworkTimeout,
-                "Connection lost",
-                "No response from the server for about a minute. \
-                 Check your network connection and reconnect.",
+                "Connection Lost",
+                "The server hasn’t responded for about a minute. Check your network and reconnect.",
             ),
             Self::NetworkError => (
                 ErrorCode::NetworkError,
-                "Connection lost",
+                "Connection Lost",
                 "A network error interrupted the connection.",
             ),
         };
@@ -434,12 +433,12 @@ pub fn connection_error(host: &str, port: u16, error: &russh::Error) -> UserFaci
     if failure == TransportFailureKind::LocalNetworkPermissionDenied {
         let mut user_error = UserFacingError::new(
             ErrorCode::LocalNetworkPermissionDenied,
-            "Local network access required",
+            "Allow Network Access",
             format!("macSFTP was not allowed to connect to {host}:{port}."),
         )
         .with_retryable(true);
         user_error.detail = Some(
-            "Enable macSFTP in System Settings → Privacy & Security → Local Network, then retry."
+            "Allow access in System Settings → Privacy & Security → Local Network, then try again."
                 .to_string(),
         );
         return user_error;
@@ -448,8 +447,8 @@ pub fn connection_error(host: &str, port: u16, error: &russh::Error) -> UserFaci
     if failure == TransportFailureKind::HostKeyAlgorithmUnsupported {
         let mut user_error = UserFacingError::new(
             ErrorCode::ChannelClosed,
-            "Unsupported SSH host key",
-            format!("{host}:{port} does not offer a host key macSFTP can verify safely."),
+            "Unsupported Server Key",
+            format!("The server at {host}:{port} has no key macSFTP can verify safely."),
         );
         user_error.detail = Some(
             "Ask the server administrator to enable an Ed25519 or ECDSA host key.".to_string(),
@@ -459,14 +458,14 @@ pub fn connection_error(host: &str, port: u16, error: &russh::Error) -> UserFaci
 
     let mut user_error = UserFacingError::new(
         ErrorCode::ChannelClosed,
-        "Connection failed",
+        "Connection Failed",
         format!("Could not connect to {host}:{port}."),
     )
     .with_retryable(true);
     // Third-party technical text is deliberately not copied into UI state
     // because it is not a trustworthy redaction boundary.
     user_error.detail =
-        Some("Check the server address, network connection, and SSH configuration.".to_string());
+        Some("Check the server address, network connection, and SSH settings.".to_string());
     user_error
 }
 
@@ -662,8 +661,8 @@ async fn authenticate_rsa_private_key(
             return Err(ConnectFailure::AuthFailed(AuthFailure {
                 reason: UserFacingError::new(
                     ErrorCode::AuthFailed,
-                    "Server does not support RSA-SHA2",
-                    "Enable rsa-sha2-256 or rsa-sha2-512 on the server. SHA-1 ssh-rsa is not supported.",
+                    "Server Update Required",
+                    "Ask your administrator to enable rsa-sha2-256 or rsa-sha2-512. SHA-1 ssh-rsa is not supported.",
                 ),
             }));
         }
@@ -671,8 +670,8 @@ async fn authenticate_rsa_private_key(
             return Err(ConnectFailure::AuthFailed(AuthFailure {
                 reason: UserFacingError::new(
                     ErrorCode::AuthFailed,
-                    "Unsupported RSA hash algorithm",
-                    "The server selected an RSA signature algorithm macSFTP does not support.",
+                    "Unsupported Sign-In Method",
+                    "The server selected an unsupported RSA signing method.",
                 ),
             }));
         }
@@ -681,8 +680,8 @@ async fn authenticate_rsa_private_key(
         ConnectFailure::AuthFailed(AuthFailure {
             reason: UserFacingError::new(
                 ErrorCode::AuthFailed,
-                "Could not use RSA private key",
-                "RSA client keys must be valid and at least 2048 bits.",
+                "Key Can’t Be Used",
+                "Use a valid RSA key with at least 2048 bits.",
             ),
         })
     })?;
@@ -698,8 +697,8 @@ async fn authenticate_rsa_private_key(
             ConnectFailure::AuthFailed(AuthFailure {
                 reason: UserFacingError::new(
                     ErrorCode::AuthFailed,
-                    "RSA private-key authentication failed",
-                    "AWS-LC could not sign the SSH authentication request.",
+                    "Key Sign-In Failed",
+                    "The RSA key couldn’t complete the sign-in request.",
                 ),
             })
         })
@@ -786,8 +785,8 @@ async fn authenticate_keyboard_interactive(
                     registry.cancel(request_id);
                     let reason = UserFacingError::new(
                         ErrorCode::ChannelClosed,
-                        "Authentication prompt unavailable",
-                        "The application could not display the server's authentication prompt.",
+                        "Sign-In Unavailable",
+                        "The server’s sign-in prompts couldn’t be displayed.",
                     );
                     return Err(emit_auth_failure(scope, event_tx, reason).await);
                 }
@@ -797,8 +796,8 @@ async fn authenticate_keyboard_interactive(
                     Ok(Ok(None)) | Ok(Err(_)) => {
                         let reason = UserFacingError::new(
                             ErrorCode::Cancelled,
-                            "Authentication cancelled",
-                            "The keyboard-interactive prompt was cancelled.",
+                            "Sign-In Cancelled",
+                            "Sign-in was cancelled.",
                         );
                         return Err(emit_auth_failure(scope, event_tx, reason).await);
                     }
@@ -806,8 +805,8 @@ async fn authenticate_keyboard_interactive(
                         registry.cancel(request_id);
                         let reason = UserFacingError::new(
                             ErrorCode::AuthFailed,
-                            "Authentication prompt timed out",
-                            "The server's keyboard-interactive prompt was not answered in time.",
+                            "Sign-In Timed Out",
+                            "The server’s prompts weren’t answered in time. Reconnect to try again.",
                         );
                         return Err(emit_auth_failure(scope, event_tx, reason).await);
                     }
@@ -815,8 +814,8 @@ async fn authenticate_keyboard_interactive(
                 if response.responses.len() != prompt_count {
                     let reason = UserFacingError::new(
                         ErrorCode::AuthFailed,
-                        "Invalid authentication response",
-                        "The number of responses did not match the server's prompts.",
+                        "Answers Don’t Match",
+                        "Provide one answer for each server prompt.",
                     );
                     return Err(emit_auth_failure(scope, event_tx, reason).await);
                 }
@@ -848,8 +847,8 @@ async fn authenticate_ssh_agent(
         ConnectFailure::AuthFailed(AuthFailure {
             reason: UserFacingError::new(
                 ErrorCode::AuthFailed,
-                "SSH agent unavailable",
-                "Start an SSH agent and make SSH_AUTH_SOCK available to macSFTP.",
+                "Agent Unavailable",
+                "Start your SSH agent and make SSH_AUTH_SOCK available to macSFTP.",
             ),
         })
     })?;
@@ -857,8 +856,8 @@ async fn authenticate_ssh_agent(
         ConnectFailure::AuthFailed(AuthFailure {
             reason: UserFacingError::new(
                 ErrorCode::AuthFailed,
-                "Could not read SSH agent identities",
-                "The SSH agent did not return its available identities.",
+                "Keys Unavailable",
+                "The SSH agent couldn’t provide its keys.",
             ),
         })
     })?;
@@ -866,8 +865,8 @@ async fn authenticate_ssh_agent(
         return Err(ConnectFailure::AuthFailed(AuthFailure {
             reason: UserFacingError::new(
                 ErrorCode::AuthFailed,
-                "SSH agent has no identities",
-                "Add a key to the SSH agent and try again.",
+                "No Keys Available",
+                "Add a key to your SSH agent and try again.",
             ),
         }));
     }
@@ -908,8 +907,8 @@ async fn authenticate_ssh_agent(
             ConnectFailure::AuthFailed(AuthFailure {
                 reason: UserFacingError::new(
                     ErrorCode::AuthFailed,
-                    "SSH agent signing failed",
-                    "The SSH agent could not sign the authentication request.",
+                    "Sign-In Failed",
+                    "Your SSH agent couldn’t complete the sign-in request.",
                 ),
             })
         })?;
@@ -924,8 +923,8 @@ async fn authenticate_ssh_agent(
         None => Err(ConnectFailure::AuthFailed(AuthFailure {
             reason: UserFacingError::new(
                 ErrorCode::AuthFailed,
-                "No compatible SSH agent identity",
-                "The server did not accept any compatible identity from the SSH agent.",
+                "No Accepted Key",
+                "The server didn’t accept any compatible key from your SSH agent.",
             ),
         })),
     }
@@ -982,8 +981,8 @@ async fn authenticate(
                     );
                     let reason = UserFacingError::new(
                         ErrorCode::AuthFailed,
-                        "Could not load private key",
-                        "The selected private key could not be read or decrypted.",
+                        "Key Couldn’t Open",
+                        "The key file couldn’t be read or unlocked.",
                     );
                     let _ = event_tx
                         .send_async(AppEvent::AuthFailed(RemoteScoped::new(
@@ -1079,8 +1078,8 @@ async fn authenticate(
         russh::client::AuthResult::Failure { .. } => {
             let reason = UserFacingError::new(
                 ErrorCode::AuthFailed,
-                "Authentication failed",
-                "The server rejected the credentials.",
+                "Sign-In Failed",
+                "The server rejected your sign-in details.",
             );
             warn!(
                 target: "macsftp_sftp::connection",
@@ -1228,8 +1227,8 @@ fn spawn_proxy_command(
             ConnectFailure::Connection(
                 UserFacingError::new(
                     ErrorCode::ChannelClosed,
-                    "Could not start ProxyCommand",
-                    "The configured proxy command could not be started.",
+                    "Command Couldn’t Start",
+                    "The configured connection command couldn’t start.",
                 )
                 .with_retryable(true),
             )
@@ -1237,15 +1236,15 @@ fn spawn_proxy_command(
     let stdin = child.stdin.take().ok_or_else(|| {
         ConnectFailure::Connection(UserFacingError::new(
             ErrorCode::ChannelClosed,
-            "Could not start ProxyCommand",
-            "The proxy command did not provide a writable input stream.",
+            "Command Couldn’t Start",
+            "The connection command didn’t provide a writable input.",
         ))
     })?;
     let stdout = child.stdout.take().ok_or_else(|| {
         ConnectFailure::Connection(UserFacingError::new(
             ErrorCode::ChannelClosed,
-            "Could not start ProxyCommand",
-            "The proxy command did not provide a readable output stream.",
+            "Command Couldn’t Start",
+            "The connection command didn’t provide a readable output.",
         ))
     })?;
     Ok(ProxyCommandStream {
@@ -1420,8 +1419,8 @@ pub async fn establish_physical_connection(
             if !matches!(&jump_settings.route, ResolvedConnectionRoute::Direct) {
                 return Err(ConnectFailure::Connection(UserFacingError::new(
                     ErrorCode::ChannelClosed,
-                    "Invalid jump-host route",
-                    "Jump-host profiles must connect directly.",
+                    "Invalid Intermediate Connection",
+                    "The intermediate server’s saved connection must use Direct.",
                 )));
             }
             let jump_stream = connect_tcp_stream(jump_settings).await?;
@@ -1452,8 +1451,8 @@ pub async fn establish_physical_connection(
                     ConnectFailure::Connection(
                         UserFacingError::new(
                             ErrorCode::ChannelClosed,
-                            "Jump host could not reach target",
-                            "The jump host rejected the TCP forwarding request.",
+                            "Server Couldn’t Be Reached",
+                            "The intermediate server rejected the connection to your destination.",
                         )
                         .with_retryable(true),
                     )
@@ -1741,7 +1740,7 @@ mod tests {
 
         let error = connection_error("10.0.0.10", 8022, &transport_error);
 
-        assert_eq!(error.title, "Unsupported SSH host key");
+        assert_eq!(error.title, "Unsupported Server Key");
         assert!(!error.retryable);
         assert!(
             error
@@ -1838,7 +1837,7 @@ mod tests {
             panic!("physical causes must map to DisconnectReason::Error")
         };
         assert_eq!(error.code, ErrorCode::ServerDisconnected);
-        assert_eq!(error.title, "Server closed the connection");
+        assert_eq!(error.title, "Server Disconnected");
 
         let reason = PhysicalDisconnectCause::NetworkTimeout.disconnect_reason();
         let macsftp_core::DisconnectReason::Error(error) = reason else {

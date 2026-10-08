@@ -100,7 +100,7 @@ pub fn file_table_header(
                 .on_click(move |_event, window, cx| {
                     modified_handler(FileSortField::ModifiedAt, window, cx);
                 })
-                .child(column_label("Modified", FileSortField::ModifiedAt)),
+                .child(column_label("Last Modified", FileSortField::ModifiedAt)),
         )
 }
 

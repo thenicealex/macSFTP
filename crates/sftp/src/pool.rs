@@ -208,7 +208,7 @@ impl ConnectionManager {
                     .await
                     .map_err(|error| {
                         ConnectFailure::Connection(sftp_connection_error(
-                            "Could not start the SFTP session.",
+                            "The file connection couldn’t start.",
                             "The SFTP subsystem did not become ready.",
                             &error,
                         ))

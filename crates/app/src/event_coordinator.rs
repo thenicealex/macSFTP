@@ -271,7 +271,7 @@ fn advance_downloading(
         Ok(()) => show_edit_status(
             cx,
             tab_id,
-            "Editable copy opened — use Upload Modified File when ready",
+            "Your copy is open. After saving, click Upload Changes.",
         ),
         Err(error) => warn!(error = %error, "could not open editor for remote edit"),
     }
@@ -337,9 +337,9 @@ fn advance_uploading_back(
         cx,
         tab_id,
         if succeeded {
-            "Uploaded modified file"
+            "Changes uploaded"
         } else {
-            "Upload failed — try Upload Modified File again"
+            "Upload failed. Click Upload Changes to try again."
         },
     );
 }
@@ -443,7 +443,7 @@ fn apply_remote_edit_check_event(event: &AppEvent, cx: &mut App) {
         show_edit_status(
             cx,
             guard.tab_id,
-            "Local file changed during verification — upload it again",
+            "Your copy changed during the check. Click Upload Changes again.",
         );
         return;
     }
@@ -460,7 +460,7 @@ fn apply_remote_edit_check_event(event: &AppEvent, cx: &mut App) {
             show_edit_status(
                 cx,
                 guard.tab_id,
-                "Could not verify the remote file — try Upload Modified File again",
+                "The server file couldn’t be checked. Click Upload Changes to try again.",
             );
         }
     }
@@ -541,14 +541,14 @@ fn dispatch_edit_command(
         None => {
             warn!(tab_id = ?tab_id, "no window owns the tab for explicit edit upload");
             revert_edit_check(cx, session_id);
-            show_edit_status(cx, tab_id, "Upload could not start — try again");
+            show_edit_status(cx, tab_id, "The upload couldn’t start. Try again.");
             return;
         }
     };
     if let Err(error) = result {
         warn!(error = ?error, "explicit edit upload could not be dispatched");
         revert_edit_check(cx, session_id);
-        show_edit_status(cx, tab_id, "Upload could not start — try again");
+        show_edit_status(cx, tab_id, "The upload couldn’t start. Try again.");
     }
 }
 
@@ -1430,8 +1430,8 @@ mod tests {
                 path: RemotePath::new("/srv/a.txt"),
                 error: UserFacingError::new(
                     ErrorCode::Unknown,
-                    "Could not check remote file",
-                    "The remote file could not be checked",
+                    "Server Check Failed",
+                    "The server file couldn’t be checked.",
                 )
                 .with_retryable(false),
             },
@@ -1454,8 +1454,8 @@ mod tests {
             path: RemotePath::new("/srv/a.txt"),
             error: UserFacingError::new(
                 ErrorCode::Unknown,
-                "Could not check remote file",
-                "The edit check could not be dispatched",
+                "Server Check Failed",
+                "The server file check couldn’t start.",
             )
             .with_retryable(true),
         })

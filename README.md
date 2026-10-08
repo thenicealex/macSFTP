@@ -18,16 +18,16 @@ current scope.
 - OpenSSH-compatible host-key verification
 - Local and remote browsing, navigation, filtering, sorting, and file operations
 - Upload/download plans with progress, conflict handling, cancellation, and retry
-- External-editor workflow with an explicit, conflict-checked **Upload Modified File** action
+- External-editor workflow with an explicit, conflict-checked **Upload Changes** action
 - Process-wide transfer queue shown in each window; jobs are not restored after relaunch
 
 Connection profiles are created, edited, and deleted only in
-**Settings → Profiles**. The Connect dialog can select a saved profile or make
-a temporary connection; its **Manage…** button opens the profile editor.
+**Settings → Saved Connections**. The Connect dialog can select a saved profile or make
+a temporary connection; its **Manage Connections…** button opens the profile editor.
 
 Remote editing is intentionally explicit: double-click a remote file to open a
 temporary copy in the configured editor, save it there, reselect the remote
-file in macSFTP, and choose **Upload Modified File** in the status bar. macSFTP
+file in macSFTP, and choose **Upload Changes** in the status bar. macSFTP
 checks current remote metadata before uploading and asks for a decision if the
 remote file changed. It does not watch local saves or upload them automatically.
 

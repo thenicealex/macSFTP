@@ -555,7 +555,7 @@ impl RemoteSessionActor {
                                     path,
                                     error: UserFacingError::new(
                                         ErrorCode::Unknown,
-                                        "Could not check remote file",
+                                        "Server Check Failed",
                                         "The remote server returned an error while reading the file metadata.",
                                     )
                                     .with_retryable(true),
@@ -690,8 +690,8 @@ pub(crate) async fn open_transfer_sftp(
     let channel = handle.channel_open_session().await.map_err(|error| {
         transfer_error(
             ErrorCode::ChannelClosed,
-            "Could not start transfer",
-            "Could not open a transfer channel. Reconnect and try again.",
+            "Transfer Couldn’t Start",
+            "The transfer connection couldn’t open. Reconnect and try again.",
             error.to_string(),
         )
     })?;
@@ -701,7 +701,7 @@ pub(crate) async fn open_transfer_sftp(
         .map_err(|error| {
             transfer_error(
                 ErrorCode::ChannelClosed,
-                "Could not start transfer",
+                "Transfer Couldn’t Start",
                 "The server rejected the SFTP subsystem for this transfer.",
                 error.to_string(),
             )
@@ -711,8 +711,8 @@ pub(crate) async fn open_transfer_sftp(
         .map_err(|error| {
             transfer_error(
                 ErrorCode::ChannelClosed,
-                "Could not start transfer",
-                "Could not start the transfer SFTP session.",
+                "Transfer Couldn’t Start",
+                "The file transfer connection couldn’t start.",
                 error.to_string(),
             )
         })
@@ -819,7 +819,7 @@ impl RemoteDownloadPlanner {
             let entries = tokio::select! {
                 _ = self.cancel.cancelled() => return Err(cancelled_transfer_error()),
                 result = sftp.read_dir(current.as_str()) => result.map_err(|error| {
-                    remote_planning_error("Could not read remote download directory", &error)
+                    remote_planning_error("Server Folder Unavailable", &error)
                 })?,
             };
             for entry in entries {
@@ -833,7 +833,7 @@ impl RemoteDownloadPlanner {
                     .ok_or_else(|| {
                         UserFacingError::new(
                             ErrorCode::Unknown,
-                            "Could not plan download",
+                            "Download Preparation Failed",
                             "The remote directory changed while it was being scanned. Try again.",
                         )
                     })?;
@@ -858,7 +858,7 @@ impl RemoteDownloadPlanner {
         tokio::select! {
             _ = self.cancel.cancelled() => Err(cancelled_transfer_error()),
             result = sftp.symlink_metadata(source.as_str()) => result.map_err(|error| {
-                remote_planning_error("Could not inspect remote download source", &error)
+                remote_planning_error("Server Item Unavailable", &error)
             }),
         }
     }
@@ -908,8 +908,8 @@ impl RemoteDownloadPlanner {
                 total_bytes: self.total_bytes,
             })) => result.map_err(|_| UserFacingError::new(
                 ErrorCode::ChannelClosed,
-                "Transfer planning stopped",
-                "The application stopped receiving planning updates.",
+                "Preparation Stopped",
+                "Transfer preparation updates stopped arriving.",
             ))?,
         }
         Ok(())
@@ -996,7 +996,7 @@ fn local_download_destination(
     {
         return Err(UserFacingError::new(
             ErrorCode::Unknown,
-            "Could not plan download",
+            "Download Preparation Failed",
             "The remote directory contains an unsafe path. Refresh and try again.",
         ));
     }
@@ -1121,8 +1121,8 @@ async fn resolve_transfer_conflict(
             } else {
                 return Err(UserFacingError::new(
                     ErrorCode::Unknown,
-                    "Could not request conflict decision",
-                    "The transfer conflict resolver is unavailable. Try again.",
+                    "Choice Unavailable",
+                    "The existing-file choice couldn’t be shown. Try again.",
                 ));
             }
             let (source_size, source_modified_at) = conflict_source_details(sftp, job).await;
@@ -1220,7 +1220,7 @@ async fn directories_can_merge(
         (TransferEndpoint::Local(source), TransferEndpoint::Remote(destination)) => {
             let source_metadata = tokio::fs::symlink_metadata(source.as_str())
                 .await
-                .map_err(|error| local_transfer_error("Could not inspect upload source", &error))?;
+                .map_err(|error| local_transfer_error("Upload Item Unavailable", &error))?;
             if !source_metadata.is_dir() {
                 return Ok(false);
             }
@@ -1231,7 +1231,7 @@ async fn directories_can_merge(
                 }
                 Err(error) => Err(transfer_error(
                     ErrorCode::Unknown,
-                    "Could not inspect remote directory",
+                    "Server Folder Unavailable",
                     "The remote destination could not be checked. Try again.",
                     error.to_string(),
                 )),
@@ -1244,7 +1244,7 @@ async fn directories_can_merge(
                     .map_err(|error| {
                         transfer_error(
                             ErrorCode::Unknown,
-                            "Could not inspect remote source",
+                            "Server Item Unavailable",
                             "The remote source could not be checked. Try again.",
                             error.to_string(),
                         )
@@ -1255,10 +1255,7 @@ async fn directories_can_merge(
             match tokio::fs::symlink_metadata(destination.as_str()).await {
                 Ok(metadata) => Ok(metadata.is_dir()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-                Err(error) => Err(local_transfer_error(
-                    "Could not inspect download directory",
-                    &error,
-                )),
+                Err(error) => Err(local_transfer_error("Download Folder Unavailable", &error)),
             }
         }
         _ => Ok(false),
@@ -1308,7 +1305,7 @@ async fn destination_exists(
             }
             Err(error) => Err(transfer_error(
                 ErrorCode::Unknown,
-                "Could not inspect remote destination",
+                "Server Destination Unavailable",
                 "The remote destination could not be checked. Try again.",
                 error.to_string(),
             )),
@@ -1318,7 +1315,7 @@ async fn destination_exists(
                 Ok(_) => Ok(true),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
                 Err(error) => Err(local_transfer_error(
-                    "Could not inspect download destination",
+                    "Download Destination Unavailable",
                     &error,
                 )),
             }
@@ -1387,7 +1384,7 @@ async fn upload_transfer(
     };
     let metadata = tokio::fs::symlink_metadata(source.as_str())
         .await
-        .map_err(|error| local_transfer_error("Could not read upload source", &error))?;
+        .map_err(|error| local_transfer_error("Upload Item Unavailable", &error))?;
     if metadata.file_type().is_symlink() {
         return upload_symlink(sftp, job, event_tx, cancel).await;
     }
@@ -1423,7 +1420,7 @@ async fn upload_transfer(
     if !cleanup_remote_temp(sftp, &temporary_destination, event_tx, job.id, Some(job.id)).await {
         return Err(UserFacingError::new(
             ErrorCode::Unknown,
-            "Could not prepare upload",
+            "Upload Preparation Failed",
             "A previous temporary upload file could not be removed. Retry the transfer.",
         )
         .with_retryable(true));
@@ -1431,7 +1428,7 @@ async fn upload_transfer(
     let copy_result = async {
         let mut source_file = tokio::fs::File::open(source.as_str())
             .await
-            .map_err(|error| local_transfer_error("Could not open upload source", &error))?;
+            .map_err(|error| local_transfer_error("Upload Item Unavailable", &error))?;
         let mut destination_file = sftp
             .open_with_flags(
                 temporary_destination.as_str(),
@@ -1509,7 +1506,7 @@ async fn verify_remote_hardlink(
     if !cleanup_remote_temp(sftp, &probe, event_tx, transfer_id, None).await {
         return Err(UserFacingError::new(
             ErrorCode::Unknown,
-            "Could not prepare upload",
+            "Upload Preparation Failed",
             "A previous temporary upload file could not be removed. Retry the transfer.",
         )
         .with_retryable(true));
@@ -1521,7 +1518,7 @@ async fn verify_remote_hardlink(
             } else {
                 Err(UserFacingError::new(
                     ErrorCode::Unknown,
-                    "Could not prepare upload",
+                    "Upload Preparation Failed",
                     "A temporary upload file could not be cleaned up. Retry the transfer.",
                 )
                 .with_retryable(true))
@@ -1632,7 +1629,7 @@ async fn verify_local_hardlink(
     if !cleanup_local_temp(&probe, event_tx, transfer_id, None).await {
         return Err(UserFacingError::new(
             ErrorCode::Unknown,
-            "Could not prepare download",
+            "Download Preparation Failed",
             "A previous temporary download file could not be removed. Retry the transfer.",
         )
         .with_retryable(true));
@@ -1644,7 +1641,7 @@ async fn verify_local_hardlink(
             } else {
                 Err(UserFacingError::new(
                     ErrorCode::Unknown,
-                    "Could not prepare download",
+                    "Download Preparation Failed",
                     "A temporary download file could not be cleaned up. Retry the transfer.",
                 )
                 .with_retryable(true))
@@ -1706,7 +1703,7 @@ async fn create_remote_directory(
                         sftp.metadata(current.clone()).await.map(|_| ()).map_err(|error| {
                             transfer_error(
                                 ErrorCode::Unknown,
-                                "Could not create remote directory",
+                                "Server Folder Creation Failed",
                                 "The remote directory could not be created. Check permissions and try again.",
                                 error.to_string(),
                             )
@@ -1715,7 +1712,7 @@ async fn create_remote_directory(
                     Err(error) => {
                         return Err(transfer_error(
                             ErrorCode::Unknown,
-                            "Could not create remote directory",
+                            "Server Folder Creation Failed",
                             "The remote directory could not be created. Check permissions and try again.",
                             error.to_string(),
                         ));
@@ -1725,7 +1722,7 @@ async fn create_remote_directory(
             Err(error) => {
                 return Err(transfer_error(
                     ErrorCode::Unknown,
-                    "Could not inspect remote directory",
+                    "Server Folder Unavailable",
                     "The remote destination could not be checked. Try again.",
                     error.to_string(),
                 ));
@@ -1757,7 +1754,7 @@ async fn download_single_file(
         .map_err(|error| {
             transfer_error(
                 ErrorCode::Unknown,
-                "Could not read remote file",
+                "Server File Unavailable",
                 "The remote file could not be read. Check permissions and try again.",
                 error.to_string(),
             )
@@ -1787,7 +1784,7 @@ async fn download_single_file(
     if !cleanup_local_temp(&temporary_destination, event_tx, job.id, Some(job.id)).await {
         return Err(UserFacingError::new(
             ErrorCode::Unknown,
-            "Could not prepare download",
+            "Download Preparation Failed",
             "A previous temporary download file could not be removed. Retry the transfer.",
         )
         .with_retryable(true));
@@ -1796,7 +1793,7 @@ async fn download_single_file(
         let mut source_file = sftp.open(source.as_str()).await.map_err(|error| {
             transfer_error(
                 ErrorCode::Unknown,
-                "Could not open remote file",
+                "Server File Unavailable",
                 "The remote file could not be opened. Check permissions and try again.",
                 error.to_string(),
             )
@@ -1858,7 +1855,7 @@ async fn download_directory(
     tokio::select! {
         _ = cancel.cancelled() => return Err(cancelled_transfer_error()),
         result = tokio::fs::create_dir_all(destination.as_str()) => result.map_err(|error| {
-            local_transfer_error("Could not create download directory", &error)
+            local_transfer_error("Download Folder Creation Failed", &error)
         })?,
     }
     preserve_download_metadata(job, source_metadata, event_tx).await;
@@ -1886,7 +1883,7 @@ async fn upload_symlink(
     }
     let target = tokio::fs::read_link(source.as_str())
         .await
-        .map_err(|error| local_transfer_error("Could not read symlink target", &error))?;
+        .map_err(|error| local_transfer_error("Link Destination Unavailable", &error))?;
     ensure_remote_parent_directory(sftp, destination, cancel).await?;
     if matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
         remove_remote_destination(sftp, destination).await?;
@@ -1902,7 +1899,7 @@ async fn upload_symlink(
         .map_err(|error| {
             transfer_error(
                 ErrorCode::UnsupportedSymlink,
-                "Could not create remote symlink",
+                "Server Link Creation Failed",
                 "The remote symlink could not be created. Check server support and try again.",
                 error.to_string(),
             )
@@ -1931,7 +1928,7 @@ async fn download_symlink(
     let target = sftp.read_link(source.as_str()).await.map_err(|error| {
         transfer_error(
             ErrorCode::UnsupportedSymlink,
-            "Could not read remote symlink",
+            "Server Link Unavailable",
             "The remote symlink target could not be read. Check server support and try again.",
             error.to_string(),
         )
@@ -1942,7 +1939,7 @@ async fn download_symlink(
     ensure_local_parent_directory(destination, cancel).await?;
     tokio::fs::symlink(target, destination.as_str())
         .await
-        .map_err(|error| local_transfer_error("Could not create local symlink", &error))
+        .map_err(|error| local_transfer_error("Local Link Creation Failed", &error))
 }
 
 async fn preserve_upload_metadata(
@@ -1987,7 +1984,7 @@ async fn remove_remote_destination(
         Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => Ok(()),
         Err(error) => Err(transfer_error(
             ErrorCode::Unknown,
-            "Could not replace remote file",
+            "Server File Replacement Failed",
             "The existing remote file could not be removed. Check permissions and try again.",
             error.to_string(),
         )),
@@ -2006,7 +2003,7 @@ fn remote_destination_create_error(error: SftpError) -> UserFacingError {
     };
     transfer_error(
         code,
-        "Could not create remote file",
+        "Server File Creation Failed",
         "The remote destination already exists or could not be created. Refresh and try again.",
         error.to_string(),
     )
@@ -2014,19 +2011,15 @@ fn remote_destination_create_error(error: SftpError) -> UserFacingError {
 
 async fn remove_local_destination(destination: &str) -> Result<(), UserFacingError> {
     match tokio::fs::symlink_metadata(destination).await {
-        Ok(metadata) if metadata.is_dir() => {
-            tokio::fs::remove_dir_all(destination)
-                .await
-                .map_err(|error| {
-                    local_transfer_error("Could not replace download destination", &error)
-                })
-        }
-        Ok(_) => tokio::fs::remove_file(destination).await.map_err(|error| {
-            local_transfer_error("Could not replace download destination", &error)
-        }),
+        Ok(metadata) if metadata.is_dir() => tokio::fs::remove_dir_all(destination)
+            .await
+            .map_err(|error| local_transfer_error("Downloaded File Replacement Failed", &error)),
+        Ok(_) => tokio::fs::remove_file(destination)
+            .await
+            .map_err(|error| local_transfer_error("Downloaded File Replacement Failed", &error)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(local_transfer_error(
-            "Could not inspect download destination",
+            "Download Destination Unavailable",
             &error,
         )),
     }
@@ -2045,7 +2038,7 @@ async fn ensure_local_parent_directory(
     tokio::select! {
         _ = cancel.cancelled() => Err(cancelled_transfer_error()),
         result = tokio::fs::create_dir_all(parent) => result.map_err(|error| {
-            local_transfer_error("Could not create download directory", &error)
+            local_transfer_error("Download Folder Creation Failed", &error)
         }),
     }
 }
@@ -2059,7 +2052,7 @@ fn local_destination_create_error(error: std::io::Error) -> UserFacingError {
         )
         .with_retryable(true);
     }
-    local_transfer_error("Could not create download destination", &error)
+    local_transfer_error("Downloaded File Creation Failed", &error)
 }
 
 async fn preserve_download_metadata(
@@ -2207,7 +2200,7 @@ where
         let bytes_read = tokio::select! {
             _ = cancel.cancelled() => return Err(cancelled_transfer_error()),
             result = source.read(&mut buffer) => result.map_err(|error| {
-                local_transfer_error("Could not read transfer data", &error)
+                local_transfer_error("Transfer Read Failed", &error)
             })?,
         };
         if bytes_read == 0 {
@@ -2216,7 +2209,7 @@ where
         tokio::select! {
             _ = cancel.cancelled() => return Err(cancelled_transfer_error()),
             result = destination.write_all(&buffer[..bytes_read]) => result.map_err(|error| {
-                local_transfer_error("Could not write transfer data", &error)
+                local_transfer_error("Transfer Write Failed", &error)
             })?,
         }
         bytes_done += bytes_read as u64;
@@ -2227,7 +2220,7 @@ where
     tokio::select! {
         _ = cancel.cancelled() => return Err(cancelled_transfer_error()),
         result = destination.shutdown() => result.map_err(|error| {
-            local_transfer_error("Could not finish transfer", &error)
+            local_transfer_error("Transfer Couldn’t Finish", &error)
         })?,
     }
     throttle.reset();
@@ -2318,18 +2311,18 @@ fn read_directory_error(error: &SftpError) -> UserFacingError {
     let (code, title, message) = match error {
         SftpError::Status(status) if status.status_code == StatusCode::NoSuchFile => (
             ErrorCode::NotFound,
-            "Remote directory not found",
-            "The directory no longer exists. Go to its parent directory or refresh.",
+            "The server folder wasn’t found.",
+            "This folder no longer exists. Go up one level or refresh.",
         ),
         SftpError::Status(status) if status.status_code == StatusCode::PermissionDenied => (
             ErrorCode::PermissionDenied,
             "Permission denied",
-            "You do not have permission to view this directory. Choose another directory or retry.",
+            "You can’t view this folder. Choose another folder or try again.",
         ),
         _ => (
             ErrorCode::Unknown,
-            "Could not read remote directory",
-            "The directory could not be loaded. Check permissions and try again.",
+            "The server folder couldn’t be loaded.",
+            "This folder couldn’t be loaded. Check permissions and try again.",
         ),
     };
     let mut user_error = UserFacingError::new(code, title, message).with_retryable(true);
@@ -2344,14 +2337,14 @@ async fn execute_remote_fs_op(sftp: &SftpSession, op: &FsOp) -> Result<(), UserF
             let to = require_remote_path(to, "rename destination")?;
             sftp.rename(from.as_str(), to.as_str())
                 .await
-                .map_err(|error| remote_fs_error("Could not rename", &error))
+                .map_err(|error| remote_fs_error("The item couldn’t be renamed.", &error))
         }
         FsOp::CreateDirectory { parent, name } => {
             let parent = require_remote_path(parent, "create directory parent")?;
             let path = parent.join(name);
             sftp.create_dir(path.as_str())
                 .await
-                .map_err(|error| remote_fs_error("Could not create folder", &error))
+                .map_err(|error| remote_fs_error("The folder couldn’t be created.", &error))
         }
         FsOp::Delete { entries } => {
             for entry in entries {
@@ -2359,9 +2352,9 @@ async fn execute_remote_fs_op(sftp: &SftpSession, op: &FsOp) -> Result<(), UserF
                 if entry.is_dir {
                     remove_remote_dir_recursive(sftp, path).await?;
                 } else {
-                    sftp.remove_file(path.as_str())
-                        .await
-                        .map_err(|error| remote_fs_error("Could not delete", &error))?;
+                    sftp.remove_file(path.as_str()).await.map_err(|error| {
+                        remote_fs_error("The item couldn’t be deleted.", &error)
+                    })?;
                 }
             }
             Ok(())
@@ -2390,7 +2383,7 @@ async fn remove_remote_dir_recursive(
     let read_dir = sftp
         .read_dir(path.as_str())
         .await
-        .map_err(|error| remote_fs_error("Could not list directory for delete", &error))?;
+        .map_err(|error| remote_fs_error("Folder Couldn’t Be Read", &error))?;
     for entry in read_dir {
         let name = entry.file_name();
         if name == "." || name == ".." {
@@ -2402,12 +2395,12 @@ async fn remove_remote_dir_recursive(
         } else {
             sftp.remove_file(child.as_str())
                 .await
-                .map_err(|error| remote_fs_error("Could not delete", &error))?;
+                .map_err(|error| remote_fs_error("The item couldn’t be deleted.", &error))?;
         }
     }
     sftp.remove_dir(path.as_str())
         .await
-        .map_err(|error| remote_fs_error("Could not delete folder", &error))
+        .map_err(|error| remote_fs_error("The folder couldn’t be deleted.", &error))
 }
 
 fn remote_fs_error(title: &str, error: &SftpError) -> UserFacingError {
@@ -2427,7 +2420,7 @@ fn remote_fs_error(title: &str, error: &SftpError) -> UserFacingError {
     let mut user_error = UserFacingError::new(
         code,
         title,
-        "Check the remote path and permissions, then try again.",
+        "Check the server path and permissions, then try again.",
     )
     .with_retryable(true);
     user_error.detail = Some(error.to_string());
@@ -2500,7 +2493,7 @@ mod tests {
         let error = read_directory_error(&status_error(StatusCode::NoSuchFile));
 
         assert_eq!(error.code, ErrorCode::NotFound);
-        assert_eq!(error.title, "Remote directory not found");
+        assert_eq!(error.title, "The server folder wasn’t found.");
         assert!(error.retryable);
     }
 
@@ -2542,7 +2535,7 @@ mod tests {
         let error = local_download_destination(&LocalPath::new("/tmp/downloads"), "../escape")
             .expect_err("parent component must be rejected");
 
-        assert_eq!(error.title, "Could not plan download");
+        assert_eq!(error.title, "Download Preparation Failed");
     }
 
     #[test]

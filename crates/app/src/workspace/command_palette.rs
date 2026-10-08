@@ -217,9 +217,19 @@ impl Workspace {
 
         let has_results = !commands.is_empty();
         let mono_family = theme.fonts.mono_family.clone();
+        let transfers_open = self.transfer_drawer.open;
         let rows = commands.into_iter().enumerate().map(|(index, command)| {
             let is_selected = index == selected;
-            let title: SharedString = command.title.into();
+            let title: SharedString = if command.id == "ShowTransferDrawer" {
+                if transfers_open {
+                    "Hide Transfers"
+                } else {
+                    "Show Transfers"
+                }
+            } else {
+                command.title
+            }
+            .into();
             let keybinding = command.keybinding.map(SharedString::from);
             let background = if is_selected {
                 theme.colors.element_selected
@@ -303,7 +313,7 @@ impl Workspace {
                                         .text_size(px(14.0))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(theme.colors.text)
-                                        .child("Command Palette"),
+                                        .child("Find an Action"),
                                 )
                                 .child(
                                     div()
@@ -317,7 +327,7 @@ impl Workspace {
                             "command-palette-input",
                             TextFieldModel {
                                 state: &self.palette.input,
-                                placeholder: "Filter commands…",
+                                placeholder: "Find an action…",
                                 focused: true,
                                 masked: false,
                             },
@@ -336,7 +346,7 @@ impl Workspace {
                                             .py_2()
                                             .text_size(px(13.0))
                                             .text_color(theme.colors.text_muted)
-                                            .child("No matching commands"),
+                                            .child("No matching actions"),
                                     )
                                 });
                             macsftp_ui::scroll_area(
@@ -352,7 +362,7 @@ impl Workspace {
                             div()
                                 .text_size(px(11.0))
                                 .text_color(theme.colors.text_muted)
-                                .child("↑↓ move · Enter run · Esc close"),
+                                .child("↑↓ to select · Enter to run · Esc to close"),
                         ),
                 )
                 .into_any_element(),

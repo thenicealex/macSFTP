@@ -268,16 +268,16 @@ fn main() {
                     MenuItem::action("New Connection", NewTab),
                     MenuItem::action("Close Tab", CloseTab),
                     MenuItem::separator(),
-                    MenuItem::action("Upload Selection", UploadSelection),
-                    MenuItem::action("Download Selection", DownloadSelection),
+                    MenuItem::action("Upload", UploadSelection),
+                    MenuItem::action("Download", DownloadSelection),
                 ],
             },
             Menu {
                 name: "View".into(),
                 items: vec![
-                    MenuItem::action("Focus Local Pane", FocusLocalPane),
-                    MenuItem::action("Focus Remote Pane", FocusRemotePane),
-                    MenuItem::action("Toggle Transfers", ShowTransferDrawer),
+                    MenuItem::action("Select Local Files", FocusLocalPane),
+                    MenuItem::action("Select Server Files", FocusRemotePane),
+                    MenuItem::action("Transfers", ShowTransferDrawer),
                     MenuItem::separator(),
                     MenuItem::action("Show Hidden Files", ToggleHiddenFiles),
                     MenuItem::separator(),
@@ -295,7 +295,7 @@ fn main() {
             Menu {
                 name: "Help".into(),
                 items: vec![
-                    MenuItem::action("Open Log Folder", OpenLogFolder),
+                    MenuItem::action("Show Logs", OpenLogFolder),
                     MenuItem::action("Copy Version Info", CopyVersionInfo),
                 ],
             },

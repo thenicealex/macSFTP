@@ -1168,7 +1168,7 @@ fn settings_new_password_profile_requires_password(cx: &mut TestAppContext) {
         assert!(editor.is_new);
         assert_eq!(
             editor.error.as_ref().map(|s| s.as_ref()),
-            Some("Password is required."),
+            Some("Enter a password."),
             "empty password on new profile is a validation error"
         );
     });
@@ -2039,7 +2039,7 @@ fn classified_disconnect_reasons_reach_the_connection_state(cx: &mut TestAppCont
 
     let network_timeout = macsftp_core::UserFacingError::new(
         macsftp_core::ErrorCode::NetworkTimeout,
-        "Connection lost",
+        "Connection Lost",
         "No response from the server for about a minute.",
     )
     .with_retryable(true);
@@ -2877,7 +2877,7 @@ fn duplicate_edit_reopens_existing_temp_without_downloading(cx: &mut TestAppCont
         );
         assert_eq!(
             workspace.status_message_for_test().as_deref(),
-            Some("Reopened file for editing")
+            Some("Your copy is open for editing.")
         );
     });
     assert!(
@@ -3016,7 +3016,7 @@ fn edit_metadata_failure_preserves_session_and_temp_directory(cx: &mut TestAppCo
         assert!(session.checking_local_mtime.is_none());
         assert_eq!(
             workspace.status_message_for_test().as_deref(),
-            Some("Could not read the edited file — restore access and try again")
+            Some("Your edited copy couldn’t be read. Check file permissions and try again.")
         );
     });
     assert!(
@@ -4011,8 +4011,8 @@ fn current_directory_failure_shows_recoverable_pane_error(cx: &mut TestAppContex
                     path: Some(missing_path.clone()),
                     error: UserFacingError::new(
                         ErrorCode::NotFound,
-                        "Remote directory not found",
-                        "The directory no longer exists. Go to its parent directory or refresh.",
+                        "The server folder wasn’t found.",
+                        "This folder no longer exists. Go up one level or refresh.",
                     )
                     .with_retryable(true),
                 },
@@ -4489,7 +4489,7 @@ fn go_to_path_navigates_local_with_push_history(cx: &mut TestAppContext) {
         );
         assert_eq!(
             workspace.go_to_path.error.as_ref().map(|s| s.as_ref()),
-            Some("Path not found")
+            Some("This location wasn’t found.")
         );
         assert_eq!(
             workspace
@@ -4522,7 +4522,7 @@ fn go_to_path_navigates_local_with_push_history(cx: &mut TestAppContext) {
         assert!(workspace.go_to_path.open);
         assert_eq!(
             workspace.go_to_path.error.as_ref().map(|s| s.as_ref()),
-            Some("Enter a path")
+            Some("Enter a full folder path.")
         );
     });
 
@@ -4542,7 +4542,7 @@ fn go_to_path_navigates_local_with_push_history(cx: &mut TestAppContext) {
         );
         assert_eq!(
             workspace.go_to_path.error.as_ref().map(|s| s.as_ref()),
-            Some("Not a directory")
+            Some("This location isn’t a folder.")
         );
         assert_eq!(
             workspace
@@ -5976,8 +5976,8 @@ fn fs_operation_failed_sets_pane_error(cx: &mut TestAppContext) {
                 },
                 failure: UserFacingError::new(
                     ErrorCode::PermissionDenied,
-                    "Could not delete",
-                    "Permission denied",
+                    "The item couldn’t be deleted.",
+                    "You don’t have permission.",
                 ),
             },
             window,
@@ -5987,7 +5987,7 @@ fn fs_operation_failed_sets_pane_error(cx: &mut TestAppContext) {
             workspace
                 .status_message
                 .as_ref()
-                .is_some_and(|m| m.contains("Could not delete"))
+                .is_some_and(|m| m.contains("The item couldn’t be deleted."))
         );
     });
 }
@@ -6541,7 +6541,7 @@ fn rate_book_observe_produces_speed_snapshot(cx: &mut TestAppContext) {
             "detail should include speed: {detail}"
         );
         assert!(
-            detail.contains("ETA"),
+            detail.contains("Time Remaining"),
             "detail should include ETA: {detail}"
         );
     });
@@ -6566,9 +6566,9 @@ fn user_status_strings_avoid_internal_jargon() {
             );
         }
     }
-    assert_eq!(STATUS_BUSY_TRY_AGAIN, "Busy — try again in a moment.");
+    assert_eq!(STATUS_BUSY_TRY_AGAIN, "Busy. Try again in a moment.");
     assert_eq!(
         STATUS_CONNECTION_SERVICE_UNAVAILABLE,
-        "Connection service is unavailable."
+        "The connection service is unavailable."
     );
 }

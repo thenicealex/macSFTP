@@ -197,11 +197,11 @@ ProxyCommand 是明确的代码执行能力。UI 必须显示风险提示，日�
 
 远程编辑 session 属于进程级状态，因为外部编辑器和传输可能跨窗口存活。tab 关闭必须清理该 tab 的 session 和临时目录；应用启动时使用新的 run namespace，避免外部编辑器缓存旧路径。
 
-应用不监视外部编辑器的保存动作。用户在选中已打开编辑的远端文件后，通过明确的 **Upload Modified File** 操作发起上传。上传不能依赖 UI 缓存的目录 listing 授权覆盖远端文件。流程为：
+应用不监视外部编辑器的保存动作。用户在选中已打开编辑的远端文件后，通过明确的 **Upload Changes** 操作发起上传。上传不能依赖 UI 缓存的目录 listing 授权覆盖远端文件。流程为：
 
 ```text
 Editing
-  -> 用户选择 Upload Modified File
+  -> 用户选择 Upload Changes
   -> CheckingRemote（分配唯一 check id）
   -> actor 对目标执行实时 metadata 查询
   -> 快照一致：UploadingBack
@@ -233,7 +233,7 @@ Profile 更新由 `ProfileStore` 协调：
 4. 在未提交失败时补偿回滚 Keychain；
 5. 提交成功后 best-effort 删除孤立 secret，并将失败作为 warning 返回。
 
-Profile 写入只有一个产品入口：Settings → Profiles 将编辑草稿转换为 `ProfileSaveRequest`，storage 通过 `ProfileStore::save_request` 提交。Connect 表单只选择已有 Profile 或建立临时连接，不创建、更新或删除 Profile；它通过 “Manage…” 进入 Settings。禁止为 Connect 或其他 UI 再增加并行的保存适配器。
+Profile 写入只有一个产品入口：Settings → Saved Connections 将编辑草稿转换为 `ProfileSaveRequest`，storage 通过 `ProfileStore::save_request` 提交。Connect 表单只选择已有 Profile 或建立临时连接，不创建、更新或删除 Profile；它通过 “Manage Connections…” 进入 Settings。禁止为 Connect 或其他 UI 再增加并行的保存适配器。
 
 `ProfileStore::save_request` 是唯一公开保存入口；更底层的 profile-file 写入只允许 storage 内部调用，测试夹具只能使用 `#[cfg(test)]` helper。Connect 中手工输入的 credential 只用于当前连接，不得因曾选择 Profile 而回写持久化状态。
 

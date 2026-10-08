@@ -395,7 +395,7 @@ async fn dispatch_fs_command(
                         scope,
                         failure: UserFacingError::new(
                             ErrorCode::Unknown,
-                            "Remote session unavailable",
+                            "Server Connection Unavailable",
                             "This session does not support file operations.",
                         )
                         .with_retryable(true),
@@ -414,7 +414,7 @@ async fn dispatch_fs_command(
                         failure: UserFacingError::new(
                             ErrorCode::Unknown,
                             "Invalid remote path",
-                            "Could not determine which directory to refresh after the operation.",
+                            "The folder to refresh couldn’t be found.",
                         ),
                     })
                     .await;
@@ -433,7 +433,7 @@ async fn dispatch_fs_command(
                         scope,
                         failure: UserFacingError::new(
                             ErrorCode::ChannelClosed,
-                            "Could not start file operation",
+                            "Action Couldn’t Start",
                             "The remote session is busy or disconnected. Try again.",
                         )
                         .with_retryable(true),
@@ -582,7 +582,7 @@ async fn command_dispatch_loop(
                                         let channel = shared_connection.handle.channel_open_session().await.map_err(|error| {
                                             crate::physical_connection::ConnectFailure::Connection(
                                                 crate::physical_connection::sftp_connection_error(
-                                                    "Could not open SFTP channel on shared connection",
+                                                    "File Connection Failed",
                                                     "The server did not open an SSH channel for SFTP.",
                                                     &error,
                                                 ),
@@ -600,7 +600,7 @@ async fn command_dispatch_loop(
                                         russh_sftp::client::SftpSession::new(channel.into_stream()).await.map_err(|error| {
                                             crate::physical_connection::ConnectFailure::Connection(
                                                 crate::physical_connection::sftp_connection_error(
-                                                    "Could not start the SFTP session.",
+                                                    "The file connection couldn’t start.",
                                                     "The SFTP subsystem did not become ready.",
                                                     &error,
                                                 ),
@@ -820,7 +820,7 @@ async fn command_dispatch_loop(
                         RemoteEventScope::new(tab_id, session.session_id, session.session_epoch);
                     let error = UserFacingError::new(
                         ErrorCode::ChannelClosed,
-                        "Could not read remote directory",
+                        "The server folder couldn’t be loaded.",
                         message,
                     )
                     .with_retryable(true);
@@ -870,8 +870,8 @@ async fn command_dispatch_loop(
                             plan_id,
                             error: UserFacingError::new(
                                 ErrorCode::Unknown,
-                                "Could not start transfer planning",
-                                "The transfer retry service is unavailable. Try again.",
+                                "Preparation Failed",
+                                "The transfer couldn’t restart. Try again.",
                             )
                             .with_retryable(true),
                         })
@@ -886,8 +886,8 @@ async fn command_dispatch_loop(
                             plan_id,
                             error: UserFacingError::new(
                                 ErrorCode::Unknown,
-                                "Could not start transfer planning",
-                                "The transfer planner is unavailable. Try again.",
+                                "Preparation Failed",
+                                "The transfer couldn’t be prepared. Try again.",
                             )
                             .with_retryable(true),
                         })
@@ -939,7 +939,7 @@ async fn command_dispatch_loop(
                                         plan_id,
                                         error: UserFacingError::new(
                                             ErrorCode::ChannelClosed,
-                                            "Could not start download planning",
+                                            "Download Preparation Failed",
                                             "The connected session is no longer available. Reconnect and try again.",
                                         )
                                         .with_retryable(true),
@@ -965,7 +965,7 @@ async fn command_dispatch_loop(
                                         plan_id,
                                         error: UserFacingError::new(
                                             ErrorCode::ChannelClosed,
-                                            "Could not start download planning",
+                                            "Download Preparation Failed",
                                             "The connected session is no longer available. Reconnect and try again.",
                                         )
                                         .with_retryable(true),
@@ -1008,7 +1008,7 @@ async fn command_dispatch_loop(
                             &terminal_event_tx,
                             jobs,
                             transfer_handoff_error(
-                                "The connected session closed before the transfer acquired its connection.",
+                                "The connection closed. Reconnect and try again.",
                             ),
                         )
                         .await;
@@ -1153,7 +1153,7 @@ impl ProgressThrottle {
 /// `RetryRoute` (they never entered the manager), so surfacing them as
 /// retryable would present a dead Retry control in the UI.
 fn transfer_handoff_error(detail: &'static str) -> UserFacingError {
-    UserFacingError::new(ErrorCode::ChannelClosed, "Could not start transfer", detail)
+    UserFacingError::new(ErrorCode::ChannelClosed, "Transfer Couldn’t Start", detail)
 }
 
 /// Emit one `TransferFailed` per planned job after a post-planning handoff
@@ -1244,12 +1244,8 @@ async fn emit_remote_edit_dispatch_failure(
     command: CheckRemoteEditSnapshotCommand,
     detail: &'static str,
 ) {
-    let error = UserFacingError::new(
-        ErrorCode::ChannelClosed,
-        "Could not check remote file",
-        detail,
-    )
-    .with_retryable(true);
+    let error = UserFacingError::new(ErrorCode::ChannelClosed, "Server Check Failed", detail)
+        .with_retryable(true);
     if let Err(send_error) = event_tx
         .send_async(AppEvent::RemoteEditSnapshotDispatchFailed(
             RemoteEditSnapshotDispatchFailed {

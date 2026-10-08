@@ -117,7 +117,7 @@ impl crate::workspace::Workspace {
                                         .text_size(px(12.0))
                                         .text_color(theme.colors.text_muted)
                                         .child(
-                                            "System follows macOS; fixed modes use One Light or One Dark.",
+                                            "Match your Mac’s appearance, or always use Light or Dark.",
                                         ),
                                 ),
                         )
@@ -127,19 +127,19 @@ impl crate::workspace::Workspace {
                                 .gap_2()
                                 .child(appearance_button(
                                     "appearance-system",
-                                    "System",
+                                    "Automatic",
                                     AppearancePreference::System,
                                     cx,
                                 ))
                                 .child(appearance_button(
                                     "appearance-light",
-                                    "One Light",
+                                    "Light",
                                     AppearancePreference::Light,
                                     cx,
                                 ))
                                 .child(appearance_button(
                                     "appearance-dark",
-                                    "One Dark",
+                                    "Dark",
                                     AppearancePreference::Dark,
                                     cx,
                                 )),
@@ -164,15 +164,14 @@ impl crate::workspace::Workspace {
                                     div()
                                         .text_size(px(14.0))
                                         .font_weight(FontWeight::MEDIUM)
-                                        .child("External editor"),
+                                        .child("File Editor"),
                                 )
                                 .child(
                                     div()
                                         .text_size(px(12.0))
                                         .text_color(theme.colors.text_muted)
                                         .child(
-                                            "Command or app used to open remote files for editing. \
-                                             Leave blank for the system default.",
+                                            "Enter an app or command. Leave blank to use your Mac’s default app.",
                                         ),
                                 )
                                 .child(
@@ -185,7 +184,7 @@ impl crate::workspace::Workspace {
                                             ("settings-external-editor-input", 0usize),
                                             TextFieldModel {
                                                 state: &self.settings.external_editor_input,
-                                                placeholder: "System default",
+                                                placeholder: "Default app",
                                                 focused: self.settings.external_editor_focused,
                                                 masked: false,
                                             },
@@ -203,14 +202,14 @@ impl crate::workspace::Workspace {
                                     div()
                                         .text_size(px(14.0))
                                         .font_weight(FontWeight::MEDIUM)
-                                        .child("Diagnostics"),
+                                        .child("Troubleshooting"),
                                 )
                                 .child(
                                     div()
                                         .flex()
                                         .gap_2()
                                         .child(
-                                            text_button("open-log-folder", "Open Log Folder")
+                                            text_button("open-log-folder", "Show Logs")
                                                 .on_click(cx.listener(
                                                     |workspace, _event, _window, cx| {
                                                         workspace.open_log_folder(cx);
@@ -294,7 +293,7 @@ impl crate::workspace::Workspace {
                             ))
                             .child(sidebar_item(
                                 "settings-section-profiles",
-                                "Profiles",
+                                "Saved Connections",
                                 SettingsSection::Profiles,
                                 cx,
                             )),
@@ -362,7 +361,7 @@ impl crate::workspace::Workspace {
             Err(error) => {
                 warn!(error = %error, "could not save external_editor");
                 self.config_error =
-                    Some("Could not write config.json. Check file permissions.".into());
+                    Some("Settings couldn’t be saved. Check file permissions.".into());
             }
         }
     }
@@ -491,19 +490,19 @@ impl crate::workspace::Workspace {
 
         let list_body: gpui::AnyElement = if total_count == 0 {
             empty_state(
-                "No saved profiles",
+                "No saved connections",
                 vec![
-                    text_button("settings-empty-new-profile", "New Profile").on_click(cx.listener(
-                        |workspace, _event, _window, cx| {
+                    text_button("settings-empty-new-profile", "Add Connection").on_click(
+                        cx.listener(|workspace, _event, _window, cx| {
                             workspace.start_new_profile(cx);
-                        },
-                    )),
+                        }),
+                    ),
                 ],
                 cx,
             )
             .into_any_element()
         } else if filtered_count == 0 && filter_active {
-            empty_state("No matches", vec![], cx).into_any_element()
+            empty_state("No matching items", vec![], cx).into_any_element()
         } else {
             div()
                 .flex()
@@ -520,13 +519,13 @@ impl crate::workspace::Workspace {
             div()
                 .text_size(px(13.0))
                 .text_color(theme.colors.text_muted)
-                .child("Create a profile to get started")
+                .child("Add a connection to save your server details.")
                 .into_any_element()
         } else {
             div()
                 .text_size(px(13.0))
                 .text_color(theme.colors.text_muted)
-                .child("Select a profile or create a new one")
+                .child("Select a saved connection or add a new one.")
                 .into_any_element()
         };
 
@@ -547,11 +546,13 @@ impl crate::workspace::Workspace {
                     .border_color(theme.colors.border)
                     .track_focus(&self.workspace_focus)
                     .on_key_down(cx.listener(Self::handle_profile_filter_key))
-                    .child(text_button("settings-new-profile", "New Profile").on_click(
-                        cx.listener(|workspace, _event, _window, cx| {
-                            workspace.start_new_profile(cx);
-                        }),
-                    ))
+                    .child(
+                        text_button("settings-new-profile", "Add Connection").on_click(
+                            cx.listener(|workspace, _event, _window, cx| {
+                                workspace.start_new_profile(cx);
+                            }),
+                        ),
+                    )
                     .child(
                         div()
                             .id("settings-profile-filter")
@@ -562,7 +563,7 @@ impl crate::workspace::Workspace {
                                 "settings-profile-filter-input",
                                 TextFieldModel {
                                     state: &self.settings.profile_filter,
-                                    placeholder: "Filter profiles…",
+                                    placeholder: "Filter saved connections…",
                                     focused: filter_focused,
                                     masked: false,
                                 },
@@ -577,7 +578,7 @@ impl crate::workspace::Workspace {
                             .px_1()
                             .text_size(px(10.0))
                             .text_color(theme.colors.text_disabled)
-                            .child("SAVED PROFILES")
+                            .child("Saved Connections")
                             .child(if filter_active {
                                 format!("{filtered_count} of {total_count}")
                             } else {
@@ -712,9 +713,9 @@ impl crate::workspace::Workspace {
         let focused = editor.focused_field;
         let auth_method = editor.auth_method;
         let title = if editor.is_new {
-            "New Profile"
+            "Add Connection"
         } else {
-            "Edit Profile"
+            "Edit Connection"
         };
 
         let mut form = div()
@@ -746,7 +747,7 @@ impl crate::workspace::Workspace {
 
         form = form
             .child(field_row(
-                "Name",
+                "Connection Name",
                 ProfileEditorField::Name,
                 &editor.name,
                 "optional",
@@ -755,7 +756,7 @@ impl crate::workspace::Workspace {
                 cx,
             ))
             .child(field_row(
-                "Host",
+                "Server Address",
                 ProfileEditorField::Host,
                 &editor.host,
                 "example.com",
@@ -792,7 +793,7 @@ impl crate::workspace::Workspace {
                             .flex_none()
                             .text_size(px(11.0))
                             .text_color(theme.colors.text_muted)
-                            .child("Auth"),
+                            .child("Sign-In Method"),
                     )
                     .child(
                         div()
@@ -807,14 +808,14 @@ impl crate::workspace::Workspace {
                                 cx,
                             ))
                             .child(auth_toggle(
-                                "Private Key",
+                                "Key File",
                                 AuthMethodKind::PrivateKey,
                                 "profile-auth-private-key",
                                 auth_method,
                                 cx,
                             ))
                             .child(auth_toggle(
-                                "Interactive",
+                                "Server Prompts",
                                 AuthMethodKind::KeyboardInteractive,
                                 "profile-auth-keyboard-interactive",
                                 auth_method,
@@ -847,7 +848,7 @@ impl crate::workspace::Workspace {
             AuthMethodKind::PrivateKey => {
                 let policy = editor.passphrase_policy;
                 form.child(field_row(
-                    "Key path",
+                    "Key File Path",
                     ProfileEditorField::KeyPath,
                     &editor.key_path,
                     "~/.ssh/id_ed25519",
@@ -866,28 +867,28 @@ impl crate::workspace::Workspace {
                                 .flex_none()
                                 .text_size(px(11.0))
                                 .text_color(theme.colors.text_muted)
-                                .child("Passphrase"),
+                                .child("Key Password"),
                         )
                         .child(
                             div()
                                 .flex()
                                 .gap_2()
                                 .child(passphrase_policy_toggle(
-                                    "None",
+                                    "No Password",
                                     PassphrasePolicy::NoPassphrase,
                                     "profile-pass-none",
                                     policy,
                                     cx,
                                 ))
                                 .child(passphrase_policy_toggle(
-                                    "Ask every time",
+                                    "Ask Every Time",
                                     PassphrasePolicy::AskEveryTime,
                                     "profile-pass-ask",
                                     policy,
                                     cx,
                                 ))
                                 .child(passphrase_policy_toggle(
-                                    "Remember",
+                                    "Remember Password",
                                     PassphrasePolicy::Remember,
                                     "profile-pass-remember",
                                     policy,
@@ -903,7 +904,7 @@ impl crate::workspace::Workspace {
                         (PassphrasePolicy::NoPassphrase, _) => "",
                     };
                     form.child(field_row(
-                        "Value",
+                        "Key Password",
                         ProfileEditorField::Passphrase,
                         editor.passphrase.as_input_state(),
                         placeholder,
@@ -915,7 +916,7 @@ impl crate::workspace::Workspace {
             }
             AuthMethodKind::KeyboardInteractive => form,
             AuthMethodKind::SshAgent => form.child(field_row(
-                "Agent socket",
+                "Agent Location",
                 ProfileEditorField::AgentSocket,
                 &editor.agent_socket,
                 "SSH_AUTH_SOCK (optional)",
@@ -937,7 +938,7 @@ impl crate::workspace::Workspace {
                         .flex_none()
                         .text_size(px(11.0))
                         .text_color(theme.colors.text_muted)
-                        .child("Route"),
+                        .child("Connection Method"),
                 )
                 .child(
                     div()
@@ -952,14 +953,14 @@ impl crate::workspace::Workspace {
                             cx,
                         ))
                         .child(route_toggle(
-                            "Jump host",
+                            "Via Another Server",
                             ProfileRouteKind::JumpHost,
                             "profile-route-jump",
                             route_kind,
                             cx,
                         ))
                         .child(route_toggle(
-                            "ProxyCommand",
+                            "Run a Command",
                             ProfileRouteKind::ProxyCommand,
                             "profile-route-command",
                             route_kind,
@@ -971,7 +972,7 @@ impl crate::workspace::Workspace {
             ProfileRouteKind::Direct => {}
             ProfileRouteKind::ProxyCommand => {
                 form = form.child(field_row(
-                    "Command",
+                    "Connection Command",
                     ProfileEditorField::ProxyCommand,
                     &editor.proxy_command,
                     "ssh -W %h:%p bastion",
@@ -991,8 +992,9 @@ impl crate::workspace::Workspace {
                                 .text_size(px(11.0))
                                 .text_color(theme.colors.text_muted)
                                 .child(
-                                    "Shell command; %h, %p and %r expand to the target. Never include secrets.",
-                                ),
+                                    "This command runs on your Mac. Never include passwords or other secrets.",
+                                )
+                                .child(div().child("%h: server address · %p: port · %r: username")),
                         ),
                 );
             }
@@ -1017,7 +1019,7 @@ impl crate::workspace::Workspace {
                         div()
                             .text_size(px(11.0))
                             .text_color(theme.colors.text_muted)
-                            .child("Create a direct profile first."),
+                            .child("First, add a saved connection that uses Direct."),
                     );
                 }
                 form = form.child(
@@ -1031,7 +1033,7 @@ impl crate::workspace::Workspace {
                                 .flex_none()
                                 .text_size(px(11.0))
                                 .text_color(theme.colors.text_muted)
-                                .child("Jump profile"),
+                                .child("Intermediate Server"),
                         )
                         .child(choices),
                 );
@@ -1039,7 +1041,7 @@ impl crate::workspace::Workspace {
         }
 
         form = form.child(field_row(
-            "Remote path",
+            "Starting Folder",
             ProfileEditorField::DefaultRemotePath,
             &editor.default_remote_path,
             "/home/user",
@@ -1051,9 +1053,11 @@ impl crate::workspace::Workspace {
         if editor.secret_present_hint {
             let note = match (editor.auth_method, editor.passphrase_policy) {
                 (AuthMethodKind::PrivateKey, PassphrasePolicy::NoPassphrase) => {
-                    "Saving will remove the remembered passphrase from the Keychain."
+                    "Saving removes the remembered key password from your Mac’s Keychain."
                 }
-                _ => "Credentials are stored in the Keychain. Leave blank to keep.",
+                _ => {
+                    "Sign-in details are stored in your Mac’s Keychain. Leave blank to keep existing values."
+                }
             };
             form = form.child(
                 div()

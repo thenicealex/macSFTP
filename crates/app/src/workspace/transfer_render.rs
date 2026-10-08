@@ -175,7 +175,7 @@ impl crate::workspace::Workspace {
                 .cursor_row_resize()
                 .bg(theme.colors.border)
                 .hover(|style| style.bg(hover_background))
-                .tooltip(text_tooltip("Drag to resize · Double-click to reset"))
+                .tooltip(text_tooltip("Drag to resize. Double-click to reset."))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|workspace, event: &MouseDownEvent, window, cx| {
@@ -238,32 +238,24 @@ impl crate::workspace::Workspace {
                 .when(active_jobs.len() + queued_jobs.len() > 0, |header| {
                     let workspace = workspace_entity.clone();
                     header.child(
-                        icon_button(
-                            "cancel-all-transfers",
-                            IconName::Close,
-                            "Cancel All Transfers",
-                        )
-                        .icon_color(theme.colors.warning)
-                        .on_click(move |_event, _window, cx| {
-                            workspace.update(cx, |workspace, cx| {
-                                workspace.cancel_all_transfers(cx);
-                            });
-                        }),
+                        icon_button("cancel-all-transfers", IconName::Close, "Cancel All")
+                            .icon_color(theme.colors.warning)
+                            .on_click(move |_event, _window, cx| {
+                                workspace.update(cx, |workspace, cx| {
+                                    workspace.cancel_all_transfers(cx);
+                                });
+                            }),
                     )
                 })
                 .when(completed_jobs.len() + failed_jobs.len() > 0, |header| {
                     let workspace = workspace_entity.clone();
                     header.child(
-                        icon_button(
-                            "clear-transfer-records",
-                            IconName::Trash,
-                            "Clear Transfer History",
-                        )
-                        .on_click(move |_event, _window, cx| {
-                            workspace.update(cx, |workspace, cx| {
-                                workspace.clear_transfer_records(cx);
-                            });
-                        }),
+                        icon_button("clear-transfer-records", IconName::Trash, "Clear History")
+                            .on_click(move |_event, _window, cx| {
+                                workspace.update(cx, |workspace, cx| {
+                                    workspace.clear_transfer_records(cx);
+                                });
+                            }),
                     )
                 })
                 .child(
@@ -287,7 +279,7 @@ impl crate::workspace::Workspace {
                     .justify_center()
                     .text_size(px(12.0))
                     .text_color(theme.colors.text_muted)
-                    .child("No transfers"),
+                    .child("No transfers yet"),
             );
             let body = macsftp_ui::scroll_area(
                 "transfer-drawer-body",
@@ -300,7 +292,7 @@ impl crate::workspace::Workspace {
             return drawer.child(body);
         }
 
-        for (label, section_jobs) in [("Active", active_jobs), ("Queued", queued_jobs)] {
+        for (label, section_jobs) in [("In Progress", active_jobs), ("Waiting", queued_jobs)] {
             if !section_jobs.is_empty() {
                 content = content
                     .child(section_header_static(label, section_jobs.len(), &theme))
@@ -314,7 +306,7 @@ impl crate::workspace::Workspace {
 
         for (label, section_jobs, expanded, toggle_id) in [
             (
-                "Completed",
+                "Complete",
                 completed_jobs,
                 self.transfer_drawer.completed_section_expanded,
                 "toggle-completed",
@@ -329,7 +321,7 @@ impl crate::workspace::Workspace {
             if section_jobs.is_empty() {
                 continue;
             }
-            let is_completed_section = label == "Completed";
+            let is_completed_section = label == "Complete";
             content = content.child(
                 div()
                     .id(toggle_id)
@@ -391,10 +383,10 @@ impl crate::workspace::Workspace {
         let title = transfer_title(job);
 
         let (state_label, state_color): (SharedString, Hsla) = match &job.state {
-            TransferState::Queued => ("Queued".into(), theme.colors.text_muted),
-            TransferState::Planning => ("Planning…".into(), theme.colors.info),
+            TransferState::Queued => ("Waiting".into(), theme.colors.text_muted),
+            TransferState::Planning => ("Preparing…".into(), theme.colors.info),
             TransferState::WaitingForConflictDecision { .. } => {
-                ("Waiting for decision".into(), theme.colors.warning)
+                ("Needs Your Choice".into(), theme.colors.warning)
             }
             TransferState::Running {
                 bytes_done,
@@ -405,12 +397,12 @@ impl crate::workspace::Workspace {
                     Some(total) if *total > 0 => {
                         format!("{}%", bytes_done * 100 / total)
                     }
-                    _ => "Running".to_string(),
+                    _ => "Transferring…".to_string(),
                 };
                 (label.into(), theme.colors.accent)
             }
             TransferState::Cancelling => ("Cancelling…".into(), theme.colors.warning),
-            TransferState::Completed => ("Completed".into(), theme.colors.success),
+            TransferState::Completed => ("Complete".into(), theme.colors.success),
             TransferState::Skipped => ("Skipped".into(), theme.colors.text_muted),
             TransferState::Failed { .. } => ("Failed".into(), theme.colors.error),
         };
@@ -423,12 +415,12 @@ impl crate::workspace::Workspace {
                 .find(|plan| plan.root_job_id == job.id)
                 .map(|plan| {
                     format!(
-                        "{} items · {}",
+                        "{} items found · {}",
                         plan.planned_count,
                         format_size(plan.total_bytes)
                     )
                 })
-                .unwrap_or_else(|| "Planning…".to_string())
+                .unwrap_or_else(|| "Preparing…".to_string())
                 .into(),
             TransferState::Running {
                 bytes_done,
@@ -447,7 +439,7 @@ impl crate::workspace::Workspace {
                 .warnings
                 .last()
                 .map(|warning| warning.message.clone().into())
-                .unwrap_or_else(|| "Completed with warning".into()),
+                .unwrap_or_else(|| "Complete with a warning".into()),
             TransferState::Failed { error, .. } if !job.warnings.is_empty() => {
                 let warning = job
                     .warnings
@@ -540,7 +532,7 @@ impl crate::workspace::Workspace {
             Some(tab) => connection_status(&tab.connection, &theme),
             None => (
                 theme.colors.text_disabled,
-                SharedString::from("No connection"),
+                SharedString::from("Not Connected"),
             ),
         };
 
@@ -630,23 +622,23 @@ impl crate::workspace::Workspace {
                                 .on_click(cx.listener(|workspace, _event, _window, cx| {
                                     workspace.upload_selected_edit(cx);
                                 }))
-                                .child("Upload Modified File")
+                                .child("Upload Changes")
                                 .into_any_element(),
                             EditPhase::Downloading => div()
                                 .text_color(theme.colors.text_disabled)
-                                .child("Downloading Editable Copy…")
+                                .child("Downloading Copy…")
                                 .into_any_element(),
                             EditPhase::CheckingRemote => div()
                                 .text_color(theme.colors.text_disabled)
-                                .child("Checking Remote…")
+                                .child("Checking Server File…")
                                 .into_any_element(),
                             EditPhase::UploadingBack => div()
                                 .text_color(theme.colors.text_disabled)
-                                .child("Uploading Modified File…")
+                                .child("Uploading Changes…")
                                 .into_any_element(),
                             EditPhase::RemoteConflict => div()
                                 .text_color(theme.colors.error)
-                                .child("Resolve Edit Conflict")
+                                .child("Review Changes")
                                 .into_any_element(),
                         })
                     })
@@ -661,7 +653,11 @@ impl crate::workspace::Workspace {
                             .rounded_sm()
                             .hover(|style| style.bg(theme.colors.element_hover))
                             .tooltip(text_tooltip(labeled_shortcut(
-                                "Toggle Transfers",
+                                if self.transfer_drawer.open {
+                                    "Hide Transfers"
+                                } else {
+                                    "Show Transfers"
+                                },
                                 "ShowTransferDrawer",
                             )))
                             .on_click(cx.listener(|workspace, _event, _window, cx| {
@@ -763,7 +759,7 @@ mod tests {
     fn partial_planning_failure_shows_only_root_error() {
         let error = UserFacingError::new(
             ErrorCode::Unknown,
-            "Planning failed",
+            "Preparation Failed",
             "Try the transfer again.",
         );
         let store = store_with_child(
@@ -784,7 +780,7 @@ mod tests {
     fn execution_failure_shows_only_terminal_child() {
         let error = UserFacingError::new(
             ErrorCode::Unknown,
-            "Transfer failed",
+            "Transfer Failed",
             "Try the transfer again.",
         );
         let store = store_with_child(
@@ -808,7 +804,7 @@ mod tests {
     fn retry_action_is_shown_for_retryable_failure() {
         let error = UserFacingError::new(
             ErrorCode::Unknown,
-            "Transfer failed",
+            "Transfer Failed",
             "Try the transfer again.",
         );
         let failed = job(
@@ -832,8 +828,8 @@ mod tests {
         // transfer manager, so a Retry button would be a dead control.
         let error = UserFacingError::new(
             ErrorCode::ChannelClosed,
-            "Could not start transfer",
-            "The connected session closed before the transfer acquired its connection.",
+            "Transfer Couldn’t Start",
+            "The connection closed. Reconnect and try again.",
         );
         let failed = job(
             2,

@@ -65,11 +65,10 @@ impl crate::workspace::Workspace {
                 if let Some(tab) = self.state.tabs.find_tab_mut(mismatch.scope.tab_id) {
                     let mut error = UserFacingError::new(
                         ErrorCode::HostKeyMismatch,
-                        "Host key mismatch",
+                        "Server Identity Changed",
                         format!(
-                            "The key presented by {}:{} does not match the stored \
-                             key. This can indicate a man-in-the-middle attack. \
-                             Connection blocked.",
+                            "The identity of {}:{} differs from the saved one. \
+                             Someone may be intercepting this connection. Connection blocked.",
                             mismatch.host, mismatch.port
                         ),
                     );
