@@ -1,12 +1,39 @@
 # macSFTP
 
 macSFTP is a native macOS SFTP client written in Rust. It uses GPUI for the
-interface, GPUI Component for ordinary controls, and `russh`/`russh-sftp` for asynchronous SSH and SFTP operations.
+interface, GPUI Base for text editing and control interaction, and
+`russh`/`russh-sftp` for asynchronous SSH and SFTP operations. macSFTP owns its
+compact layout, control styling, themes, and business state.
 
 The project currently targets macOS and builds an unsigned app bundle for local
 testing. Public releases currently provide source only. App Store distribution,
 notarization, automatic updates, and protocols other than SFTP are outside the
 current scope.
+
+## Screenshots
+
+### Dark workspace
+
+Local file browsing with sorting, selection, and a separate server pane.
+
+![macSFTP dark workspace with sample files](docs/screenshots/workspace-dark.jpg)
+
+### Connect to a server
+
+One-off connections or saved profiles, with password, key-file, server-prompt,
+and SSH-agent authentication choices.
+
+![macSFTP connection dialog with example connection details](docs/screenshots/connect-dark.jpg)
+
+### Light appearance
+
+Follow the system appearance or select Light/Dark, and configure an external editor.
+
+![macSFTP light appearance and external editor settings](docs/screenshots/settings-light.jpg)
+
+These captures use an isolated preview with local sample files. The server
+pane is disconnected; `demo.example` and `deploy` are example connection details.
+No credentials or personal files are shown.
 
 ## Current capabilities
 
@@ -35,7 +62,8 @@ remote file changed. It does not watch local saves or upload them automatically.
 
 - macOS
 - Xcode with the Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`)
-- Rust `1.96.1` or newer with `rustfmt` and `clippy`
+- Rust `1.96.1` (pinned in `rust-toolchain.toml`) with `rustfmt` and `clippy`
+- Python `3.11` or newer for architecture checks; CI uses Python `3.13`
 - `/usr/sbin/sshd`, `ssh-keygen`, and `ssh-keyscan` for real-session tests
 
 Metal Toolchain is a separate Xcode component. After installing it, verify
@@ -64,7 +92,8 @@ The workspace is intentionally split by responsibility:
 | Crate | Responsibility |
 | --- | --- |
 | `macsftp-core` | Pure models and state machines |
-| `macsftp-ui` | Reusable GPUI presentation components |
+| `macsftp-ui` | Project-styled GPUI Base controls, themes, and presentation |
+| `macsftp-native-menu` | Isolated macOS AppKit presenter for input context menus |
 | `macsftp-app` | Windows, actions, UI state, and event orchestration |
 | `macsftp-sftp` | Tokio runtime, russh adapters, sessions, and transfers |
 | `macsftp-storage` | Profiles, known hosts, Keychain references, and migrations |
@@ -87,4 +116,6 @@ private reporting process.
 
 ## License
 
-macSFTP is available under the [MIT License](LICENSE).
+macSFTP is available under the [MIT License](LICENSE). The native menu adapter
+uses the [Apache-2.0 License](crates/native-menu/LICENSE-APACHE) and preserves
+attribution for its adapted AppKit implementation.
