@@ -257,7 +257,9 @@ Profile 写入只有一个产品入口：Settings → Saved Connections 将编�
 - 表单草稿仍由 Workspace 持有；`PlainInput` 仅保留选区、撤销和 IME 编辑状态，Change 事件写回草稿，程序修改草稿时只在文本不同的情况下同步控件；关闭 surface 时释放相应绑定，替换表单或冲突请求后旧控件事件必须被忽略；
 - Connect/Profile 表单的 Tab 使用 scoped action 跨普通和敏感字段移动实际焦点，普通字段的 Enter 通过 Base `PressEnter` 转发原有提交入口；端口、路径、名称及认证校验仍由原有业务入口统一执行，无效提交不能清空草稿；
 - 密码、私钥 passphrase 和 keyboard-interactive answer 保留不可 Clone 的 `SecretInputState` 及清零路径，不进入普通 Base 输入或其撤销/剪贴板状态；
+- 工作区的空文件夹、加载和无匹配状态填满列表 viewport 后居中；首次未连接的远端 pane 居中显示连接入口及说明，最近连接列表保持靠上以便扫描，并用独立的统一 scrollbar 保证短窗口中仍可访问全部入口。传输面板默认展开 160px，保留手动调整、最小高度和全局队列所有权；面板内提供收起按钮，底部常驻 Transfers 入口，不改变传输执行或连接安全语义；
 - 第一屏是可操作的文件工作区；
+- 首次连接入口保留 160×34px 外观，复用 Base 按钮焦点、无障碍 label 和 Enter/Space 激活；`ConnectionEntry` 上下文排除文件 pane 的 Enter 打开快捷键。最近连接行高 30px，分组标题使用完整 muted token；空传输队列的提示在可用空间居中，面板高度至少 90px 时显示上传/下载说明，更小高度隐藏说明并裁切内容，保留调整入口；
 - 目录列表必须虚拟化，10k entries 不创建长期 row entity；
 - 可滚动 surface 使用统一的 theme-aware scrollbar；虚拟列表和普通 scroll container 分别绑定各自 handle，但共享 overflow、drag、track paging 和 resize 语义；
 - selection 存稳定 path，不存易漂移的 row index；

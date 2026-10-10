@@ -4438,6 +4438,7 @@ name = "macsftp-app"
 version = "0.3.0"
 dependencies = [
  "gpui-kit",
+ "gpui-pre-apple",
  "macsftp-core",
  "macsftp-platform",
  "macsftp-sftp",

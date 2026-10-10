@@ -88,6 +88,8 @@ pub struct Workspace {
     /// Active-tab type-to-filter state (cleared on tab switch / navigate).
     local: view_state::PaneUi,
     remote: view_state::PaneUi,
+    remote_empty_scroll: gpui_kit::ScrollHandle,
+    remote_empty_scrollbar: ScrollbarState,
     /// Anchor path for shift-range multi-select (view-local; single-select resets it).
     selection_anchor: Option<EntryPath>,
     /// Session credentials per tab, kept in memory only so Reconnect
@@ -178,6 +180,8 @@ impl Workspace {
             tab_switcher: view_state::TabSwitcherUi::new(),
             local: view_state::PaneUi::new(),
             remote: view_state::PaneUi::new(),
+            remote_empty_scroll: gpui_kit::ScrollHandle::new(),
+            remote_empty_scrollbar: ScrollbarState::new(),
             selection_anchor: None,
             _appearance_subscription: appearance_subscription,
         };

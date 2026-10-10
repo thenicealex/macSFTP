@@ -642,132 +642,176 @@ impl crate::workspace::Workspace {
         } else {
             Vec::new()
         };
-        // Keep idle/disconnected actions on a stable top-aligned axis. The
-        // unused pane height remains below the group instead of moving it.
+        // Center the first connection action; recent connections retain their
+        // top-aligned browsing layout.
         let remote_empty_with_recents =
             |title: Option<SharedString>,
              detail: Option<SharedString>,
              actions: Vec<gpui_kit::AnyElement>,
+             window: &mut Window,
              cx: &mut Context<Self>| {
                 let theme = cx.theme();
                 let rows = recent_rows.clone();
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .items_center()
-                    .pt(px(56.0))
-                    .px_3()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .w_full()
-                            .max_w(px(320.0))
-                            .when(title.is_some() || detail.is_some(), |container| {
-                                container.child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .items_center()
-                                        .gap_1()
-                                        .mb_4()
-                                        .when_some(title, |container, title| {
-                                            container.child(
-                                                div()
-                                                    .text_size(px(15.0))
-                                                    .font_weight(FontWeight::MEDIUM)
-                                                    .text_color(theme.colors.text)
-                                                    .child(title),
-                                            )
-                                        })
-                                        .when_some(detail, |container, detail| {
-                                            container.child(
-                                                div()
-                                                    .text_size(px(13.0))
-                                                    .text_color(theme.colors.text_muted)
-                                                    .text_center()
-                                                    .child(detail),
-                                            )
-                                        }),
-                                )
-                            })
-                            .child(
+                let surface = div().flex().flex_col().items_center().py_3().px_3().child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .w_full()
+                        .max_w(px(320.0))
+                        .debug_selector(|| "remote-empty-card".into())
+                        .when(title.is_some() || detail.is_some(), |container| {
+                            container.child(
                                 div()
                                     .flex()
+                                    .flex_col()
                                     .items_center()
-                                    .justify_center()
-                                    .gap_2()
-                                    .children(actions),
-                            )
-                            .when(!rows.is_empty(), |container| {
-                                container.child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .w_full()
-                                        .mt(px(26.0))
-                                        .child(
+                                    .gap_1()
+                                    .mb_4()
+                                    .when_some(title, |container, title| {
+                                        container.child(
                                             div()
-                                                .mb(px(8.0))
-                                                .text_size(px(11.0))
-                                                .text_color(theme.colors.text_muted)
-                                                .opacity(0.5)
-                                                .child("Recent Connections"),
+                                                .text_size(px(15.0))
+                                                .line_height(gpui_kit::relative(1.2))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(theme.colors.text)
+                                                .child(title),
                                         )
-                                        .children(rows.into_iter().map(|(id, label)| {
+                                    })
+                                    .when_some(detail, |container, detail| {
+                                        container.child(
                                             div()
-                                                .id(SharedString::from(format!("recent-{id}")))
-                                                .flex()
-                                                .items_center()
-                                                .h(px(36.0))
-                                                .mb(px(2.0))
-                                                .px(px(10.0))
-                                                .rounded_md()
-                                                .cursor_pointer()
-                                                .hover(|style| style.bg(theme.colors.element_hover))
-                                                .active(|style| {
-                                                    style.bg(theme.colors.element_active)
-                                                })
-                                                .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .min_w_0()
-                                                        .truncate()
-                                                        .text_size(px(13.0))
-                                                        .text_color(theme.colors.text)
-                                                        .child(label),
-                                                )
-                                                .on_click(cx.listener(
-                                                    move |workspace, _event, window, cx| {
-                                                        workspace
-                                                            .open_recent_connection(id, window, cx);
-                                                    },
-                                                ))
-                                        })),
-                                )
-                            }),
+                                                .text_size(px(13.0))
+                                                .line_height(gpui_kit::relative(1.25))
+                                                .text_color(theme.colors.text_muted)
+                                                .text_center()
+                                                .child(detail),
+                                        )
+                                    }),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .gap_2()
+                                .children(actions),
+                        )
+                        .when(!rows.is_empty(), |container| {
+                            container.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .w_full()
+                                    .mt(px(24.0))
+                                    .child(
+                                        div()
+                                            .mb(px(8.0))
+                                            .text_size(px(11.0))
+                                            .text_color(theme.colors.text_muted)
+                                            .child("Recent Connections"),
+                                    )
+                                    .children(rows.into_iter().map(|(id, label)| {
+                                        div()
+                                            .id(SharedString::from(format!("recent-{id}")))
+                                            .flex()
+                                            .items_center()
+                                            .h(px(30.0))
+                                            .mb(px(2.0))
+                                            .px(px(10.0))
+                                            .rounded_md()
+                                            .cursor_pointer()
+                                            .hover(|style| style.bg(theme.colors.element_hover))
+                                            .active(|style| style.bg(theme.colors.element_active))
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .text_size(px(13.0))
+                                                    .text_color(theme.colors.text)
+                                                    .child(label),
+                                            )
+                                            .on_click(cx.listener(
+                                                move |workspace, _event, window, cx| {
+                                                    workspace
+                                                        .open_recent_connection(id, window, cx);
+                                                },
+                                            ))
+                                    })),
+                            )
+                        }),
+                );
+                if recent_rows.is_empty() {
+                    surface.flex_1().justify_center().into_any_element()
+                } else {
+                    macsftp_ui::scroll_area(
+                        "remote-connection-empty",
+                        surface.flex_none(),
+                        &self.remote_empty_scroll,
+                        &self.remote_empty_scrollbar,
+                        window,
+                        cx,
                     )
                     .into_any_element()
+                }
             };
         let connection_placeholder: Option<gpui_kit::AnyElement> = if side == PaneSide::Remote {
             match tab_state.map(|tab| &tab.connection) {
                 Some(ConnectionState::Empty) => {
-                    let theme = cx.theme();
-                    let connect_action = div()
-                        .id("connect-remote")
+                    let theme = cx.theme().clone();
+                    let focus = window
+                        .use_keyed_state("connect-remote", cx, |_, cx| cx.focus_handle())
+                        .read(cx)
+                        .clone();
+                    let focused = focus.is_focused(window);
+                    let connect_action = gpui_kit::base::Button::new("connect-remote")
+                        // app_actions.rs excludes this context from OpenSelectedEntry.
+                        .key_context("ConnectionEntry")
+                        .track_focus(&focus)
+                        .on_mouse_down(gpui_kit::MouseButton::Left, move |_, window, cx| {
+                            window.focus(&focus, cx);
+                            cx.stop_propagation();
+                        })
+                        .accessibility_label("Connect to Server")
+                        .debug_selector(|| "connect-remote".into())
                         .flex()
                         .items_center()
                         .justify_between()
                         .w(px(160.0))
                         .h(px(34.0))
                         .px_3()
+                        .relative()
                         .rounded_md()
+                        .border_1()
+                        .border_color(if focused {
+                            theme.colors.border_focused
+                        } else {
+                            theme.colors.accent
+                        })
+                        .line_height(gpui_kit::relative(1.25))
                         .cursor_pointer()
                         .bg(theme.colors.accent)
                         .text_size(px(13.0))
                         .text_color(theme.colors.background)
                         .hover(|style| style.opacity(0.9))
+                        .active(|style| style.opacity(0.8))
+                        .when(focused, |button| {
+                            button.child(
+                                div()
+                                    .absolute()
+                                    .top(-theme.sizes.button_focus_ring - px(1.0))
+                                    .left(-theme.sizes.button_focus_ring - px(1.0))
+                                    .right(-theme.sizes.button_focus_ring - px(1.0))
+                                    .bottom(-theme.sizes.button_focus_ring - px(1.0))
+                                    .border(theme.sizes.button_focus_ring)
+                                    .rounded(px(8.0))
+                                    .border_color(gpui_kit::Hsla {
+                                        a: 0.5,
+                                        ..theme.colors.border_focused
+                                    }),
+                            )
+                        })
                         .child("Connect…")
                         .child(div().opacity(0.6).child("⌘⇧R"))
                         .on_click(cx.listener(|workspace, _event, window, cx| {
@@ -775,9 +819,10 @@ impl crate::workspace::Workspace {
                         }))
                         .into_any_element();
                     Some(remote_empty_with_recents(
-                        None,
-                        None,
+                        Some("Connect to a server".into()),
+                        Some("Choose a saved connection or enter server details.".into()),
                         vec![connect_action],
+                        window,
                         cx,
                     ))
                 }
@@ -842,6 +887,7 @@ impl crate::workspace::Workspace {
                         connect_button("reconnect-remote", "Reconnect (⌘⇧R)").into_any_element(),
                         edit_connection_button("edit-connection-disconnected").into_any_element(),
                     ],
+                    window,
                     cx,
                 )),
                 Some(ConnectionState::Disconnected { .. }) => Some(remote_empty_with_recents(
@@ -851,6 +897,7 @@ impl crate::workspace::Workspace {
                         connect_button("reconnect-remote", "Reconnect (⌘⇧R)").into_any_element(),
                         edit_connection_button("edit-connection-disconnected").into_any_element(),
                     ],
+                    window,
                     cx,
                 )),
                 Some(ConnectionState::Failed { error }) => Some(
@@ -1002,7 +1049,9 @@ impl crate::workspace::Workspace {
                     workspace.handle_inline_edit_key(event, window, cx);
                     return;
                 }
-                workspace.handle_filter_key(side, event, window, cx);
+                if workspace.pane_focus(side).is_focused(window) {
+                    workspace.handle_filter_key(side, event, window, cx);
+                }
             }))
             .when(side == PaneSide::Local, |pane| {
                 pane.border_r_1().border_color(theme.colors.border)
@@ -1194,19 +1243,27 @@ impl crate::workspace::Workspace {
                 }
                 pane.child(banner)
             })
-            .child(div().flex_1().min_h_0().relative().child(list).child(
-                macsftp_ui::Scrollbar::vertical_uniform(
-                    if side == PaneSide::Local {
-                        "local-file-scrollbar"
-                    } else {
-                        "remote-file-scrollbar"
-                    },
-                    self.scroll_handle(side),
-                    self.pane_scrollbar(side),
-                    window,
-                    cx,
-                ),
-            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .debug_selector(move || format!("{list_container_id}-viewport"))
+                    .child(list)
+                    .child(macsftp_ui::Scrollbar::vertical_uniform(
+                        if side == PaneSide::Local {
+                            "local-file-scrollbar"
+                        } else {
+                            "remote-file-scrollbar"
+                        },
+                        self.scroll_handle(side),
+                        self.pane_scrollbar(side),
+                        window,
+                        cx,
+                    )),
+            )
     }
     pub(crate) fn render_about(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         if !self.modal_inputs.about_open {

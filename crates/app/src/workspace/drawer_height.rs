@@ -1,7 +1,7 @@
 use gpui_kit::{Context, IntoElement, Pixels, Render, Styled, Window, div, px};
 
-/// Default open height (matches former `max_h(240)`).
-pub(crate) const DEFAULT_DRAWER_HEIGHT: Pixels = px(240.0);
+/// Keep the queue visible without taking half of a short window.
+pub(crate) const DEFAULT_DRAWER_HEIGHT: Pixels = px(160.0);
 /// Smallest allowed height: handle + one header row (list may be empty).
 pub(crate) const MIN_DRAWER_HEIGHT: Pixels = px(40.0);
 /// Absolute ceiling regardless of window size.
