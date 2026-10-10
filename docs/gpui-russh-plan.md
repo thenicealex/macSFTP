@@ -246,7 +246,8 @@ Profile 写入只有一个产品入口：Settings → Saved Connections 将编�
 ## 12. UI 约束
 
 - app/ui 共同使用 workspace 锁定的 `gpui-pre` snapshot，组件和 GPUI 类型不能来自不同版本；
-- 每个生产窗口以 `gpui-component::Root` 承载 `Workspace`，Root 只管理组件浮层和交互；事件分发、远程编辑清理和会话 checkpoint 必须读取其中的 Workspace，不能仅按窗口根类型筛选；
+- Base 迁移第一阶段固定 `gpui-base` / `gpui-component` 0.7.1 和 GPUI snapshot 0.3.8：窗口 Root、输入编辑状态、事件和编辑 action 直接来自 Base；控件绘制、主题投影、assets 和 Component 初始化保持现有实现。输入状态与 Root 原本即由 Component 重新导出，直接引用不能重新创建 Entity、改变业务状态所有权或丢失生命周期回调；
+- 每个生产窗口以 `gpui-base::Root` 承载 `Workspace`，Root 只管理组件浮层和交互；事件分发、远程编辑清理和会话 checkpoint 必须读取其中的 Workspace，不能仅按窗口根类型筛选；
 - `Theme::install` 从 macSFTP 的主题 token 派生组件主题，明暗切换只通过该入口更新，避免两套视觉系统独立演化；
 - 普通输入和按钮使用 `gpui-component`：Connect、Saved Connections、路径跳转、重命名、文件/Profile 筛选和 command palette 的普通文本编辑复用组件 Entity；虚拟文件列表、自定义滚动条和安全 modal 的业务决策保留现有实现；
 - 表单草稿仍由 Workspace 持有；`PlainInput` 仅保留选区、撤销和 IME 编辑状态，Change 事件写回草稿，程序修改草稿时只在文本不同的情况下同步控件；关闭 surface 时释放相应绑定，替换表单或冲突请求后旧控件事件必须被忽略；

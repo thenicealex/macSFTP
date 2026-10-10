@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use gpui::{Context, ElementId, IntoElement, Window};
-use gpui_component::input::InputEvent;
+use gpui_base::input::InputEvent;
 use macsftp_core::ConflictRequestId;
 use macsftp_ui::{PlainInput, plain_text_field};
 

@@ -12,7 +12,7 @@ use crate::theme::ActiveTheme;
 /// Programmatic draft changes synchronize only when text differs, preserving
 /// selection, undo history, and IME composition through unrelated redraws.
 pub struct PlainInput {
-    state: Entity<gpui_component::input::InputState>,
+    state: Entity<gpui_base::input::InputState>,
     _subscription: Subscription,
 }
 
@@ -24,14 +24,14 @@ impl PlainInput {
         cx: &mut Context<V>,
         on_event: impl Fn(
             &mut V,
-            &Entity<gpui_component::input::InputState>,
-            &gpui_component::input::InputEvent,
+            &Entity<gpui_base::input::InputState>,
+            &gpui_base::input::InputEvent,
             &mut Window,
             &mut Context<V>,
         ) + 'static,
     ) -> Self {
         let state = cx.new(|cx| {
-            gpui_component::input::InputState::new(window, cx)
+            gpui_base::input::InputState::new(window, cx)
                 .placeholder(placeholder)
                 .default_value(value.to_string())
         });
@@ -42,7 +42,7 @@ impl PlainInput {
         }
     }
 
-    pub fn state(&self) -> &Entity<gpui_component::input::InputState> {
+    pub fn state(&self) -> &Entity<gpui_base::input::InputState> {
         &self.state
     }
 

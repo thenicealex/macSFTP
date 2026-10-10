@@ -4175,6 +4175,7 @@ dependencies = [
 name = "macsftp-app"
 version = "0.3.0"
 dependencies = [
+ "gpui-base",
  "gpui-component",
  "gpui-kit-assets",
  "gpui-pre",
@@ -4255,6 +4256,7 @@ dependencies = [
 name = "macsftp-ui"
 version = "0.3.0"
 dependencies = [
+ "gpui-base",
  "gpui-component",
  "gpui-pre",
  "macsftp-core",

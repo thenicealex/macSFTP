@@ -216,7 +216,7 @@ fn init_workspace_with_paths(
     let window = cx.add_window(|window, cx| {
         let workspace =
             cx.new(|cx| Workspace::new(client, window_session_id, restore_snapshot, window, cx));
-        gpui_component::Root::new(workspace, window, cx)
+        gpui_base::Root::new(workspace, window, cx)
     });
     let workspace = window
         .root(cx)
@@ -5061,7 +5061,7 @@ fn replaced_connect_form_ignores_changes_from_its_old_component(cx: &mut TestApp
     });
     old_input.update_in(&mut cx, |input, window, cx| {
         input.set_value("stale.example", window, cx);
-        cx.emit(gpui_component::input::InputEvent::Change);
+        cx.emit(gpui_base::input::InputEvent::Change);
     });
     workspace.read_with(&cx, |workspace, _| {
         assert_eq!(

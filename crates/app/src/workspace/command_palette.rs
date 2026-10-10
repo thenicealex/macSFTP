@@ -279,13 +279,13 @@ impl Workspace {
                     div()
                         .key_context("CommandPalette")
                         .capture_action(cx.listener(
-                            |workspace, _: &gpui_component::input::MoveUp, _window, cx| {
+                            |workspace, _: &gpui_base::input::MoveUp, _window, cx| {
                                 cx.stop_propagation();
                                 workspace.move_palette_selection(-1, cx);
                             },
                         ))
                         .capture_action(cx.listener(
-                            |workspace, _: &gpui_component::input::MoveDown, _window, cx| {
+                            |workspace, _: &gpui_base::input::MoveDown, _window, cx| {
                                 cx.stop_propagation();
                                 workspace.move_palette_selection(1, cx);
                             },

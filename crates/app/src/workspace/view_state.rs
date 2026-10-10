@@ -242,7 +242,7 @@ pub(crate) struct SettingsUi {
     pub(crate) profile_filter_focused: bool,
     /// Settings → General external-editor override field. Committed to config
     /// on every edit (empty → None).
-    pub(crate) external_editor_input: gpui::Entity<gpui_component::input::InputState>,
+    pub(crate) external_editor_input: gpui::Entity<gpui_base::input::InputState>,
     _external_editor_subscription: gpui::Subscription,
     /// Selected profile in Settings → Profiles (None when the list is empty).
     pub(crate) selected_profile_id: Option<macsftp_core::ProfileId>,
@@ -260,7 +260,7 @@ pub(crate) struct SettingsUi {
 
 impl SettingsUi {
     pub(crate) fn new(
-        external_editor_input: gpui::Entity<gpui_component::input::InputState>,
+        external_editor_input: gpui::Entity<gpui_base::input::InputState>,
         external_editor_subscription: gpui::Subscription,
     ) -> Self {
         Self {

@@ -1,5 +1,5 @@
 use gpui::{AnyWindowHandle, App, Context, Global, Task, Window, WindowHandle};
-use gpui_component::Root;
+use gpui_base::Root;
 use macsftp_core::{
     AppCommand, AppEvent, ConflictRequest, EditPhase, EditSessionId, LocalPath, ProfileId,
     RemotePath, RemoteSnapshot, TabId, Timestamp, TransferConflictPrompt, TransferDirection,
@@ -592,7 +592,7 @@ pub fn present_orphaned_transfer_conflicts(cx: &mut App) {
     }
 }
 
-/// Routes events to application content even when the component Root owns the window.
+/// Routes events to application content even when the Base Root owns the window.
 #[derive(Clone, Copy)]
 pub(crate) enum WorkspaceWindow {
     Content(WindowHandle<Workspace>),
@@ -683,7 +683,8 @@ fn conflict_prompt(conflict: ConflictRequest) -> TransferConflictPrompt {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{TestAppContext, WindowHandle};
+    use gpui::{AppContext as _, TestAppContext, WindowHandle};
+    use gpui_base::Root;
     use macsftp_core::{
         AppCommand, AppEvent, AuthCredential, ConflictPolicy, ConflictRequestId, ConnectionKey,
         ConnectionPoolIdentity, ConnectionSettings, ConnectionState, EditCheckId, EditPhase,
@@ -1242,12 +1243,16 @@ mod tests {
         let channels = BridgeChannels::new(&RuntimeBridgeConfig::default());
         let first_client = RuntimeClient::new(channels.command_tx.clone());
         let second_client = RuntimeClient::new(channels.command_tx.clone());
-        let first = cx.add_window(|window, cx| {
-            Workspace::new(first_client, WindowSessionId(1), None, window, cx)
-        });
-        let second = cx.add_window(|window, cx| {
-            Workspace::new(second_client, WindowSessionId(2), None, window, cx)
-        });
+        let first = super::WorkspaceWindow::Root(cx.add_window(|window, cx| {
+            let workspace =
+                cx.new(|cx| Workspace::new(first_client, WindowSessionId(1), None, window, cx));
+            Root::new(workspace, window, cx)
+        }));
+        let second = super::WorkspaceWindow::Root(cx.add_window(|window, cx| {
+            let workspace =
+                cx.new(|cx| Workspace::new(second_client, WindowSessionId(2), None, window, cx));
+            Root::new(workspace, window, cx)
+        }));
 
         let now = Timestamp::from_secs_since_epoch(10);
         let plan_id = TransferPlanId(1);
@@ -1329,9 +1334,8 @@ mod tests {
                 (second, first)
             }
         });
-        owner
-            .update(cx, |_workspace, window, _cx| window.remove_window())
-            .expect("owner window should close");
+        cx.update(|cx| owner.update(cx, |_workspace, window, _cx| window.remove_window()))
+            .expect("Base Root owner window should close");
         cx.update(present_orphaned_transfer_conflicts);
         assert!(cx.read(|cx| {
             survivor
