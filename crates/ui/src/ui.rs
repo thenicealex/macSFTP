@@ -18,8 +18,8 @@ pub use file_list::{
 };
 pub use icon::{ICON_SIZE, IconName, icon};
 pub use input::{
-    InputKeyResult, InputState, PlainInput, SecretInputState, TextFieldModel, plain_text_field,
-    text_field,
+    InputKeyResult, InputState, OrdinaryTextField, PlainInput, SecretInputState, TextFieldModel,
+    ordinary_text_field, plain_text_field, text_field,
 };
 pub use scrollbar::{
     MIN_THUMB, Scrollbar, ScrollbarState, ThumbGeometry, scroll_area, thumb_geometry,

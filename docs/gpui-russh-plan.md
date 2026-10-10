@@ -249,9 +249,11 @@ Profile 写入只有一个产品入口：Settings → Saved Connections 将编�
 - Base 迁移第一阶段固定 `gpui-base` / `gpui-component` 0.7.1 和 GPUI snapshot 0.3.8：窗口 Root、输入编辑状态、事件和编辑 action 直接来自 Base；控件绘制、主题投影、assets 和 Component 初始化保持现有实现。输入状态与 Root 原本即由 Component 重新导出，直接引用不能重新创建 Entity、改变业务状态所有权或丢失生命周期回调；
 - 每个生产窗口以 `gpui-base::Root` 承载 `Workspace`，Root 只管理组件浮层和交互；事件分发、远程编辑清理和会话 checkpoint 必须读取其中的 Workspace，不能仅按窗口根类型筛选；
 - `Theme::install` 从 macSFTP 的主题 token 派生组件主题，明暗切换只通过该入口更新，避免两套视觉系统独立演化；
-- 普通输入和按钮使用 `gpui-component`：Connect、Saved Connections、路径跳转、重命名、文件/Profile 筛选和 command palette 的普通文本编辑复用组件 Entity；虚拟文件列表、自定义滚动条和安全 modal 的业务决策保留现有实现；
+- Base 迁移第二阶段由 `ui::OrdinaryTextField` 使用 `gpui-base::InputBase` / `Input` 绘制所有普通输入：Settings 外部编辑器、Connect、Saved Connections、路径跳转、重命名、新建目录、文件/Profile 筛选和 command palette 均复用原来的 Base Entity。macSFTP theme 拥有输入框尺寸、内边距、边框、焦点环、占位符、光标和选区色；保持冻结的 Component Small 实际紧凑尺寸（13px UI 字体下高度 19.5px），不读取 Component 输入外观 token。按钮、assets、初始化及其他控件仍保留 Component；
+- 输入右键菜单的 native/fallback presenter 暂留 `gpui-component`，仅通过 `show_input_context_menu` 接入；编辑 action、可编辑性及可复制性由 Base 提供，第三阶段再迁移 presenter。禁用/只读状态保存在 Base Entity，绘制不能重置；无障碍 Focus / SetValue 使用同一编辑状态，SetValue 必须发出 Change 并执行原有业务更新；
 - 表单草稿仍由 Workspace 持有；`PlainInput` 仅保留选区、撤销和 IME 编辑状态，Change 事件写回草稿，程序修改草稿时只在文本不同的情况下同步控件；关闭 surface 时释放相应绑定，替换表单或冲突请求后旧控件事件必须被忽略；
-- Connect/Profile 表单的 Tab 使用 scoped action 跨普通和敏感字段移动实际焦点，普通字段的 Enter 通过组件 `PressEnter` 转发原有提交入口；端口、路径、名称及认证校验仍由原有业务入口统一执行，无效提交不能清空草稿；
+- Connect/Profile 表单的 Tab 使用 scoped action 跨普通和敏感字段移动实际焦点，普通字段的 Enter 通过 Base `PressEnter` 转发原有提交入口；端口、路径、名称及认证校验仍由原有业务入口统一执行，无效提交不能清空草稿；
+- 密码、私钥 passphrase 和 keyboard-interactive answer 保留不可 Clone 的 `SecretInputState` 及清零路径，不进入普通 Base 输入或其撤销/剪贴板状态；
 - 第一屏是可操作的文件工作区；
 - 目录列表必须虚拟化，10k entries 不创建长期 row entity；
 - 可滚动 surface 使用统一的 theme-aware scrollbar；虚拟列表和普通 scroll container 分别绑定各自 handle，但共享 overflow、drag、track paging 和 resize 语义；

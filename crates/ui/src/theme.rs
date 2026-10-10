@@ -20,6 +20,8 @@ pub struct Theme {
 
 impl Global for Theme {}
 
+const UI_FONT_SIZE: f32 = 13.0;
+
 #[derive(Debug, Clone, Copy)]
 pub struct ThemeColors {
     /// Main working area behind file lists.
@@ -34,6 +36,10 @@ pub struct ThemeColors {
     pub text: Hsla,
     pub text_muted: Hsla,
     pub text_disabled: Hsla,
+    // Preserve the Component 0.7.1 input palette while owning its presentation.
+    pub input_placeholder: Hsla,
+    pub input_caret: Hsla,
+    pub input_selection: Hsla,
     pub element_hover: Hsla,
     pub element_active: Hsla,
     /// Selected rows and tabs; accent-tinted, low alpha.
@@ -70,9 +76,25 @@ pub struct ThemeSizes {
     pub status_bar_height: Pixels,
     /// Width of the custom scrollbar (track + thumb).
     pub scrollbar_width: Pixels,
+    pub input_height: Pixels,
+    pub input_text_size: Pixels,
+    pub input_padding_x: Pixels,
+    pub input_padding_y: Pixels,
+    pub input_radius: Pixels,
+    pub input_focus_ring: Pixels,
 }
 
 impl Theme {
+    pub fn input_background(&self, disabled: bool) -> Hsla {
+        let mut background = self.colors.background;
+        if disabled {
+            background.a *= 0.4;
+        } else if self.appearance == Appearance::Dark {
+            background.a *= 0.3;
+        }
+        background
+    }
+
     /// Keep component tokens derived from the application's visual system.
     pub fn install(self, cx: &mut App) {
         if !cx.has_global::<gpui_component::Theme>() {
@@ -86,13 +108,16 @@ impl Theme {
         gpui_component::Theme::update(cx, |component| {
             component.font_family = self.fonts.ui_family.clone();
             component.mono_font_family = self.fonts.mono_family.clone();
-            component.font_size = px(13.0);
-            component.radius = px(3.0);
+            component.font_size = px(UI_FONT_SIZE);
+            component.radius = self.sizes.input_radius;
             component.shadow = false;
             component.colors.background = self.colors.background;
             component.colors.foreground = self.colors.text;
             component.colors.border = self.colors.border;
             component.colors.input = self.colors.background;
+            component.colors.muted_foreground = self.colors.input_placeholder;
+            component.colors.caret = self.colors.input_caret;
+            component.colors.selection = self.colors.input_selection;
             component.colors.ring = self.colors.border_focused;
             component.colors.primary = self.colors.accent;
             component.colors.primary_foreground = self.colors.background;
@@ -119,6 +144,9 @@ impl Theme {
                 text: rgb(0xabb2bf).into(),
                 text_muted: rgb(0x828997).into(),
                 text_disabled: rgb(0x5c6370).into(),
+                input_placeholder: rgb(0xa3a3a3).into(),
+                input_caret: rgb(0xfafafa).into(),
+                input_selection: rgb(0x1d4ed8).into(),
                 element_hover: hsla(0.0, 0.0, 1.0, 0.04),
                 element_active: hsla(0.0, 0.0, 1.0, 0.08),
                 element_selected: hsla(214.0 / 360.0, 0.6, 0.6, 0.16),
@@ -150,6 +178,9 @@ impl Theme {
                 text: rgb(0x383a42).into(),
                 text_muted: rgb(0x696c77).into(),
                 text_disabled: rgb(0xa0a1a7).into(),
+                input_placeholder: rgb(0x737373).into(),
+                input_caret: rgb(0x0a0a0a).into(),
+                input_selection: rgb(0x55a0fc).into(),
                 element_hover: hsla(0.0, 0.0, 0.0, 0.04),
                 element_active: hsla(0.0, 0.0, 0.0, 0.08),
                 element_selected: hsla(214.0 / 360.0, 0.55, 0.5, 0.14),
@@ -201,6 +232,13 @@ fn default_sizes() -> ThemeSizes {
         transfer_row_height: px(44.0),
         status_bar_height: px(26.0),
         scrollbar_width: px(10.0),
+        // Match the rendered Component Small input (1.5rem at the 13px UI font).
+        input_height: px(UI_FONT_SIZE * 1.5),
+        input_text_size: px(UI_FONT_SIZE * 0.875),
+        input_padding_x: px(8.0),
+        input_padding_y: px(2.0),
+        input_radius: px(3.0),
+        input_focus_ring: px(3.0),
     }
 }
 

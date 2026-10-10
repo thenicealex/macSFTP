@@ -1,14 +1,20 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Context, ElementId, Entity, EntityInputHandler as _, Focusable as _,
-    InteractiveElement, IntoElement, Keystroke, ParentElement, SharedString, Styled, Subscription,
-    Window, div, px,
+    AccessibleAction, App, AppContext as _, Context, ElementId, Entity, EntityInputHandler as _,
+    Focusable as _, InteractiveElement, IntoElement, Keystroke, MouseButton, ParentElement,
+    RenderOnce, Role, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, div,
+    px, relative,
 };
+use gpui_base::{
+    InputBase,
+    input::{InputEditorStyle, InputState as BaseInputState},
+};
+use std::rc::Rc;
 use zeroize::Zeroize;
 
 use crate::theme::ActiveTheme;
 
-/// Retains component editing state while the caller owns the authoritative draft.
+/// Retains Base editing state while the caller owns the authoritative draft.
 /// Programmatic draft changes synchronize only when text differs, preserving
 /// selection, undo history, and IME composition through unrelated redraws.
 pub struct PlainInput {
@@ -70,17 +76,153 @@ impl PlainInput {
 pub fn plain_text_field(
     id: impl Into<ElementId>,
     input: &PlainInput,
-    cx: &App,
+    _cx: &App,
 ) -> impl IntoElement {
-    use gpui_component::Sizable as _;
-    let theme = cx.theme();
-    div().id(id).w_full().min_w_0().child(
-        gpui_component::input::Input::new(input.state())
-            .small()
-            .h(px(26.0))
+    ordinary_text_field(id, input.state())
+}
+
+/// Project-owned presentation for a retained Base editing entity.
+#[derive(IntoElement)]
+pub struct OrdinaryTextField {
+    id: ElementId,
+    state: Entity<BaseInputState>,
+}
+
+pub fn ordinary_text_field(
+    id: impl Into<ElementId>,
+    state: &Entity<BaseInputState>,
+) -> OrdinaryTextField {
+    OrdinaryTextField {
+        id: id.into(),
+        state: state.clone(),
+    }
+}
+
+impl RenderOnce for OrdinaryTextField {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        self.state.update(cx, |state, _| {
+            state.set_editor_style(InputEditorStyle {
+                foreground: theme.colors.text,
+                muted_foreground: theme.colors.input_placeholder,
+                background: theme.input_background(state.presentation().is_disabled()),
+                border: theme.colors.border,
+                selection: theme.colors.input_selection,
+                caret: theme.colors.input_caret,
+                ..Default::default()
+            });
+            state.on_context_menu(Rc::new(show_input_context_menu));
+        });
+        let state = self.state.read(cx);
+        let disabled = state.presentation().is_disabled();
+        let editable = state.is_editable();
+        let focused = state.focus_handle(cx).is_focused(window) && !disabled;
+        let focus = state.focus_handle(cx);
+        let placeholder = state.presentation().placeholder().clone();
+        let value = window.is_a11y_active().then(|| state.value());
+        let mouse_state = self.state.clone();
+        let focus_state = self.state.clone();
+        let value_state = self.state.clone();
+        InputBase::new(self.id)
+            .focused(focused)
+            .disabled(disabled)
+            .when(disabled, |field| {
+                field.capture_any_mouse_down(|_, _, cx| cx.stop_propagation())
+            })
+            .role(Role::TextInput)
+            .track_focus(&focus)
+            .when(!placeholder.is_empty(), |field| {
+                field
+                    .aria_label(placeholder.clone())
+                    .aria_placeholder(placeholder)
+            })
+            .when_some(value, |field, value| field.aria_value(value))
+            .on_a11y_action(AccessibleAction::Focus, move |_, window, cx| {
+                focus_state.update(cx, |state, cx| {
+                    if !state.presentation().is_disabled() {
+                        state.focus(window, cx);
+                    }
+                });
+            })
+            .when(editable, |field| {
+                field.on_a11y_action(AccessibleAction::SetValue, move |data, window, cx| {
+                    if let Some(gpui::accesskit::ActionData::Value(value)) = data {
+                        value_state.update(cx, |state, cx| {
+                            if state.is_editable() {
+                                let length = state.value().encode_utf16().count();
+                                state.replace_text_in_range(Some(0..length), value, window, cx);
+                            }
+                        });
+                    }
+                })
+            })
+            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                mouse_state.update(cx, |state, cx| {
+                    if !state.presentation().is_disabled() {
+                        state.focus(window, cx);
+                    }
+                });
+            })
+            .relative()
+            .flex()
+            .w_full()
+            .min_w_0()
+            .items_center()
+            .h(theme.sizes.input_height)
+            .px(theme.sizes.input_padding_x)
+            .py(theme.sizes.input_padding_y)
+            .text_size(theme.sizes.input_text_size)
+            .line_height(relative(1.25))
+            .font_family(theme.fonts.ui_family.clone())
+            .bg(theme.input_background(disabled))
+            .rounded(theme.sizes.input_radius)
             .border_1()
-            .border_color(theme.colors.border),
-    )
+            .border_color(if focused {
+                theme.colors.border_focused
+            } else {
+                theme.colors.border
+            })
+            .when(focused, |field| {
+                field.child(
+                    div()
+                        .absolute()
+                        .top(-theme.sizes.input_focus_ring - px(1.0))
+                        .left(-theme.sizes.input_focus_ring - px(1.0))
+                        .right(-theme.sizes.input_focus_ring - px(1.0))
+                        .bottom(-theme.sizes.input_focus_ring - px(1.0))
+                        .border(theme.sizes.input_focus_ring)
+                        .rounded(theme.sizes.input_radius + theme.sizes.input_focus_ring)
+                        .border_color(gpui::Hsla {
+                            a: 0.5,
+                            ..theme.colors.border_focused
+                        }),
+                )
+            })
+            .child(gpui_base::Input::new(&self.state))
+    }
+}
+
+// Component still owns the native/fallback presenter until stage 3. Keep this
+// boundary independent of the project's input appearance and Base edit state.
+fn show_input_context_menu(
+    _menu: gpui_base::input::NativeMenu,
+    capabilities: gpui_base::input::InputContextMenuCapabilities,
+    position: gpui::Point<gpui::Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    use gpui_base::input::{Copy, Cut, Paste, SelectAll};
+    gpui_component::native_menu::NativeMenu::new()
+        .menu_with_disabled(
+            "Cut",
+            !(capabilities.is_editable() && capabilities.is_copyable()),
+            Box::new(Cut),
+        )
+        .menu_with_disabled("Copy", !capabilities.is_copyable(), Box::new(Copy))
+        .menu_with_disabled("Paste", !capabilities.is_editable(), Box::new(Paste))
+        .separator()
+        .menu("Select All", Box::new(SelectAll))
+        .show(position, window, cx);
 }
 
 /// Pure single-line draft state. Ordinary fields render through `PlainInput`;
@@ -380,6 +522,7 @@ impl TextFieldModel<'_> {
 
 #[cfg(test)]
 mod tests {
+    use gpui::AppContext as _;
     use gpui::Keystroke;
 
     use super::{InputKeyResult, InputState, SecretInputState};
@@ -392,6 +535,79 @@ mod tests {
         let mut keystroke = key(&character.to_string());
         keystroke.key_char = Some(character.to_string());
         keystroke
+    }
+
+    struct InputComparison {
+        base: gpui::Entity<gpui_base::input::InputState>,
+        component: gpui::Entity<gpui_base::input::InputState>,
+    }
+
+    impl gpui::Render for InputComparison {
+        fn render(
+            &mut self,
+            window: &mut gpui::Window,
+            cx: &mut gpui::Context<Self>,
+        ) -> impl gpui::IntoElement {
+            use crate::theme::ActiveTheme as _;
+            use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
+            use gpui_component::Sizable as _;
+            window.set_rem_size(gpui::px(13.0));
+            gpui::div()
+                .flex()
+                .flex_col()
+                .w_full()
+                .child(
+                    gpui::div()
+                        .debug_selector(|| "base-input".into())
+                        .child(super::ordinary_text_field("base-field", &self.base)),
+                )
+                // Frozen stage-1 reference; production must not use this renderer.
+                .child(
+                    gpui::div()
+                        .debug_selector(|| "component-input".into())
+                        .child(
+                            gpui_component::input::Input::new(&self.component)
+                                .small()
+                                .h(gpui::px(26.0))
+                                .border_1()
+                                .border_color(cx.theme().colors.border),
+                        ),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn ordinary_input_preserves_frozen_component_bounds_in_narrow_windows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| crate::theme::Theme::one_dark().install(cx));
+        let (view, cx) = cx.add_window_view(|window, cx| InputComparison {
+            base: cx.new(|cx| gpui_base::input::InputState::new(window, cx)),
+            component: cx.new(|cx| gpui_base::input::InputState::new(window, cx)),
+        });
+        for theme in [
+            crate::theme::Theme::one_dark(),
+            crate::theme::Theme::one_light(),
+        ] {
+            cx.update(|_window, cx| {
+                theme.install(cx);
+                view.update(cx, |_view, cx| cx.notify());
+            });
+            for width in [160.0, 480.0] {
+                cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(160.0)));
+                cx.run_until_parked();
+                let base = cx
+                    .debug_bounds("base-input")
+                    .expect("Base input must be rendered");
+                let component = cx
+                    .debug_bounds("component-input")
+                    .expect("frozen Component reference must be rendered");
+                assert_eq!(
+                    base.size, component.size,
+                    "migration must preserve compact input bounds"
+                );
+            }
+        }
     }
 
     #[test]
