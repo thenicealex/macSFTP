@@ -246,11 +246,16 @@ Profile 写入只有一个产品入口：Settings → Saved Connections 将编�
 ## 12. UI 约束
 
 - app/ui 共同使用 workspace 锁定的 `gpui-pre` snapshot，组件和 GPUI 类型不能来自不同版本；
-- 每个生产窗口以 `gpui-component::Root` 承载 `Workspace`，Root 只管理组件浮层和交互；事件分发、远程编辑清理和会话 checkpoint 必须读取其中的 Workspace，不能仅按窗口根类型筛选；
-- `Theme::install` 从 macSFTP 的主题 token 派生组件主题，明暗切换只通过该入口更新，避免两套视觉系统独立演化；
-- 普通输入和按钮使用 `gpui-component`：Connect、Saved Connections、路径跳转、重命名、文件/Profile 筛选和 command palette 的普通文本编辑复用组件 Entity；虚拟文件列表、自定义滚动条和安全 modal 的业务决策保留现有实现；
+- Base 迁移第一阶段固定 `gpui-base` / `gpui-component` 0.7.1 和 GPUI snapshot 0.3.8：窗口 Root、输入编辑状态、事件和编辑 action 直接来自 Base；控件绘制、主题投影、assets 和 Component 初始化保持现有实现。输入状态与 Root 原本即由 Component 重新导出，直接引用不能重新创建 Entity、改变业务状态所有权或丢失生命周期回调；
+- 每个生产窗口以 `gpui-base::Root` 承载 `Workspace`，Root 只管理组件浮层和交互；事件分发、远程编辑清理和会话 checkpoint 必须读取其中的 Workspace，不能仅按窗口根类型筛选；
+- `Theme::install` 从 macSFTP 的主题 token 派生 Base 语义主题，并刷新所有窗口；项目的 `WindowPresentation` Root 插件统一设置 13px rem、字体、背景和文字色，明暗切换只通过该入口更新；
+- Base 迁移第二阶段由 `ui::OrdinaryTextField` 使用 `gpui-base::InputBase` / `Input` 绘制所有普通输入：Settings 外部编辑器、Connect、Saved Connections、路径跳转、重命名、新建目录、文件/Profile 筛选和 command palette 均复用原来的 Base Entity。macSFTP theme 拥有输入框尺寸、内边距、边框、焦点环、占位符、光标和选区色；保持冻结的 Component Small 实际紧凑尺寸（13px UI 字体下高度 19.5px），不读取 Component 输入外观 token。按钮绘制、初始化和主题在第三阶段转到 Base；
+- 输入右键菜单使用 Base 的 `NativeMenu` 模型和编辑 action；`macsftp-native-menu` 仅呈现 macOS AppKit 菜单，不持有输入 Entity 或业务草稿。用户已授权该独立适配器的 `src/macos.rs` 包含必要 unsafe：crate 默认 deny，其余 workspace crate 继续继承 forbid，架构检查强制该边界。NSView 在释放 GPUI Window 借用前被 retain，AppKit tracking loop 在 foreground task 中执行且不持有 GPUI update 借用；呈现前检查窗口/焦点，返回后只向仍存在且焦点未变的窗口派发 action，并在取消后刷新窗口。非 macOS 返回明确 Unsupported 错误；macSFTP 当前产品只支持 macOS；
+- Base 迁移第三阶段的 `IconButton` / `TextButton` 使用 `gpui-base::Button` 保留 keyed focus、Enter/Space、Tab、无障碍 label 和禁用行为；macSFTP theme 拥有按钮尺寸、圆角、文字和焦点环，鼠标点击保留 pane/input 焦点。图标按钮保持冻结实现的实际 26×22px 尺寸；tooltip 使用现有项目 `Tooltip`，不再读取 Component 按钮样式。Component 及 gpui-kit-assets 依赖已移除，Root 窗口默认值由项目插件提供；Assets 仅加载项目嵌入图标，未知资源返回 None，缺失资源不能回退到另一套控件资源；
+- unsafe 边界检查递归扫描 native-menu 的 Rust 源文件，只允许规范路径 `src/macos.rs` 和唯一 macOS-gated module 例外；拒绝其他 unsafe 语法、lint 覆盖、外部 include/path 和符号链接模块。回归 fixture 覆盖嵌套路径、unsafe fn/impl/extern/attribute、注释与字面量。菜单调度层使用真实 GPUI 窗口更新验证关闭、焦点变更及重复取消；OS tracking loop 在测试中替换，原生界面截图见 `docs/visual-evidence/gpui-base/README.md`；
 - 表单草稿仍由 Workspace 持有；`PlainInput` 仅保留选区、撤销和 IME 编辑状态，Change 事件写回草稿，程序修改草稿时只在文本不同的情况下同步控件；关闭 surface 时释放相应绑定，替换表单或冲突请求后旧控件事件必须被忽略；
-- Connect/Profile 表单的 Tab 使用 scoped action 跨普通和敏感字段移动实际焦点，普通字段的 Enter 通过组件 `PressEnter` 转发原有提交入口；端口、路径、名称及认证校验仍由原有业务入口统一执行，无效提交不能清空草稿；
+- Connect/Profile 表单的 Tab 使用 scoped action 跨普通和敏感字段移动实际焦点，普通字段的 Enter 通过 Base `PressEnter` 转发原有提交入口；端口、路径、名称及认证校验仍由原有业务入口统一执行，无效提交不能清空草稿；
+- 密码、私钥 passphrase 和 keyboard-interactive answer 保留不可 Clone 的 `SecretInputState` 及清零路径，不进入普通 Base 输入或其撤销/剪贴板状态；
 - 第一屏是可操作的文件工作区；
 - 目录列表必须虚拟化，10k entries 不创建长期 row entity；
 - 可滚动 surface 使用统一的 theme-aware scrollbar；虚拟列表和普通 scroll container 分别绑定各自 handle，但共享 overflow、drag、track paging 和 resize 语义；

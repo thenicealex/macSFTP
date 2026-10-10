@@ -162,7 +162,7 @@ fn main() {
         }
     });
     app.run(|cx: &mut App| {
-        gpui_component::init(cx);
+        macsftp_ui::init(cx);
         app_actions::init(cx);
 
         // Host trust files (plan §10): read the user's known_hosts if
@@ -325,7 +325,7 @@ fn main() {
 fn open_workspace_window(
     cx: &mut App,
     restore_session: Option<SessionWindowSnapshot>,
-) -> gpui::Result<WindowHandle<gpui_component::Root>> {
+) -> gpui::Result<WindowHandle<gpui_base::Root>> {
     let runtime_client = {
         let handle = cx.global::<RuntimeHandle>();
         let controller = handle
@@ -379,7 +379,7 @@ fn open_workspace_window(
                     cx,
                 )
             });
-            cx.new(|cx| gpui_component::Root::new(workspace, window, cx))
+            cx.new(|cx| gpui_base::Root::new(workspace, window, cx))
         },
     )?;
     cx.global_mut::<SessionCoordinator>()

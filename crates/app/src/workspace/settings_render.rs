@@ -3,11 +3,10 @@ use gpui::{
     Context, FontWeight, IntoElement, ParentElement, Styled, Window, WindowControlArea, div,
     prelude::*, px,
 };
-use gpui_component::{Sizable, input::Input};
 use macsftp_core::{AuthMethodKind, ConnectionRoute};
 use macsftp_ui::{
-    ActiveTheme, IconName, InputState, TextFieldModel, empty_state, icon, plain_text_field,
-    text_button, text_field, text_tooltip,
+    ActiveTheme, IconName, InputState, TextFieldModel, empty_state, icon, ordinary_text_field,
+    plain_text_field, text_button, text_field, text_tooltip,
 };
 use tracing::warn;
 
@@ -181,8 +180,7 @@ impl crate::workspace::Workspace {
                                         .on_click(cx.listener(|workspace, _event, window, cx| {
                                             workspace.focus_external_editor(window, cx);
                                         }))
-                                        .child(Input::new(&self.settings.external_editor_input)
-                                            .small().h(px(26.0)).border_1().border_color(theme.colors.border)),
+                                        .child(ordinary_text_field("settings-external-editor-input", &self.settings.external_editor_input)),
                                 ),
                         )
                         .child(div().h(px(1.0)).bg(theme.colors.border))

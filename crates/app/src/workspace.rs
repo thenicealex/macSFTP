@@ -123,7 +123,7 @@ impl Workspace {
                 .clone()
                 .unwrap_or_default();
             cx.new(|cx| {
-                gpui_component::input::InputState::new(window, cx)
+                gpui_base::input::InputState::new(window, cx)
                     .placeholder("Default app")
                     .default_value(current)
             })
@@ -132,7 +132,7 @@ impl Workspace {
             &external_editor_input,
             window,
             |workspace, _input, event, _window, cx| {
-                if matches!(event, gpui_component::input::InputEvent::Change) {
+                if matches!(event, gpui_base::input::InputEvent::Change) {
                     workspace.commit_external_editor(cx);
                     cx.notify();
                 }

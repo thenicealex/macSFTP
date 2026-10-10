@@ -124,7 +124,7 @@ fn collect_session(cx: &App) -> SessionFile {
             let snapshot = if let Some(workspace) = window.downcast::<Workspace>() {
                 workspace.read(cx).ok()?.build_session_snapshot()
             } else {
-                let root = window.downcast::<gpui_component::Root>()?;
+                let root = window.downcast::<gpui_base::Root>()?;
                 let workspace = root
                     .read(cx)
                     .ok()?
@@ -233,7 +233,8 @@ fn release_closed_window_sessions(cx: &mut App, snapshot: &SessionFile) {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{TestAppContext, WindowHandle};
+    use gpui::{AppContext as _, TestAppContext, WindowHandle};
+    use gpui_base::Root;
     use macsftp_core::{LocalPath, RemotePath, RuntimeBridgeConfig, WindowSessionId};
     use macsftp_platform::AppPaths;
     use macsftp_sftp::{BridgeChannels, RuntimeClient};
@@ -248,7 +249,7 @@ mod tests {
     fn setup_two_windows(
         cx: &mut TestAppContext,
         label: &str,
-    ) -> (AppPaths, WindowHandle<Workspace>, WindowHandle<Workspace>) {
+    ) -> (AppPaths, WindowHandle<Root>, WindowHandle<Root>) {
         let app_paths = test_app_paths(label);
         let config = ConfigStore::with_defaults(app_paths.config_file.clone());
         let mut coordinator =
@@ -269,26 +270,44 @@ mod tests {
         let first_client = RuntimeClient::new(channels.command_tx.clone());
         let second_client = RuntimeClient::new(channels.command_tx);
         let first = cx.add_window(|window, cx| {
-            Workspace::new(first_client, WindowSessionId(10), None, window, cx)
+            let workspace =
+                cx.new(|cx| Workspace::new(first_client, WindowSessionId(10), None, window, cx));
+            Root::new(workspace, window, cx)
         });
         let second = cx.add_window(|window, cx| {
-            Workspace::new(second_client, WindowSessionId(20), None, window, cx)
+            let workspace =
+                cx.new(|cx| Workspace::new(second_client, WindowSessionId(20), None, window, cx));
+            Root::new(workspace, window, cx)
         });
 
         first
-            .update(cx, |workspace, _window, _cx| {
-                let tab = workspace.active_tab_mut().expect("first default tab");
-                tab.title = "first.example".into();
-                tab.local.path = Some(LocalPath::new("/tmp/first"));
-                tab.remote.path = Some(RemotePath::new("/srv/first"));
+            .update(cx, |root, _window, cx| {
+                let workspace = root
+                    .view()
+                    .clone()
+                    .downcast::<Workspace>()
+                    .expect("Base Root must retain Workspace content");
+                workspace.update(cx, |workspace, _cx| {
+                    let tab = workspace.active_tab_mut().expect("first default tab");
+                    tab.title = "first.example".into();
+                    tab.local.path = Some(LocalPath::new("/tmp/first"));
+                    tab.remote.path = Some(RemotePath::new("/srv/first"));
+                });
             })
             .expect("first workspace should be open");
         second
-            .update(cx, |workspace, _window, _cx| {
-                let tab = workspace.active_tab_mut().expect("second default tab");
-                tab.title = "second.example".into();
-                tab.local.path = Some(LocalPath::new("/tmp/second"));
-                tab.remote.path = Some(RemotePath::new("/srv/second"));
+            .update(cx, |root, _window, cx| {
+                let workspace = root
+                    .view()
+                    .clone()
+                    .downcast::<Workspace>()
+                    .expect("Base Root must retain Workspace content");
+                workspace.update(cx, |workspace, _cx| {
+                    let tab = workspace.active_tab_mut().expect("second default tab");
+                    tab.title = "second.example".into();
+                    tab.local.path = Some(LocalPath::new("/tmp/second"));
+                    tab.remote.path = Some(RemotePath::new("/srv/second"));
+                });
             })
             .expect("second workspace should be open");
 
@@ -317,8 +336,15 @@ mod tests {
         assert_eq!(saved.file().windows[1].tabs[0].title, "second.example");
 
         first
-            .update(cx, |workspace, window, _cx| {
-                workspace.active_tab_mut().expect("first tab").title = "late-change".into();
+            .update(cx, |root, window, cx| {
+                let workspace = root
+                    .view()
+                    .clone()
+                    .downcast::<Workspace>()
+                    .expect("Base Root must retain Workspace content until close");
+                workspace.update(cx, |workspace, _cx| {
+                    workspace.active_tab_mut().expect("first tab").title = "late-change".into();
+                });
                 window.remove_window();
             })
             .expect("first window should close");

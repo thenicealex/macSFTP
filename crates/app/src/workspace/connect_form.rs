@@ -1,5 +1,5 @@
 use gpui::{App, Context, KeyDownEvent, SharedString, Window};
-use gpui_component::input::InputEvent;
+use gpui_base::input::InputEvent;
 use macsftp_core::{
     AuthCredential, AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionSettings, ProfileId,
     ResolvedConnectionRoute,

@@ -216,7 +216,7 @@ fn init_workspace_with_paths(
     let window = cx.add_window(|window, cx| {
         let workspace =
             cx.new(|cx| Workspace::new(client, window_session_id, restore_snapshot, window, cx));
-        gpui_component::Root::new(workspace, window, cx)
+        gpui_base::Root::new(workspace, window, cx)
     });
     let workspace = window
         .root(cx)
@@ -5035,6 +5035,84 @@ fn ordinary_input_preserves_ime_composition_across_parent_redraw(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn ordinary_input_theme_change_preserves_composition_and_focus(cx: &mut TestAppContext) {
+    use gpui::EntityInputHandler as _;
+    use gpui::Focusable as _;
+    let (workspace, mut cx, _) = init_workspace(cx);
+    cx.dispatch_action(OpenSettings);
+    let input = workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.focus_external_editor(window, cx);
+        workspace.settings.external_editor_input.clone()
+    });
+    input.update_in(&mut cx, |input, window, cx| {
+        input.replace_and_mark_text_in_range(None, "zhong", None, window, cx);
+    });
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.set_appearance(AppearancePreference::Light, window, cx);
+    });
+    input.update_in(&mut cx, |input, window, cx| {
+        assert!(input.focus_handle(cx).is_focused(window));
+        assert!(
+            input.marked_text_range(window, cx).is_some(),
+            "theme repaint must preserve preedit"
+        );
+        input.replace_text_in_range(None, "中文", window, cx);
+    });
+    workspace.read_with(&cx, |_workspace, cx| {
+        assert_eq!(
+            cx.resources().config.config().external_editor.as_deref(),
+            Some("中文")
+        );
+    });
+}
+
+#[gpui::test]
+fn ordinary_input_readonly_and_disabled_survive_parent_redraw(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _) = init_workspace(cx);
+    cx.dispatch_action(OpenSettings);
+    let input = workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.focus_external_editor(window, cx);
+        workspace.settings.external_editor_input.clone()
+    });
+    cx.simulate_input("vim");
+    input.update(&mut cx, |input, cx| input.set_readonly(true, cx));
+    workspace.update(&mut cx, |_workspace, cx| cx.notify());
+    cx.simulate_keystrokes("cmd-a cmd-c backspace");
+    cx.simulate_input("replacement");
+    cx.update(|_window, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("vim".into()),
+            "read-only fields remain copyable"
+        );
+    });
+    input.read_with(&cx, |input, _| assert_eq!(input.value(), "vim"));
+    input.update(&mut cx, |input, cx| {
+        input.set_readonly(false, cx);
+        input.set_disabled(true, cx);
+    });
+    workspace.update(&mut cx, |_workspace, cx| cx.notify());
+    cx.simulate_keystrokes("backspace cmd-v");
+    cx.simulate_input("replacement");
+    input.read_with(&cx, |input, _| {
+        assert!(
+            input.presentation().is_disabled(),
+            "rendering must not reset disabled state"
+        );
+        assert_eq!(input.value(), "vim");
+    });
+    input.update(&mut cx, |input, cx| input.set_disabled(false, cx));
+    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_input("code");
+    workspace.read_with(&cx, |_workspace, cx| {
+        assert_eq!(
+            cx.resources().config.config().external_editor.as_deref(),
+            Some("code")
+        );
+    });
+}
+
+#[gpui::test]
 fn replaced_connect_form_ignores_changes_from_its_old_component(cx: &mut TestAppContext) {
     use crate::workspace::connect_form::{ConnectField, ConnectForm};
     let (workspace, mut cx, _) = init_workspace(cx);
@@ -5061,7 +5139,7 @@ fn replaced_connect_form_ignores_changes_from_its_old_component(cx: &mut TestApp
     });
     old_input.update_in(&mut cx, |input, window, cx| {
         input.set_value("stale.example", window, cx);
-        cx.emit(gpui_component::input::InputEvent::Change);
+        cx.emit(gpui_base::input::InputEvent::Change);
     });
     workspace.read_with(&cx, |workspace, _| {
         assert_eq!(

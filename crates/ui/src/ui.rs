@@ -18,14 +18,14 @@ pub use file_list::{
 };
 pub use icon::{ICON_SIZE, IconName, icon};
 pub use input::{
-    InputKeyResult, InputState, PlainInput, SecretInputState, TextFieldModel, plain_text_field,
-    text_field,
+    InputKeyResult, InputState, OrdinaryTextField, PlainInput, SecretInputState, TextFieldModel,
+    ordinary_text_field, plain_text_field, text_field,
 };
 pub use scrollbar::{
     MIN_THUMB, Scrollbar, ScrollbarState, ThumbGeometry, scroll_area, thumb_geometry,
 };
 pub use tab::{Tab, tab};
-pub use theme::{ActiveTheme, Appearance, Theme, ThemeColors, ThemeFonts, ThemeSizes};
+pub use theme::{ActiveTheme, Appearance, Theme, ThemeColors, ThemeFonts, ThemeSizes, init};
 pub use transfer_row::{TransferRow, transfer_row};
 pub use workspace_widgets::{
     DragPreview, connection_status, copy_name, section_header_static, transfer_title,

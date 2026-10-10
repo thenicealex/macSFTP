@@ -7,7 +7,7 @@ all-features = true
 
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2024-0384", reason = "gpui-base/gpui-component 0.7.1 transitive UI timing dependency; this advisory reports unmaintained status rather than a specific vulnerability, and macOS Instant/SystemTime alias std::time, so current assessed risk is low. Reassess on the next gpui-component upgrade; remove this exception once instant is absent from Cargo.lock." },
+    { id = "RUSTSEC-2024-0384", reason = "gpui-base 0.7.1 transitive UI timing dependency; this advisory reports unmaintained status rather than a specific vulnerability, and macOS Instant/SystemTime alias std::time, so current assessed risk is low. Reassess on the next gpui-base upgrade; remove this exception once instant is absent from Cargo.lock." },
     { id = "RUSTSEC-2024-0436", reason = "GPUI transitive dependency; no maintained paste replacement is selectable from macSFTP" },
     { id = "RUSTSEC-2025-0052", reason = "GPUI HTTP transitive dependency; remove when GPUI no longer depends on async-std" },
     { id = "RUSTSEC-2025-0134", reason = "GPUI HTTP transitive dependency; remove when GPUI migrates to rustls-pki-types PEM APIs" },

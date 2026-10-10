@@ -49,3 +49,8 @@ if [[ -n "$direct_keychain_access" ]]; then
     echo "$direct_keychain_access" >&2
     exit 1
 fi
+
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_unsafe_boundary.py
+python3 scripts/check_unsafe_boundary.py
+
+assert_no_direct_dependency macsftp-native-menu macsftp-app macsftp-ui macsftp-core macsftp-sftp macsftp-storage macsftp-platform russh russh-sftp tokio
