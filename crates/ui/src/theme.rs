@@ -76,6 +76,14 @@ pub struct ThemeSizes {
     pub status_bar_height: Pixels,
     /// Width of the custom scrollbar (track + thumb).
     pub scrollbar_width: Pixels,
+    pub button_height: Pixels,
+    pub button_min_width: Pixels,
+    pub button_text_size: Pixels,
+    pub button_padding_x: Pixels,
+    pub button_radius: Pixels,
+    pub button_focus_ring: Pixels,
+    pub icon_button_width: Pixels,
+    pub icon_button_height: Pixels,
     pub input_height: Pixels,
     pub input_text_size: Pixels,
     pub input_padding_x: Pixels,
@@ -95,40 +103,46 @@ impl Theme {
         background
     }
 
-    /// Keep component tokens derived from the application's visual system.
+    /// Project tokens are the single source for Base behavior and presentation.
     pub fn install(self, cx: &mut App) {
-        if !cx.has_global::<gpui_component::Theme>() {
-            gpui_component::init(cx);
-        }
-        let mode = match self.appearance {
-            Appearance::Dark => gpui_component::ThemeMode::Dark,
-            Appearance::Light => gpui_component::ThemeMode::Light,
+        init(cx);
+        let colors = gpui_base::ColorTokens {
+            background: self.colors.background,
+            foreground: self.colors.text,
+            surface: self.colors.elevated_surface,
+            surface_foreground: self.colors.text,
+            primary: self.colors.accent,
+            primary_foreground: self.colors.background,
+            secondary: self.colors.surface,
+            secondary_foreground: self.colors.text,
+            muted: self.colors.surface,
+            muted_foreground: self.colors.input_placeholder,
+            accent: self.colors.element_hover,
+            accent_foreground: self.colors.text,
+            destructive: self.colors.error,
+            destructive_foreground: self.colors.background,
+            border: self.colors.border,
+            input: self.colors.background,
+            ring: self.colors.border_focused,
+            selection: self.colors.input_selection,
         };
-        gpui_component::Theme::change(mode, None, cx);
-        gpui_component::Theme::update(cx, |component| {
-            component.font_family = self.fonts.ui_family.clone();
-            component.mono_font_family = self.fonts.mono_family.clone();
-            component.font_size = px(UI_FONT_SIZE);
-            component.radius = self.sizes.input_radius;
-            component.shadow = false;
-            component.colors.background = self.colors.background;
-            component.colors.foreground = self.colors.text;
-            component.colors.border = self.colors.border;
-            component.colors.input = self.colors.background;
-            component.colors.muted_foreground = self.colors.input_placeholder;
-            component.colors.caret = self.colors.input_caret;
-            component.colors.selection = self.colors.input_selection;
-            component.colors.ring = self.colors.border_focused;
-            component.colors.primary = self.colors.accent;
-            component.colors.primary_foreground = self.colors.background;
-            component.colors.danger = self.colors.error;
-            component.colors.danger_foreground = self.colors.background;
-            component.colors.button = self.colors.surface;
-            component.colors.button_foreground = self.colors.text;
-            component.colors.button_hover = self.colors.element_hover;
-            component.colors.button_active = self.colors.element_active;
+        let mut tokens = gpui_base::SemanticThemeTokens {
+            colors,
+            ..Default::default()
+        };
+        tokens.typography.md.size = px(UI_FONT_SIZE);
+        tokens.typography.sans = self.fonts.ui_family.clone();
+        tokens.typography.mono = self.fonts.mono_family.clone();
+        cx.set_global(gpui_base::Theme {
+            appearance: match self.appearance {
+                Appearance::Dark => gpui_base::ThemeAppearance::Dark,
+                Appearance::Light => gpui_base::ThemeAppearance::Light,
+            },
+            tokens,
+            ..Default::default()
         });
         cx.set_global(self);
+        cx.refresh_windows();
     }
 
     /// One Dark is the default palette for every dark appearance mode.
@@ -232,6 +246,15 @@ fn default_sizes() -> ThemeSizes {
         transfer_row_height: px(44.0),
         status_bar_height: px(26.0),
         scrollbar_width: px(10.0),
+        button_height: px(26.0),
+        button_min_width: px(UI_FONT_SIZE * 1.5),
+        button_text_size: px(UI_FONT_SIZE * 0.875),
+        button_padding_x: px(UI_FONT_SIZE * 0.75),
+        button_radius: px(UI_FONT_SIZE * 0.25),
+        button_focus_ring: px(3.0),
+        // Component expands the 22px icon control to fit its padded 16px child.
+        icon_button_width: px(26.0),
+        icon_button_height: px(22.0),
         // Match the rendered Component Small input (1.5rem at the 13px UI font).
         input_height: px(UI_FONT_SIZE * 1.5),
         input_text_size: px(UI_FONT_SIZE * 0.875),
@@ -253,8 +276,101 @@ impl ActiveTheme for App {
     }
 }
 
+struct UiInitialized;
+impl Global for UiInitialized {}
+
+/// Register window defaults once, before constructing any Base Root.
+pub fn init(cx: &mut App) {
+    if cx.has_global::<UiInitialized>() {
+        return;
+    }
+    gpui_base::init(cx);
+    gpui_base::Root::register_plugin::<WindowPresentation>(cx, |_, _| WindowPresentation);
+    cx.set_global(UiInitialized);
+}
+
+struct WindowPresentation;
+
+impl gpui::Render for WindowPresentation {
+    fn render(
+        &mut self,
+        _window: &mut gpui::Window,
+        _cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
+        gpui::div()
+    }
+}
+
+impl gpui_base::RootPlugin for WindowPresentation {
+    fn prepare(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+        window.set_rem_size(px(UI_FONT_SIZE));
+        gpui_base::TextSelection::activate_scope(Default::default(), window, cx);
+    }
+
+    fn style(
+        &self,
+        surface: &mut gpui::Stateful<gpui::Div>,
+        _window: &mut gpui::Window,
+        cx: &mut App,
+    ) {
+        use gpui::Styled as _;
+        let theme = cx.theme();
+        use gpui::Refineable as _;
+        surface.style().refine(
+            &gpui::StyleRefinement::default()
+                .font_family(theme.fonts.ui_family.clone())
+                .text_size(px(UI_FONT_SIZE))
+                .bg(theme.colors.background)
+                .text_color(theme.colors.text),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[gpui::test]
+    fn root_defaults_follow_theme_across_two_windows(cx: &mut gpui::TestAppContext) {
+        use gpui::{AppContext as _, ParentElement as _};
+        struct Content;
+        impl gpui::Render for Content {
+            fn render(
+                &mut self,
+                _window: &mut gpui::Window,
+                _cx: &mut gpui::Context<Self>,
+            ) -> impl gpui::IntoElement {
+                gpui::div().child("window content")
+            }
+        }
+        cx.update(|cx| super::Theme::one_dark().install(cx));
+        let first = cx.add_window(|window, cx| {
+            let content = cx.new(|_| Content);
+            gpui_base::Root::new(content, window, cx)
+        });
+        let second = cx.add_window(|window, cx| {
+            let content = cx.new(|_| Content);
+            gpui_base::Root::new(content, window, cx)
+        });
+        for theme in [super::Theme::one_light(), super::Theme::one_dark()] {
+            let expected = theme.colors.background;
+            cx.update(|cx| theme.install(cx));
+            for handle in [first, second] {
+                let handle: gpui::AnyWindowHandle = handle.into();
+                handle
+                    .update(cx, |_, window, cx| {
+                        window.draw(cx).clear(cx);
+                        assert_eq!(window.rem_size(), gpui::px(super::UI_FONT_SIZE));
+                        let base = cx.global::<gpui_base::Theme>();
+                        assert_eq!(base.tokens.colors.background, expected);
+                        assert_eq!(
+                            base.tokens.typography.md.size,
+                            gpui::px(super::UI_FONT_SIZE)
+                        );
+                    })
+                    .expect("both open Root windows must render after a theme switch");
+            }
+        }
+    }
+
     use gpui::{WindowAppearance, px, rgb};
 
     use super::{Appearance, Theme};

@@ -202,17 +202,16 @@ impl RenderOnce for OrdinaryTextField {
     }
 }
 
-// Component still owns the native/fallback presenter until stage 3. Keep this
-// boundary independent of the project's input appearance and Base edit state.
+// Base owns the menu model; the isolated macOS adapter owns only presentation.
 fn show_input_context_menu(
-    _menu: gpui_base::input::NativeMenu,
+    menu: gpui_base::input::NativeMenu,
     capabilities: gpui_base::input::InputContextMenuCapabilities,
     position: gpui::Point<gpui::Pixels>,
     window: &mut Window,
     cx: &mut App,
 ) {
     use gpui_base::input::{Copy, Cut, Paste, SelectAll};
-    gpui_component::native_menu::NativeMenu::new()
+    let menu = menu
         .menu_with_disabled(
             "Cut",
             !(capabilities.is_editable() && capabilities.is_copyable()),
@@ -221,8 +220,10 @@ fn show_input_context_menu(
         .menu_with_disabled("Copy", !capabilities.is_copyable(), Box::new(Copy))
         .menu_with_disabled("Paste", !capabilities.is_editable(), Box::new(Paste))
         .separator()
-        .menu("Select All", Box::new(SelectAll))
-        .show(position, window, cx);
+        .menu("Select All", Box::new(SelectAll));
+    if let Err(error) = macsftp_native_menu::show(menu, position, window, cx) {
+        tracing::warn!(%error, "could not show native input menu");
+    }
 }
 
 /// Pure single-line draft state. Ordinary fields render through `PlainInput`;
@@ -537,12 +538,11 @@ mod tests {
         keystroke
     }
 
-    struct InputComparison {
+    struct InputHarness {
         base: gpui::Entity<gpui_base::input::InputState>,
-        component: gpui::Entity<gpui_base::input::InputState>,
     }
 
-    impl gpui::Render for InputComparison {
+    impl gpui::Render for InputHarness {
         fn render(
             &mut self,
             window: &mut gpui::Window,
@@ -550,29 +550,12 @@ mod tests {
         ) -> impl gpui::IntoElement {
             use crate::theme::ActiveTheme as _;
             use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
-            use gpui_component::Sizable as _;
-            window.set_rem_size(gpui::px(13.0));
-            gpui::div()
-                .flex()
-                .flex_col()
-                .w_full()
-                .child(
-                    gpui::div()
-                        .debug_selector(|| "base-input".into())
-                        .child(super::ordinary_text_field("base-field", &self.base)),
-                )
-                // Frozen stage-1 reference; production must not use this renderer.
-                .child(
-                    gpui::div()
-                        .debug_selector(|| "component-input".into())
-                        .child(
-                            gpui_component::input::Input::new(&self.component)
-                                .small()
-                                .h(gpui::px(26.0))
-                                .border_1()
-                                .border_color(cx.theme().colors.border),
-                        ),
-                )
+            window.set_rem_size(cx.theme().sizes.input_text_size / 0.875);
+            gpui::div().flex().flex_col().w_full().child(
+                gpui::div()
+                    .debug_selector(|| "base-input".into())
+                    .child(super::ordinary_text_field("base-field", &self.base)),
+            )
         }
     }
 
@@ -581,9 +564,8 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|cx| crate::theme::Theme::one_dark().install(cx));
-        let (view, cx) = cx.add_window_view(|window, cx| InputComparison {
+        let (view, cx) = cx.add_window_view(|window, cx| InputHarness {
             base: cx.new(|cx| gpui_base::input::InputState::new(window, cx)),
-            component: cx.new(|cx| gpui_base::input::InputState::new(window, cx)),
         });
         for theme in [
             crate::theme::Theme::one_dark(),
@@ -599,11 +581,10 @@ mod tests {
                 let base = cx
                     .debug_bounds("base-input")
                     .expect("Base input must be rendered");
-                let component = cx
-                    .debug_bounds("component-input")
-                    .expect("frozen Component reference must be rendered");
+                // Stage-2 comparison measured this actual compact height.
                 assert_eq!(
-                    base.size, component.size,
+                    base.size,
+                    gpui::size(gpui::px(width), gpui::px(19.5)),
                     "migration must preserve compact input bounds"
                 );
             }

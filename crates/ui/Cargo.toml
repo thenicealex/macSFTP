@@ -13,7 +13,8 @@ path = "src/ui.rs"
 [dependencies]
 gpui.workspace = true
 gpui-base.workspace = true
-gpui-component.workspace = true
+macsftp-native-menu = { path = "../native-menu" }
+tracing = "0.1"
 macsftp-core = { path = "../core" }
 zeroize = "1"
 

@@ -162,7 +162,7 @@ fn main() {
         }
     });
     app.run(|cx: &mut App| {
-        gpui_component::init(cx);
+        macsftp_ui::init(cx);
         app_actions::init(cx);
 
         // Host trust files (plan §10): read the user's known_hosts if
