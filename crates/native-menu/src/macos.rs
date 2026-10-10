@@ -71,36 +71,9 @@ pub fn show(
         .ok_or_else(|| io::Error::other("could not retain native menu view"))?;
     let window_handle = Window::window_handle(window);
     let owner_focus = window.focused(cx);
-    cx.spawn(async move |cx| {
-        // Check the window still exists before entering AppKit; keep GPUI
-        // entirely unborrowed while AppKit pumps its synchronous tracking loop.
-        match cx.update(|app| {
-            window_handle.update(app, |_, window, app| window.focused(app) == owner_focus)
-        }) {
-            Ok(true) => {}
-            Ok(false) => return,
-            Err(error) => {
-                tracing::debug!(%error, "native menu owner closed before presentation");
-                return;
-            }
-        }
-        let action = run_menu(&menu, &view, position, marker);
-        match cx.update(move |app| {
-            window_handle.update(app, |_, window, app| {
-                if window.focused(app) == owner_focus
-                    && let Some(action) = action
-                {
-                    window.dispatch_action(action, app);
-                }
-                // Repaint/re-register mouse handlers even after Escape or dismissal.
-                window.refresh();
-            })
-        }) {
-            Ok(()) => {}
-            Err(error) => tracing::debug!(%error, "native menu owner closed during tracking"),
-        }
-    })
-    .detach();
+    super::schedule_menu(window_handle, owner_focus, cx, move || {
+        run_menu(&menu, &view, position, marker)
+    });
     Ok(())
 }
 

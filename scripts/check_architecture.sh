@@ -50,25 +50,7 @@ if [[ -n "$direct_keychain_access" ]]; then
     exit 1
 fi
 
-# The approved AppKit exception must not weaken any other workspace crate.
-python3 - <<'PY'
-import pathlib
-import re
-import tomllib
-
-root = pathlib.Path.cwd()
-workspace = tomllib.loads((root / "Cargo.toml").read_text())
-assert workspace["workspace"]["lints"]["rust"]["unsafe_code"] == "forbid"
-for member in workspace["workspace"]["members"]:
-    manifest = tomllib.loads((root / member / "Cargo.toml").read_text())
-    if member == "crates/native-menu":
-        assert manifest["lints"]["rust"]["unsafe_code"] == "deny", "native menu must default to deny"
-    else:
-        assert manifest["lints"].get("workspace") is True, f"{member} must inherit unsafe forbid"
-    assert "gpui-component" not in manifest.get("dependencies", {}), f"{member} must not restore Component"
-for source in (root / "crates/native-menu/src").glob("*.rs"):
-    if source.name != "macos.rs":
-        assert not re.search(r"\bunsafe\s*\{|#\[unsafe\(", source.read_text()), f"FFI escaped macos.rs: {source}"
-PY
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_unsafe_boundary.py
+python3 scripts/check_unsafe_boundary.py
 
 assert_no_direct_dependency macsftp-native-menu macsftp-app macsftp-ui macsftp-core macsftp-sftp macsftp-storage macsftp-platform russh russh-sftp tokio
