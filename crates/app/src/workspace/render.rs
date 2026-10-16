@@ -1,5 +1,5 @@
 use crate::workspace::TextInputTarget;
-use gpui::{
+use gpui_kit::{
     AppContext, ClickEvent, Context, FontWeight, IntoElement, ParentElement, SharedString, Styled,
     Window, WindowControlArea, div, prelude::*, px, uniform_list,
 };
@@ -85,7 +85,7 @@ impl crate::workspace::Workspace {
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
+    ) -> Option<gpui_kit::AnyElement> {
         if !self.tab_switcher.open || self.tab_mru.is_empty() {
             return None;
         }
@@ -163,7 +163,7 @@ impl crate::workspace::Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.35))
+                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.35))
                 .child(
                     div()
                         .key_context("TabSwitcher")
@@ -647,7 +647,7 @@ impl crate::workspace::Workspace {
         let remote_empty_with_recents =
             |title: Option<SharedString>,
              detail: Option<SharedString>,
-             actions: Vec<gpui::AnyElement>,
+             actions: Vec<gpui_kit::AnyElement>,
              cx: &mut Context<Self>| {
                 let theme = cx.theme();
                 let rows = recent_rows.clone();
@@ -750,7 +750,7 @@ impl crate::workspace::Workspace {
                     )
                     .into_any_element()
             };
-        let connection_placeholder: Option<gpui::AnyElement> = if side == PaneSide::Remote {
+        let connection_placeholder: Option<gpui_kit::AnyElement> = if side == PaneSide::Remote {
             match tab_state.map(|tab| &tab.connection) {
                 Some(ConnectionState::Empty) => {
                     let theme = cx.theme();
@@ -881,7 +881,7 @@ impl crate::workspace::Workspace {
             })
         };
 
-        let list: gpui::AnyElement = if let Some(placeholder) = connection_placeholder {
+        let list: gpui_kit::AnyElement = if let Some(placeholder) = connection_placeholder {
             placeholder
         } else if entry_count == 0 && is_remote_refreshing {
             loading_state("Loading files…", cx).into_any_element()
@@ -1208,7 +1208,7 @@ impl crate::workspace::Workspace {
                 ),
             ))
     }
-    pub(crate) fn render_about(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_about(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         if !self.modal_inputs.about_open {
             return None;
         }
@@ -1244,7 +1244,7 @@ impl crate::workspace::Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
+                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
                 .child(
                     div()
                         .w(px(340.0))

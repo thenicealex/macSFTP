@@ -10,10 +10,10 @@ pub use macos::show;
 
 #[cfg(not(target_os = "macos"))]
 pub fn show(
-    _menu: gpui_base::input::NativeMenu,
-    _position: gpui::Point<gpui::Pixels>,
-    _window: &mut gpui::Window,
-    _cx: &mut gpui::App,
+    _menu: gpui_kit::base::input::NativeMenu,
+    _position: gpui_kit::Point<gpui_kit::Pixels>,
+    _window: &mut gpui_kit::Window,
+    _cx: &mut gpui_kit::App,
 ) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
@@ -23,12 +23,12 @@ pub fn show(
 
 #[cfg(any(target_os = "macos", test))]
 fn selected_action(
-    menu: &gpui_base::input::NativeMenu,
+    menu: &gpui_kit::base::input::NativeMenu,
     tag: isize,
-) -> Option<Box<dyn gpui::Action>> {
+) -> Option<Box<dyn gpui_kit::Action>> {
     let index = usize::try_from(tag).ok()?;
     match menu.items.get(index)? {
-        gpui_base::input::NativeMenuItem::Action {
+        gpui_kit::base::input::NativeMenuItem::Action {
             action,
             disabled: false,
             ..
@@ -41,10 +41,10 @@ fn selected_action(
 // real GPUI window updates while a deterministic tracker replaces only the OS loop.
 #[cfg(any(target_os = "macos", test))]
 fn schedule_menu(
-    window_handle: gpui::AnyWindowHandle,
-    owner_focus: Option<gpui::FocusHandle>,
-    cx: &gpui::App,
-    track: impl FnOnce() -> Option<Box<dyn gpui::Action>> + 'static,
+    window_handle: gpui_kit::AnyWindowHandle,
+    owner_focus: Option<gpui_kit::FocusHandle>,
+    cx: &gpui_kit::App,
+    track: impl FnOnce() -> Option<Box<dyn gpui_kit::Action>> + 'static,
 ) {
     cx.spawn(async move |cx| {
         // Check the window still exists before entering AppKit; keep GPUI
@@ -81,37 +81,41 @@ fn schedule_menu(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui_base::input::{Copy, Cut, NativeMenu, SelectAll};
+    use gpui_kit::base::input::{Copy, Cut, NativeMenu, SelectAll};
 
-    gpui::actions!(menu_lifecycle, [Activate]);
+    gpui_kit::actions!(menu_lifecycle, [Activate]);
 
     struct LifecycleView {
-        first: gpui::FocusHandle,
-        second: gpui::FocusHandle,
+        first: gpui_kit::FocusHandle,
+        second: gpui_kit::FocusHandle,
         activations: std::rc::Rc<std::cell::Cell<usize>>,
     }
 
-    impl gpui::Render for LifecycleView {
+    impl gpui_kit::Render for LifecycleView {
         fn render(
             &mut self,
-            _: &mut gpui::Window,
-            cx: &mut gpui::Context<Self>,
-        ) -> impl gpui::IntoElement {
-            use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
-            gpui::div()
+            _: &mut gpui_kit::Window,
+            cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            use gpui_kit::{InteractiveElement as _, ParentElement as _, Styled as _};
+            gpui_kit::div()
                 .track_focus(&self.first)
                 .size_full()
                 .on_action(cx.listener(|view, _: &Activate, _, _| {
                     view.activations.set(view.activations.get() + 1)
                 }))
-                .child(gpui::div().track_focus(&self.second).size(gpui::px(20.0)))
+                .child(
+                    gpui_kit::div()
+                        .track_focus(&self.second)
+                        .size(gpui_kit::px(20.0)),
+                )
         }
     }
 
     fn lifecycle_window(
-        cx: &mut gpui::TestAppContext,
+        cx: &mut gpui_kit::TestAppContext,
     ) -> (
-        gpui::WindowHandle<LifecycleView>,
+        gpui_kit::WindowHandle<LifecycleView>,
         std::rc::Rc<std::cell::Cell<usize>>,
     ) {
         let activations = std::rc::Rc::new(std::cell::Cell::new(0));
@@ -130,12 +134,12 @@ mod tests {
         (handle, activations)
     }
 
-    #[gpui::test]
-    fn closed_window_before_presentation_never_enters_tracker(cx: &mut gpui::TestAppContext) {
+    #[gpui_kit::test]
+    fn closed_window_before_presentation_never_enters_tracker(cx: &mut gpui_kit::TestAppContext) {
         let (handle, activations) = lifecycle_window(cx);
         let tracked = std::rc::Rc::new(std::cell::Cell::new(false));
         let captured = tracked.clone();
-        let handle: gpui::AnyWindowHandle = handle.into();
+        let handle: gpui_kit::AnyWindowHandle = handle.into();
         handle
             .update(cx, |_, window, app| {
                 schedule_menu(handle, window.focused(app), app, move || {
@@ -150,10 +154,10 @@ mod tests {
         assert_eq!(activations.get(), 0);
     }
 
-    #[gpui::test]
-    fn window_closed_during_tracking_drops_selected_action(cx: &mut gpui::TestAppContext) {
+    #[gpui_kit::test]
+    fn window_closed_during_tracking_drops_selected_action(cx: &mut gpui_kit::TestAppContext) {
         let (handle, activations) = lifecycle_window(cx);
-        let handle: gpui::AnyWindowHandle = handle.into();
+        let handle: gpui_kit::AnyWindowHandle = handle.into();
         let async_app = cx.to_async();
         handle.update(cx, |_, window, app| {
             schedule_menu(handle, window.focused(app), app, move || {
@@ -170,13 +174,13 @@ mod tests {
         );
     }
 
-    #[gpui::test]
-    fn changed_focus_during_tracking_drops_selected_action(cx: &mut gpui::TestAppContext) {
+    #[gpui_kit::test]
+    fn changed_focus_during_tracking_drops_selected_action(cx: &mut gpui_kit::TestAppContext) {
         let (handle, activations) = lifecycle_window(cx);
         let second = handle
             .read_with(cx, |view, _| view.second.clone())
             .expect("live view must expose its second focus");
-        let handle: gpui::AnyWindowHandle = handle.into();
+        let handle: gpui_kit::AnyWindowHandle = handle.into();
         let async_app = cx.to_async();
         handle
             .update(cx, |_, window, app| {
@@ -196,10 +200,10 @@ mod tests {
         assert_eq!(activations.get(), 0);
     }
 
-    #[gpui::test]
-    fn repeated_cancellation_keeps_the_next_menu_dispatchable(cx: &mut gpui::TestAppContext) {
+    #[gpui_kit::test]
+    fn repeated_cancellation_keeps_the_next_menu_dispatchable(cx: &mut gpui_kit::TestAppContext) {
         let (handle, activations) = lifecycle_window(cx);
-        let handle: gpui::AnyWindowHandle = handle.into();
+        let handle: gpui_kit::AnyWindowHandle = handle.into();
         let tracked = std::rc::Rc::new(std::cell::Cell::new(0));
         for _ in 0..10 {
             let captured = tracked.clone();
@@ -231,21 +235,23 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    #[gpui::test]
-    fn menu_requires_native_main_thread_window_and_empty_is_inert(cx: &mut gpui::TestAppContext) {
+    #[gpui_kit::test]
+    fn menu_requires_native_main_thread_window_and_empty_is_inert(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
         struct Content;
-        impl gpui::Render for Content {
+        impl gpui_kit::Render for Content {
             fn render(
                 &mut self,
-                _: &mut gpui::Window,
-                _: &mut gpui::Context<Self>,
-            ) -> impl gpui::IntoElement {
-                gpui::div()
+                _: &mut gpui_kit::Window,
+                _: &mut gpui_kit::Context<Self>,
+            ) -> impl gpui_kit::IntoElement {
+                gpui_kit::div()
             }
         }
         let (_, cx) = cx.add_window_view(|_, _| Content);
         cx.update(|window, cx| {
-            let position = gpui::point(gpui::px(0.0), gpui::px(0.0));
+            let position = gpui_kit::point(gpui_kit::px(0.0), gpui_kit::px(0.0));
             assert!(show(NativeMenu::new(), position, window, cx).is_ok());
             assert!(
                 show(

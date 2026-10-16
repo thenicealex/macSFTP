@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
-use gpui::{Context, ElementId, IntoElement, Window};
-use gpui_base::input::InputEvent;
+use gpui_kit::base::input::InputEvent;
+use gpui_kit::{Context, ElementId, IntoElement, Window};
 use macsftp_core::ConflictRequestId;
 use macsftp_ui::{PlainInput, plain_text_field};
 
@@ -96,7 +96,7 @@ impl Workspace {
                                     TextInputTarget::ProfileFilter => {
                                         workspace.settings.profile_filter.set_value(value);
                                         workspace.settings.profile_list_scroll =
-                                            gpui::ScrollHandle::new();
+                                            gpui_kit::ScrollHandle::new();
                                     }
                                     TextInputTarget::GoToPath if workspace.go_to_path.open => {
                                         workspace.go_to_path.input.set_value(value);
@@ -202,8 +202,8 @@ impl Workspace {
         &self,
         target: TextInputTarget,
         id: impl Into<ElementId>,
-        cx: &gpui::App,
-    ) -> gpui::AnyElement {
+        cx: &gpui_kit::App,
+    ) -> gpui_kit::AnyElement {
         plain_text_field(
             id,
             self.text_inputs

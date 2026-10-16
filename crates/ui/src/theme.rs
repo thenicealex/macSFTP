@@ -1,4 +1,4 @@
-use gpui::{App, Global, Hsla, Pixels, SharedString, WindowAppearance, hsla, px, rgb};
+use gpui_kit::{App, Global, Hsla, Pixels, SharedString, WindowAppearance, hsla, px, rgb};
 
 /// Which of the two required token sets is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,7 +106,7 @@ impl Theme {
     /// Project tokens are the single source for Base behavior and presentation.
     pub fn install(self, cx: &mut App) {
         init(cx);
-        let colors = gpui_base::ColorTokens {
+        let colors = gpui_kit::base::ColorTokens {
             background: self.colors.background,
             foreground: self.colors.text,
             surface: self.colors.elevated_surface,
@@ -126,17 +126,17 @@ impl Theme {
             ring: self.colors.border_focused,
             selection: self.colors.input_selection,
         };
-        let mut tokens = gpui_base::SemanticThemeTokens {
+        let mut tokens = gpui_kit::base::SemanticThemeTokens {
             colors,
             ..Default::default()
         };
         tokens.typography.md.size = px(UI_FONT_SIZE);
         tokens.typography.sans = self.fonts.ui_family.clone();
         tokens.typography.mono = self.fonts.mono_family.clone();
-        cx.set_global(gpui_base::Theme {
+        cx.set_global(gpui_kit::base::Theme {
             appearance: match self.appearance {
-                Appearance::Dark => gpui_base::ThemeAppearance::Dark,
-                Appearance::Light => gpui_base::ThemeAppearance::Light,
+                Appearance::Dark => gpui_kit::base::ThemeAppearance::Dark,
+                Appearance::Light => gpui_kit::base::ThemeAppearance::Light,
             },
             tokens,
             ..Default::default()
@@ -284,40 +284,40 @@ pub fn init(cx: &mut App) {
     if cx.has_global::<UiInitialized>() {
         return;
     }
-    gpui_base::init(cx);
-    gpui_base::Root::register_plugin::<WindowPresentation>(cx, |_, _| WindowPresentation);
+    gpui_kit::base::init(cx);
+    gpui_kit::base::Root::register_plugin::<WindowPresentation>(cx, |_, _| WindowPresentation);
     cx.set_global(UiInitialized);
 }
 
 struct WindowPresentation;
 
-impl gpui::Render for WindowPresentation {
+impl gpui_kit::Render for WindowPresentation {
     fn render(
         &mut self,
-        _window: &mut gpui::Window,
-        _cx: &mut gpui::Context<Self>,
-    ) -> impl gpui::IntoElement {
-        gpui::div()
+        _window: &mut gpui_kit::Window,
+        _cx: &mut gpui_kit::Context<Self>,
+    ) -> impl gpui_kit::IntoElement {
+        gpui_kit::div()
     }
 }
 
-impl gpui_base::RootPlugin for WindowPresentation {
-    fn prepare(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+impl gpui_kit::base::RootPlugin for WindowPresentation {
+    fn prepare(&mut self, window: &mut gpui_kit::Window, cx: &mut gpui_kit::Context<Self>) {
         window.set_rem_size(px(UI_FONT_SIZE));
-        gpui_base::TextSelection::activate_scope(Default::default(), window, cx);
+        gpui_kit::base::TextSelection::activate_scope(Default::default(), window, cx);
     }
 
     fn style(
         &self,
-        surface: &mut gpui::Stateful<gpui::Div>,
-        _window: &mut gpui::Window,
+        surface: &mut gpui_kit::Stateful<gpui_kit::Div>,
+        _window: &mut gpui_kit::Window,
         cx: &mut App,
     ) {
-        use gpui::Styled as _;
+        use gpui_kit::Styled as _;
         let theme = cx.theme();
-        use gpui::Refineable as _;
+        use gpui_kit::Refineable as _;
         surface.style().refine(
-            &gpui::StyleRefinement::default()
+            &gpui_kit::StyleRefinement::default()
                 .font_family(theme.fonts.ui_family.clone())
                 .text_size(px(UI_FONT_SIZE))
                 .bg(theme.colors.background)
@@ -328,42 +328,42 @@ impl gpui_base::RootPlugin for WindowPresentation {
 
 #[cfg(test)]
 mod tests {
-    #[gpui::test]
-    fn root_defaults_follow_theme_across_two_windows(cx: &mut gpui::TestAppContext) {
-        use gpui::{AppContext as _, ParentElement as _};
+    #[gpui_kit::test]
+    fn root_defaults_follow_theme_across_two_windows(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::{AppContext as _, ParentElement as _};
         struct Content;
-        impl gpui::Render for Content {
+        impl gpui_kit::Render for Content {
             fn render(
                 &mut self,
-                _window: &mut gpui::Window,
-                _cx: &mut gpui::Context<Self>,
-            ) -> impl gpui::IntoElement {
-                gpui::div().child("window content")
+                _window: &mut gpui_kit::Window,
+                _cx: &mut gpui_kit::Context<Self>,
+            ) -> impl gpui_kit::IntoElement {
+                gpui_kit::div().child("window content")
             }
         }
         cx.update(|cx| super::Theme::one_dark().install(cx));
         let first = cx.add_window(|window, cx| {
             let content = cx.new(|_| Content);
-            gpui_base::Root::new(content, window, cx)
+            gpui_kit::base::Root::new(content, window, cx)
         });
         let second = cx.add_window(|window, cx| {
             let content = cx.new(|_| Content);
-            gpui_base::Root::new(content, window, cx)
+            gpui_kit::base::Root::new(content, window, cx)
         });
         for theme in [super::Theme::one_light(), super::Theme::one_dark()] {
             let expected = theme.colors.background;
             cx.update(|cx| theme.install(cx));
             for handle in [first, second] {
-                let handle: gpui::AnyWindowHandle = handle.into();
+                let handle: gpui_kit::AnyWindowHandle = handle.into();
                 handle
                     .update(cx, |_, window, cx| {
                         window.draw(cx).clear(cx);
-                        assert_eq!(window.rem_size(), gpui::px(super::UI_FONT_SIZE));
-                        let base = cx.global::<gpui_base::Theme>();
+                        assert_eq!(window.rem_size(), gpui_kit::px(super::UI_FONT_SIZE));
+                        let base = cx.global::<gpui_kit::base::Theme>();
                         assert_eq!(base.tokens.colors.background, expected);
                         assert_eq!(
                             base.tokens.typography.md.size,
-                            gpui::px(super::UI_FONT_SIZE)
+                            gpui_kit::px(super::UI_FONT_SIZE)
                         );
                     })
                     .expect("both open Root windows must render after a theme switch");
@@ -371,7 +371,7 @@ mod tests {
         }
     }
 
-    use gpui::{WindowAppearance, px, rgb};
+    use gpui_kit::{WindowAppearance, px, rgb};
 
     use super::{Appearance, Theme};
 

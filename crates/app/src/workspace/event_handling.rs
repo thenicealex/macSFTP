@@ -1,4 +1,4 @@
-use gpui::{Context, UniformListScrollHandle, Window};
+use gpui_kit::{Context, UniformListScrollHandle, Window};
 use macsftp_core::{
     AppEvent, EditSessionId, ErrorCode, ModalRequest, RemotePath, RemoteSnapshot,
     RestoredTabTarget, TabId, UserFacingError, sort_entries,

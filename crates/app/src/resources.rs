@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use gpui::{App, Global};
+use gpui_kit::{App, Global};
 use macsftp_core::{
     AppEvent, EditSessionStore, LocalPath, TabId, Timestamp, TransferId, TransferState,
     TransferStore,

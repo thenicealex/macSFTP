@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use gpui::{
+use gpui_kit::{
     Context, FontWeight, IntoElement, KeyDownEvent, ParentElement, SharedString, Styled, Window,
     div, prelude::*, px,
 };
@@ -484,7 +484,7 @@ impl crate::workspace::Workspace {
     pub(crate) fn render_go_to_path_modal(
         &self,
         cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
+    ) -> Option<gpui_kit::AnyElement> {
         if !self.go_to_path.open {
             return None;
         }
@@ -503,7 +503,7 @@ impl crate::workspace::Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
+                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
                 .child(
                     div()
                         .key_context("GoToPath")
@@ -566,7 +566,7 @@ impl crate::workspace::Workspace {
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
+    ) -> Option<gpui_kit::AnyElement> {
         let form = self.connect_form_ui.form.as_ref()?;
         let theme = cx.theme().clone();
 
@@ -1014,7 +1014,7 @@ impl crate::workspace::Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
+                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
                 .child(card)
                 .into_any_element(),
         )
@@ -1064,7 +1064,7 @@ impl crate::workspace::Workspace {
     pub(crate) fn render_keyboard_interactive_modal(
         &self,
         cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
+    ) -> Option<gpui_kit::AnyElement> {
         let prompt = self.active_keyboard_interactive_prompt()?.clone();
         let inputs = self
             .modal_inputs
@@ -1174,13 +1174,16 @@ impl crate::workspace::Workspace {
                 .items_center()
                 .justify_center()
                 .p_4()
-                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
+                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
                 .child(card)
                 .into_any_element(),
         )
     }
 
-    pub(crate) fn render_host_key_modal(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_host_key_modal(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::AnyElement> {
         let prompt = self.active_host_key_prompt()?.clone();
         let theme = cx.theme().clone();
         let request_id = prompt.request_id;
@@ -1220,7 +1223,7 @@ impl crate::workspace::Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
+                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
                 .child(
                     div()
                         .key_context("HostKeyModal")
@@ -1294,7 +1297,7 @@ impl crate::workspace::Workspace {
     pub(crate) fn render_transfer_conflict_modal(
         &self,
         cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
+    ) -> Option<gpui_kit::AnyElement> {
         let prompt = self.active_transfer_conflict_prompt()?.clone();
         let theme = cx.theme().clone();
         let source = match &prompt.source {
@@ -1349,7 +1352,7 @@ impl crate::workspace::Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
+                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
                 .child(
                     div()
                         .key_context("TransferConflictModal")
@@ -1497,7 +1500,7 @@ impl crate::workspace::Workspace {
     pub(crate) fn render_profile_delete_confirm_modal(
         &self,
         cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
+    ) -> Option<gpui_kit::AnyElement> {
         let profile_id = self.settings.profile_delete_confirm?;
         let body = {
             let profile = cx.resources().profiles.find_profile(profile_id)?;
@@ -1574,7 +1577,7 @@ impl crate::workspace::Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
+                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
                 .child(card)
                 .into_any_element(),
         )

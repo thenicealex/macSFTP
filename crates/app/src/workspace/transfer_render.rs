@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use gpui::{
+use gpui_kit::{
     AppContext, Context, CursorStyle, DragMoveEvent, Hsla, IntoElement, MouseButton,
     MouseDownEvent, ParentElement, SharedString, Styled, Window, div, prelude::*, px,
 };

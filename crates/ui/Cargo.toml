@@ -11,15 +11,14 @@ name = "macsftp_ui"
 path = "src/ui.rs"
 
 [dependencies]
-gpui.workspace = true
-gpui-base.workspace = true
+gpui-kit.workspace = true
 macsftp-native-menu = { path = "../native-menu" }
 tracing = "0.1"
 macsftp-core = { path = "../core" }
 zeroize = "1"
 
 [dev-dependencies]
-gpui = { workspace = true, features = ["test-support"] }
+gpui-kit = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

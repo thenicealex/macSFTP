@@ -1,9 +1,9 @@
 # macSFTP
 
-macSFTP is a native macOS SFTP client written in Rust. It uses GPUI for the
-interface, GPUI Base for text editing and control interaction, and
-`russh`/`russh-sftp` for asynchronous SSH and SFTP operations. macSFTP owns its
-compact layout, control styling, themes, and business state.
+macSFTP is a native macOS SFTP client written in Rust. It uses GPUI Kit
+(GPUI, with GPUI Base for text editing and control interaction) for the
+interface, and `russh`/`russh-sftp` for asynchronous SSH and SFTP operations.
+macSFTP owns its compact layout, control styling, themes, and business state.
 
 The project currently targets macOS and builds an unsigned app bundle for local
 testing. Public releases currently provide source only. App Store distribution,
@@ -61,14 +61,13 @@ remote file changed. It does not watch local saves or upload them automatically.
 ## Requirements
 
 - macOS
-- Xcode with the Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`)
+- Xcode
 - Rust `1.96.1` (pinned in `rust-toolchain.toml`) with `rustfmt` and `clippy`
 - Python `3.11` or newer for architecture checks; CI uses Python `3.13`
 - `/usr/sbin/sshd`, `ssh-keygen`, and `ssh-keyscan` for real-session tests
 
-Metal Toolchain is a separate Xcode component. After installing it, verify
-`xcrun -sdk macosx metal --version`. If tool lookup still reports a missing
-component, clear the old lookup cache with `xcrun --kill-cache` and retry.
+Metal shaders compile when the application starts, so the separate Metal
+Toolchain component is no longer required to build macSFTP.
 
 ## Build and verify
 

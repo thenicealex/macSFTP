@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use gpui::{
+use gpui_kit::{
     Context, FontWeight, IntoElement, KeyDownEvent, ParentElement, SharedString, Styled, Window,
     div, prelude::*, px,
 };
@@ -454,7 +454,7 @@ impl crate::workspace::Workspace {
     pub(crate) fn render_delete_confirm_modal(
         &self,
         cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
+    ) -> Option<gpui_kit::AnyElement> {
         let state = self.modal_inputs.delete_confirm.as_ref()?;
         let theme = cx.theme().clone();
         let presentation = delete_confirm_presentation(&state.entries);
@@ -543,7 +543,7 @@ impl crate::workspace::Workspace {
                             .items_center()
                             .justify_center()
                             .rounded_full()
-                            .bg(gpui::hsla(0.0, 0.55, 0.45, 0.15))
+                            .bg(gpui_kit::hsla(0.0, 0.55, 0.45, 0.15))
                             .child(icon(IconName::Trash, theme.colors.error)),
                     )
                     .child(
@@ -647,13 +647,16 @@ impl crate::workspace::Workspace {
                 .items_center()
                 .justify_center()
                 .p_4()
-                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
+                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
                 .child(card)
                 .into_any_element(),
         )
     }
 
-    pub(crate) fn render_context_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+    pub(crate) fn render_context_menu(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::AnyElement> {
         let menu = self.modal_inputs.context_menu.as_ref()?;
         let theme = cx.theme().clone();
         let side = menu.side;
@@ -663,7 +666,7 @@ impl crate::workspace::Workspace {
             .active_tab()
             .is_some_and(|tab| matches!(tab.connection, ConnectionState::Connected { .. }));
 
-        let mut items: Vec<gpui::AnyElement> = Vec::new();
+        let mut items: Vec<gpui_kit::AnyElement> = Vec::new();
         if has_entry {
             items.push(
                 text_button("ctx-rename", "Rename")

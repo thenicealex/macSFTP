@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use gpui::{App, Global};
+use gpui_kit::{App, Global};
 use macsftp_core::{AppCommand, TabId, WindowSessionId};
 use macsftp_sftp::RuntimeClient;
 use macsftp_storage::{SessionFile, SessionStore, SessionWindowSnapshot, StorageError};
@@ -124,7 +124,7 @@ fn collect_session(cx: &App) -> SessionFile {
             let snapshot = if let Some(workspace) = window.downcast::<Workspace>() {
                 workspace.read(cx).ok()?.build_session_snapshot()
             } else {
-                let root = window.downcast::<gpui_base::Root>()?;
+                let root = window.downcast::<gpui_kit::base::Root>()?;
                 let workspace = root
                     .read(cx)
                     .ok()?
@@ -233,8 +233,8 @@ fn release_closed_window_sessions(cx: &mut App, snapshot: &SessionFile) {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{AppContext as _, TestAppContext, WindowHandle};
-    use gpui_base::Root;
+    use gpui_kit::base::Root;
+    use gpui_kit::{AppContext as _, TestAppContext, WindowHandle};
     use macsftp_core::{LocalPath, RemotePath, RuntimeBridgeConfig, WindowSessionId};
     use macsftp_platform::AppPaths;
     use macsftp_sftp::{BridgeChannels, RuntimeClient};
@@ -314,7 +314,7 @@ mod tests {
         (app_paths, first, second)
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn quit_checkpoint_preserves_every_window_and_ignores_late_closes(cx: &mut TestAppContext) {
         let (app_paths, first, second) = setup_two_windows(cx, "quit-freeze");
 
@@ -362,7 +362,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn normal_window_closes_save_only_survivors_then_empty(cx: &mut TestAppContext) {
         let (app_paths, first, second) = setup_two_windows(cx, "normal-close");
 

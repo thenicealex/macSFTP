@@ -1,4 +1,4 @@
-use gpui::{
+use gpui_kit::{
     App, ClickEvent, ClipboardItem, Context, KeyDownEvent, ScrollStrategy, UniformListScrollHandle,
     Window,
 };

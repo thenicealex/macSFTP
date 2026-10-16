@@ -1,5 +1,5 @@
-use gpui::{App, Context, KeyDownEvent, SharedString, Window};
-use gpui_base::input::InputEvent;
+use gpui_kit::base::input::InputEvent;
+use gpui_kit::{App, Context, KeyDownEvent, SharedString, Window};
 use macsftp_core::{
     AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionRoute, LocalPath, ProfileId,
     RemotePath,
@@ -491,7 +491,7 @@ impl crate::workspace::Workspace {
         self.settings.profile_filter_focused = false;
         self.settings.selected_profile_id = None;
         self.settings.profile_editor = Some(ProfileEditorState::blank());
-        self.settings.editor_scroll = gpui::ScrollHandle::new();
+        self.settings.editor_scroll = gpui_kit::ScrollHandle::new();
         cx.notify();
     }
 
@@ -504,7 +504,7 @@ impl crate::workspace::Workspace {
         self.settings.selected_profile_id = Some(id);
         self.settings.profile_editor =
             Some(ProfileEditorState::from_profile(&profile, secret_present));
-        self.settings.editor_scroll = gpui::ScrollHandle::new();
+        self.settings.editor_scroll = gpui_kit::ScrollHandle::new();
         cx.notify();
     }
 

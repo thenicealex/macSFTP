@@ -1,5 +1,5 @@
 use crate::workspace::TextInputTarget;
-use gpui::{
+use gpui_kit::{
     Context, FontWeight, IntoElement, ParentElement, Styled, Window, WindowControlArea, div,
     prelude::*, px,
 };
@@ -21,7 +21,7 @@ impl crate::workspace::Workspace {
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let theme = cx.theme().clone();
         let selected_section = self.settings.section;
         let selected_appearance = cx.resources().config.config().appearance;
@@ -333,7 +333,7 @@ impl crate::workspace::Workspace {
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> gpui::AnyElement {
+    ) -> gpui_kit::AnyElement {
         let theme = cx.theme().clone();
         let profiles = cx.resources().profiles.profiles().to_vec();
         let total_count = profiles.len();
@@ -449,7 +449,7 @@ impl crate::workspace::Workspace {
             })
             .collect();
 
-        let list_body: gpui::AnyElement = if total_count == 0 {
+        let list_body: gpui_kit::AnyElement = if total_count == 0 {
             empty_state(
                 "No saved connections",
                 vec![
@@ -562,7 +562,7 @@ impl crate::workspace::Workspace {
             .into_any_element()
     }
 
-    pub(crate) fn render_profile_editor(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
+    pub(crate) fn render_profile_editor(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let Some(editor) = self.settings.profile_editor.as_ref() else {
             return div().into_any_element();
         };

@@ -1,13 +1,13 @@
-use gpui::prelude::FluentBuilder as _;
-use gpui::{
+use gpui_kit::base::{
+    InputBase,
+    input::{InputEditorStyle, InputState as BaseInputState},
+};
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::{
     AccessibleAction, App, AppContext as _, Context, ElementId, Entity, EntityInputHandler as _,
     Focusable as _, InteractiveElement, IntoElement, Keystroke, MouseButton, ParentElement,
     RenderOnce, Role, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, div,
     px, relative,
-};
-use gpui_base::{
-    InputBase,
-    input::{InputEditorStyle, InputState as BaseInputState},
 };
 use std::rc::Rc;
 use zeroize::Zeroize;
@@ -18,7 +18,7 @@ use crate::theme::ActiveTheme;
 /// Programmatic draft changes synchronize only when text differs, preserving
 /// selection, undo history, and IME composition through unrelated redraws.
 pub struct PlainInput {
-    state: Entity<gpui_base::input::InputState>,
+    state: Entity<gpui_kit::base::input::InputState>,
     _subscription: Subscription,
 }
 
@@ -30,14 +30,14 @@ impl PlainInput {
         cx: &mut Context<V>,
         on_event: impl Fn(
             &mut V,
-            &Entity<gpui_base::input::InputState>,
-            &gpui_base::input::InputEvent,
+            &Entity<gpui_kit::base::input::InputState>,
+            &gpui_kit::base::input::InputEvent,
             &mut Window,
             &mut Context<V>,
         ) + 'static,
     ) -> Self {
         let state = cx.new(|cx| {
-            gpui_base::input::InputState::new(window, cx)
+            gpui_kit::base::input::InputState::new(window, cx)
                 .placeholder(placeholder)
                 .default_value(value.to_string())
         });
@@ -48,7 +48,7 @@ impl PlainInput {
         }
     }
 
-    pub fn state(&self) -> &Entity<gpui_base::input::InputState> {
+    pub fn state(&self) -> &Entity<gpui_kit::base::input::InputState> {
         &self.state
     }
 
@@ -146,7 +146,7 @@ impl RenderOnce for OrdinaryTextField {
             })
             .when(editable, |field| {
                 field.on_a11y_action(AccessibleAction::SetValue, move |data, window, cx| {
-                    if let Some(gpui::accesskit::ActionData::Value(value)) = data {
+                    if let Some(gpui_kit::accesskit::ActionData::Value(value)) = data {
                         value_state.update(cx, |state, cx| {
                             if state.is_editable() {
                                 let length = state.value().encode_utf16().count();
@@ -192,25 +192,25 @@ impl RenderOnce for OrdinaryTextField {
                         .bottom(-theme.sizes.input_focus_ring - px(1.0))
                         .border(theme.sizes.input_focus_ring)
                         .rounded(theme.sizes.input_radius + theme.sizes.input_focus_ring)
-                        .border_color(gpui::Hsla {
+                        .border_color(gpui_kit::Hsla {
                             a: 0.5,
                             ..theme.colors.border_focused
                         }),
                 )
             })
-            .child(gpui_base::Input::new(&self.state))
+            .child(gpui_kit::base::Input::new(&self.state))
     }
 }
 
 // Base owns the menu model; the isolated macOS adapter owns only presentation.
 fn show_input_context_menu(
-    menu: gpui_base::input::NativeMenu,
-    capabilities: gpui_base::input::InputContextMenuCapabilities,
-    position: gpui::Point<gpui::Pixels>,
+    menu: gpui_kit::base::input::NativeMenu,
+    capabilities: gpui_kit::base::input::InputContextMenuCapabilities,
+    position: gpui_kit::Point<gpui_kit::Pixels>,
     window: &mut Window,
     cx: &mut App,
 ) {
-    use gpui_base::input::{Copy, Cut, Paste, SelectAll};
+    use gpui_kit::base::input::{Copy, Cut, Paste, SelectAll};
     let menu = menu
         .menu_with_disabled(
             "Cut",
@@ -523,8 +523,8 @@ impl TextFieldModel<'_> {
 
 #[cfg(test)]
 mod tests {
-    use gpui::AppContext as _;
-    use gpui::Keystroke;
+    use gpui_kit::AppContext as _;
+    use gpui_kit::Keystroke;
 
     use super::{InputKeyResult, InputState, SecretInputState};
 
@@ -539,33 +539,33 @@ mod tests {
     }
 
     struct InputHarness {
-        base: gpui::Entity<gpui_base::input::InputState>,
+        base: gpui_kit::Entity<gpui_kit::base::input::InputState>,
     }
 
-    impl gpui::Render for InputHarness {
+    impl gpui_kit::Render for InputHarness {
         fn render(
             &mut self,
-            window: &mut gpui::Window,
-            cx: &mut gpui::Context<Self>,
-        ) -> impl gpui::IntoElement {
+            window: &mut gpui_kit::Window,
+            cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
             use crate::theme::ActiveTheme as _;
-            use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
+            use gpui_kit::{InteractiveElement as _, ParentElement as _, Styled as _};
             window.set_rem_size(cx.theme().sizes.input_text_size / 0.875);
-            gpui::div().flex().flex_col().w_full().child(
-                gpui::div()
+            gpui_kit::div().flex().flex_col().w_full().child(
+                gpui_kit::div()
                     .debug_selector(|| "base-input".into())
                     .child(super::ordinary_text_field("base-field", &self.base)),
             )
         }
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn ordinary_input_preserves_frozen_component_bounds_in_narrow_windows(
-        cx: &mut gpui::TestAppContext,
+        cx: &mut gpui_kit::TestAppContext,
     ) {
         cx.update(|cx| crate::theme::Theme::one_dark().install(cx));
         let (view, cx) = cx.add_window_view(|window, cx| InputHarness {
-            base: cx.new(|cx| gpui_base::input::InputState::new(window, cx)),
+            base: cx.new(|cx| gpui_kit::base::input::InputState::new(window, cx)),
         });
         for theme in [
             crate::theme::Theme::one_dark(),
@@ -576,7 +576,7 @@ mod tests {
                 view.update(cx, |_view, cx| cx.notify());
             });
             for width in [160.0, 480.0] {
-                cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(160.0)));
+                cx.simulate_resize(gpui_kit::size(gpui_kit::px(width), gpui_kit::px(160.0)));
                 cx.run_until_parked();
                 let base = cx
                     .debug_bounds("base-input")
@@ -584,7 +584,7 @@ mod tests {
                 // Stage-2 comparison measured this actual compact height.
                 assert_eq!(
                     base.size,
-                    gpui::size(gpui::px(width), gpui::px(19.5)),
+                    gpui_kit::size(gpui_kit::px(width), gpui_kit::px(19.5)),
                     "migration must preserve compact input bounds"
                 );
             }

@@ -1,4 +1,4 @@
-use gpui::{Context, IntoElement, Pixels, Render, Styled, Window, div, px};
+use gpui_kit::{Context, IntoElement, Pixels, Render, Styled, Window, div, px};
 
 /// Default open height (matches former `max_h(240)`).
 pub(crate) const DEFAULT_DRAWER_HEIGHT: Pixels = px(240.0);
@@ -68,7 +68,7 @@ pub(crate) fn content_area_height_from_viewport(viewport_height: Pixels) -> Pixe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::px;
+    use gpui_kit::px;
 
     #[test]
     fn clamp_enforces_minimum() {

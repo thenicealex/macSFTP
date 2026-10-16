@@ -1,5 +1,5 @@
-use gpui::{AnyWindowHandle, App, Context, Global, Task, Window, WindowHandle};
-use gpui_base::Root;
+use gpui_kit::base::Root;
+use gpui_kit::{AnyWindowHandle, App, Context, Global, Task, Window, WindowHandle};
 use macsftp_core::{
     AppCommand, AppEvent, ConflictRequest, EditPhase, EditSessionId, LocalPath, ProfileId,
     RemotePath, RemoteSnapshot, TabId, Timestamp, TransferConflictPrompt, TransferDirection,
@@ -15,7 +15,7 @@ use crate::workspace::build_edit_upload_command;
 /// Hook used to open the downloaded temp file in the user's editor. Production
 /// always uses [`macsftp_platform::open_in_editor`]; tests swap in a recording
 /// stub via [`set_edit_opener`]. A `thread_local` cell keeps this safe on the
-/// single-threaded GPUI main loop (and one-thread `#[gpui::test]`) without any
+/// single-threaded GPUI main loop (and one-thread `#[gpui_kit::test]`) without any
 /// `unsafe`.
 type EditorOpener = fn(&LocalPath, Option<&str>) -> std::io::Result<()>;
 
@@ -614,7 +614,7 @@ impl WorkspaceWindow {
         Some(Self::Root(root))
     }
 
-    pub(crate) fn read<'a>(&self, cx: &'a App) -> gpui::Result<&'a Workspace> {
+    pub(crate) fn read<'a>(&self, cx: &'a App) -> gpui_kit::Result<&'a Workspace> {
         match self {
             Self::Content(window) => window.read(cx),
             Self::Root(window) => Ok(window
@@ -631,7 +631,7 @@ impl WorkspaceWindow {
         &self,
         cx: &mut App,
         update: impl FnOnce(&mut Workspace, &mut Window, &mut Context<Workspace>) -> R,
-    ) -> gpui::Result<R> {
+    ) -> gpui_kit::Result<R> {
         match self {
             Self::Content(window) => window.update(cx, update),
             Self::Root(window) => window.update(cx, |root, window, cx| {
@@ -683,8 +683,8 @@ fn conflict_prompt(conflict: ConflictRequest) -> TransferConflictPrompt {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{AppContext as _, TestAppContext, WindowHandle};
-    use gpui_base::Root;
+    use gpui_kit::base::Root;
+    use gpui_kit::{AppContext as _, TestAppContext, WindowHandle};
     use macsftp_core::{
         AppCommand, AppEvent, AuthCredential, ConflictPolicy, ConflictRequestId, ConnectionKey,
         ConnectionPoolIdentity, ConnectionSettings, ConnectionState, EditCheckId, EditPhase,
@@ -915,7 +915,7 @@ mod tests {
         });
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn download_completion_moves_edit_session_to_editing(cx: &mut TestAppContext) {
         install_test_globals(cx, "edit-editing");
         let transfer_id = TransferId(42);
@@ -940,7 +940,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn unrelated_transfer_sharing_temp_path_does_not_drive_edit_session(cx: &mut TestAppContext) {
         install_test_globals(cx, "edit-misattr");
         // A Downloading edit session for /srv/a.txt whose temp path the unrelated
@@ -995,7 +995,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn download_failure_removes_session_and_surfaces_error(cx: &mut TestAppContext) {
         install_test_globals(cx, "edit-failed");
         // A window owning the session's tab (`TabId(1)`) so the failure status
@@ -1055,7 +1055,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn upload_back_completion_rebases_snapshot_and_returns_to_editing(cx: &mut TestAppContext) {
         install_test_globals(cx, "upload-ok");
         let transfer_id = TransferId(50);
@@ -1124,7 +1124,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn upload_back_truncates_rebased_snapshot_mtime_to_whole_seconds(cx: &mut TestAppContext) {
         install_test_globals(cx, "upload-trunc");
         let transfer_id = TransferId(52);
@@ -1187,7 +1187,7 @@ mod tests {
         });
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn upload_back_failure_returns_to_editing_without_rebasing(cx: &mut TestAppContext) {
         install_test_globals(cx, "upload-fail");
         let transfer_id = TransferId(51);
@@ -1229,7 +1229,7 @@ mod tests {
         });
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn transfer_events_are_reduced_once_and_conflict_has_one_window_owner(cx: &mut TestAppContext) {
         let app_paths = test_app_paths("single-owner");
         let config = ConfigStore::with_defaults(app_paths.config_file.clone());
@@ -1513,7 +1513,7 @@ mod tests {
         })
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn matching_remote_check_dispatches_one_upload(cx: &mut TestAppContext) {
         install_test_globals(cx, "matched-upload");
         let baseline = RemoteSnapshot {
@@ -1561,7 +1561,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn diverged_remote_check_enters_conflict_without_upload(cx: &mut TestAppContext) {
         install_test_globals(cx, "diverged-conflict");
         let baseline = RemoteSnapshot {
@@ -1603,7 +1603,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn failed_remote_check_returns_to_editing_without_upload(cx: &mut TestAppContext) {
         install_test_globals(cx, "failed-editing");
         let baseline = RemoteSnapshot {
@@ -1640,7 +1640,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn stale_remote_check_after_reconnect_is_ignored_and_session_retries(cx: &mut TestAppContext) {
         install_test_globals(cx, "stale-reconnect");
         let baseline = RemoteSnapshot {
@@ -1689,7 +1689,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn stale_dispatch_failure_after_reconnect_does_not_reset_replacement_check(
         cx: &mut TestAppContext,
     ) {
@@ -1742,7 +1742,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn remote_check_event_is_applied_once_with_multiple_windows(cx: &mut TestAppContext) {
         install_test_globals(cx, "multi-window");
         let baseline = RemoteSnapshot {
@@ -1796,7 +1796,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn duplicate_remote_check_result_does_not_dispatch_second_upload(cx: &mut TestAppContext) {
         install_test_globals(cx, "duplicate");
         let baseline = RemoteSnapshot {
@@ -1836,7 +1836,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn late_result_from_prior_check_id_does_not_authorize_retry(cx: &mut TestAppContext) {
         install_test_globals(cx, "prior-check-id");
         let baseline = RemoteSnapshot {
@@ -1874,7 +1874,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn local_file_changed_during_remote_check_requires_another_upload(cx: &mut TestAppContext) {
         install_test_globals(cx, "changed-during");
         let baseline = RemoteSnapshot {

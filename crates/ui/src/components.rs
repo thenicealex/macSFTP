@@ -1,16 +1,16 @@
-use gpui::{
+use gpui_kit::{
     AnyView, App, ClickEvent, Context, ElementId, Hsla, IntoElement, ParentElement, Render,
     RenderOnce, SharedString, Styled, Window, div, prelude::*, px, relative,
 };
 
-use gpui_base::Button;
+use gpui_kit::base::Button;
 
 use crate::icon::{IconName, icon_with_size};
 use crate::theme::ActiveTheme;
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
-const ICON_BUTTON_ICON_SIZE: gpui::Pixels = px(16.0);
+const ICON_BUTTON_ICON_SIZE: gpui_kit::Pixels = px(16.0);
 const ICON_BUTTON_OPACITY: f32 = 0.65;
 const ICON_BUTTON_DISABLED_OPACITY: f32 = 0.25;
 
@@ -101,7 +101,7 @@ impl RenderOnce for IconButton {
         button_base(self.id, None, self.disabled, window, cx)
             .w(theme.sizes.icon_button_width)
             .h(theme.sizes.icon_button_height)
-            .bg(gpui::hsla(0.0, 0.0, 0.0, 0.0))
+            .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.0))
             .text_color(icon_color)
             .disabled(self.disabled)
             .accessibility_label(self.tooltip_label.clone())
@@ -260,9 +260,9 @@ fn button_base(
             })
         })
         .when(!disabled, |button| {
-            button.on_mouse_down(gpui::MouseButton::Left, |_, window, cx| {
+            button.on_mouse_down(gpui_kit::MouseButton::Left, |_, window, cx| {
                 window.prevent_default();
-                gpui_base::GlobalState::suppress_text_selection(cx);
+                gpui_kit::base::GlobalState::suppress_text_selection(cx);
             })
         })
         .when(focused, |button| {
@@ -275,7 +275,7 @@ fn button_base(
                     .bottom(-theme.sizes.button_focus_ring - border)
                     .border(theme.sizes.button_focus_ring)
                     .rounded(theme.sizes.button_radius + theme.sizes.button_focus_ring)
-                    .border_color(gpui::Hsla {
+                    .border_color(gpui_kit::Hsla {
                         a: 0.5,
                         ..theme.colors.border_focused
                     }),
@@ -332,7 +332,7 @@ pub fn loading_state(message: impl Into<SharedString>, cx: &App) -> impl IntoEle
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{FocusHandle, MouseDownEvent, MouseUpEvent, TestAppContext, point, size};
+    use gpui_kit::{FocusHandle, MouseDownEvent, MouseUpEvent, TestAppContext, point, size};
     use std::{cell::Cell, rc::Rc};
 
     struct ButtonHarness {
@@ -368,7 +368,7 @@ mod tests {
         }
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn base_buttons_preserve_frozen_bounds_and_keyboard_activation(cx: &mut TestAppContext) {
         cx.update(|cx| crate::theme::Theme::one_dark().install(cx));
         let clicks = Rc::new(Cell::new(0));
@@ -408,13 +408,14 @@ mod tests {
         }
         cx.update(|window, cx| window.focus_next(cx));
         for key in ["enter", "space"] {
-            let keystroke = gpui::Keystroke::parse(key).expect("button activation key must parse");
-            cx.simulate_event(gpui::KeyDownEvent {
+            let keystroke =
+                gpui_kit::Keystroke::parse(key).expect("button activation key must parse");
+            cx.simulate_event(gpui_kit::KeyDownEvent {
                 keystroke: keystroke.clone(),
                 is_held: false,
                 prefer_character_input: false,
             });
-            cx.simulate_event(gpui::KeyUpEvent { keystroke });
+            cx.simulate_event(gpui_kit::KeyUpEvent { keystroke });
         }
         assert_eq!(
             clicks.get(),
@@ -423,13 +424,14 @@ mod tests {
         );
         cx.update(|window, cx| window.focus_next(cx));
         for key in ["enter", "space"] {
-            let keystroke = gpui::Keystroke::parse(key).expect("button activation key must parse");
-            cx.simulate_event(gpui::KeyDownEvent {
+            let keystroke =
+                gpui_kit::Keystroke::parse(key).expect("button activation key must parse");
+            cx.simulate_event(gpui_kit::KeyDownEvent {
                 keystroke: keystroke.clone(),
                 is_held: false,
                 prefer_character_input: false,
             });
-            cx.simulate_event(gpui::KeyUpEvent { keystroke });
+            cx.simulate_event(gpui_kit::KeyUpEvent { keystroke });
         }
         assert_eq!(
             clicks.get(),
@@ -438,7 +440,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn disabled_icon_button_rejects_clicks_and_toolbar_click_preserves_focus(
         cx: &mut TestAppContext,
     ) {
@@ -468,13 +470,13 @@ mod tests {
             let position = point(bounds.left() + px(5.0), bounds.top() + px(5.0));
             cx.simulate_event(MouseDownEvent {
                 position,
-                button: gpui::MouseButton::Left,
+                button: gpui_kit::MouseButton::Left,
                 click_count: 1,
                 ..Default::default()
             });
             cx.simulate_event(MouseUpEvent {
                 position,
-                button: gpui::MouseButton::Left,
+                button: gpui_kit::MouseButton::Left,
                 click_count: 1,
                 ..Default::default()
             });

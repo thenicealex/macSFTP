@@ -1,4 +1,4 @@
-use gpui::{Context, FontWeight, IntoElement, ParentElement, Styled, div, prelude::*, px};
+use gpui_kit::{Context, FontWeight, IntoElement, ParentElement, Styled, div, prelude::*, px};
 use macsftp_core::{
     AppCommand, CheckRemoteEditSnapshotCommand, ConflictPolicy, ConnectionKey, EditPhase,
     EditSession, EditSessionId, EntryPath, FileKind, LocalPath, MetadataPolicy, ProfileId,
@@ -86,7 +86,7 @@ impl Workspace {
 
     pub(crate) fn selected_edit_session(
         &self,
-        cx: &gpui::App,
+        cx: &gpui_kit::App,
     ) -> Option<(EditSessionId, EditPhase)> {
         let tab = self.active_tab()?;
         let remote_path = tab
@@ -446,7 +446,7 @@ impl Workspace {
     pub(crate) fn render_large_edit_modal(
         &self,
         cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
+    ) -> Option<gpui_kit::AnyElement> {
         let size = self.modal_inputs.large_edit_confirm.as_ref()?.size;
         let theme = cx.theme().clone();
         let body = match size {
@@ -512,7 +512,7 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
+                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
                 .child(card)
                 .into_any_element(),
         )
@@ -521,7 +521,7 @@ impl Workspace {
     pub(crate) fn render_edit_conflict_modal(
         &self,
         cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
+    ) -> Option<gpui_kit::AnyElement> {
         let active_tab_id = self.active_tab()?.id;
         let id = cx
             .resources()
@@ -599,7 +599,7 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
+                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
                 .child(card)
                 .into_any_element(),
         )
@@ -618,7 +618,7 @@ impl Workspace {
 /// tab-close path (where `Context` derefs to `App`) and the window-closed hook.
 ///
 /// [`find_active`]: macsftp_core::EditSessionStore::find_active
-pub(crate) fn cleanup_edit_sessions_for_tab(cx: &mut gpui::App, tab_id: TabId) {
+pub(crate) fn cleanup_edit_sessions_for_tab(cx: &mut gpui_kit::App, tab_id: TabId) {
     let removed = cx.resources_mut().edit_sessions.remove_for_tab(tab_id);
     for session in removed {
         cleanup_edit_temp_dir(&session.local_temp_path);
@@ -632,7 +632,7 @@ pub(crate) fn cleanup_edit_sessions_for_tab(cx: &mut gpui::App, tab_id: TabId) {
 /// from the window-closed hook and again before reopening from zero windows.
 /// Enumerating live windows first, then removing the unmatched sessions,
 /// avoids a borrow conflict on `cx`.
-pub(crate) fn cleanup_orphaned_edit_sessions(cx: &mut gpui::App) {
+pub(crate) fn cleanup_orphaned_edit_sessions(cx: &mut gpui_kit::App) {
     let live_tabs: std::collections::HashSet<TabId> =
         crate::event_coordinator::workspace_windows(cx)
             .into_iter()

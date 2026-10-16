@@ -20,9 +20,10 @@ rust-version = "1.96.1"
 version = "0.3.0"
 
 [workspace.dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.8" }
-gpui-base = "=0.7.1"
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit"] }
+# Single UI dependency: GPUI (gpui-pre snapshot) and GPUI Base, pinned
+# together by the Kit release. macSFTP draws its own controls, so the Kit's
+# component and asset layers stay off.
+gpui-kit = { version = "=0.7.3", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

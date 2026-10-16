@@ -1,7 +1,7 @@
 use std::rc::Rc;
 use std::time::UNIX_EPOCH;
 
-use gpui::{
+use gpui_kit::{
     App, Div, ElementId, IntoElement, ParentElement, Pixels, SharedString, Stateful, Styled,
     Window, div, prelude::*, px,
 };
