@@ -1,4 +1,4 @@
-use gpui::{Hsla, Pixels, Styled, Svg, px, svg};
+use gpui_kit::{Hsla, Pixels, Styled, Svg, px, svg};
 
 /// Icon names resolved against the application's `AssetSource`.
 /// The app crate embeds the SVG bytes; `ui` only knows the paths.

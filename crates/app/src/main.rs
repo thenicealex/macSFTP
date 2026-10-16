@@ -8,7 +8,7 @@ mod resources;
 mod session_coordinator;
 mod workspace;
 
-use gpui::{
+use gpui_kit::{
     App, AppContext, Bounds, Global, Menu, MenuItem, SystemMenuType, TitlebarOptions, WindowBounds,
     WindowHandle, WindowOptions, point, px, size,
 };
@@ -147,7 +147,7 @@ fn clear_edit_temps_dir(edits_dir: &macsftp_core::LocalPath) {
 }
 
 fn main() {
-    let app = gpui_platform::application().with_assets(Assets);
+    let app = gpui_kit::application().with_assets(Assets);
     // Native macOS behavior: the app stays alive with no windows open;
     // clicking the Dock icon opens a fresh window. gpui only fires this
     // when zero windows are open. Registered on the builder (not `App`);
@@ -325,7 +325,7 @@ fn main() {
 fn open_workspace_window(
     cx: &mut App,
     restore_session: Option<SessionWindowSnapshot>,
-) -> gpui::Result<WindowHandle<gpui_base::Root>> {
+) -> gpui_kit::Result<WindowHandle<gpui_kit::base::Root>> {
     let runtime_client = {
         let handle = cx.global::<RuntimeHandle>();
         let controller = handle
@@ -379,7 +379,7 @@ fn open_workspace_window(
                     cx,
                 )
             });
-            cx.new(|cx| gpui_base::Root::new(workspace, window, cx))
+            cx.new(|cx| gpui_kit::base::Root::new(workspace, window, cx))
         },
     )?;
     cx.global_mut::<SessionCoordinator>()
@@ -389,7 +389,7 @@ fn open_workspace_window(
     Ok(window)
 }
 
-fn restore_workspace_windows(cx: &mut App) -> gpui::Result<()> {
+fn restore_workspace_windows(cx: &mut App) -> gpui_kit::Result<()> {
     let session = cx.global_mut::<SessionCoordinator>().take_restore_session();
     if session.windows.is_empty() {
         open_workspace_window(cx, None)?;

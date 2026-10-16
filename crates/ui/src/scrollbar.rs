@@ -1,6 +1,6 @@
 use std::{cell::Cell, rc::Rc};
 
-use gpui::{
+use gpui_kit::{
     Context, DragMoveEvent, ElementId, IntoElement, MouseButton, MouseDownEvent, Pixels, Point,
     Render, ScrollHandle, Styled, UniformListScrollHandle, Window, div, prelude::*, px,
 };
@@ -150,7 +150,7 @@ fn render_scrollbar<V: 'static>(
     has_deferred_layout: bool,
     window: &mut Window,
     cx: &mut Context<V>,
-) -> gpui::AnyElement {
+) -> gpui_kit::AnyElement {
     let viewport_h = handle.bounds().size.height;
     if viewport_h <= px(0.0) || has_deferred_layout {
         // ScrollHandle geometry is populated during layout, after this parent
@@ -322,7 +322,7 @@ mod tests {
     use super::*;
     use std::ops::Range;
 
-    use gpui::{
+    use gpui_kit::{
         Modifiers, ParentElement, Render, ScrollDelta, ScrollWheelEvent, Styled, TestAppContext,
         Window, div, point, size, uniform_list,
     };
@@ -503,7 +503,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn track_click_repaints_thumb_immediately(cx: &mut TestAppContext) {
         install_test_theme(cx);
         let handle = ScrollHandle::new();
@@ -537,7 +537,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn thumb_drag_continues_outside_track_and_stops_on_release(cx: &mut TestAppContext) {
         install_test_theme(cx);
         let handle = ScrollHandle::new();
@@ -577,7 +577,7 @@ mod tests {
         assert_eq!(test_handle.offset(), released_offset);
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn hidden_native_scrollbar_keeps_wheel_scrolling_and_repaints_thumb(cx: &mut TestAppContext) {
         install_test_theme(cx);
         let handle = ScrollHandle::new();
@@ -605,7 +605,7 @@ mod tests {
         assert!(thumb_after.top() > thumb_before.top());
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn uniform_list_and_scrollbar_share_one_scroll_position(cx: &mut TestAppContext) {
         install_test_theme(cx);
         let handle = UniformListScrollHandle::new();
@@ -620,7 +620,7 @@ mod tests {
         let thumb_before = cx
             .debug_bounds("test-uniform-scrollbar-thumb")
             .expect("overflowing uniform list must render a scrollbar thumb");
-        test_handle.scroll_to_item_strict(80, gpui::ScrollStrategy::Center);
+        test_handle.scroll_to_item_strict(80, gpui_kit::ScrollStrategy::Center);
         cx.update(|_window, cx| {
             view.update(cx, |_view, cx| cx.notify());
         });
@@ -639,7 +639,7 @@ mod tests {
         );
     }
 
-    #[gpui::test]
+    #[gpui_kit::test]
     fn zero_height_scroll_area_does_not_schedule_an_infinite_render_loop(cx: &mut TestAppContext) {
         install_test_theme(cx);
         let render_count = Rc::new(Cell::new(0));

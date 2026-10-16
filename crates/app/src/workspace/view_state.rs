@@ -6,7 +6,7 @@
 //! are plain data holders: no behavior beyond trivial constructors, and
 //! nothing here is persisted.
 
-use gpui::{Pixels, UniformListScrollHandle};
+use gpui_kit::{Pixels, UniformListScrollHandle};
 use macsftp_ui::{InputState, ScrollbarState};
 
 use crate::workspace::drawer_height;
@@ -55,7 +55,7 @@ pub(crate) struct CommandPaletteUi {
     pub(crate) open: bool,
     pub(crate) input: InputState,
     pub(crate) selected: usize,
-    pub(crate) scroll: gpui::ScrollHandle,
+    pub(crate) scroll: gpui_kit::ScrollHandle,
     pub(crate) scrollbar: ScrollbarState,
 }
 
@@ -65,7 +65,7 @@ impl CommandPaletteUi {
             open: false,
             input: InputState::new(),
             selected: 0,
-            scroll: gpui::ScrollHandle::new(),
+            scroll: gpui_kit::ScrollHandle::new(),
             scrollbar: ScrollbarState::new(),
         }
     }
@@ -75,7 +75,7 @@ impl CommandPaletteUi {
 pub(crate) struct TabSwitcherUi {
     pub(crate) open: bool,
     pub(crate) index: usize,
-    pub(crate) scroll: gpui::ScrollHandle,
+    pub(crate) scroll: gpui_kit::ScrollHandle,
     pub(crate) scrollbar: ScrollbarState,
 }
 
@@ -84,7 +84,7 @@ impl TabSwitcherUi {
         Self {
             open: false,
             index: 0,
-            scroll: gpui::ScrollHandle::new(),
+            scroll: gpui_kit::ScrollHandle::new(),
             scrollbar: ScrollbarState::new(),
         }
     }
@@ -94,7 +94,7 @@ impl TabSwitcherUi {
 pub(crate) struct GoToPathUi {
     pub(crate) open: bool,
     pub(crate) input: InputState,
-    pub(crate) error: Option<gpui::SharedString>,
+    pub(crate) error: Option<gpui_kit::SharedString>,
 }
 
 impl GoToPathUi {
@@ -114,7 +114,7 @@ pub(crate) struct TransferDrawerUi {
     pub(crate) resize: Option<drawer_height::TransferDrawerResize>,
     pub(crate) completed_section_expanded: bool,
     pub(crate) failed_section_expanded: bool,
-    pub(crate) scroll: gpui::ScrollHandle,
+    pub(crate) scroll: gpui_kit::ScrollHandle,
     pub(crate) scrollbar: ScrollbarState,
 }
 
@@ -128,7 +128,7 @@ impl TransferDrawerUi {
             resize: None,
             completed_section_expanded: false,
             failed_section_expanded: false,
-            scroll: gpui::ScrollHandle::new(),
+            scroll: gpui_kit::ScrollHandle::new(),
             scrollbar: ScrollbarState::new(),
         }
     }
@@ -137,11 +137,11 @@ impl TransferDrawerUi {
 /// Connect form sheet state (form model + focus handle).
 pub(crate) struct ConnectFormUi {
     pub(crate) form: Option<crate::workspace::connect_form::ConnectForm>,
-    pub(crate) focus: gpui::FocusHandle,
+    pub(crate) focus: gpui_kit::FocusHandle,
 }
 
 impl ConnectFormUi {
-    pub(crate) fn new(focus: gpui::FocusHandle) -> Self {
+    pub(crate) fn new(focus: gpui_kit::FocusHandle) -> Self {
         Self { form: None, focus }
     }
 }
@@ -152,7 +152,7 @@ pub(crate) struct ModalInputsUi {
     /// view-local because the runtime only receives a decision after the
     /// user submits it.
     pub(crate) conflict_rename: InputState,
-    pub(crate) conflict_rename_error: Option<gpui::SharedString>,
+    pub(crate) conflict_rename_error: Option<gpui_kit::SharedString>,
     /// Phase 1 delete confirmation modal (view-local).
     pub(crate) delete_confirm: Option<crate::workspace::file_ops::DeleteConfirmState>,
     /// Phase 1 inline rename / new-folder editor.
@@ -242,26 +242,26 @@ pub(crate) struct SettingsUi {
     pub(crate) profile_filter_focused: bool,
     /// Settings → General external-editor override field. Committed to config
     /// on every edit (empty → None).
-    pub(crate) external_editor_input: gpui::Entity<gpui_base::input::InputState>,
-    _external_editor_subscription: gpui::Subscription,
+    pub(crate) external_editor_input: gpui_kit::Entity<gpui_kit::base::input::InputState>,
+    _external_editor_subscription: gpui_kit::Subscription,
     /// Selected profile in Settings → Profiles (None when the list is empty).
     pub(crate) selected_profile_id: Option<macsftp_core::ProfileId>,
     /// Draft for New / Edit profile in Settings → Profiles.
     pub(crate) profile_editor: Option<crate::workspace::profiles::ProfileEditorState>,
     /// Pending profile delete confirmation (Settings / Connect). View-local.
     pub(crate) profile_delete_confirm: Option<macsftp_core::ProfileId>,
-    pub(crate) picker_scroll: gpui::ScrollHandle,
+    pub(crate) picker_scroll: gpui_kit::ScrollHandle,
     pub(crate) picker_scrollbar: ScrollbarState,
-    pub(crate) profile_list_scroll: gpui::ScrollHandle,
+    pub(crate) profile_list_scroll: gpui_kit::ScrollHandle,
     pub(crate) profile_list_scrollbar: ScrollbarState,
-    pub(crate) editor_scroll: gpui::ScrollHandle,
+    pub(crate) editor_scroll: gpui_kit::ScrollHandle,
     pub(crate) editor_scrollbar: ScrollbarState,
 }
 
 impl SettingsUi {
     pub(crate) fn new(
-        external_editor_input: gpui::Entity<gpui_base::input::InputState>,
-        external_editor_subscription: gpui::Subscription,
+        external_editor_input: gpui_kit::Entity<gpui_kit::base::input::InputState>,
+        external_editor_subscription: gpui_kit::Subscription,
     ) -> Self {
         Self {
             section: crate::workspace::profiles::SettingsSection::General,
@@ -272,11 +272,11 @@ impl SettingsUi {
             selected_profile_id: None,
             profile_editor: None,
             profile_delete_confirm: None,
-            picker_scroll: gpui::ScrollHandle::new(),
+            picker_scroll: gpui_kit::ScrollHandle::new(),
             picker_scrollbar: ScrollbarState::new(),
-            profile_list_scroll: gpui::ScrollHandle::new(),
+            profile_list_scroll: gpui_kit::ScrollHandle::new(),
             profile_list_scrollbar: ScrollbarState::new(),
-            editor_scroll: gpui::ScrollHandle::new(),
+            editor_scroll: gpui_kit::ScrollHandle::new(),
             editor_scrollbar: ScrollbarState::new(),
         }
     }

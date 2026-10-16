@@ -58,7 +58,7 @@ GPUI 入口、窗口、Entity、Action、事件协调和 UI 状态。它可以�
 
 ### `crates/ui`
 
-主题和可复用 GPUI 组件。普通控件逐步采用 `gpui-component`，保留 macSFTP 的紧凑布局和主题 token；组件只拥有交互状态，业务状态仍由 app/core 管理。敏感输入继续使用脱敏、不可 Clone 的 `SecretInputState` 和 zeroize 清理，未经安全验证不能替换为通用输入。它只接收展示模型，不拥有远端 session 或持久化状态。
+主题和可复用 GPUI 组件。GPUI 与 GPUI Base 统一经由 workspace 锁定的 `gpui-kit` 依赖（`gpui_kit::*` 即 GPUI，Base 在 `gpui_kit::base`），普通控件基于 Base 由项目自绘，保留 macSFTP 的紧凑布局和主题 token；组件只拥有交互状态，业务状态仍由 app/core 管理。敏感输入继续使用脱敏、不可 Clone 的 `SecretInputState` 和 zeroize 清理，未经安全验证不能替换为通用输入。它只接收展示模型，不拥有远端 session 或持久化状态。
 
 ### `crates/sftp`
 
@@ -245,13 +245,14 @@ Profile 写入只有一个产品入口：Settings → Saved Connections 将编�
 
 ## 12. UI 约束
 
-- app/ui 共同使用 workspace 锁定的 `gpui-pre` snapshot，组件和 GPUI 类型不能来自不同版本；
-- Base 迁移第一阶段固定 `gpui-base` / `gpui-component` 0.7.1 和 GPUI snapshot 0.3.8：窗口 Root、输入编辑状态、事件和编辑 action 直接来自 Base；控件绘制、主题投影、assets 和 Component 初始化保持现有实现。输入状态与 Root 原本即由 Component 重新导出，直接引用不能重新创建 Entity、改变业务状态所有权或丢失生命周期回调；
-- 每个生产窗口以 `gpui-base::Root` 承载 `Workspace`，Root 只管理组件浮层和交互；事件分发、远程编辑清理和会话 checkpoint 必须读取其中的 Workspace，不能仅按窗口根类型筛选；
+- app/ui 共同使用 workspace 锁定的 `gpui-kit` 单一依赖（GPUI snapshot 与 GPUI Base 由 Kit 成组锁定，component/assets 层关闭），组件和 GPUI 类型不能来自不同版本；只有 app/ui/native-menu 可以直接依赖 `gpui-kit`，其余 crate 由 `scripts/check_architecture.sh` 强制禁止；
+- Metal shader 由 `gpui-kit` platform 依赖强制的 `runtime_shaders` 特性在应用启动时编译（Kit 无法关闭该特性），构建不再需要 Metal Toolchain；
+- Base 迁移第一阶段固定 `gpui-base` / `gpui-component` 0.7.1 和 GPUI snapshot 0.3.8（现由 `gpui-kit` 0.7.3 成组锁定 gpui-pre 0.3.9 / gpui-base 0.7.3）：窗口 Root、输入编辑状态、事件和编辑 action 直接来自 Base；控件绘制、主题投影、assets 和 Component 初始化保持现有实现。输入状态与 Root 原本即由 Component 重新导出，直接引用不能重新创建 Entity、改变业务状态所有权或丢失生命周期回调；
+- 每个生产窗口以 `gpui_kit::base::Root` 承载 `Workspace`，Root 只管理组件浮层和交互；事件分发、远程编辑清理和会话 checkpoint 必须读取其中的 Workspace，不能仅按窗口根类型筛选；
 - `Theme::install` 从 macSFTP 的主题 token 派生 Base 语义主题，并刷新所有窗口；项目的 `WindowPresentation` Root 插件统一设置 13px rem、字体、背景和文字色，明暗切换只通过该入口更新；
-- Base 迁移第二阶段由 `ui::OrdinaryTextField` 使用 `gpui-base::InputBase` / `Input` 绘制所有普通输入：Settings 外部编辑器、Connect、Saved Connections、路径跳转、重命名、新建目录、文件/Profile 筛选和 command palette 均复用原来的 Base Entity。macSFTP theme 拥有输入框尺寸、内边距、边框、焦点环、占位符、光标和选区色；保持冻结的 Component Small 实际紧凑尺寸（13px UI 字体下高度 19.5px），不读取 Component 输入外观 token。按钮绘制、初始化和主题在第三阶段转到 Base；
+- Base 迁移第二阶段由 `ui::OrdinaryTextField` 使用 `gpui_kit::base::InputBase` / `Input` 绘制所有普通输入：Settings 外部编辑器、Connect、Saved Connections、路径跳转、重命名、新建目录、文件/Profile 筛选和 command palette 均复用原来的 Base Entity。macSFTP theme 拥有输入框尺寸、内边距、边框、焦点环、占位符、光标和选区色；保持冻结的 Component Small 实际紧凑尺寸（13px UI 字体下高度 19.5px），不读取 Component 输入外观 token。按钮绘制、初始化和主题在第三阶段转到 Base；
 - 输入右键菜单使用 Base 的 `NativeMenu` 模型和编辑 action；`macsftp-native-menu` 仅呈现 macOS AppKit 菜单，不持有输入 Entity 或业务草稿。用户已授权该独立适配器的 `src/macos.rs` 包含必要 unsafe：crate 默认 deny，其余 workspace crate 继续继承 forbid，架构检查强制该边界。NSView 在释放 GPUI Window 借用前被 retain，AppKit tracking loop 在 foreground task 中执行且不持有 GPUI update 借用；呈现前检查窗口/焦点，返回后只向仍存在且焦点未变的窗口派发 action，并在取消后刷新窗口。非 macOS 返回明确 Unsupported 错误；macSFTP 当前产品只支持 macOS；
-- Base 迁移第三阶段的 `IconButton` / `TextButton` 使用 `gpui-base::Button` 保留 keyed focus、Enter/Space、Tab、无障碍 label 和禁用行为；macSFTP theme 拥有按钮尺寸、圆角、文字和焦点环，鼠标点击保留 pane/input 焦点。图标按钮保持冻结实现的实际 26×22px 尺寸；tooltip 使用现有项目 `Tooltip`，不再读取 Component 按钮样式。Component 及 gpui-kit-assets 依赖已移除，Root 窗口默认值由项目插件提供；Assets 仅加载项目嵌入图标，未知资源返回 None，缺失资源不能回退到另一套控件资源；
+- Base 迁移第三阶段的 `IconButton` / `TextButton` 使用 `gpui_kit::base::Button` 保留 keyed focus、Enter/Space、Tab、无障碍 label 和禁用行为；macSFTP theme 拥有按钮尺寸、圆角、文字和焦点环，鼠标点击保留 pane/input 焦点。图标按钮保持冻结实现的实际 26×22px 尺寸；tooltip 使用现有项目 `Tooltip`，不再读取 Component 按钮样式。Component 及 gpui-kit-assets 依赖已移除（`gpui-kit` 的 component/assets 层保持关闭），Root 窗口默认值由项目插件提供；Assets 仅加载项目嵌入图标，未知资源返回 None，缺失资源不能回退到另一套控件资源；
 - unsafe 边界检查递归扫描 native-menu 的 Rust 源文件，只允许规范路径 `src/macos.rs` 和唯一 macOS-gated module 例外；拒绝其他 unsafe 语法、lint 覆盖、外部 include/path 和符号链接模块。回归 fixture 覆盖嵌套路径、unsafe fn/impl/extern/attribute、注释与字面量。菜单调度层使用真实 GPUI 窗口更新验证关闭、焦点变更及重复取消；OS tracking loop 在测试中替换，原生界面截图见 `docs/visual-evidence/gpui-base/README.md`；
 - 表单草稿仍由 Workspace 持有；`PlainInput` 仅保留选区、撤销和 IME 编辑状态，Change 事件写回草稿，程序修改草稿时只在文本不同的情况下同步控件；关闭 surface 时释放相应绑定，替换表单或冲突请求后旧控件事件必须被忽略；
 - Connect/Profile 表单的 Tab 使用 scoped action 跨普通和敏感字段移动实际焦点，普通字段的 Enter 通过 Base `PressEnter` 转发原有提交入口；端口、路径、名称及认证校验仍由原有业务入口统一执行，无效提交不能清空草稿；

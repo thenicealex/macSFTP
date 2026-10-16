@@ -1,4 +1,4 @@
-use gpui::{App, KeyBinding, actions};
+use gpui_kit::{App, KeyBinding, actions};
 
 // Stable action names from the plan (§16) plus the file-list and tab
 // navigation actions the workspace needs. Names are the command-palette

@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use gpui::{AssetSource, Result, SharedString};
+use gpui_kit::{AssetSource, Result, SharedString};
 
 /// Embedded asset source: ships the icon SVGs inside the binary so the
 /// app bundle needs no external resource directory.
@@ -64,7 +64,7 @@ impl AssetSource for Assets {
 
 #[cfg(test)]
 mod tests {
-    use gpui::AssetSource;
+    use gpui_kit::AssetSource;
     use macsftp_ui::IconName;
 
     use super::Assets;

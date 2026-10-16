@@ -2,7 +2,7 @@
 
 use crate::workspace::TextInputTarget;
 
-use gpui::{
+use gpui_kit::{
     Context, FontWeight, IntoElement, KeyDownEvent, ParentElement, SharedString, Styled, Window,
     div, prelude::*, px,
 };
@@ -191,7 +191,7 @@ impl Workspace {
         &self,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<gpui::AnyElement> {
+    ) -> Option<gpui_kit::AnyElement> {
         if !self.palette.open {
             return None;
         }
@@ -274,18 +274,18 @@ impl Workspace {
                 .items_start()
                 .justify_center()
                 .pt(px(80.0))
-                .bg(gpui::hsla(0.0, 0.0, 0.0, 0.45))
+                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
                 .child(
                     div()
                         .key_context("CommandPalette")
                         .capture_action(cx.listener(
-                            |workspace, _: &gpui_base::input::MoveUp, _window, cx| {
+                            |workspace, _: &gpui_kit::base::input::MoveUp, _window, cx| {
                                 cx.stop_propagation();
                                 workspace.move_palette_selection(-1, cx);
                             },
                         ))
                         .capture_action(cx.listener(
-                            |workspace, _: &gpui_base::input::MoveDown, _window, cx| {
+                            |workspace, _: &gpui_kit::base::input::MoveDown, _window, cx| {
                                 cx.stop_propagation();
                                 workspace.move_palette_selection(1, cx);
                             },

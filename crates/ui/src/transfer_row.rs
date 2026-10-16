@@ -1,4 +1,4 @@
-use gpui::{
+use gpui_kit::{
     App, ClickEvent, DefiniteLength, ElementId, Hsla, IntoElement, ParentElement, RenderOnce,
     SharedString, Styled, Window, div, prelude::*, px,
 };

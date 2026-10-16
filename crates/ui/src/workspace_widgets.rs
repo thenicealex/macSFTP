@@ -1,4 +1,4 @@
-use gpui::{Context, Hsla, IntoElement, Render, SharedString, Window, div, prelude::*, px};
+use gpui_kit::{Context, Hsla, IntoElement, Render, SharedString, Window, div, prelude::*, px};
 use macsftp_core::{ConnectionState, TransferEndpoint, TransferJob};
 
 use crate::{ActiveTheme, Theme};

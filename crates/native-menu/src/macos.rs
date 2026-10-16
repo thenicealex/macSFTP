@@ -5,8 +5,8 @@
 
 use std::{cell::Cell, io};
 
-use gpui::{App, Pixels, Point, Window};
-use gpui_base::input::{NativeMenu, NativeMenuItem};
+use gpui_kit::base::input::{NativeMenu, NativeMenuItem};
+use gpui_kit::{App, Pixels, Point, Window};
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, define_class, msg_send,
     rc::Retained,
@@ -82,7 +82,7 @@ fn run_menu(
     view: &NSView,
     position: Point<Pixels>,
     marker: MainThreadMarker,
-) -> Option<Box<dyn gpui::Action>> {
+) -> Option<Box<dyn gpui_kit::Action>> {
     let target = MenuTarget::new();
     let native = NSMenu::new(marker);
     native.setAutoenablesItems(false);

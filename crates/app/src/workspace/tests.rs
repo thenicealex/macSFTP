@@ -1,6 +1,6 @@
 // Tests use unwrap/expect for fixtures; production keeps unwrap_used deny.
 #![allow(clippy::unwrap_used)]
-use gpui::{
+use gpui_kit::{
     App, AppContext as _, Entity, ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext,
     point, px, size,
 };
@@ -216,7 +216,7 @@ fn init_workspace_with_paths(
     let window = cx.add_window(|window, cx| {
         let workspace =
             cx.new(|cx| Workspace::new(client, window_session_id, restore_snapshot, window, cx));
-        gpui_base::Root::new(workspace, window, cx)
+        gpui_kit::base::Root::new(workspace, window, cx)
     });
     let workspace = window
         .root(cx)
@@ -269,7 +269,7 @@ fn test_connection_key(session_id: SessionId) -> ConnectionKey {
     )
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn local_network_recovery_opens_the_macos_privacy_pane(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -305,7 +305,7 @@ fn connect_and_prompt(workspace: &Entity<Workspace>, cx: &mut VisualTestContext)
     prompt
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn new_tab_and_close_tab_actions_manage_tab_store(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -347,7 +347,7 @@ fn new_tab_and_close_tab_actions_manage_tab_store(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn tab_switching_cycles_through_tabs(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     cx.dispatch_action(NewTab); // tabs: 1, 2 — active 2
@@ -363,7 +363,7 @@ fn tab_switching_cycles_through_tabs(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn keyboard_shortcut_opens_new_tab(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -377,7 +377,7 @@ fn keyboard_shortcut_opens_new_tab(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn keyboard_selection_moves_through_local_entries(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -419,7 +419,7 @@ fn keyboard_selection_moves_through_local_entries(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn page_down_moves_by_ten_on_visible_list(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     let (fixture, base) = temp_local_fixture("page-down");
@@ -455,7 +455,7 @@ fn page_down_moves_by_ten_on_visible_list(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(&fixture);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn shift_down_extends_selection_range(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     let (fixture, base) = temp_local_fixture("shift-range");
@@ -491,7 +491,7 @@ fn shift_down_extends_selection_range(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(&fixture);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn shift_selection_replaces_filtered_out_anchor(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, _window, cx| {
@@ -531,7 +531,7 @@ fn shift_selection_replaces_filtered_out_anchor(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn shift_selection_preserves_visible_range_when_anchor_is_filtered(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, _window, cx| {
@@ -569,7 +569,7 @@ fn shift_selection_preserves_visible_range_when_anchor_is_filtered(cx: &mut Test
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn large_directory_selection_smoke(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, _window, cx| {
@@ -616,7 +616,7 @@ fn large_directory_selection_smoke(cx: &mut TestAppContext) {
         });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn select_all_selects_all_visible(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     let (fixture, base) = temp_local_fixture("select-all");
@@ -654,7 +654,7 @@ fn select_all_selects_all_visible(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(&fixture);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn transfer_drawer_toggles_via_action(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -673,7 +673,7 @@ fn transfer_drawer_toggles_via_action(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn transfer_drawer_default_height(cx: &mut TestAppContext) {
     let (workspace, _cx, _channels) = init_workspace(cx);
     workspace.read_with(&_cx, |workspace, _| {
@@ -684,26 +684,26 @@ fn transfer_drawer_default_height(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn transfer_drawer_height_survives_toggle(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     workspace.update(&mut cx, |workspace, _cx| {
-        workspace.set_drawer_height(gpui::px(180.0), gpui::px(900.0));
+        workspace.set_drawer_height(gpui_kit::px(180.0), gpui_kit::px(900.0));
     });
     cx.dispatch_action(ShowTransferDrawer);
     cx.dispatch_action(ShowTransferDrawer);
     workspace.read_with(&cx, |workspace, _| {
         assert!(workspace.transfer_drawer.open);
-        assert_eq!(workspace.transfer_drawer.height, gpui::px(180.0));
+        assert_eq!(workspace.transfer_drawer.height, gpui_kit::px(180.0));
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn transfer_drawer_reset_height(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     workspace.update(&mut cx, |workspace, _cx| {
-        workspace.set_drawer_height(gpui::px(360.0), gpui::px(900.0));
-        workspace.reset_drawer_height(gpui::px(900.0));
+        workspace.set_drawer_height(gpui_kit::px(360.0), gpui_kit::px(900.0));
+        workspace.reset_drawer_height(gpui_kit::px(900.0));
     });
     workspace.read_with(&cx, |workspace, _| {
         assert_eq!(
@@ -713,12 +713,12 @@ fn transfer_drawer_reset_height(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn transfer_drawer_min_height_does_not_close(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     workspace.update(&mut cx, |workspace, _cx| {
         // Simulate dragging the handle all the way down.
-        workspace.set_drawer_height(gpui::px(1.0), gpui::px(900.0));
+        workspace.set_drawer_height(gpui_kit::px(1.0), gpui_kit::px(900.0));
     });
     workspace.read_with(&cx, |workspace, _| {
         assert!(
@@ -733,29 +733,29 @@ fn transfer_drawer_min_height_does_not_close(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn transfer_drawer_resize_delta_grows_when_dragging_up(cx: &mut TestAppContext) {
     // Logic mirror of on_drag_move: new_height = start_height + (start_y - current_y).
     let (workspace, mut cx, _channels) = init_workspace(cx);
     workspace.update(&mut cx, |workspace, _cx| {
         let start = crate::workspace::drawer_height::TransferDrawerResize {
-            start_height: gpui::px(240.0),
-            start_y: gpui::px(500.0),
+            start_height: gpui_kit::px(240.0),
+            start_y: gpui_kit::px(500.0),
         };
         workspace.transfer_drawer.resize = Some(start.clone());
-        let current_y = gpui::px(400.0); // drag up → taller
+        let current_y = gpui_kit::px(400.0); // drag up → taller
         let new_height = start.start_height + (start.start_y - current_y);
-        workspace.set_drawer_height(new_height, gpui::px(900.0));
+        workspace.set_drawer_height(new_height, gpui_kit::px(900.0));
         workspace.transfer_drawer.resize = None;
     });
     workspace.read_with(&cx, |workspace, _| {
-        assert_eq!(workspace.transfer_drawer.height, gpui::px(340.0));
+        assert_eq!(workspace.transfer_drawer.height, gpui_kit::px(340.0));
         assert!(workspace.transfer_drawer.resize.is_none());
         assert!(workspace.transfer_drawer.open);
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn settings_action_switches_surface_and_persists_appearance(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -786,7 +786,7 @@ fn settings_action_switches_surface_and_persists_appearance(cx: &mut TestAppCont
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn open_profiles_action_opens_settings_profiles_section(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -801,7 +801,7 @@ fn open_profiles_action_opens_settings_profiles_section(cx: &mut TestAppContext)
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn settings_profiles_section_lists_saved_profiles(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -837,7 +837,7 @@ fn settings_profiles_section_lists_saved_profiles(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn settings_profile_list_overflow_uses_custom_scrollbar(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -876,7 +876,7 @@ fn settings_profile_list_overflow_uses_custom_scrollbar(cx: &mut TestAppContext)
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn settings_new_profile_save_persists(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -936,7 +936,7 @@ fn settings_new_profile_save_persists(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn profile_editor_saves_jump_and_proxy_routes(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, _window, cx| {
@@ -991,7 +991,7 @@ fn profile_editor_saves_jump_and_proxy_routes(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn profile_editor_scrolls_at_minimum_window_size(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     let scroll = workspace.read_with(&cx, |workspace, _| workspace.settings.editor_scroll.clone());
@@ -1026,7 +1026,7 @@ fn profile_editor_scrolls_at_minimum_window_size(cx: &mut TestAppContext) {
     assert!(thumb_after.top() > thumb_before.top());
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn profile_editor_passphrase_policy_round_trip_to_ask_every_time(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -1090,7 +1090,7 @@ fn profile_editor_passphrase_policy_round_trip_to_ask_every_time(cx: &mut TestAp
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn settings_edit_host_keeps_keychain_secret_when_password_blank(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -1146,7 +1146,7 @@ fn settings_edit_host_keeps_keychain_secret_when_password_blank(cx: &mut TestApp
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn settings_new_password_profile_requires_password(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -1179,7 +1179,7 @@ fn settings_new_password_profile_requires_password(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn delete_profile_requires_confirmation(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -1252,7 +1252,7 @@ fn delete_profile_requires_confirmation(cx: &mut TestAppContext) {
 /// dead id. The stale recents linkage broke upsert dedupe (manual
 /// reconnects created duplicate entries) and future session snapshots
 /// kept propagating the dead reference.
-#[gpui::test]
+#[gpui_kit::test]
 fn deleting_profile_decouples_recents_and_live_tabs(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -1335,7 +1335,7 @@ fn profile_matches_filter_name_host_user() {
     assert!(!profile_matches_filter(&profile, "nomatch"));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn settings_profile_filter_narrows_list(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -1383,7 +1383,7 @@ fn settings_profile_filter_narrows_list(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn about_action_opens_and_escape_closes_overlay(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -1398,7 +1398,7 @@ fn about_action_opens_and_escape_closes_overlay(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn about_escape_restores_pane_focus(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |ws, window, cx| {
@@ -1415,7 +1415,7 @@ fn about_escape_restores_pane_focus(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn about_close_button_restores_pane_focus(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |ws, window, cx| {
@@ -1431,7 +1431,7 @@ fn about_close_button_restores_pane_focus(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn go_to_path_escape_restores_pane_focus(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |ws, window, cx| {
@@ -1453,7 +1453,7 @@ fn go_to_path_escape_restores_pane_focus(cx: &mut TestAppContext) {
 
 // ── Runtime bridge wiring ─────────────────────────────────────
 
-#[gpui::test]
+#[gpui_kit::test]
 fn connect_sends_command_with_ui_allocated_session(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
 
@@ -1501,7 +1501,7 @@ fn connect_sends_command_with_ui_allocated_session(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn host_key_prompt_opens_modal_and_accept_returns_to_connecting(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     let prompt = connect_and_prompt(&workspace, &mut cx);
@@ -1545,7 +1545,7 @@ fn host_key_prompt_opens_modal_and_accept_returns_to_connecting(cx: &mut TestApp
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn keyboard_interactive_prompt_submits_redacted_responses(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -1600,7 +1600,7 @@ fn keyboard_interactive_prompt_submits_redacted_responses(cx: &mut TestAppContex
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn stale_keyboard_interactive_prompt_is_dropped(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -1626,7 +1626,7 @@ fn stale_keyboard_interactive_prompt_is_dropped(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn keyboard_interactive_inputs_are_isolated_per_tab(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     let prompt = |request_id, tab_id| KeyboardInteractivePrompt {
@@ -1669,7 +1669,7 @@ fn keyboard_interactive_inputs_are_isolated_per_tab(cx: &mut TestAppContext) {
     ));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn full_command_channel_keeps_host_key_prompt_actionable(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     let prompt = connect_and_prompt(&workspace, &mut cx);
@@ -1696,7 +1696,7 @@ fn full_command_channel_keeps_host_key_prompt_actionable(cx: &mut TestAppContext
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn reject_host_key_disconnects_tab(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     let prompt = connect_and_prompt(&workspace, &mut cx);
@@ -1726,7 +1726,7 @@ fn reject_host_key_disconnects_tab(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn cancel_connect_sends_disconnect_and_clears_connecting(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
 
@@ -1759,7 +1759,7 @@ fn cancel_connect_sends_disconnect_and_clears_connecting(cx: &mut TestAppContext
     assert!(saw_disconnect, "DisconnectTab must be sent");
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn full_command_channel_does_not_fake_cancel_connect(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -1779,7 +1779,7 @@ fn full_command_channel_does_not_fake_cancel_connect(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn custom_conflict_rename_validates_and_sends_plan_scoped_decision(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     let prompt = TransferConflictPrompt {
@@ -1842,7 +1842,7 @@ fn custom_conflict_rename_validates_and_sends_plan_scoped_decision(cx: &mut Test
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn full_command_channel_keeps_transfer_conflict_modal(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     let prompt = TransferConflictPrompt {
@@ -1883,7 +1883,7 @@ fn full_command_channel_keeps_transfer_conflict_modal(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn stale_host_key_prompt_is_dropped(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -1919,7 +1919,7 @@ fn stale_host_key_prompt_is_dropped(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn tab_connected_event_requests_the_real_remote_root(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -1956,7 +1956,7 @@ fn tab_connected_event_requests_the_real_remote_root(cx: &mut TestAppContext) {
     ));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn session_snapshot_never_contains_cached_credentials(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -2016,7 +2016,7 @@ fn session_snapshot_never_contains_cached_credentials(cx: &mut TestAppContext) {
     ));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn classified_disconnect_reasons_reach_the_connection_state(cx: &mut TestAppContext) {
     // Mid-session drops now arrive with a classified UserFacingError so
     // the remote pane can say WHY the connection dropped instead of a
@@ -2093,7 +2093,7 @@ fn classified_disconnect_reasons_reach_the_connection_state(cx: &mut TestAppCont
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn disconnect_preserves_last_remote_path_for_session_restore(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -2143,7 +2143,7 @@ fn disconnect_preserves_last_remote_path_for_session_restore(cx: &mut TestAppCon
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn tab_connected_upserts_recents(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -2185,7 +2185,7 @@ fn tab_connected_upserts_recents(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn tab_connected_dedupes_recents(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
 
@@ -2289,7 +2289,7 @@ fn format_recent_label_uses_display_name_when_present() {
     assert_eq!(format_recent_label(&custom_port), "alex@example.com:2222");
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn open_recent_without_profile_prefills_form(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
 
@@ -2340,7 +2340,7 @@ fn open_recent_without_profile_prefills_form(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn open_recent_with_profile_and_keychain_connects(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
 
@@ -2420,7 +2420,7 @@ fn open_recent_with_profile_and_keychain_connects(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn open_recent_with_missing_keychain_password_keeps_form_open(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
 
@@ -2500,7 +2500,7 @@ fn open_recent_with_missing_keychain_password_keeps_form_open(cx: &mut TestAppCo
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn drag_local_file_onto_remote_pane_begins_upload(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -2551,7 +2551,7 @@ fn drag_local_file_onto_remote_pane_begins_upload(cx: &mut TestAppContext) {
     }
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn drag_remote_file_onto_local_pane_begins_download(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -2601,7 +2601,7 @@ fn drag_remote_file_onto_local_pane_begins_download(cx: &mut TestAppContext) {
     }
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn directory_selection_starts_a_download_plan(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -2745,7 +2745,7 @@ fn manual_connection_key() -> ConnectionKey {
     test_connection_key(SessionId(1))
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn edit_small_file_starts_download_to_edits_dir(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     connect_and_drain(&workspace, &mut cx, &channels);
@@ -2812,7 +2812,7 @@ fn edit_small_file_starts_download_to_edits_dir(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn duplicate_edit_reopens_existing_temp_without_downloading(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     connect_and_drain(&workspace, &mut cx, &channels);
@@ -2891,7 +2891,7 @@ fn duplicate_edit_reopens_existing_temp_without_downloading(cx: &mut TestAppCont
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn upload_modified_file_is_explicit_and_checks_remote_first(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     connect_and_drain(&workspace, &mut cx, &channels);
@@ -2969,7 +2969,7 @@ fn upload_modified_file_is_explicit_and_checks_remote_first(cx: &mut TestAppCont
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn edit_metadata_failure_preserves_session_and_temp_directory(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     connect_and_drain(&workspace, &mut cx, &channels);
@@ -3039,7 +3039,7 @@ fn edit_metadata_failure_preserves_session_and_temp_directory(cx: &mut TestAppCo
     std::fs::remove_dir_all(temp_dir).expect("remove edit metadata fixture");
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn edit_reaps_orphaned_existing_session_and_retries(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     connect_and_drain(&workspace, &mut cx, &channels);
@@ -3108,7 +3108,7 @@ fn edit_reaps_orphaned_existing_session_and_retries(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn edit_large_file_requires_confirmation_first(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     connect_and_drain(&workspace, &mut cx, &channels);
@@ -3151,7 +3151,7 @@ fn edit_large_file_requires_confirmation_first(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn closing_tab_clears_its_large_edit_confirmation(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     connect_and_drain(&workspace, &mut cx, &channels);
@@ -3176,7 +3176,7 @@ fn closing_tab_clears_its_large_edit_confirmation(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn closing_another_tab_preserves_large_edit_confirmation(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     connect_and_drain(&workspace, &mut cx, &channels);
@@ -3204,7 +3204,7 @@ fn closing_another_tab_preserves_large_edit_confirmation(cx: &mut TestAppContext
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn confirm_large_edit_starts_download(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     connect_and_drain(&workspace, &mut cx, &channels);
@@ -3264,7 +3264,7 @@ fn confirm_large_edit_starts_download(cx: &mut TestAppContext) {
     assert_eq!(command.destination, TransferEndpoint::Local(expected_temp));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn confirm_large_edit_uses_refreshed_epoch_after_reconnect(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     connect_and_drain(&workspace, &mut cx, &channels); // Connected at epoch 1
@@ -3339,7 +3339,7 @@ fn confirm_large_edit_uses_refreshed_epoch_after_reconnect(cx: &mut TestAppConte
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn request_edit_on_remote_file_starts_edit(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     connect_and_drain(&workspace, &mut cx, &channels);
@@ -3386,7 +3386,7 @@ fn request_edit_on_remote_file_starts_edit(cx: &mut TestAppContext) {
     assert_eq!(command.sources, vec![TransferEndpoint::Remote(file_path)]);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn request_edit_on_remote_directory_is_noop(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     connect_and_drain(&workspace, &mut cx, &channels);
@@ -3427,7 +3427,7 @@ fn request_edit_on_remote_directory_is_noop(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn settings_external_editor_typing_persists_and_round_trips(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -3477,7 +3477,7 @@ fn settings_external_editor_typing_persists_and_round_trips(cx: &mut TestAppCont
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn component_input_keeps_unicode_and_focus_across_redraws(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     cx.dispatch_action(OpenSettings);
@@ -3546,7 +3546,7 @@ fn register_conflict_session(
     })
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn resolve_conflict_overwrite_uploads(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
 
@@ -3586,7 +3586,7 @@ fn resolve_conflict_overwrite_uploads(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn resolve_conflict_double_overwrite_dispatches_once(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
 
@@ -3613,7 +3613,7 @@ fn resolve_conflict_double_overwrite_dispatches_once(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn resolve_conflict_later_returns_to_editing(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
 
@@ -3643,7 +3643,7 @@ fn resolve_conflict_later_returns_to_editing(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn resolve_conflict_discard_local_redownloads(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
 
@@ -3687,7 +3687,7 @@ fn resolve_conflict_discard_local_redownloads(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn edit_dedup_follows_captured_connection_key_not_profile_id(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     connect_and_drain(&workspace, &mut cx, &channels);
@@ -3762,7 +3762,7 @@ fn edit_dedup_follows_captured_connection_key_not_profile_id(cx: &mut TestAppCon
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn saved_profile_host_change_does_not_hit_old_connections_edit(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
 
@@ -3880,7 +3880,7 @@ fn saved_profile_host_change_does_not_hit_old_connections_edit(cx: &mut TestAppC
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn reconnect_same_target_reuses_edit_session_for_upload(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     connect_and_drain(&workspace, &mut cx, &channels);
@@ -3939,7 +3939,7 @@ fn reconnect_same_target_reuses_edit_session_for_upload(cx: &mut TestAppContext)
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn older_directory_result_does_not_replace_a_newer_requested_path(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -4004,7 +4004,7 @@ fn older_directory_result_does_not_replace_a_newer_requested_path(cx: &mut TestA
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn current_directory_failure_shows_recoverable_pane_error(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -4078,7 +4078,7 @@ fn current_directory_failure_shows_recoverable_pane_error(cx: &mut TestAppContex
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn remote_listing_applies_the_tab_sort(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -4246,7 +4246,7 @@ fn session_snapshot(
     })
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn refresh_adopts_listing_when_only_sub_second_mtime_differs(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     let scope = connect_and_land_on_root(&workspace, &mut cx, &channels);
@@ -4292,7 +4292,7 @@ fn refresh_adopts_listing_when_only_sub_second_mtime_differs(cx: &mut TestAppCon
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn refresh_preserves_baseline_when_remote_genuinely_changed(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     let scope = connect_and_land_on_root(&workspace, &mut cx, &channels);
@@ -4334,7 +4334,7 @@ fn refresh_preserves_baseline_when_remote_genuinely_changed(cx: &mut TestAppCont
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn refresh_preserves_baseline_when_size_changed_at_same_second(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     let scope = connect_and_land_on_root(&workspace, &mut cx, &channels);
@@ -4364,7 +4364,7 @@ fn refresh_preserves_baseline_when_size_changed_at_same_second(cx: &mut TestAppC
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn navigate_back_restores_previous_local_path(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     let (fixture, parent) = temp_local_fixture("nav-back");
@@ -4477,7 +4477,7 @@ fn navigate_back_restores_previous_local_path(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(&fixture);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn go_to_path_navigates_local_with_push_history(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     let (fixture, parent) = temp_local_fixture("go-to-path");
@@ -4587,7 +4587,7 @@ fn go_to_path_navigates_local_with_push_history(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(&fixture);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn navigate_clears_type_to_filter_query(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     let (fixture, parent) = temp_local_fixture("nav-clears-filter");
@@ -4617,7 +4617,7 @@ fn navigate_clears_type_to_filter_query(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(&fixture);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn go_to_path_remote_requests_directory_with_push(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -4675,7 +4675,7 @@ fn go_to_path_remote_requests_directory_with_push(cx: &mut TestAppContext) {
     ));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn remote_navigation_and_refresh_keep_the_previous_listing_visible(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -4752,7 +4752,7 @@ fn remote_navigation_and_refresh_keep_the_previous_listing_visible(cx: &mut Test
     ));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn disconnect_event_clears_remote_pane_and_expires_modal(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     let _prompt = connect_and_prompt(&workspace, &mut cx);
@@ -4788,7 +4788,7 @@ fn disconnect_event_clears_remote_pane_and_expires_modal(cx: &mut TestAppContext
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn request_connect_opens_form_then_reuses_session_credentials(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
 
@@ -4875,7 +4875,7 @@ fn request_connect_opens_form_then_reuses_session_credentials(cx: &mut TestAppCo
     }
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn connect_component_inputs_support_clipboard_and_mixed_secret_focus(cx: &mut TestAppContext) {
     use crate::workspace::connect_form::ConnectField;
     let (workspace, mut cx, channels) = init_workspace(cx);
@@ -4933,7 +4933,7 @@ fn connect_component_inputs_support_clipboard_and_mixed_secret_focus(cx: &mut Te
     assert_eq!(connect.settings.username, "new-user");
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn profile_component_input_preserves_invalid_draft_and_clears_error_on_edit(
     cx: &mut TestAppContext,
 ) {
@@ -4978,7 +4978,7 @@ fn profile_component_input_preserves_invalid_draft_and_clears_error_on_edit(
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn ordinary_modal_input_keeps_selection_across_redraw_and_supports_undo(cx: &mut TestAppContext) {
     let (workspace, mut cx, _) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -4988,7 +4988,7 @@ fn ordinary_modal_input_keeps_selection_across_redraw_and_supports_undo(cx: &mut
     cx.simulate_keystrokes("cmd-a");
     workspace.update(&mut cx, |_workspace, cx| cx.notify());
     cx.update(|_window, cx| {
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string("/replacement".into()))
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("/replacement".into()))
     });
     cx.simulate_keystrokes("cmd-v");
     workspace.read_with(&cx, |workspace, _| {
@@ -5002,10 +5002,10 @@ fn ordinary_modal_input_keeps_selection_across_redraw_and_supports_undo(cx: &mut
     workspace.read_with(&cx, |workspace, _| assert!(!workspace.go_to_path.open));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn ordinary_input_preserves_ime_composition_across_parent_redraw(cx: &mut TestAppContext) {
     use super::TextInputTarget;
-    use gpui::EntityInputHandler as _;
+    use gpui_kit::EntityInputHandler as _;
     let (workspace, mut cx, _) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
         workspace.open_go_to_path(window, cx)
@@ -5034,10 +5034,10 @@ fn ordinary_input_preserves_ime_composition_across_parent_redraw(cx: &mut TestAp
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn ordinary_input_theme_change_preserves_composition_and_focus(cx: &mut TestAppContext) {
-    use gpui::EntityInputHandler as _;
-    use gpui::Focusable as _;
+    use gpui_kit::EntityInputHandler as _;
+    use gpui_kit::Focusable as _;
     let (workspace, mut cx, _) = init_workspace(cx);
     cx.dispatch_action(OpenSettings);
     let input = workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -5066,7 +5066,7 @@ fn ordinary_input_theme_change_preserves_composition_and_focus(cx: &mut TestAppC
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn ordinary_input_readonly_and_disabled_survive_parent_redraw(cx: &mut TestAppContext) {
     let (workspace, mut cx, _) = init_workspace(cx);
     cx.dispatch_action(OpenSettings);
@@ -5112,7 +5112,7 @@ fn ordinary_input_readonly_and_disabled_survive_parent_redraw(cx: &mut TestAppCo
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn replaced_connect_form_ignores_changes_from_its_old_component(cx: &mut TestAppContext) {
     use crate::workspace::connect_form::{ConnectField, ConnectForm};
     let (workspace, mut cx, _) = init_workspace(cx);
@@ -5139,7 +5139,7 @@ fn replaced_connect_form_ignores_changes_from_its_old_component(cx: &mut TestApp
     });
     old_input.update_in(&mut cx, |input, window, cx| {
         input.set_value("stale.example", window, cx);
-        cx.emit(gpui_base::input::InputEvent::Change);
+        cx.emit(gpui_kit::base::input::InputEvent::Change);
     });
     workspace.read_with(&cx, |workspace, _| {
         assert_eq!(
@@ -5155,7 +5155,7 @@ fn replaced_connect_form_ignores_changes_from_its_old_component(cx: &mut TestApp
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn open_connect_form_resets_profile_picker(cx: &mut TestAppContext) {
     let (workspace, mut cx, _) = init_workspace(cx);
     workspace.update_in(&mut cx, |ws, window, cx| {
@@ -5177,7 +5177,7 @@ fn open_connect_form_resets_profile_picker(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn connect_picker_select_profile_prefills_form(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -5247,7 +5247,7 @@ fn connect_picker_select_profile_prefills_form(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn connect_picker_filter_narrows_profiles(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -5305,7 +5305,7 @@ fn connect_picker_filter_narrows_profiles(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn escape_closes_profile_picker_before_connect_form(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -5338,7 +5338,7 @@ fn escape_closes_profile_picker_before_connect_form(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn connect_picker_enter_selects_first_filtered_profile(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
 
@@ -5402,7 +5402,7 @@ fn connect_picker_enter_selects_first_filtered_profile(cx: &mut TestAppContext) 
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn leave_settings_discards_unsaved_new_profile_draft(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -5442,7 +5442,7 @@ fn leave_settings_discards_unsaved_new_profile_draft(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn connect_manual_entry_clears_profile_link_and_secrets(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -5513,7 +5513,7 @@ fn connect_manual_entry_clears_profile_link_and_secrets(cx: &mut TestAppContext)
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn connect_form_validates_before_sending(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -5587,7 +5587,7 @@ fn connect_form_builds_interactive_and_agent_credentials() {
     ));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn escape_closes_connect_form(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -5603,7 +5603,7 @@ fn escape_closes_connect_form(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn host_key_mismatch_fails_tab_and_blocks(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -5648,7 +5648,7 @@ fn host_key_mismatch_fails_tab_and_blocks(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn stale_host_key_mismatch_does_not_fail_replacement_session(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -5713,7 +5713,7 @@ fn stale_host_key_mismatch_does_not_fail_replacement_session(cx: &mut TestAppCon
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn close_tab_notifies_runtime(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
 
@@ -5729,7 +5729,7 @@ fn close_tab_notifies_runtime(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn full_command_channel_eventually_releases_closed_tab(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     fill_command_channel(&channels);
@@ -5752,7 +5752,7 @@ fn full_command_channel_eventually_releases_closed_tab(cx: &mut TestAppContext) 
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn window_release_notifies_runtime_for_all_remaining_tabs(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     cx.cx.update(|cx| {
@@ -5778,7 +5778,7 @@ fn window_release_notifies_runtime_for_all_remaining_tabs(cx: &mut TestAppContex
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn completed_child_jobs_finalize_root_plan(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     let now = Timestamp(std::time::SystemTime::now());
@@ -5942,7 +5942,7 @@ fn temp_local_fixture(label: &str) -> (std::path::PathBuf, LocalPath) {
     )
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn hidden_files_filtered_by_default(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     let (fixture, base) = temp_local_fixture("hidden-files");
@@ -6000,7 +6000,7 @@ fn hidden_files_filtered_by_default(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(&fixture);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn type_to_filter_reduces_visible_local_entries(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     let (fixture, base) = temp_local_fixture("type-to-filter");
@@ -6080,7 +6080,7 @@ fn type_to_filter_reduces_visible_local_entries(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(&fixture);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn local_directory_respects_tab_sort_by_size(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     let (fixture, base) = {
@@ -6121,7 +6121,7 @@ fn local_directory_respects_tab_sort_by_size(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(&fixture);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn apply_sort_field_toggles_direction_on_same_column(cx: &mut TestAppContext) {
     let (workspace, mut cx, _) = init_workspace(cx);
     workspace.update(&mut cx, |workspace, cx| {
@@ -6138,7 +6138,7 @@ fn apply_sort_field_toggles_direction_on_same_column(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn delete_confirm_modal_lists_selection_and_dir_warning(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     let (fixture, base) = temp_local_fixture("delete-confirm");
@@ -6171,7 +6171,7 @@ fn delete_confirm_modal_lists_selection_and_dir_warning(cx: &mut TestAppContext)
     let _ = std::fs::remove_dir_all(&fixture);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn dont_ask_again_persists_and_skips_next_confirm(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     let (fixture, base) = temp_local_fixture("dont-ask");
@@ -6229,7 +6229,7 @@ fn dont_ask_again_persists_and_skips_next_confirm(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(&fixture);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn local_new_folder_and_rename_via_inline_edit(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     let (fixture, base) = temp_local_fixture("inline-edit");
@@ -6273,7 +6273,7 @@ fn local_new_folder_and_rename_via_inline_edit(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(&fixture);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn fs_operation_failed_sets_pane_error(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -6303,7 +6303,7 @@ fn fs_operation_failed_sets_pane_error(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn status_bar_selection_count_tracks_focused_pane(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     let (fixture, base) = temp_local_fixture("status-selection");
@@ -6355,7 +6355,7 @@ fn status_bar_selection_count_tracks_focused_pane(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(&fixture);
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn activate_tab_updates_mru_front(cx: &mut TestAppContext) {
     let (workspace, mut cx, _) = init_workspace(cx);
     // open_new_tab seeds MRU with tab 1.
@@ -6388,7 +6388,7 @@ fn activate_tab_updates_mru_front(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn cmd_shift_tab_still_creation_order(cx: &mut TestAppContext) {
     let (workspace, mut cx, _) = init_workspace(cx);
     cx.dispatch_action(NewTab); // 1, 2 active 2
@@ -6419,7 +6419,7 @@ fn cmd_shift_tab_still_creation_order(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn close_tab_removes_from_mru(cx: &mut TestAppContext) {
     let (workspace, mut cx, _) = init_workspace(cx);
     cx.dispatch_action(NewTab);
@@ -6439,7 +6439,7 @@ fn close_tab_removes_from_mru(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn close_tab_tears_down_its_edit_sessions_and_temp_dir(cx: &mut TestAppContext) {
     let (workspace, mut cx, _) = init_workspace(cx);
     cx.dispatch_action(NewTab); // TabId(2)
@@ -6491,7 +6491,7 @@ fn close_tab_tears_down_its_edit_sessions_and_temp_dir(cx: &mut TestAppContext) 
     std::fs::remove_dir_all(&session_dir).ok();
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn window_closed_callback_reaps_orphaned_edit_session(cx: &mut TestAppContext) {
     let (workspace, mut cx, _) = init_workspace(cx);
     let app = cx.cx.clone();
@@ -6535,7 +6535,7 @@ fn window_closed_callback_reaps_orphaned_edit_session(cx: &mut TestAppContext) {
     assert!(!session_dir.exists());
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn close_active_tab_touches_mru_with_new_active(cx: &mut TestAppContext) {
     let (workspace, mut cx, _) = init_workspace(cx);
     cx.dispatch_action(NewTab); // mru: 2, 1
@@ -6554,7 +6554,7 @@ fn close_active_tab_touches_mru_with_new_active(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn tab_switcher_next_and_enter_activates_mru(cx: &mut TestAppContext) {
     let (workspace, mut cx, _) = init_workspace(cx);
     cx.dispatch_action(NewTab); // mru: 2, 1
@@ -6571,7 +6571,7 @@ fn tab_switcher_next_and_enter_activates_mru(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn tab_switcher_esc_cancels_without_switch(cx: &mut TestAppContext) {
     let (workspace, mut cx, _) = init_workspace(cx);
     cx.dispatch_action(NewTab);
@@ -6590,7 +6590,7 @@ fn tab_switcher_esc_cancels_without_switch(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn overflowing_tab_switcher_renders_custom_scrollbar(cx: &mut TestAppContext) {
     let (workspace, mut cx, _) = init_workspace(cx);
     for _ in 0..20 {
@@ -6611,7 +6611,7 @@ fn overflowing_tab_switcher_renders_custom_scrollbar(cx: &mut TestAppContext) {
     assert!(track.contains(&thumb.center()));
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn cancel_modal_closes_palette_before_switcher(cx: &mut TestAppContext) {
     let (workspace, mut cx, _) = init_workspace(cx);
     cx.dispatch_action(NewTab);
@@ -6628,7 +6628,7 @@ fn cancel_modal_closes_palette_before_switcher(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn command_palette_filters_and_runs_new_tab(cx: &mut TestAppContext) {
     let (workspace, mut cx, _) = init_workspace(cx);
     workspace.update_in(&mut cx, |ws, window, cx| {
@@ -6644,7 +6644,7 @@ fn command_palette_filters_and_runs_new_tab(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn command_palette_manage_profiles_opens_profiles_section(cx: &mut TestAppContext) {
     let (workspace, mut cx, _) = init_workspace(cx);
     workspace.update_in(&mut cx, |ws, window, cx| {
@@ -6658,7 +6658,7 @@ fn command_palette_manage_profiles_opens_profiles_section(cx: &mut TestAppContex
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn command_palette_esc_closes_before_other_modals(cx: &mut TestAppContext) {
     let (workspace, mut cx, _) = init_workspace(cx);
     workspace.update_in(&mut cx, |ws, window, cx| {
@@ -6674,7 +6674,7 @@ fn command_palette_esc_closes_before_other_modals(cx: &mut TestAppContext) {
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn restore_session_rebuilds_tabs_without_connect(cx: &mut TestAppContext) {
     let app_paths = temp_app_paths();
     let mut store = SessionStore::open_or_empty(app_paths.session_file.clone());
@@ -6745,7 +6745,7 @@ fn restore_session_rebuilds_tabs_without_connect(cx: &mut TestAppContext) {
     );
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn build_session_snapshot_round_trips_active_tab_and_paths(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -6782,7 +6782,7 @@ fn build_session_snapshot_round_trips_active_tab_and_paths(cx: &mut TestAppConte
     });
 }
 
-#[gpui::test]
+#[gpui_kit::test]
 fn session_snapshot_never_persists_credentials(cx: &mut TestAppContext) {
     let app_paths = temp_app_paths();
     let session_path = app_paths.session_file.clone();
@@ -6822,7 +6822,7 @@ fn session_snapshot_never_persists_credentials(cx: &mut TestAppContext) {
 
 /// App-level wiring: after workspace init, `SharedTransfers.rates` is
 /// reachable via `ActiveTransfers` and produces speed from observes.
-#[gpui::test]
+#[gpui_kit::test]
 fn rate_book_observe_produces_speed_snapshot(cx: &mut TestAppContext) {
     use std::time::{Duration, Instant};
 

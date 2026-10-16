@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use gpui::{
+use gpui_kit::{
     App, ClipboardItem, Context, FocusHandle, Focusable, IntoElement, ParentElement, Pixels,
     Render, SharedString, Styled, Subscription, UniformListScrollHandle, Window, div, prelude::*,
 };
@@ -123,7 +123,7 @@ impl Workspace {
                 .clone()
                 .unwrap_or_default();
             cx.new(|cx| {
-                gpui_base::input::InputState::new(window, cx)
+                gpui_kit::base::input::InputState::new(window, cx)
                     .placeholder("Default app")
                     .default_value(current)
             })
@@ -132,7 +132,7 @@ impl Workspace {
             &external_editor_input,
             window,
             |workspace, _input, event, _window, cx| {
-                if matches!(event, gpui_base::input::InputEvent::Change) {
+                if matches!(event, gpui_kit::base::input::InputEvent::Change) {
                     workspace.commit_external_editor(cx);
                     cx.notify();
                 }
@@ -333,25 +333,25 @@ impl Workspace {
             PaneSide::Remote => &self.remote.scroll,
         }
     }
-    pub(crate) fn transfer_scroll(&self) -> &gpui::ScrollHandle {
+    pub(crate) fn transfer_scroll(&self) -> &gpui_kit::ScrollHandle {
         &self.transfer_drawer.scroll
     }
     pub(crate) fn transfer_scrollbar(&self) -> &ScrollbarState {
         &self.transfer_drawer.scrollbar
     }
-    pub(crate) fn palette_scroll(&self) -> &gpui::ScrollHandle {
+    pub(crate) fn palette_scroll(&self) -> &gpui_kit::ScrollHandle {
         &self.palette.scroll
     }
     pub(crate) fn palette_scrollbar(&self) -> &ScrollbarState {
         &self.palette.scrollbar
     }
-    pub(crate) fn profile_picker_scroll(&self) -> &gpui::ScrollHandle {
+    pub(crate) fn profile_picker_scroll(&self) -> &gpui_kit::ScrollHandle {
         &self.settings.picker_scroll
     }
     pub(crate) fn profile_picker_scrollbar(&self) -> &ScrollbarState {
         &self.settings.picker_scrollbar
     }
-    pub(crate) fn tab_switcher_scroll(&self) -> &gpui::ScrollHandle {
+    pub(crate) fn tab_switcher_scroll(&self) -> &gpui_kit::ScrollHandle {
         &self.tab_switcher.scroll
     }
     pub(crate) fn tab_switcher_scrollbar(&self) -> &ScrollbarState {
@@ -958,7 +958,7 @@ impl Render for Workspace {
         let theme = cx.theme().clone();
         let has_tabs = !self.state.tabs.tabs.is_empty();
 
-        let main_area: gpui::AnyElement = if has_tabs {
+        let main_area: gpui_kit::AnyElement = if has_tabs {
             div()
                 .flex()
                 .flex_1()
@@ -1009,7 +1009,7 @@ impl Render for Workspace {
             // Always attach so clear works even before the tree re-renders
             // after drag start (drawer_resize may still be None on last paint).
             .on_mouse_up(
-                gpui::MouseButton::Left,
+                gpui_kit::MouseButton::Left,
                 cx.listener(|workspace, _event, _window, cx| {
                     if workspace.transfer_drawer.resize.take().is_some() {
                         cx.notify();
