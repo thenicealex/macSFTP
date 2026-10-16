@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 gpui-kit.workspace = true
 macsftp-core = { path = "../core" }
+macsftp-native-menu = { path = "../native-menu" }
 macsftp-platform = { path = "../platform" }
 macsftp-storage = { path = "../storage" }
 macsftp-sftp = { path = "../sftp" }

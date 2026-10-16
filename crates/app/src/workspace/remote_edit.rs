@@ -1,9 +1,8 @@
 use gpui_kit::{Context, FontWeight, IntoElement, ParentElement, Styled, div, prelude::*, px};
 use macsftp_core::{
     AppCommand, CheckRemoteEditSnapshotCommand, ConflictPolicy, ConnectionKey, EditPhase,
-    EditSession, EditSessionId, EntryPath, FileKind, LocalPath, MetadataPolicy, ProfileId,
-    RemotePath, RemoteSnapshot, StartTransferCommand, TabId, Timestamp, TransferDirection,
-    TransferEndpoint,
+    EditSession, EditSessionId, EntryPath, LocalPath, MetadataPolicy, ProfileId, RemotePath,
+    RemoteSnapshot, StartTransferCommand, TabId, Timestamp, TransferDirection, TransferEndpoint,
 };
 use macsftp_ui::{ActiveTheme, format_size, text_button};
 use tracing::warn;
@@ -53,37 +52,6 @@ pub(crate) enum ConflictChoice {
 }
 
 impl Workspace {
-    /// Resolve the first selected remote file (non-directory) from the active
-    /// tab's listing into `(RemotePath, size, modified_at)` and open it for
-    /// editing. Mirrors `download_selection`'s selection parsing. A directory
-    /// or empty selection is a no-op with a status hint.
-    pub(crate) fn request_edit_selection(&mut self, cx: &mut Context<Self>) {
-        let Some(tab) = self.active_tab() else {
-            return;
-        };
-        // Extract owned values while borrowing `tab`, so the borrow ends
-        // before the `&mut self` call to `begin_edit` below.
-        let selected: Option<(RemotePath, Option<u64>, Option<Timestamp>)> = tab
-            .selection
-            .selected_paths
-            .iter()
-            .find_map(|path| match path {
-                EntryPath::Remote(p) => tab
-                    .remote
-                    .entries
-                    .iter()
-                    .find(|entry| &entry.path == p && entry.kind != FileKind::Directory)
-                    .map(|entry| (entry.path.clone(), entry.size, entry.modified_at)),
-                EntryPath::Local(_) => None,
-            });
-        let Some((remote_path, size, modified_at)) = selected else {
-            self.status_message = Some("Select one server file to edit.".into());
-            cx.notify();
-            return;
-        };
-        self.begin_edit(remote_path, size, modified_at, cx);
-    }
-
     pub(crate) fn selected_edit_session(
         &self,
         cx: &gpui_kit::App,

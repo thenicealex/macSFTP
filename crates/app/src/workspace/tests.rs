@@ -24,7 +24,7 @@ use macsftp_storage::{
     AppearancePreference, PrivateKeyPassphraseUpdate, ProfileAuthUpdate, ProfileSaveRequest,
     SessionFile, SessionStore, SessionTabSnapshot, SessionWindowSnapshot,
 };
-use macsftp_ui::{Appearance, Theme};
+use macsftp_ui::{ActiveTheme as _, Appearance, Theme};
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -3492,12 +3492,12 @@ fn confirm_large_edit_uses_refreshed_epoch_after_reconnect(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
-fn request_edit_on_remote_file_starts_edit(cx: &mut TestAppContext) {
+fn open_remote_file_starts_edit(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     connect_and_drain(&workspace, &mut cx, &channels);
 
     let file_path = RemotePath::new("/home/tester/notes.txt");
-    workspace.update_in(&mut cx, |workspace, _window, cx| {
+    workspace.update_in(&mut cx, |workspace, window, cx| {
         let tab = workspace.active_tab_mut().expect("active tab");
         tab.remote.entries = vec![RemoteEntry {
             name: "notes.txt".to_string(),
@@ -3509,7 +3509,10 @@ fn request_edit_on_remote_file_starts_edit(cx: &mut TestAppContext) {
             link_target: None,
         }];
         tab.selection.selected_paths = vec![EntryPath::Remote(file_path.clone())];
-        workspace.request_edit_selection(cx);
+        // Opening a remote file (Enter, double-click or the pane context menu)
+        // resolves through the focused pane's selection.
+        workspace.focus_pane(PaneSide::Remote, window, cx);
+        workspace.open_selected_entry(window, cx);
     });
 
     // A small remote file goes straight to a Downloading edit session (no
@@ -3523,14 +3526,14 @@ fn request_edit_on_remote_file_starts_edit(cx: &mut TestAppContext) {
             .resources()
             .edit_sessions
             .find_active(&manual_connection_key(), &file_path)
-            .expect("request_edit_selection on a remote file registers a session");
+            .expect("opening a remote file registers an edit session");
         assert_eq!(session.phase, EditPhase::Downloading);
     });
 
     let command = channels
         .command_rx
         .try_recv()
-        .expect("request_edit_selection must enqueue a StartTransfer download");
+        .expect("opening a remote file must enqueue a StartTransfer download");
     let AppCommand::StartTransfer(command) = command else {
         panic!("expected StartTransfer for edit download, got {command:?}");
     };
@@ -3539,12 +3542,12 @@ fn request_edit_on_remote_file_starts_edit(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn request_edit_on_remote_directory_is_noop(cx: &mut TestAppContext) {
+fn open_remote_directory_navigates_instead_of_editing(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     connect_and_drain(&workspace, &mut cx, &channels);
 
     let dir_path = RemotePath::new("/home/tester/project");
-    workspace.update_in(&mut cx, |workspace, _window, cx| {
+    workspace.update_in(&mut cx, |workspace, window, cx| {
         let tab = workspace.active_tab_mut().expect("active tab");
         tab.remote.entries = vec![RemoteEntry {
             name: "project".to_string(),
@@ -3556,10 +3559,11 @@ fn request_edit_on_remote_directory_is_noop(cx: &mut TestAppContext) {
             link_target: None,
         }];
         tab.selection.selected_paths = vec![EntryPath::Remote(dir_path.clone())];
-        workspace.request_edit_selection(cx);
+        workspace.focus_pane(PaneSide::Remote, window, cx);
+        workspace.open_selected_entry(window, cx);
     });
 
-    // A directory is not editable: no session, no command.
+    // A directory is not editable: it navigates instead of arming an edit.
     workspace.read_with(&cx, |workspace, cx| {
         assert!(
             workspace.modal_inputs.large_edit_confirm.is_none(),
@@ -3570,12 +3574,22 @@ fn request_edit_on_remote_directory_is_noop(cx: &mut TestAppContext) {
                 .edit_sessions
                 .find_active(&manual_connection_key(), &dir_path)
                 .is_none(),
-            "selecting a directory must not register an edit session"
+            "opening a directory must not register an edit session"
+        );
+        let tab = workspace.active_tab().expect("active tab");
+        assert_eq!(
+            tab.remote.path.as_ref(),
+            Some(&dir_path),
+            "opening a directory navigates into it"
         );
     });
+    let command = channels
+        .command_rx
+        .try_recv()
+        .expect("navigation must ask the runtime for the directory");
     assert!(
-        channels.command_rx.try_recv().is_err(),
-        "editing a directory must not enqueue any command"
+        !matches!(command, AppCommand::StartTransfer(_)),
+        "a directory must not start an edit download, got {command:?}"
     );
 }
 
@@ -7232,4 +7246,135 @@ fn regenerate_workspace_ux_evidence() {
     .expect("window update must succeed");
     cx.run_until_parked();
     capture(&mut cx, "light-recents-scroll-720x480.png");
+}
+
+/// Local pane with a real, sorted fixture listing; returns the fixture dir so
+/// the caller can clean it up.
+fn workspace_with_local_files(
+    cx: &mut TestAppContext,
+    label: &str,
+    names: &[&str],
+) -> (std::path::PathBuf, Entity<Workspace>, VisualTestContext) {
+    let (fixture, base) = temp_local_fixture(label);
+    for name in names {
+        std::fs::write(fixture.join(name), b"x").expect("fixture file");
+    }
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.simulate_resize(size(px(900.0), px(600.0)));
+    set_local_path_and_wait(&workspace, &mut cx, base);
+    (fixture, workspace, cx)
+}
+
+fn right_click_local_pane(cx: &mut VisualTestContext, position: gpui_kit::Point<gpui_kit::Pixels>) {
+    cx.simulate_event(gpui_kit::MouseDownEvent {
+        position,
+        button: gpui_kit::MouseButton::Right,
+        click_count: 1,
+        ..Default::default()
+    });
+    cx.simulate_event(gpui_kit::MouseUpEvent {
+        position,
+        button: gpui_kit::MouseButton::Right,
+        click_count: 1,
+        ..Default::default()
+    });
+    cx.run_until_parked();
+}
+
+fn local_visible_entry(
+    workspace: &Entity<Workspace>,
+    cx: &VisualTestContext,
+    visible_index: usize,
+) -> EntryPath {
+    workspace
+        .read_with(cx, |workspace, cx| {
+            workspace.entry_path_at(PaneSide::Local, visible_index, cx)
+        })
+        .unwrap_or_else(|| panic!("fixture lists a row at visible index {visible_index}"))
+}
+
+/// Right-click selects the row under the pointer before the menu opens, so
+/// every menu command targets exactly what was clicked.
+#[gpui_kit::test]
+fn right_click_selects_the_row_under_the_pointer(cx: &mut TestAppContext) {
+    let (fixture, workspace, mut cx) =
+        workspace_with_local_files(cx, "context-menu-row", &["a.txt", "b.txt", "c.txt"]);
+    let row_height = workspace.read_with(&cx, |_workspace, cx| cx.theme().sizes.file_row_height);
+    let expected = local_visible_entry(&workspace, &cx, 1);
+    let viewport = cx
+        .debug_bounds("local-list-container-viewport")
+        .expect("local list viewport is laid out");
+
+    right_click_local_pane(
+        &mut cx,
+        point(viewport.center().x, viewport.top() + row_height * 1.5),
+    );
+
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(workspace.focused_side, PaneSide::Local);
+        let tab = workspace.active_tab().expect("active tab");
+        assert_eq!(tab.selection.selected_paths, vec![expected]);
+    });
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+/// A right click collapses a multi-selection onto the clicked row; the menu
+/// commands then act on that single row (Transmit semantics).
+#[gpui_kit::test]
+fn right_click_collapses_a_multi_selection_to_the_clicked_row(cx: &mut TestAppContext) {
+    let (fixture, workspace, mut cx) = workspace_with_local_files(
+        cx,
+        "context-menu-collapse",
+        &["a.txt", "b.txt", "c.txt", "d.txt"],
+    );
+    cx.dispatch_action(SelectAllEntries);
+    cx.run_until_parked();
+    workspace.read_with(&cx, |workspace, _| {
+        let tab = workspace.active_tab().expect("active tab");
+        assert_eq!(tab.selection.selected_paths.len(), 4, "all rows selected");
+    });
+
+    let row_height = workspace.read_with(&cx, |_workspace, cx| cx.theme().sizes.file_row_height);
+    let expected = local_visible_entry(&workspace, &cx, 2);
+    let viewport = cx
+        .debug_bounds("local-list-container-viewport")
+        .expect("local list viewport is laid out");
+    right_click_local_pane(
+        &mut cx,
+        point(viewport.center().x, viewport.top() + row_height * 2.5),
+    );
+
+    workspace.read_with(&cx, |workspace, _| {
+        let tab = workspace.active_tab().expect("active tab");
+        assert_eq!(tab.selection.selected_paths, vec![expected]);
+    });
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+/// A right click below the last row opens the blank-area menu without
+/// disturbing the selection.
+#[gpui_kit::test]
+fn right_click_on_blank_space_keeps_the_selection(cx: &mut TestAppContext) {
+    let (fixture, workspace, mut cx) =
+        workspace_with_local_files(cx, "context-menu-blank", &["a.txt", "b.txt"]);
+    let expected = local_visible_entry(&workspace, &cx, 0);
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        workspace.select_index(PaneSide::Local, 0, cx);
+    });
+    cx.run_until_parked();
+
+    let viewport = cx
+        .debug_bounds("local-list-container-viewport")
+        .expect("local list viewport is laid out");
+    right_click_local_pane(
+        &mut cx,
+        point(viewport.center().x, viewport.bottom() - px(8.0)),
+    );
+
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(workspace.focused_side, PaneSide::Local);
+        let tab = workspace.active_tab().expect("active tab");
+        assert_eq!(tab.selection.selected_paths, vec![expected]);
+    });
+    let _ = std::fs::remove_dir_all(&fixture);
 }

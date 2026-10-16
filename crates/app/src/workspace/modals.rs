@@ -356,11 +356,6 @@ impl crate::workspace::Workspace {
             self.cancel_delete_confirm(window, cx);
             return;
         }
-        if self.modal_inputs.context_menu.is_some() {
-            self.close_context_menu(cx);
-            self.focus_pane(self.focused_side, window, cx);
-            return;
-        }
         if self.modal_inputs.inline_edit.is_some() {
             self.cancel_inline_edit(cx);
             self.focus_pane(self.focused_side, window, cx);

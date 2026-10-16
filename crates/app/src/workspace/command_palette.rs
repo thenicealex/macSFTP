@@ -93,6 +93,7 @@ impl Workspace {
             "RefreshPane" => self.refresh_focused_pane(window, cx),
             "FocusLocalPane" => self.focus_pane(PaneSide::Local, window, cx),
             "FocusRemotePane" => self.focus_pane(PaneSide::Remote, window, cx),
+            "OpenSelectedEntry" => self.open_selected_entry(window, cx),
             "UploadSelection" => self.upload_selection(cx),
             "DownloadSelection" => self.download_selection(cx),
             "ShowTransferDrawer" => {
@@ -154,6 +155,7 @@ impl Workspace {
             "ParentDirectory" => self.go_to_parent_directory(window, cx),
             "ToggleHiddenFiles" => self.toggle_hidden_files(cx),
             "CopyPath" => self.copy_focused_path(cx),
+            "ShowInFinder" => self.reveal_local_selection(cx),
             "ReconnectTab" => self.request_connect(window, cx),
             "OpenLogFolder" => self.open_log_folder(cx),
             "OpenCommandPalette" => self.open_command_palette(window, cx),

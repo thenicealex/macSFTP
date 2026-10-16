@@ -95,13 +95,6 @@ pub(crate) struct InlineEditState {
     pub error: Option<SharedString>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct ContextMenuState {
-    pub side: PaneSide,
-    /// `None` = blank-area menu (New Folder / Refresh).
-    pub entry_index: Option<usize>,
-}
-
 impl crate::workspace::Workspace {
     pub(crate) fn selected_fs_entries(&self, side: PaneSide) -> Vec<FsEntryRef> {
         let Some(tab) = self.active_tab() else {
@@ -159,7 +152,6 @@ impl crate::workspace::Workspace {
             cx.notify();
             return;
         };
-        self.modal_inputs.context_menu = None;
         if cx.resources().config.config().confirm_delete {
             self.modal_inputs.delete_confirm = Some(DeleteConfirmState {
                 scope,
@@ -232,7 +224,6 @@ impl crate::workspace::Workspace {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        self.modal_inputs.context_menu = None;
         self.text_inputs.remove(&TextInputTarget::InlineEdit);
         self.modal_inputs.inline_edit = Some(InlineEditState {
             side,
@@ -266,7 +257,6 @@ impl crate::workspace::Workspace {
             cx.notify();
             return;
         };
-        self.modal_inputs.context_menu = None;
         self.text_inputs.remove(&TextInputTarget::InlineEdit);
         self.modal_inputs.inline_edit = Some(InlineEditState {
             side,
@@ -419,25 +409,6 @@ impl crate::workspace::Workspace {
     ) {
         // Keep the listing visible; phase 1 reports via status bar only.
         self.status_message = Some(format!("{}: {}", failure.title, failure.message).into());
-        cx.notify();
-    }
-
-    pub(crate) fn open_context_menu(
-        &mut self,
-        side: PaneSide,
-        entry_index: Option<usize>,
-        cx: &mut Context<Self>,
-    ) {
-        self.focused_side = side;
-        if let Some(index) = entry_index {
-            self.select_index(side, index, cx);
-        }
-        self.modal_inputs.context_menu = Some(ContextMenuState { side, entry_index });
-        cx.notify();
-    }
-
-    pub(crate) fn close_context_menu(&mut self, cx: &mut Context<Self>) {
-        self.modal_inputs.context_menu = None;
         cx.notify();
     }
 
@@ -649,142 +620,6 @@ impl crate::workspace::Workspace {
                 .p_4()
                 .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
                 .child(card)
-                .into_any_element(),
-        )
-    }
-
-    pub(crate) fn render_context_menu(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui_kit::AnyElement> {
-        let menu = self.modal_inputs.context_menu.as_ref()?;
-        let theme = cx.theme().clone();
-        let side = menu.side;
-        let is_local = side == PaneSide::Local;
-        let has_entry = menu.entry_index.is_some();
-        let connected = self
-            .active_tab()
-            .is_some_and(|tab| matches!(tab.connection, ConnectionState::Connected { .. }));
-
-        let mut items: Vec<gpui_kit::AnyElement> = Vec::new();
-        if has_entry {
-            items.push(
-                text_button("ctx-rename", "Rename")
-                    .on_click(cx.listener(move |workspace, _event, window, cx| {
-                        workspace.modal_inputs.context_menu = None;
-                        workspace.focused_side = side;
-                        workspace.begin_rename_selection(window, cx);
-                    }))
-                    .into_any_element(),
-            );
-            items.push(
-                text_button("ctx-delete", "Delete")
-                    .danger(true)
-                    .on_click(cx.listener(move |workspace, _event, window, cx| {
-                        workspace.modal_inputs.context_menu = None;
-                        workspace.focused_side = side;
-                        workspace.request_delete_selection(window, cx);
-                    }))
-                    .into_any_element(),
-            );
-        }
-        items.push(
-            text_button("ctx-new-folder", "New Folder")
-                .on_click(cx.listener(move |workspace, _event, window, cx| {
-                    workspace.modal_inputs.context_menu = None;
-                    workspace.focused_side = side;
-                    workspace.begin_new_folder(window, cx);
-                }))
-                .into_any_element(),
-        );
-        if has_entry && is_local {
-            items.push(
-                text_button("ctx-upload", "Upload")
-                    .on_click(cx.listener(|workspace, _event, _window, cx| {
-                        workspace.modal_inputs.context_menu = None;
-                        workspace.focused_side = PaneSide::Local;
-                        workspace.upload_selection(cx);
-                    }))
-                    .into_any_element(),
-            );
-            items.push(
-                text_button("ctx-reveal", "Show in Finder")
-                    .on_click(cx.listener(|workspace, _event, _window, cx| {
-                        workspace.modal_inputs.context_menu = None;
-                        workspace.reveal_local_selection(cx);
-                    }))
-                    .into_any_element(),
-            );
-        }
-        if has_entry && !is_local && connected {
-            items.push(
-                text_button("ctx-edit", "Open for Editing")
-                    .on_click(cx.listener(|workspace, _event, _window, cx| {
-                        workspace.modal_inputs.context_menu = None;
-                        workspace.focused_side = PaneSide::Remote;
-                        workspace.request_edit_selection(cx);
-                    }))
-                    .into_any_element(),
-            );
-            items.push(
-                text_button("ctx-download", "Download")
-                    .on_click(cx.listener(|workspace, _event, _window, cx| {
-                        workspace.modal_inputs.context_menu = None;
-                        workspace.focused_side = PaneSide::Remote;
-                        workspace.download_selection(cx);
-                    }))
-                    .into_any_element(),
-            );
-        }
-        if has_entry {
-            items.push(
-                text_button("ctx-copy-path", "Copy Path")
-                    .on_click(cx.listener(move |workspace, _event, _window, cx| {
-                        workspace.modal_inputs.context_menu = None;
-                        workspace.focused_side = side;
-                        workspace.copy_focused_path(cx);
-                    }))
-                    .into_any_element(),
-            );
-        }
-        if !has_entry {
-            items.push(
-                text_button("ctx-refresh", "Refresh")
-                    .on_click(cx.listener(move |workspace, _event, window, cx| {
-                        workspace.modal_inputs.context_menu = None;
-                        workspace.focused_side = side;
-                        workspace.refresh_focused_pane(window, cx);
-                    }))
-                    .into_any_element(),
-            );
-        }
-
-        Some(
-            div()
-                .id("context-menu-scrim")
-                .absolute()
-                .inset_0()
-                .occlude()
-                .on_click(cx.listener(|workspace, _event, _window, cx| {
-                    workspace.close_context_menu(cx);
-                }))
-                .child(
-                    div()
-                        .absolute()
-                        .top(px(80.0))
-                        .left(if is_local { px(40.0) } else { px(420.0) })
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .p_2()
-                        .min_w(px(180.0))
-                        .bg(theme.colors.elevated_surface)
-                        .border_1()
-                        .border_color(theme.colors.border)
-                        .rounded_md()
-                        .shadow_sm()
-                        .children(items),
-                )
                 .into_any_element(),
         )
     }
