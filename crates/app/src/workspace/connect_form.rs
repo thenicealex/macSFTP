@@ -124,7 +124,7 @@ impl ConnectForm {
 
     /// Prefill the non-secret fields from a saved profile. The secret
     /// itself is restored separately by `use_profile`, which reads it
-    /// back from the Keychain (plan §11).
+    /// back from the Keychain (architecture §11).
     pub(crate) fn from_profile(profile: &ConnectionProfile) -> Self {
         let mut form = Self::empty();
         form.host = InputState::with_value(profile.host.clone());
@@ -487,7 +487,7 @@ impl crate::workspace::Workspace {
     }
 
     /// Prefill the form from a saved profile, including the secret read
-    /// back from the Keychain (plan §11). If the secret is missing or the
+    /// back from the Keychain (architecture §11). If the secret is missing or the
     /// Keychain is unavailable, the form still opens with metadata filled
     /// and the user re-enters the secret — saving is never blocked.
     pub(crate) fn use_profile(&mut self, profile_id: ProfileId, cx: &mut Context<Self>) {

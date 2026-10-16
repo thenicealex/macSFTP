@@ -752,7 +752,7 @@ impl Workspace {
                 session_id,
                 session_epoch: next_epoch,
                 // Credentials are carried directly on the command; the
-                // Keychain holds the persisted copy (plan §11). The
+                // Keychain holds the persisted copy (architecture §11). The
                 // profile id links the tab to a saved entry when one
                 // was used, so transfers and reconnects stay associated.
                 profile_id: profile_id.unwrap_or(ProfileId(0)),
@@ -784,7 +784,7 @@ impl Workspace {
             .update_epoch_for_tab(tab_id, next_epoch);
         // Keep the credentials for this tab's lifetime so Reconnect
         // works without re-typing. The persisted copy lives in the
-        // Keychain (plan §11); this in-memory copy is zeroized with the tab.
+        // Keychain (architecture §11); this in-memory copy is zeroized with the tab.
         if let Some(tab) = self.state.tabs.find_tab_mut(tab_id) {
             tab.connection_settings = Some(Box::new(settings));
         }

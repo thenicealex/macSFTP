@@ -303,7 +303,7 @@ impl SecretRef {
     /// Build a `SecretRef` that resolves to a Keychain entry for the given
     /// profile and secret kind. The actual secret is written to (and read
     /// from) the macOS Keychain; this is only the handle. The Keychain
-    /// backend lives in `macsftp_storage::keychain` (plan §11).
+    /// backend lives in `macsftp_storage::keychain` (architecture §11).
     pub fn keychain_ref(profile_id: ProfileId, kind: &str) -> Self {
         Self::new(format!("keychain:macsftp:{}:{}", profile_id.0, kind))
     }
@@ -3735,7 +3735,7 @@ mod tests {
         );
     }
 
-    // ── Default sort rules (plan §12) ──────────────────────────────
+    // ── Default sort rules (architecture §12) ──────────────────────────────
 
     fn remote_entry(name: &str, kind: super::FileKind, size: Option<u64>) -> super::RemoteEntry {
         super::RemoteEntry {

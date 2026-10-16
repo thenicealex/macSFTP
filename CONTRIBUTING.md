@@ -9,7 +9,7 @@ to review and safer to merge.
 2. Open an issue before a large feature, architectural change, or security-
    sensitive redesign.
 3. Read `AGENTS.md` and the relevant sections of
-   `docs/gpui-russh-plan.md` before changing runtime, SFTP, transfer, host-key,
+   `docs/architecture.md` before changing runtime, SFTP, transfer, host-key,
    persistence, or UI behavior.
 
 Do not include unrelated cleanup, formatting, or renaming in a functional
@@ -84,8 +84,8 @@ boundary changes:
 - `README.md` for supported user workflows and build prerequisites;
 - `CHANGELOG.md` for unreleased user-visible, security, or compatibility
   changes;
-- `docs/gpui-russh-plan.md` for ownership and runtime contracts;
-- `docs/ui-ux-guidelines.md` for durable interaction rules;
+- `docs/architecture.md` for ownership, runtime contracts, and durable
+  interaction rules;
 - `docs/release-process.md` or the evidence template for release-policy changes.
 
 Published files under `docs/release-evidence/` are historical records. Do not

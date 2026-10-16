@@ -6,7 +6,7 @@ macSFTP 的强制编码准则。所有代码、测试、文档和 agent 修改�
 
 ## 1. 开工前必须做
 
-- 先读上下文，再写代码。涉及架构、crate 划分、运行时、SFTP、传输、host key、UI 的任务，必须先读 `docs/gpui-russh-plan.md` 的相关章节。
+- 先读上下文，再写代码。涉及架构、crate 划分、运行时、SFTP、传输、host key、UI 的任务，必须先读 `docs/architecture.md` 的相关章节。
 - 明确成功标准。每个非平凡任务开始前要能说清：要改什么、如何验证、哪些行为不能变。
 - 有歧义就说出来。存在多种解释时，不要悄悄选一个；说明取舍。若错误选择会造成返工或安全风险，先问。
 - 先找简单方案。禁止为了“未来可能需要”添加抽象、配置项、插件点、泛型或跨层框架。
@@ -26,7 +26,7 @@ macSFTP 的强制编码准则。所有代码、测试、文档和 agent 修改�
 
 ## 3. 项目架构边界
 
-详细架构以 `docs/gpui-russh-plan.md` 为准。本节只列硬约束。
+详细架构以 `docs/architecture.md` 为准。本节只列硬约束。
 
 - `core` 是纯业务模型和状态机，禁止依赖 GPUI、russh、Tokio runtime 实现或 macOS 平台 API。
 - `ui` 只做可复用 GPUI 组件和表现层，禁止直接发起网络请求或持有远端 session。
@@ -118,7 +118,7 @@ storage -> gpui
 
 ## 10. 文档与 ADR
 
-- 架构变化必须更新 `docs/gpui-russh-plan.md` 或新增 ADR，不能只改代码。
+- 架构变化必须更新 `docs/architecture.md` 或新增 ADR，不能只改代码。
 - 新增中等以上功能前，先写清：解决什么问题、为什么现在做、影响哪些 action/settings/persistence/security/performance/accessibility。
 - 文档要记录取舍，不堆“最佳实践”。
 - 不要把 crate 的完整架构说明塞进本文件；本文件只放会反复踩坑的强制规则。

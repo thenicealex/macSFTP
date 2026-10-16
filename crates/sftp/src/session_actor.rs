@@ -27,7 +27,7 @@ use tracing::warn;
 
 use crate::transfer_planner::PLAN_PROGRESS_BATCH_SIZE;
 
-/// Host trust file locations and prompt policy (plan §10).
+/// Host trust file locations and prompt policy (architecture §10).
 #[derive(Debug, Clone)]
 pub struct HostTrustConfig {
     /// App-owned known_hosts — the only file macSFTP writes.

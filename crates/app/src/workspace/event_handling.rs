@@ -60,7 +60,7 @@ impl crate::workspace::Workspace {
                 self.present_keyboard_interactive(prompt, window, cx);
             }
             AppEvent::HostKeyMismatch(mismatch) => {
-                // Security block, no override (plan §10): the tab fails
+                // Security block, no override (architecture §10): the tab fails
                 // with an explanation and the known_hosts file location.
                 if let Some(tab) = self.state.tabs.find_tab_mut(mismatch.scope.tab_id) {
                     let mut error = UserFacingError::new(

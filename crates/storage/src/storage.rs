@@ -8,7 +8,7 @@ pub use atomic_file::{AtomicWriteError, write_private_file_atomically};
 /// Cross-instance advisory locking for store write transactions.
 mod file_lock;
 
-/// macOS Keychain backend for credential persistence (plan §11/§18).
+/// macOS Keychain backend for credential persistence (architecture §11).
 mod keychain;
 pub use keychain::KeychainError;
 

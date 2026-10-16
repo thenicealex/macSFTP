@@ -595,7 +595,7 @@ impl crate::workspace::Workspace {
             });
 
         // Remote pane visualizes the connection lifecycle; the local
-        // pane is always browsable. States per ui-ux-guidelines §6.3.
+        // pane is always browsable. States per architecture §12.6.
         let target_host = tab_state.map(|tab| tab.title.clone()).unwrap_or_default();
         let connect_button = |id: &'static str, label: &'static str| {
             text_button(id, label).on_click(cx.listener(|workspace, _event, window, cx| {
