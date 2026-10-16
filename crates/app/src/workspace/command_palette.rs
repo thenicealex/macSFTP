@@ -12,7 +12,7 @@ use macsftp_ui::ActiveTheme;
 use crate::palette_commands::{PaletteCommand, PaletteContext, filter_palette_commands};
 use crate::workspace::overlay::OverlayFade;
 use crate::workspace::{PaneSide, Workspace, WorkspaceSurface};
-use macsftp_core::HistoryOp;
+use macsftp_core::{FileSortField, HistoryOp, SortDirection};
 
 impl Workspace {
     pub(crate) fn palette_context(&self) -> PaletteContext {
@@ -155,6 +155,26 @@ impl Workspace {
             "NavigateForward" => self.navigate_focused(HistoryOp::Forward, window, cx),
             "ParentDirectory" => self.go_to_parent_directory(window, cx),
             "ToggleHiddenFiles" => self.toggle_hidden_files(cx),
+            // View ▸ Sort By: field and direction are both explicit, so a menu
+            // item and a palette row mean exactly the same thing (§12.2).
+            "SortByNameAscending" => {
+                self.set_sort(FileSortField::Name, SortDirection::Ascending, cx)
+            }
+            "SortByNameDescending" => {
+                self.set_sort(FileSortField::Name, SortDirection::Descending, cx)
+            }
+            "SortBySizeAscending" => {
+                self.set_sort(FileSortField::Size, SortDirection::Ascending, cx)
+            }
+            "SortBySizeDescending" => {
+                self.set_sort(FileSortField::Size, SortDirection::Descending, cx)
+            }
+            "SortByDateModifiedAscending" => {
+                self.set_sort(FileSortField::ModifiedAt, SortDirection::Ascending, cx)
+            }
+            "SortByDateModifiedDescending" => {
+                self.set_sort(FileSortField::ModifiedAt, SortDirection::Descending, cx)
+            }
             "CopyPath" => self.copy_focused_path(cx),
             "ShowInFinder" => self.reveal_local_selection(cx),
             "ReconnectTab" => self.request_connect(window, cx),

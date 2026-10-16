@@ -1,4 +1,5 @@
 mod app_actions;
+mod app_menus;
 mod assets;
 mod event_coordinator;
 mod m7_regression;
@@ -9,8 +10,8 @@ mod session_coordinator;
 mod workspace;
 
 use gpui_kit::{
-    App, AppContext, Bounds, Global, Menu, MenuItem, SystemMenuType, TitlebarOptions, WindowBounds,
-    WindowHandle, WindowOptions, point, px, size,
+    App, AppContext, Bounds, Global, TitlebarOptions, WindowBounds, WindowHandle, WindowOptions,
+    point, px, size,
 };
 use macsftp_core::RuntimeBridgeConfig;
 use macsftp_platform::{AppPaths, prune_log_files, write_crash_marker};
@@ -24,12 +25,8 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt};
 
-use crate::app_actions::{
-    CloseTab, CopyVersionInfo, DownloadSelection, FocusLocalPane, FocusRemotePane, HideApplication,
-    HideOtherApplications, MinimizeWindow, NewTab, NewWindow, OpenLogFolder, OpenSettings, Quit,
-    ReconnectTab, RefreshPane, ShowAbout, ShowAllApplications, ShowTransferDrawer,
-    ToggleHiddenFiles, UploadSelection, ZoomWindow,
-};
+use crate::app_actions::NewWindow;
+use crate::app_menus::menu_bar;
 use crate::assets::Assets;
 use crate::event_coordinator::{AppEventCoordinator, present_orphaned_transfer_conflicts};
 use crate::resources::{AppResources, SharedTransfers};
@@ -37,6 +34,11 @@ use crate::session_coordinator::{
     SessionCoordinator, checkpoint_after_window_closed, checkpoint_before_quit,
 };
 use crate::workspace::Workspace;
+
+/// Display name used in the menu bar and as the window title while no tab is
+/// open (§12.7). Single source: the application menu, the window title, and
+/// the initial window options all read it from here.
+pub(crate) const APP_NAME: &str = "macSFTP";
 
 /// Owns the Tokio runtime controller for the app's lifetime so it can
 /// be shut down explicitly (with timeout) when the app quits (ADR-002).
@@ -246,66 +248,7 @@ fn main() {
             }
         });
 
-        cx.set_menus(vec![
-            Menu {
-                disabled: false,
-                name: "macSFTP".into(),
-                items: vec![
-                    MenuItem::action("About macSFTP", ShowAbout),
-                    MenuItem::action("Settings…", OpenSettings),
-                    MenuItem::separator(),
-                    MenuItem::os_submenu("Services", SystemMenuType::Services),
-                    MenuItem::separator(),
-                    MenuItem::action("Hide macSFTP", HideApplication),
-                    MenuItem::action("Hide Others", HideOtherApplications),
-                    MenuItem::action("Show All", ShowAllApplications),
-                    MenuItem::separator(),
-                    MenuItem::action("Quit macSFTP", Quit),
-                ],
-            },
-            Menu {
-                disabled: false,
-                name: "File".into(),
-                items: vec![
-                    MenuItem::action("New Window", NewWindow),
-                    MenuItem::action("New Connection", NewTab),
-                    MenuItem::action("Close Tab", CloseTab),
-                    MenuItem::separator(),
-                    MenuItem::action("Upload", UploadSelection),
-                    MenuItem::action("Download", DownloadSelection),
-                ],
-            },
-            Menu {
-                disabled: false,
-                name: "View".into(),
-                items: vec![
-                    MenuItem::action("Select Local Files", FocusLocalPane),
-                    MenuItem::action("Select Server Files", FocusRemotePane),
-                    MenuItem::action("Transfers", ShowTransferDrawer),
-                    MenuItem::separator(),
-                    MenuItem::action("Show Hidden Files", ToggleHiddenFiles),
-                    MenuItem::separator(),
-                    MenuItem::action("Refresh", RefreshPane),
-                    MenuItem::action("Reconnect", ReconnectTab),
-                ],
-            },
-            Menu {
-                disabled: false,
-                name: "Window".into(),
-                items: vec![
-                    MenuItem::action("Minimize", MinimizeWindow),
-                    MenuItem::action("Zoom", ZoomWindow),
-                ],
-            },
-            Menu {
-                disabled: false,
-                name: "Help".into(),
-                items: vec![
-                    MenuItem::action("Show Logs", OpenLogFolder),
-                    MenuItem::action("Copy Version Info", CopyVersionInfo),
-                ],
-            },
-        ]);
+        cx.set_menus(menu_bar());
 
         if let Err(error) = restore_workspace_windows(cx) {
             error!(error = ?error, "failed to open macSFTP window");
@@ -362,8 +305,11 @@ fn open_workspace_window(
             // Transparent custom titlebar: the tab bar is the top chrome
             // (see render_tab_bar). The native traffic lights stay, placed
             // inside its 34px strip; the tab bar reserves room for them.
+            // The title itself is never drawn (transparent titlebars hide
+            // it) but it names the window in Mission Control and the Window
+            // menu; the workspace then follows the active tab (§12.7).
             titlebar: Some(TitlebarOptions {
-                title: None,
+                title: Some(APP_NAME.into()),
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(12.0), px(11.0))),
             }),

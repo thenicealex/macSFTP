@@ -24,13 +24,15 @@ use crate::app_actions::{
     OpenCommandPalette, OpenLogFolder, OpenProfiles, OpenSelectedEntry, OpenSettings, PageDown,
     PageUp, ParentDirectory, ReconnectTab, RefreshPane, RenameEntry, SelectAllEntries,
     SelectFirstEntry, SelectLastEntry, SelectNextEntry, SelectNextEntryExtend, SelectPrevEntry,
-    SelectPrevEntryExtend, ShowAbout, ShowInFinder, ShowTransferDrawer, TabSwitcherNext,
+    SelectPrevEntryExtend, ShowAbout, ShowInFinder, ShowTransferDrawer,
+    SortByDateModifiedAscending, SortByDateModifiedDescending, SortByNameAscending,
+    SortByNameDescending, SortBySizeAscending, SortBySizeDescending, TabSwitcherNext,
     TabSwitcherPrev, ToggleHiddenFiles, UploadSelection, ZoomWindow,
 };
 use crate::resources::ActiveResources;
 use crate::session_coordinator::SessionCoordinator;
 use crate::workspace::profiles::SettingsSection;
-use macsftp_core::{HistoryOp, RestoredTabTarget};
+use macsftp_core::{FileSortField, HistoryOp, RestoredTabTarget, SortDirection};
 
 /// Status bar copy when the command channel is full (non-blocking drop).
 pub(crate) const STATUS_BUSY_TRY_AGAIN: &str = "Busy. Try again in a moment.";
@@ -957,6 +959,7 @@ impl Focusable for Workspace {
 }
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_window_title(window);
         self.prepare_connect_inputs(window, cx);
         self.prepare_profile_inputs(window, cx);
         self.prepare_text_inputs(window, cx);
@@ -1169,6 +1172,39 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|workspace, _: &ToggleHiddenFiles, _window, cx| {
                     workspace.toggle_hidden_files(cx);
+                }),
+            )
+            // View ▸ Sort By. The header's click-to-toggle stays on
+            // `apply_sort_field`; these set both field and direction, because
+            // the menu item cannot show which one is active (§12.2).
+            .on_action(
+                cx.listener(|workspace, _: &SortByNameAscending, _window, cx| {
+                    workspace.set_sort(FileSortField::Name, SortDirection::Ascending, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|workspace, _: &SortByNameDescending, _window, cx| {
+                    workspace.set_sort(FileSortField::Name, SortDirection::Descending, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|workspace, _: &SortBySizeAscending, _window, cx| {
+                    workspace.set_sort(FileSortField::Size, SortDirection::Ascending, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|workspace, _: &SortBySizeDescending, _window, cx| {
+                    workspace.set_sort(FileSortField::Size, SortDirection::Descending, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|workspace, _: &SortByDateModifiedAscending, _window, cx| {
+                    workspace.set_sort(FileSortField::ModifiedAt, SortDirection::Ascending, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|workspace, _: &SortByDateModifiedDescending, _window, cx| {
+                    workspace.set_sort(FileSortField::ModifiedAt, SortDirection::Descending, cx);
                 }),
             )
             .on_action(cx.listener(|workspace, _: &OpenSettings, window, cx| {
