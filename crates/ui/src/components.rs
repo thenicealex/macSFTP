@@ -300,7 +300,11 @@ pub fn empty_state(
         .text_size(px(13.0))
         .text_color(theme.colors.text_muted)
         .font_family(theme.fonts.ui_family.clone())
-        .child(message.into())
+        .child(
+            div()
+                .debug_selector(|| "empty-state-message".into())
+                .child(message.into()),
+        )
         .when(!actions.is_empty(), |empty| {
             empty.child(div().flex().gap_2().children(actions))
         })

@@ -48,7 +48,7 @@ trait KeychainBackend: Send + Sync {
 }
 
 /// macOS login Keychain via `security-framework`'s generic-password
-/// helpers (plan §11).
+/// helpers (architecture §11).
 struct OsKeychain;
 
 impl OsKeychain {

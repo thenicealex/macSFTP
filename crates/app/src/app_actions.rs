@@ -101,7 +101,12 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("home", SelectFirstEntry, Some("FilePane")),
         KeyBinding::new("end", SelectLastEntry, Some("FilePane")),
         KeyBinding::new("cmd-a", SelectAllEntries, Some("FilePane")),
-        KeyBinding::new("enter", OpenSelectedEntry, Some("FilePane")),
+        // ConnectionEntry in workspace/render.rs uses native button activation.
+        KeyBinding::new(
+            "enter",
+            OpenSelectedEntry,
+            Some("FilePane && !ConnectionEntry"),
+        ),
         KeyBinding::new("cmd-up", ParentDirectory, Some("FilePane")),
         KeyBinding::new("cmd-[", NavigateBack, Some("Workspace")),
         KeyBinding::new("cmd-]", NavigateForward, Some("Workspace")),

@@ -265,31 +265,52 @@ impl crate::workspace::Workspace {
                         .truncate()
                         .text_right()
                         .child(agg_label),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| "hide-transfer-drawer".into())
+                        .child(
+                            icon_button(
+                                "hide-transfer-drawer",
+                                IconName::ChevronDown,
+                                labeled_shortcut("Hide Transfers", "ShowTransferDrawer"),
+                            )
+                            .on_click(cx.listener(
+                                |workspace, _, _, cx| {
+                                    workspace.transfer_drawer.open = false;
+                                    workspace.transfer_drawer.resize = None;
+                                    cx.notify();
+                                },
+                            )),
+                        ),
                 ),
         );
 
         let mut content = div().flex().flex_col();
 
         if jobs.is_empty() {
-            content = content.child(
+            return drawer.child(
                 div()
+                    .debug_selector(|| "empty-transfer-queue".into())
                     .flex()
+                    .flex_col()
                     .flex_1()
+                    .min_h_0()
+                    .overflow_hidden()
                     .items_center()
                     .justify_center()
+                    .gap_1()
                     .text_size(px(12.0))
                     .text_color(theme.colors.text_muted)
-                    .child("No transfers yet"),
+                    .child("No transfers yet")
+                    .when(self.transfer_drawer.height >= px(90.0), |empty| {
+                        empty.child(
+                            div()
+                                .text_size(px(11.0))
+                                .child("Select files to upload or download."),
+                        )
+                    }),
             );
-            let body = macsftp_ui::scroll_area(
-                "transfer-drawer-body",
-                content,
-                self.transfer_scroll(),
-                self.transfer_scrollbar(),
-                window,
-                cx,
-            );
-            return drawer.child(body);
         }
 
         for (label, section_jobs) in [("In Progress", active_jobs), ("Waiting", queued_jobs)] {
@@ -645,6 +666,7 @@ impl crate::workspace::Workspace {
                     .child(
                         div()
                             .id("status-transfers")
+                            .debug_selector(|| "status-transfers".into())
                             .flex()
                             .flex_none()
                             .items_center()
@@ -673,7 +695,8 @@ impl crate::workspace::Workspace {
                                 } else {
                                     theme.colors.text_muted
                                 },
-                            )),
+                            ))
+                            .child("Transfers"),
                     ),
             )
     }

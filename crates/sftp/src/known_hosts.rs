@@ -23,7 +23,7 @@ pub enum HostKeyCheckResult {
 /// Reads from both the app-owned known_hosts file and the user's
 /// `~/.ssh/known_hosts`. Writes only to the app-owned file.
 ///
-/// MVP subset (per `docs/gpui-russh-plan.md` §10):
+/// MVP subset (per `docs/architecture.md` §10):
 /// - Supports plaintext host and `[host]:port` patterns.
 /// - Supports common key types: ed25519, ecdsa, rsa.
 /// - Supports plaintext and OpenSSH `|1|` hashed hostnames.

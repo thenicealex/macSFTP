@@ -24,6 +24,11 @@ version = "0.3.0"
 # together by the Kit release. macSFTP draws its own controls, so the Kit's
 # component and asset layers stay off.
 gpui-kit = { version = "=0.7.3", default-features = false }
+# Test-only companion of the Kit, pinned to the same GPUI snapshot: the
+# visual-evidence capture test supplies this platform text system (real glyph
+# metrics) to `HeadlessAppContext`. `font-kit` matches the feature gpui-kit
+# enables for the shipped app, so captures and the app shape text identically.
+gpui-pre-apple = { version = "=0.3.9", default-features = false, features = ["font-kit"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

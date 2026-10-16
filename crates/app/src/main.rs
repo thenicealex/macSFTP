@@ -165,7 +165,7 @@ fn main() {
         macsftp_ui::init(cx);
         app_actions::init(cx);
 
-        // Host trust files (plan §10): read the user's known_hosts if
+        // Host trust files (architecture §10): read the user's known_hosts if
         // present, write only to the app-owned file.
         let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         let app_paths = AppPaths::from_home_dir(&home_dir);

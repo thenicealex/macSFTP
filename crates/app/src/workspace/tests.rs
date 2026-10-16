@@ -655,6 +655,158 @@ fn select_all_selects_all_visible(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn connection_entry_preserves_geometry_and_keyboard_activation(cx: &mut TestAppContext) {
+    for key in ["enter", "space"] {
+        let (workspace, mut cx, _channels) = init_workspace(cx);
+        cx.simulate_resize(size(px(720.0), px(480.0)));
+        cx.run_until_parked();
+        assert_eq!(
+            cx.debug_bounds("connect-remote")
+                .expect("connection entry is visible")
+                .size,
+            size(px(160.0), px(34.0))
+        );
+        let entry = cx
+            .debug_bounds("connect-remote")
+            .expect("connection entry is visible");
+        cx.simulate_event(gpui_kit::MouseDownEvent {
+            position: entry.center(),
+            button: gpui_kit::MouseButton::Left,
+            click_count: 1,
+            ..Default::default()
+        });
+        cx.simulate_event(gpui_kit::MouseUpEvent {
+            position: point(entry.left() - px(10.0), entry.center().y),
+            button: gpui_kit::MouseButton::Left,
+            click_count: 1,
+            ..Default::default()
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let keystroke = gpui_kit::Keystroke::parse(key).expect("button activation key is valid");
+        let mut keystroke = keystroke;
+        if key == "space" {
+            keystroke.key_char = Some(" ".into());
+        }
+        cx.simulate_event(gpui_kit::KeyDownEvent {
+            keystroke: keystroke.clone(),
+            is_held: false,
+            prefer_character_input: false,
+        });
+        cx.simulate_event(gpui_kit::KeyUpEvent { keystroke });
+        workspace.read_with(&cx, |workspace, _| {
+            assert!(
+                workspace.pane_filter(PaneSide::Remote).query.is_empty(),
+                "button activation must not start a file filter"
+            );
+            assert!(
+                workspace.connect_form_ui.form.is_some(),
+                "keyboard activation opens the existing connection form"
+            );
+        });
+    }
+}
+
+#[gpui_kit::test]
+fn compact_workspace_centers_empty_content(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.run_until_parked();
+    workspace.update(&mut cx, |workspace, cx| {
+        let tab = workspace
+            .active_tab_mut()
+            .expect("fixture has an active tab");
+        tab.local.entries.clear();
+        tab.local.error = None;
+        cx.notify();
+    });
+    for appearance in [AppearancePreference::Light, AppearancePreference::Dark] {
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.set_appearance(appearance, window, cx);
+        });
+        for dimensions in [size(px(720.0), px(480.0)), size(px(1200.0), px(800.0))] {
+            cx.simulate_resize(dimensions);
+            cx.run_until_parked();
+            for (content, viewport) in [
+                ("empty-state-message", "local-list-container-viewport"),
+                ("remote-empty-card", "remote-list-container-viewport"),
+            ] {
+                let content = cx.debug_bounds(content).expect("empty content is visible");
+                let viewport = cx.debug_bounds(viewport).expect("pane viewport is visible");
+                assert!(
+                    (content.center().y - viewport.center().y).abs() < px(2.0),
+                    "empty content is vertically centered: {content:?} in {viewport:?}"
+                );
+                assert!(content.left() >= viewport.left() && content.right() <= viewport.right());
+            }
+        }
+    }
+}
+
+#[gpui_kit::test]
+fn compact_workspace_scrolls_recent_connections(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    workspace.update(&mut cx, |_workspace, cx| {
+        for index in 0..6 {
+            cx.resources_mut()
+                .recents
+                .upsert(macsftp_storage::RecentEntryInput {
+                    host: format!("recent-{index}.example.com"),
+                    port: 22,
+                    username: "operator".into(),
+                    profile_id: None,
+                    display_name: None,
+                    last_remote_path: None,
+                    last_connected_at: index,
+                })
+                .expect("seed recent connection fixture");
+        }
+        cx.notify();
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("remote-connection-empty-scrollbar-thumb")
+            .is_some(),
+        "short windows expose a scrollbar for all recent connections"
+    );
+    let position = cx
+        .debug_bounds("remote-list-container-viewport")
+        .expect("remote viewport exists")
+        .center();
+    cx.simulate_event(ScrollWheelEvent {
+        position,
+        delta: ScrollDelta::Pixels(point(px(0.0), px(-120.0))),
+        ..Default::default()
+    });
+    workspace.read_with(&cx, |workspace, _| {
+        assert!(workspace.remote_empty_scroll.offset().y < px(0.0))
+    });
+}
+
+#[gpui_kit::test]
+fn transfer_drawer_buttons_preserve_resized_height(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.set_drawer_height(px(180.0), px(900.0));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let collapse = cx
+        .debug_bounds("hide-transfer-drawer")
+        .expect("drawer has a collapse button");
+    cx.simulate_click(collapse.center(), gpui_kit::Modifiers::default());
+    workspace.read_with(&cx, |workspace, _| assert!(!workspace.transfer_drawer.open));
+    cx.run_until_parked();
+    let reopen = cx
+        .debug_bounds("status-transfers")
+        .expect("footer keeps the transfer toggle visible");
+    cx.simulate_click(reopen.center(), gpui_kit::Modifiers::default());
+    workspace.read_with(&cx, |workspace, _| {
+        assert!(workspace.transfer_drawer.open);
+        assert_eq!(workspace.transfer_drawer.height, px(180.0));
+    });
+}
+
+#[gpui_kit::test]
 fn transfer_drawer_toggles_via_action(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -6882,4 +7034,202 @@ fn user_status_strings_avoid_internal_jargon() {
         STATUS_CONNECTION_SERVICE_UNAVAILABLE,
         "The connection service is unavailable."
     );
+}
+
+/// Regenerates `docs/visual-evidence/workspace-ux` from this checkout through
+/// gpui's headless Metal renderer: the real scene, text system and rasterizer,
+/// but no on-screen window, so captures are deterministic and do not need
+/// screen-recording permission.
+///
+/// Ignored by default because it writes repository files. Run it explicitly:
+/// `cargo test -p macsftp-app regenerate_workspace_ux_evidence -- --ignored --nocapture`.
+/// It writes PNGs (the renderer hands back RGBA); convert them to the committed
+/// JPEGs with `sips -s format jpeg` as the evidence README describes.
+#[test]
+#[ignore = "writes docs/visual-evidence/workspace-ux; run explicitly with -- --ignored"]
+fn regenerate_workspace_ux_evidence() {
+    use gpui_kit::HeadlessAppContext;
+
+    let output_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../docs/visual-evidence/workspace-ux");
+    std::fs::create_dir_all(&output_dir).expect("evidence directory must be writable");
+
+    let app_paths = temp_app_paths();
+    // A short fixed path keeps the breadcrumb trail fully readable at a 360 pt
+    // pane; the capture asserts the folder is empty before using it.
+    let fixture = std::path::PathBuf::from("/tmp/test");
+    std::fs::create_dir_all(&fixture).expect("empty local fixture must be creatable");
+    assert!(
+        std::fs::read_dir(&fixture)
+            .expect("local fixture must be readable")
+            .next()
+            .is_none(),
+        "/tmp/test must be an empty folder for the capture; delete its contents"
+    );
+
+    let config = macsftp_storage::ConfigStore::with_defaults(app_paths.config_file.clone());
+    let mut session_coordinator =
+        SessionCoordinator::new(SessionStore::open_or_empty(app_paths.session_file.clone()));
+    let window_session_id = session_coordinator.allocate_window_id();
+    session_coordinator.register_window(window_session_id);
+
+    // `MacPlatform` may only be built on the main thread; its text system may
+    // not. Building it directly gives the same `font-kit` text system the app
+    // runs with (gpui-kit enables that feature for shipped builds).
+    let mut cx = HeadlessAppContext::with_platform(
+        std::sync::Arc::new(gpui_apple::AppleTextSystem::new()),
+        std::sync::Arc::new(crate::assets::Assets),
+        gpui_kit::platform::current_headless_renderer,
+    );
+    cx.update(|cx| {
+        Theme::one_light().install(cx);
+        app_actions::init(cx);
+        cx.set_global(crate::resources::AppResources::load_for_test(
+            app_paths, config,
+        ));
+        cx.set_global(session_coordinator);
+        cx.set_global(crate::resources::SharedTransfers::default());
+    });
+
+    let channels = BridgeChannels::new(&RuntimeBridgeConfig::default());
+    let client = RuntimeClient::new(channels.command_tx.clone());
+    let mut workspace_slot: Option<Entity<Workspace>> = None;
+    let (window, _) = cx
+        .update(|cx| {
+            gpui_kit::open_window(
+                gpui_kit::WindowOptions {
+                    window_bounds: Some(gpui_kit::WindowBounds::Windowed(gpui_kit::Bounds {
+                        origin: Default::default(),
+                        size: size(px(720.0), px(480.0)),
+                    })),
+                    focus: false,
+                    show: false,
+                    ..Default::default()
+                },
+                cx,
+                |window, cx| {
+                    let workspace =
+                        cx.new(|cx| Workspace::new(client, window_session_id, None, window, cx));
+                    workspace_slot = Some(workspace.clone());
+                    cx.new(|cx| gpui_kit::base::Root::new(workspace, window, cx))
+                },
+            )
+        })
+        .expect("headless window must open");
+    let workspace = workspace_slot.expect("root builder must capture the workspace entity");
+
+    let capture = |cx: &mut HeadlessAppContext, name: &str| {
+        cx.update_window(window, |_, window, cx| {
+            window.draw(cx).clear(cx);
+        })
+        .expect("frame draw must succeed");
+        let path = output_dir.join(name);
+        cx.capture_screenshot(window)
+            .expect("headless Metal renderer must produce an image")
+            .save(&path)
+            .expect("evidence image must be saved as PNG");
+        println!("wrote {}", path.display());
+    };
+
+    // Capture 1 (light): fresh window, no recents, centered first-connection card.
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                workspace.set_appearance(AppearancePreference::Light, window, cx);
+                workspace.set_local_path(
+                    LocalPath::new(fixture.to_string_lossy().into_owned()),
+                    window,
+                    cx,
+                );
+            })
+            .expect("workspace must be live");
+    });
+    cx.run_until_parked();
+    cx.run_until_parked();
+    capture(&mut cx, "light-720x480.png");
+
+    // Capture 2 (dark): the connection entry carries keyboard focus, reached by
+    // Tab traversal the way a keyboard user gets there. The focus ring is the
+    // only element painting a half-alpha border, so finding that quad in the
+    // painted scene proves the entry is focused.
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                workspace.set_appearance(AppearancePreference::Dark, window, cx);
+            })
+            .expect("workspace must be live");
+    });
+    cx.update_window(window, |_, window, cx| {
+        let focus_ring = gpui_kit::Hsla {
+            a: 0.5,
+            ..cx.global::<Theme>().colors.border_focused
+        };
+        let mut focused = false;
+        for _ in 0..24 {
+            window.dispatch_keystroke(
+                gpui_kit::Keystroke::parse("tab").expect("tab must be a valid keystroke"),
+                cx,
+            );
+            window.draw(cx).clear(cx);
+            if window
+                .painted_quads()
+                .iter()
+                .any(|quad| quad.border_color == focus_ring)
+            {
+                focused = true;
+                break;
+            }
+        }
+        assert!(
+            focused,
+            "Tab traversal must focus the connection entry: no focus ring in the painted scene"
+        );
+    })
+    .expect("window update must succeed");
+    capture(&mut cx, "dark-720x480.png");
+
+    // Capture 3 (light): six recent connections, scrolled to the last row.
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                workspace.set_appearance(AppearancePreference::Light, window, cx);
+            })
+            .expect("workspace must be live");
+        workspace.update(cx, |_workspace, cx| {
+            for index in 1..=6 {
+                cx.resources_mut()
+                    .recents
+                    .upsert(macsftp_storage::RecentEntryInput {
+                        host: format!("demo-{index}.example.com"),
+                        port: 22,
+                        username: "demo".into(),
+                        profile_id: None,
+                        display_name: Some(format!("Demo Server {index}")),
+                        last_remote_path: None,
+                        last_connected_at: index,
+                    })
+                    .expect("seed recent connection fixture");
+            }
+            cx.notify();
+        });
+    });
+    cx.update_window(window, |_, window, cx| {
+        window.blur(cx);
+        for _ in 0..4 {
+            window.dispatch_event(
+                gpui_kit::PlatformInput::ScrollWheel(ScrollWheelEvent {
+                    position: point(px(540.0), px(180.0)),
+                    delta: ScrollDelta::Pixels(point(px(0.0), px(-120.0))),
+                    ..Default::default()
+                }),
+                cx,
+            );
+        }
+    })
+    .expect("window update must succeed");
+    cx.run_until_parked();
+    capture(&mut cx, "light-recents-scroll-720x480.png");
 }

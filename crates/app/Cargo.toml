@@ -24,6 +24,7 @@ tokio = "1.52.3"
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
+gpui-pre-apple.workspace = true
 
 [lints]
 workspace = true

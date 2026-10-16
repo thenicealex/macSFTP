@@ -6,10 +6,11 @@
 
 | 文档 | 用途 |
 | --- | --- |
-| [`gpui-russh-plan.md`](gpui-russh-plan.md) | 当前架构、所有权、协议、安全和测试边界；架构改动前必读 |
-| [`ui-ux-guidelines.md`](ui-ux-guidelines.md) | 当前 UI/UX 强制规范和评审清单 |
+| [`architecture.md`](architecture.md) | 当前架构、所有权、协议、安全、UI/UX 和测试边界；架构或界面改动前必读 |
 | [`release-process.md`](release-process.md) | tag、版本、构建和 GitHub Release 流程 |
 | [`release-evidence/`](release-evidence/) | 已发布版本的验收记录及新版本模板 |
+| [`screenshots/`](screenshots/) | `README.md` 使用的产品截图 |
+| [`visual-evidence/`](visual-evidence/) | 界面改动的视觉验收记录 |
 
 仓库根目录还维护以下当前文档：
 
@@ -22,20 +23,8 @@
 
 ## 维护规则
 
-- 代码是行为事实来源；文档记录代码无法强制的约束和取舍。
-- 中等以上架构变化更新 `gpui-russh-plan.md`，或在实现期间增加临时设计说明。
-- 功能合并后，把仍有效的约束并回当前架构文档，并删除已完成的逐步实施计划。
+- 代码是行为事实来源；文档只记录代码无法强制的约束和取舍。
+- 中等以上架构或 UI/UX 变化更新 `architecture.md`；功能交付后把仍有效的约束并回当前文档，并删除已完成的逐步实施计划。
 - 发布证据按版本保留，不把旧版本的结果改写成当前状态。
-- 用户流程改变时同步 `README.md` 和 `CHANGELOG.md`；所有权或协议改变时同步架构文档；持久 UI 规则改变时同步 UI/UX 准则。
+- 用户流程改变时同步 `README.md` 和 `CHANGELOG.md`；持久 UI 规则改变时同步 `architecture.md` 第 12 节。
 - 历史材料需要追溯时使用 `git log -- docs`、`git show <commit>:<path>` 或 GitHub commit history。
-
-当前目录结构：
-
-```text
-docs/
-  README.md
-  gpui-russh-plan.md
-  ui-ux-guidelines.md
-  release-process.md
-  release-evidence/
-```

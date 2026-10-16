@@ -99,8 +99,8 @@ The workspace is intentionally split by responsibility:
 | `macsftp-platform` | macOS and local-filesystem boundaries |
 | `macsftp-test-support` | Shared integration-test fixtures |
 
-The dependency rules and runtime model are documented in
-[`docs/gpui-russh-plan.md`](docs/gpui-russh-plan.md). Contributor requirements
+The dependency rules, runtime model, and UI/UX constraints are documented in
+[`docs/architecture.md`](docs/architecture.md). Contributor requirements
 are defined in [`AGENTS.md`](AGENTS.md) and
 [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
