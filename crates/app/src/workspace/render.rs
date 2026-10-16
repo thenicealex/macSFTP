@@ -13,6 +13,7 @@ use macsftp_ui::{
 use crate::palette_commands::labeled_shortcut;
 use crate::resources::ActiveResources;
 use crate::workspace::PaneSide;
+use crate::workspace::overlay::OverlayFade;
 
 /// Left inset of the transparent titlebar reserved for the native macOS
 /// traffic lights (`TitlebarOptions::traffic_light_position`).
@@ -86,6 +87,7 @@ impl crate::workspace::Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
+        let fade = OverlayFade::sample("tab-switcher", self.tab_switcher.open, window, cx);
         if !self.tab_switcher.open || self.tab_mru.is_empty() {
             return None;
         }
@@ -164,6 +166,7 @@ impl crate::workspace::Workspace {
                 .items_center()
                 .justify_center()
                 .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.35))
+                .opacity(fade.opacity())
                 .child(
                     div()
                         .key_context("TabSwitcher")
@@ -931,7 +934,7 @@ impl crate::workspace::Workspace {
         let list: gpui_kit::AnyElement = if let Some(placeholder) = connection_placeholder {
             placeholder
         } else if entry_count == 0 && is_remote_refreshing {
-            loading_state("Loading files…", cx).into_any_element()
+            loading_state("Loading files…", window, cx).into_any_element()
         } else if entry_count == 0 && !self.filter_query(side).is_empty() {
             empty_state("No matching items", vec![], cx).into_any_element()
         } else if entry_count == 0 {
@@ -1265,7 +1268,12 @@ impl crate::workspace::Workspace {
                     )),
             )
     }
-    pub(crate) fn render_about(&self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
+    pub(crate) fn render_about(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::AnyElement> {
+        let fade = OverlayFade::sample("about", self.modal_inputs.about_open, window, cx);
         if !self.modal_inputs.about_open {
             return None;
         }
@@ -1302,6 +1310,7 @@ impl crate::workspace::Workspace {
                 .items_center()
                 .justify_center()
                 .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
+                .opacity(fade.opacity())
                 .child(
                     div()
                         .w(px(340.0))

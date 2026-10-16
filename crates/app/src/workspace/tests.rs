@@ -1,8 +1,8 @@
 // Tests use unwrap/expect for fixtures; production keeps unwrap_used deny.
 #![allow(clippy::unwrap_used)]
 use gpui_kit::{
-    App, AppContext as _, Entity, ScrollDelta, ScrollWheelEvent, TestAppContext, VisualTestContext,
-    point, px, size,
+    App, AppContext as _, Context, Entity, IntoElement, Pixels, Render, ScrollDelta,
+    ScrollWheelEvent, TestAppContext, VisualTestContext, Window, div, point, px, size,
 };
 use macsftp_core::{
     AppCommand, AppEvent, AuthCredential, AuthMethod, AuthMethodKind, ConflictDecision,
@@ -26,7 +26,8 @@ use macsftp_storage::{
 };
 use macsftp_ui::{Appearance, Theme};
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
@@ -42,9 +43,12 @@ use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::session_coordinator::SessionCoordinator;
 use crate::workspace::ConflictChoice;
 use crate::workspace::connect_form::ConnectForm;
+use crate::workspace::drawer_height::TransferDrawerResize;
 use crate::workspace::helpers::format_recent_label;
+use crate::workspace::overlay::{OVERLAY_FADE, OverlayFade};
 use crate::workspace::profiles::{PassphrasePolicy, ProfileEditorState, ProfileRouteKind};
 use crate::workspace::profiles::{SettingsSection, profile_matches_filter};
+use crate::workspace::transfer_render::{PROGRESS_SMOOTHING, painted_progress};
 use macsftp_core::HistoryOp;
 use macsftp_ui::InputState;
 
@@ -848,6 +852,281 @@ fn transfer_drawer_height_survives_toggle(cx: &mut TestAppContext) {
         assert!(workspace.transfer_drawer.open);
         assert_eq!(workspace.transfer_drawer.height, gpui_kit::px(180.0));
     });
+}
+
+// ---------------------------------------------------------------------------
+// Motion (WS1): the drawer spring, the drag override, the overlay fade, and
+// the eased transfer progress bar.
+// ---------------------------------------------------------------------------
+
+/// One visible frame: advance the simulated clock, then draw. Motion state is
+/// sampled while rendering, so a test that advances without drawing sees
+/// nothing move; `Duration::ZERO` draws at the current time.
+fn advance_frame(cx: &mut VisualTestContext, by: std::time::Duration) {
+    cx.executor().advance_clock(by);
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+}
+
+/// The height the drawer paints right now; `None` once a closing spring has
+/// settled and taken it out of the tree.
+fn mounted_drawer_height(cx: &mut VisualTestContext) -> Option<Pixels> {
+    cx.debug_bounds("transfer-drawer")
+        .map(|bounds| bounds.size.height)
+}
+
+/// Layout is not bit-exact, so heights are compared with a hair of tolerance —
+/// far tighter than any jump a user could see.
+fn assert_height(actual: Option<Pixels>, expected: Pixels, what: &str) {
+    let actual = actual.unwrap_or_else(|| panic!("{what}: the drawer is not mounted"));
+    assert!(
+        (actual.as_f32() - expected.as_f32()).abs() < 0.05,
+        "{what}: painted {actual:?}, expected {expected:?}"
+    );
+}
+
+/// The value a probe view pushed on its most recent render.
+fn last_sample(samples: &Rc<RefCell<Vec<f32>>>) -> f32 {
+    *samples
+        .borrow()
+        .last()
+        .expect("the probe pushes one sample per render")
+}
+
+#[gpui_kit::test]
+fn transfer_drawer_springs_shut_and_unmounts_only_at_zero(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.run_until_parked();
+    let open_height = mounted_drawer_height(&mut cx).expect("the drawer starts mounted");
+    assert!(open_height > px(0.0));
+
+    cx.dispatch_action(ShowTransferDrawer);
+    advance_frame(&mut cx, std::time::Duration::from_millis(60));
+    let first = mounted_drawer_height(&mut cx).expect("still mounted on the way out");
+    assert!(
+        first < open_height && first > px(0.0),
+        "closing travels from {open_height:?} toward zero instead of jumping: {first:?}"
+    );
+
+    advance_frame(&mut cx, std::time::Duration::from_millis(60));
+    let second = mounted_drawer_height(&mut cx).expect("still mounted on the way out");
+    assert!(
+        second < first,
+        "the spring keeps closing: {second:?} < {first:?}"
+    );
+
+    for _ in 0..15 {
+        advance_frame(&mut cx, std::time::Duration::from_millis(100));
+    }
+    assert_eq!(
+        mounted_drawer_height(&mut cx),
+        None,
+        "a settled spring leaves the tree at exactly zero"
+    );
+    workspace.read_with(&cx, |workspace, _| {
+        assert!(!workspace.transfer_drawer.open);
+        assert!(
+            workspace.transfer_drawer.height > px(0.0),
+            "the stored height survives the animation"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn transfer_drawer_opens_from_zero_and_settles_at_the_stored_height(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.run_until_parked();
+    let stored = workspace.read_with(&cx, |workspace, _| workspace.transfer_drawer.height);
+    assert!(stored > px(0.0));
+
+    cx.dispatch_action(ShowTransferDrawer);
+    for _ in 0..15 {
+        advance_frame(&mut cx, std::time::Duration::from_millis(100));
+    }
+    assert_eq!(mounted_drawer_height(&mut cx), None, "closed first");
+
+    cx.dispatch_action(ShowTransferDrawer);
+    advance_frame(&mut cx, std::time::Duration::from_millis(60));
+    let growing = mounted_drawer_height(&mut cx).expect("an opening drawer is mounted at once");
+    assert!(
+        growing > px(0.0) && growing < stored,
+        "opening grows from zero rather than popping back: {growing:?} of {stored:?}"
+    );
+
+    for _ in 0..15 {
+        advance_frame(&mut cx, std::time::Duration::from_millis(100));
+    }
+    assert_height(
+        mounted_drawer_height(&mut cx),
+        stored,
+        "a settled spring lands on the stored height",
+    );
+}
+
+#[gpui_kit::test]
+fn a_resize_drag_shows_the_stored_height_without_spring_travel(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.run_until_parked();
+    let open_height = mounted_drawer_height(&mut cx).expect("the drawer starts open");
+
+    let dragged_to = open_height + px(60.0);
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.transfer_drawer.resize = Some(TransferDrawerResize {
+            start_height: open_height,
+            start_y: px(0.0),
+        });
+        workspace.set_drawer_height(dragged_to, px(900.0));
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert_height(
+        mounted_drawer_height(&mut cx),
+        dragged_to,
+        "while a drag is live the pointer owns the height",
+    );
+}
+
+#[gpui_kit::test]
+fn reduced_motion_snaps_the_drawer_closed(cx: &mut TestAppContext) {
+    let (_workspace, mut cx, _channels) = init_workspace(cx);
+    cx.run_until_parked();
+    assert!(
+        mounted_drawer_height(&mut cx).is_some(),
+        "the drawer starts open"
+    );
+
+    cx.update(|_, cx| cx.set_reduce_motion(true));
+    cx.dispatch_action(ShowTransferDrawer);
+    cx.run_until_parked();
+    assert_eq!(
+        mounted_drawer_height(&mut cx),
+        None,
+        "with reduce motion on, the drawer is gone in the same frame"
+    );
+}
+
+/// Reports the opacity `OverlayFade` samples, driven by `open`.
+struct OverlayFadeProbe {
+    open: Rc<Cell<bool>>,
+    samples: Rc<RefCell<Vec<f32>>>,
+}
+
+impl Render for OverlayFadeProbe {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let fade = OverlayFade::sample("overlay-fade-probe", self.open.get(), window, cx);
+        self.samples.borrow_mut().push(fade.opacity());
+        div()
+    }
+}
+
+#[gpui_kit::test]
+fn an_overlay_fades_in_from_transparent_and_lands_opaque(cx: &mut TestAppContext) {
+    let open = Rc::new(Cell::new(false));
+    let samples = Rc::new(RefCell::new(Vec::new()));
+    let window = cx.open_window(size(px(200.0), px(200.0)), {
+        let open = open.clone();
+        let samples = samples.clone();
+        move |_, _| OverlayFadeProbe { open, samples }
+    });
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    cx.run_until_parked();
+    assert_eq!(
+        last_sample(&samples),
+        0.0,
+        "a hidden surface is fully transparent"
+    );
+
+    samples.borrow_mut().clear();
+    open.set(true);
+    advance_frame(&mut cx, std::time::Duration::ZERO);
+    assert_eq!(
+        last_sample(&samples),
+        0.0,
+        "the opening frame starts transparent"
+    );
+
+    advance_frame(&mut cx, std::time::Duration::from_millis(60));
+    let part_way = last_sample(&samples);
+    assert!(
+        part_way > 0.0 && part_way < 1.0,
+        "the fade is in flight: {part_way}"
+    );
+
+    advance_frame(&mut cx, OVERLAY_FADE);
+    assert_eq!(last_sample(&samples), 1.0, "the fade lands fully opaque");
+
+    // Reduce motion skips every frame in between, in both directions.
+    cx.update(|_, cx| cx.set_reduce_motion(true));
+    open.set(false);
+    advance_frame(&mut cx, std::time::Duration::ZERO);
+    assert_eq!(last_sample(&samples), 0.0, "no exit is played");
+    open.set(true);
+    advance_frame(&mut cx, std::time::Duration::ZERO);
+    assert_eq!(
+        last_sample(&samples),
+        1.0,
+        "under reduce motion the surface is opaque at once"
+    );
+}
+
+/// Reports the fraction `painted_progress` hands to the bar, driven by
+/// `reported`.
+struct ProgressProbe {
+    reported: Rc<Cell<f32>>,
+    samples: Rc<RefCell<Vec<f32>>>,
+}
+
+impl Render for ProgressProbe {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let painted = painted_progress(TransferId(7), self.reported.get(), window, cx);
+        self.samples.borrow_mut().push(painted);
+        div()
+    }
+}
+
+#[gpui_kit::test]
+fn painted_progress_eases_toward_the_reported_fraction(cx: &mut TestAppContext) {
+    let reported = Rc::new(Cell::new(0.25));
+    let samples = Rc::new(RefCell::new(Vec::new()));
+    let window = cx.open_window(size(px(200.0), px(200.0)), {
+        let reported = reported.clone();
+        let samples = samples.clone();
+        move |_, _| ProgressProbe { reported, samples }
+    });
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    cx.run_until_parked();
+    assert_eq!(
+        last_sample(&samples),
+        0.25,
+        "a row that appears mid-transfer shows the real value at once"
+    );
+
+    reported.set(0.75);
+    advance_frame(&mut cx, std::time::Duration::ZERO);
+    assert!(
+        (last_sample(&samples) - 0.25).abs() < 0.01,
+        "the bar does not jump to a newly reported value"
+    );
+
+    advance_frame(&mut cx, PROGRESS_SMOOTHING / 2);
+    let part_way = last_sample(&samples);
+    assert!(
+        part_way > 0.25 && part_way < 0.75,
+        "the bar is chasing the value: {part_way}"
+    );
+
+    advance_frame(&mut cx, PROGRESS_SMOOTHING);
+    assert_eq!(last_sample(&samples), 0.75, "it arrives exactly");
+
+    // Reduce motion paints the reported value in the same frame.
+    cx.update(|_, cx| cx.set_reduce_motion(true));
+    reported.set(0.5);
+    advance_frame(&mut cx, std::time::Duration::ZERO);
+    assert_eq!(
+        last_sample(&samples),
+        0.5,
+        "reduce motion paints the reported fraction directly"
+    );
 }
 
 #[gpui_kit::test]
@@ -1727,10 +2006,13 @@ fn keyboard_interactive_prompt_submits_redacted_responses(cx: &mut TestAppContex
             .get_mut(&request_id)
             .expect("prompt creates input state");
         inputs.inputs[0].state_mut().set_value("123456");
-        assert!(
-            workspace.render_keyboard_interactive_modal(cx).is_some(),
-            "keyboard-interactive prompt must render an actionable modal"
-        );
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("keyboard-interactive-scrim").is_some(),
+        "keyboard-interactive prompt must render an actionable modal"
+    );
+    workspace.update_in(&mut cx, |workspace, window, cx| {
         workspace.submit_keyboard_interactive(request_id, window, cx);
     });
 
