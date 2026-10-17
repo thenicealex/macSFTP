@@ -616,6 +616,15 @@ fn large_directory_selection_smoke(cx: &mut TestAppContext) {
                 workspace.move_selection_extend(side, -1, cx);
                 assert_eq!(workspace.active_tab().expect("active tab").selection.selected_paths.len(), 9_999);
                 eprintln!("10k {side:?}: select-all={select_all_elapsed:?}, range={range_elapsed:?}, shrink={:?}", started.elapsed());
+                let started = std::time::Instant::now();
+                workspace.extend_type_select(side, "entry-09999", std::time::Instant::now(), cx);
+                let type_select_elapsed = started.elapsed();
+                assert_eq!(
+                    workspace.selected_index(side, cx),
+                    Some(9_999),
+                    "a typed prefix selects its entry in a 10k listing"
+                );
+                eprintln!("10k {side:?}: type-select={type_select_elapsed:?}");
                 workspace.pane_filter_mut(side).query = "absent".into();
                 workspace.select_all_visible(side, cx);
                 assert!(workspace.active_tab().expect("active tab").selection.selected_paths.is_empty());
