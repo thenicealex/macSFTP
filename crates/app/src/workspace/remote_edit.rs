@@ -441,6 +441,7 @@ impl Workspace {
             .border_1()
             .border_color(theme.colors.border)
             .rounded_md()
+            .shadow(theme.shadow_modal())
             .font_family(theme.fonts.ui_family.clone())
             .child(
                 div()
@@ -486,7 +487,7 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
+                .bg(theme.scrim())
                 .opacity(fade.opacity())
                 .child(card)
                 .into_any_element(),
@@ -521,6 +522,7 @@ impl Workspace {
             .border_1()
             .border_color(theme.colors.border)
             .rounded_md()
+            .shadow(theme.shadow_modal())
             .font_family(theme.fonts.ui_family.clone())
             .child(
                 div()
@@ -579,7 +581,7 @@ impl Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
+                .bg(theme.scrim())
                 .opacity(fade.opacity())
                 .child(card)
                 .into_any_element(),

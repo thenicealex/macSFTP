@@ -459,11 +459,10 @@ impl crate::workspace::Workspace {
                         }),
                     ),
                 ],
-                cx,
             )
             .into_any_element()
         } else if filtered_count == 0 && filter_active {
-            empty_state("No matching items", vec![], cx).into_any_element()
+            empty_state("No matching items", vec![]).into_any_element()
         } else {
             div()
                 .flex()

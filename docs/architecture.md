@@ -194,6 +194,7 @@ Profile 更新由 `ProfileStore` 协调：校验请求和 route → 写入或读
 - transfer drawer 默认位于底部，可以折叠，不能遮挡主文件列表；折叠后 status bar 仍须简要提示 active 或 failed transfer。
 - 空文件夹、加载和无匹配状态填满列表 viewport 后居中；首次未连接的远端 pane 居中显示连接入口及说明，最近连接列表保持靠上以便扫描，并用统一的 scrollbar 保证短窗口中仍可访问全部入口。
 - 调整 pane 或窗口尺寸时，路径栏、表头、滚动区域和空状态布局必须保持完整。
+- 路径栏按功能成组：导航（后退、前进、上级、刷新）、面包屑、文件操作（复制路径、隐藏文件、新建文件夹、删除）、传输（上传或下载）；组间用 1px 竖线分隔，图标命中区保持冻结的 26×22，窄 pane 下优先保证面包屑的末段（当前目录）可见。
 - 空状态只提供下一步操作（如 `Open Connection`、`Choose Local Folder`、`Retry`），不含长篇功能说明。
 - 文件列表、传输列表、tab、路径栏和状态栏保持紧凑；组件高度稳定，hover、loading、progress 不引发布局变化。
 
@@ -228,6 +229,15 @@ Profile 更新由 `ProfileStore` 协调：校验请求和 route → 写入或读
 - 支持 dark 和 light 两套 theme token，默认值分别采用 One Dark 和 One Light；界面以中性灰阶为主，强调色只用于焦点、主操作、连接成功、选中态和进度。
 - 错误、警告、成功和信息色具有固定语义，同一颜色不得表示无关含义；颜色不能作为唯一状态表达，状态还必须包含文本或图标。
 - 层级通过边线、背景、间距和文字权重表达，不依赖厚重阴影；面板之间用 1px 分隔线或相邻背景面区分；page section 内禁止嵌套卡片。
+- 阴影只能来自 theme 的 elevation scale，按浮层等级命名，不允许调用点自行拼 shadow；三个等级有固定顺序，低等级的浮层不得看起来比高等级的更远：
+  - `Theme::shadow_chip`：贴在表面上的单行小浮层，目前是 tooltip。
+  - `Theme::shadow_popover`：独立的短命浮层，目前是 command palette、tab switcher 和拖拽预览。
+  - `Theme::shadow_modal`：modal / sheet 卡片。
+  `elevation_shadow_token_stays_light` 测试守住等级顺序以及透明度、模糊半径的上限。
+- modal 背后的遮罩统一取 `Theme::scrim()`；调用点不写裸色值，一处变暗处处一致。
+- 窗口顶边那一行 chrome 用 `Theme::chrome_highlight()` 画 1px 高光边线（dark 取亮线、light 取暗线），这是 chrome 唯一的材质提示；chrome 本身保持不透明，不做玻璃或半透明（§12.15）。
+- 卡片内部的列表、选择面板不叠加 elevation：它们与卡片同层，用 1px 边线区分；浮层阴影只给真正浮在窗口之上的表面，不在卡片里再叠一层卡片。
+- 空态分两行表达：lead 行（13px / MEDIUM / 主文本色）给结论，detail 行（12px / muted / 居中）给原因或恢复提示；单行空态只保留 lead 行。错误的 title 与 message 不得再用破折号拼成一行。层级关系对齐首次连接卡片（`remote_empty_with_recents` 的标题与说明），尺寸整体小一档，因为空态位于 pane 内。
 - 圆角克制：工具按钮、输入框、popover、modal 使用小圆角；文件行、tab、状态条不用大圆角。
 - 字体分开 `ui_font_family` 和 `mono_font_family`；文件名、路径、权限、大小、mtime、速度、ETA 等表格数据使用 UI 字体，需要按列对齐时使用 tabular numbers 或等宽字体；正文和控件不用 hero 级字号；文件列表、传输列表和状态栏使用固定行高。
 - 间距使用小步进 token（4、6、8、12、16、24）；icon button 命中区域不得过小；文件行、传输行、tab 和 toolbar 高度使用固定 token。
@@ -242,6 +252,7 @@ remote pane 必须覆盖：`Disconnected`（提供连接或重新连接）、`Co
 - tab 显示连接名称或 host，需要区分时可以附加路径上下文。
 - tab 显示连接状态：empty、connecting、awaiting host key、connected、disconnected、failed；错误 indicator 支持键盘 focus 并能打开详情。
 - 关闭 tab 的行为必须符合传输状态：会取消 transfer 时必须要求明确确认，transfer 独立继续时不得显示错误暗示。
+- 非活动 tab 的关闭钮只在指针位于该 tab 上时出现（Safari 习惯），隐藏时不可点击，避免误关；活动 tab 常显；26×22 的关闭钮槽位恒定占位，出现或消失不得引起标题位移。
 - tab switcher 按最近使用时间排序，不能只按创建顺序。
 - 窗口标题跟随活动 tab 的标题（无 tab 时用 app 名）：标题栏透明不显示标题，但 Mission Control 和 Window 菜单用它命名窗口，不得留空标题或让非活动 tab 的名字覆盖它。
 

@@ -1,6 +1,6 @@
 use gpui_kit::{
-    AnyView, App, ClickEvent, Context, ElementId, Hsla, IntoElement, ParentElement, Render,
-    RenderOnce, SharedString, Styled, Transformation, Window, div, prelude::*, px, radians,
+    AnyView, App, ClickEvent, Context, ElementId, FontWeight, Hsla, IntoElement, ParentElement,
+    Render, RenderOnce, SharedString, Styled, Transformation, Window, div, prelude::*, px, radians,
     relative,
 };
 
@@ -37,6 +37,7 @@ impl Render for Tooltip {
             .bg(theme.colors.elevated_surface)
             .border_1()
             .border_color(theme.colors.border)
+            .shadow(theme.shadow_chip())
             .text_size(px(12.0))
             .text_color(theme.colors.text)
             .font_family(theme.fonts.ui_family.clone())
@@ -290,31 +291,80 @@ fn button_base(
         })
 }
 
-/// Empty state: one short message plus the next actions (usually one).
-pub fn empty_state(
-    message: impl Into<SharedString>,
+/// Empty state: one short lead line, optional guidance, and the next actions.
+///
+/// The hierarchy mirrors the first-connection card (`remote_empty_with_recents`):
+/// the lead line carries weight and full contrast, the detail stays muted, and
+/// the actions sit below as the decision. Sizes run one step smaller because
+/// these states live inside list panes rather than in an empty pane.
+#[derive(IntoElement)]
+pub struct EmptyState {
+    title: SharedString,
+    detail: Option<SharedString>,
     actions: Vec<TextButton>,
-    cx: &App,
-) -> impl IntoElement {
-    let theme = cx.theme();
-    div()
-        .flex()
-        .flex_col()
-        .flex_1()
-        .items_center()
-        .justify_center()
-        .gap_3()
-        .text_size(px(13.0))
-        .text_color(theme.colors.text_muted)
-        .font_family(theme.fonts.ui_family.clone())
-        .child(
-            div()
-                .debug_selector(|| "empty-state-message".into())
-                .child(message.into()),
-        )
-        .when(!actions.is_empty(), |empty| {
-            empty.child(div().flex().gap_2().children(actions))
-        })
+}
+
+impl EmptyState {
+    /// One line of guidance under the lead line. A classified error reads
+    /// better as title plus detail than as one line spliced with a dash.
+    pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+}
+
+impl RenderOnce for EmptyState {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let theme = cx.theme();
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .font_family(theme.fonts.ui_family.clone())
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        div()
+                            .debug_selector(|| "empty-state-message".into())
+                            .text_size(px(13.0))
+                            .line_height(relative(1.2))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.colors.text)
+                            .child(self.title),
+                    )
+                    .when_some(self.detail, |column, detail| {
+                        column.child(
+                            div()
+                                .debug_selector(|| "empty-state-detail".into())
+                                .max_w(px(320.0))
+                                .text_size(px(12.0))
+                                .line_height(relative(1.25))
+                                .text_color(theme.colors.text_muted)
+                                .text_center()
+                                .child(detail),
+                        )
+                    }),
+            )
+            .when(!self.actions.is_empty(), |empty| {
+                empty.child(div().flex().gap_2().children(self.actions))
+            })
+    }
+}
+
+/// Build the centered empty state for a pane or list.
+pub fn empty_state(title: impl Into<SharedString>, actions: Vec<TextButton>) -> EmptyState {
+    EmptyState {
+        title: title.into(),
+        detail: None,
+        actions,
+    }
 }
 
 /// First-load / busy placeholder: spinning activity glyph + short message.

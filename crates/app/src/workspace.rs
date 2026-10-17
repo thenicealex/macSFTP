@@ -1005,7 +1005,6 @@ impl Render for Workspace {
                             }),
                         ),
                     ],
-                    cx,
                 ))
                 .into_any_element()
         };
