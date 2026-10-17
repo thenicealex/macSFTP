@@ -8,7 +8,7 @@ use gpui_kit::{
 };
 use macsftp_core::{FileKind, FileSort, FileSortField, SortDirection, Timestamp};
 
-use crate::icon::{IconName, icon};
+use crate::icon::{ICON_SIZE, IconName, icon};
 use crate::theme::ActiveTheme;
 
 /// Fixed trailing column widths shared by the header and every row so
@@ -82,6 +82,7 @@ pub fn file_table_header(
             div()
                 .id("sort-name")
                 .flex_1()
+                .pl(ICON_SIZE + px(8.0))
                 .cursor_pointer()
                 .hover(move |style| style.bg(hover_background))
                 .on_click(move |_event, window, cx| {
