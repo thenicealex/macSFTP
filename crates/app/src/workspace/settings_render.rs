@@ -108,7 +108,7 @@ impl crate::workspace::Workspace {
                                 .gap_1()
                                 .child(
                                     div()
-                                        .text_size(px(16.0))
+                                        .text_size(px(14.0))
                                         .font_weight(FontWeight::MEDIUM)
                                         .child("Appearance"),
                                 )

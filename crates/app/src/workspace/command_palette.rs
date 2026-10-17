@@ -288,6 +288,11 @@ impl Workspace {
                 })
         });
 
+        let top_padding = px(48.0);
+        let max_palette_height = (window.viewport_size().height - top_padding - px(32.0))
+            .min(px(420.0))
+            .max(px(240.0));
+
         Some(
             div()
                 .id("command-palette-scrim")
@@ -297,11 +302,13 @@ impl Workspace {
                 .flex()
                 .items_start()
                 .justify_center()
-                .pt(px(80.0))
+                .pt(top_padding)
                 .bg(theme.scrim())
                 .opacity(fade.opacity())
                 .child(
                     div()
+                        .id("command-palette-card")
+                        .debug_selector(|| "command-palette-card".into())
                         .key_context("CommandPalette")
                         .capture_action(cx.listener(
                             |workspace, _: &gpui_kit::base::input::MoveUp, _window, cx| {
@@ -321,7 +328,7 @@ impl Workspace {
                         .flex_col()
                         .gap_2()
                         .w(px(520.0))
-                        .max_h(px(420.0))
+                        .max_h(max_palette_height)
                         .p_3()
                         .bg(theme.colors.elevated_surface)
                         .border_1()
