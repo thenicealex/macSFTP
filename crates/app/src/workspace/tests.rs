@@ -7567,6 +7567,32 @@ fn command_palette_esc_closes_before_other_modals(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn show_in_finder_without_a_local_selection_says_so(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _) = init_workspace(cx);
+    let (fixture, base) = temp_local_fixture("show-in-finder");
+    set_local_path_and_wait(&workspace, &mut cx, base);
+
+    workspace.update_in(&mut cx, |ws, window, cx| {
+        assert!(
+            ws.selected_index(PaneSide::Local, cx).is_none(),
+            "the fixture folder is empty"
+        );
+        ws.open_command_palette(window, cx);
+        ws.palette.input.set_value("show in finder");
+        ws.palette.selected = 0;
+        ws.execute_palette_selected(window, cx);
+    });
+    workspace.read_with(&cx, |ws, _| {
+        assert_eq!(
+            ws.status_message_for_test().as_deref(),
+            Some("Select one file or folder to show in Finder.")
+        );
+    });
+
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+#[gpui_kit::test]
 fn restore_session_rebuilds_tabs_without_connect(cx: &mut TestAppContext) {
     let app_paths = temp_app_paths();
     let mut store = SessionStore::open_or_empty(app_paths.session_file.clone());
