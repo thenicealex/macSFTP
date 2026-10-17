@@ -1,4 +1,6 @@
-use gpui_kit::{App, Global, Hsla, Pixels, SharedString, WindowAppearance, hsla, px, rgb};
+use gpui_kit::{
+    App, BoxShadow, Global, Hsla, Pixels, SharedString, WindowAppearance, hsla, px, rgb,
+};
 
 /// Which of the two required token sets is active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,6 +103,24 @@ impl Theme {
             background.a *= 0.3;
         }
         background
+    }
+
+    /// Shadow for floating overlays: drag previews, the command palette,
+    /// tooltips and popovers.
+    ///
+    /// Elevation reads through the border first; the shadow only softens the
+    /// edge. §12.15 forbids heavy shadows, so the levels stay inside this
+    /// range and call sites take a token instead of assembling their own.
+    pub fn shadow_popover(&self) -> Vec<BoxShadow> {
+        let color = hsla(0.0, 0.0, 0.0, 0.10);
+        vec![
+            BoxShadow::new(px(0.), px(4.), color)
+                .blur_radius(px(6.))
+                .spread_radius(px(-1.)),
+            BoxShadow::new(px(0.), px(2.), color)
+                .blur_radius(px(4.))
+                .spread_radius(px(-2.)),
+        ]
     }
 
     /// Project tokens are the single source for Base behavior and presentation.
@@ -367,6 +387,30 @@ mod tests {
                         );
                     })
                     .expect("both open Root windows must render after a theme switch");
+            }
+        }
+    }
+
+    #[test]
+    fn elevation_shadow_token_stays_light() {
+        // §12.15 forbids heavy shadows: the token may only soften an edge, in
+        // both appearances, and every call site takes it from here.
+        for theme in [Theme::one_dark(), Theme::one_light()] {
+            let shadows = theme.shadow_popover();
+            assert_eq!(shadows.len(), 2, "a soft edge plus a contact line");
+            for shadow in shadows {
+                assert!(
+                    shadow.color.a <= 0.2,
+                    "shadow alpha {} is heavier than §12.15 allows",
+                    shadow.color.a
+                );
+                assert!(
+                    shadow.blur_radius <= px(8.0),
+                    "shadow blur {} stops reading as an edge",
+                    shadow.blur_radius
+                );
+                assert!(shadow.offset.y >= px(0.0), "overlays cast shadows downward");
+                assert!(!shadow.inset, "overlay shadows are never inset");
             }
         }
     }

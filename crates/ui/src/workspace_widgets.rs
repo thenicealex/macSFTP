@@ -74,7 +74,7 @@ impl Render for DragPreview {
             .rounded_md()
             .bg(theme.colors.element_selected)
             .text_color(theme.colors.text)
-            .shadow_md()
+            .shadow(theme.shadow_popover())
             .text_size(px(12.0))
             .child(self.label.clone())
     }

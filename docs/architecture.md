@@ -224,6 +224,7 @@ Profile 更新由 `ProfileStore` 协调：校验请求和 route → 写入或读
 - 支持 dark 和 light 两套 theme token，默认值分别采用 One Dark 和 One Light；界面以中性灰阶为主，强调色只用于焦点、主操作、连接成功、选中态和进度。
 - 错误、警告、成功和信息色具有固定语义，同一颜色不得表示无关含义；颜色不能作为唯一状态表达，状态还必须包含文本或图标。
 - 层级通过边线、背景、间距和文字权重表达，不依赖厚重阴影；面板之间用 1px 分隔线或相邻背景面区分；page section 内禁止嵌套卡片。
+- 阴影只能来自 theme 的 elevation token（如 `Theme::shadow_popover`），按浮层等级命名；同一等级的所有浮层共用一个 token，不允许调用点自行拼 shadow。
 - 圆角克制：工具按钮、输入框、popover、modal 使用小圆角；文件行、tab、状态条不用大圆角。
 - 字体分开 `ui_font_family` 和 `mono_font_family`；文件名、路径、权限、大小、mtime、速度、ETA 等表格数据使用 UI 字体，需要按列对齐时使用 tabular numbers 或等宽字体；正文和控件不用 hero 级字号；文件列表、传输列表和状态栏使用固定行高。
 - 间距使用小步进 token（4、6、8、12、16、24）；icon button 命中区域不得过小；文件行、传输行、tab 和 toolbar 高度使用固定 token。
@@ -238,6 +239,7 @@ remote pane 必须覆盖：`Disconnected`（提供连接或重新连接）、`Co
 - tab 显示连接名称或 host，需要区分时可以附加路径上下文。
 - tab 显示连接状态：empty、connecting、awaiting host key、connected、disconnected、failed；错误 indicator 支持键盘 focus 并能打开详情。
 - 关闭 tab 的行为必须符合传输状态：会取消 transfer 时必须要求明确确认，transfer 独立继续时不得显示错误暗示。
+- 非活动 tab 的关闭钮只在指针位于该 tab 上时出现（Safari 习惯），隐藏时不可点击，避免误关；活动 tab 常显；26×22 的关闭钮槽位恒定占位，出现或消失不得引起标题位移。
 - tab switcher 按最近使用时间排序，不能只按创建顺序。
 
 ### 12.8 Transfer Drawer
