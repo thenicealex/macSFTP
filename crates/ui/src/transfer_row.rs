@@ -4,7 +4,7 @@ use gpui_kit::{
 };
 use macsftp_core::TransferDirection;
 
-use crate::components::icon_button;
+use crate::components::{icon_button, text_tooltip};
 use crate::icon::{IconName, icon};
 use crate::theme::ActiveTheme;
 
@@ -102,6 +102,8 @@ impl RenderOnce for TransferRow {
             )
             .on_click(move |event, window, cx| handler(event, window, cx))
         });
+        let detail_id =
+            ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "detail".into());
 
         div()
             .id(self.id)
@@ -166,6 +168,7 @@ impl RenderOnce for TransferRow {
                     )
                     .child(
                         div()
+                            .id(detail_id)
                             .flex_none()
                             .max_w(px(160.0))
                             .min_w_0()
@@ -173,6 +176,9 @@ impl RenderOnce for TransferRow {
                             .text_size(px(10.0))
                             .text_color(theme.colors.text_muted)
                             .font_family(theme.fonts.mono_family.clone())
+                            .when(!self.detail_label.is_empty(), |el| {
+                                el.tooltip(text_tooltip(self.detail_label.clone()))
+                            })
                             .child(self.detail_label),
                     ),
             )
