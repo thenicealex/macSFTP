@@ -8016,22 +8016,58 @@ fn regenerate_workspace_ux_evidence() {
     // Capture 7 (light): Finder-style type-select. Typing "b" jumps the
     // selection to the first matching name and leaves the rest of the list
     // visible — the filter bar stays empty, unlike the old type-to-filter.
-    let type_select_fixture = std::path::Path::new("/tmp/fs-demo");
-    let _ = std::fs::remove_dir_all(type_select_fixture);
-    std::fs::create_dir_all(type_select_fixture).expect("type-select fixture must be creatable");
-    for name in [
+    //
+    // The capture must read the same on every run, so this folder has a fixed
+    // path instead of a per-run temp directory. It is the test's own fixture:
+    // it refuses a folder holding anything it did not write (never deleting
+    // files it does not own) and removes its own entries when it is done.
+    const TYPE_SELECT_FIXTURE: &str = "/tmp/macsftp-type-select";
+    const TYPE_SELECT_ENTRIES: [&str; 5] = [
         "alpha.txt",
         "beta-report.pdf",
         "brand-audit.log",
         "charlie.txt",
         "docs",
-    ] {
+    ];
+    let type_select_fixture = std::path::PathBuf::from(TYPE_SELECT_FIXTURE);
+    std::fs::create_dir_all(&type_select_fixture).expect("type-select fixture must be creatable");
+    for entry in std::fs::read_dir(&type_select_fixture).expect("fixture must be readable") {
+        let entry = entry.expect("fixture entries must be readable");
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        assert!(
+            TYPE_SELECT_ENTRIES.contains(&name.as_ref()),
+            "{TYPE_SELECT_FIXTURE} holds `{name}`, which this capture did not write; move it away"
+        );
+    }
+    for name in TYPE_SELECT_ENTRIES {
         let path = type_select_fixture.join(name);
         if name == "docs" {
             std::fs::create_dir_all(&path).expect("fixture folder");
         } else {
             std::fs::write(&path, b"evidence").expect("fixture file");
         }
+    }
+    // The listing carries a "Last Modified" column at minute precision and the
+    // entries are written fresh on every run, so their real times would change
+    // the pixels from run to run and break the byte-identical rerun guarantee.
+    // Pin them to one instant (rendered in the machine's local time); the
+    // folder is included because writing the entries inside it bumps its time.
+    let fixed_mtime =
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_767_323_045); // 2026-01-02 03:04:05 UTC
+    for name in TYPE_SELECT_ENTRIES {
+        let path = type_select_fixture.join(name);
+        let handle = if name == "docs" {
+            std::fs::File::open(&path).expect("fixture folder must be openable")
+        } else {
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .expect("fixture file must be openable for writing")
+        };
+        handle
+            .set_times(std::fs::FileTimes::new().set_modified(fixed_mtime))
+            .expect("fixture times must be settable");
     }
     cx.update(|cx| {
         workspace
@@ -8056,7 +8092,14 @@ fn regenerate_workspace_ux_evidence() {
     .expect("window update must succeed");
     cx.run_until_parked();
     capture(&mut cx, "light-type-select-720x480.png");
-    let _ = std::fs::remove_dir_all(type_select_fixture);
+    for name in TYPE_SELECT_ENTRIES {
+        let path = type_select_fixture.join(name);
+        if name == "docs" {
+            std::fs::remove_dir_all(&path).expect("fixture folder removal");
+        } else {
+            std::fs::remove_file(&path).expect("fixture file removal");
+        }
+    }
 }
 
 /// Local pane with a real, sorted fixture listing; returns the fixture dir so
