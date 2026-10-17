@@ -694,15 +694,15 @@ impl crate::workspace::Workspace {
                                 .child("Upload Changes")
                                 .into_any_element(),
                             EditPhase::Downloading => div()
-                                .text_color(theme.colors.text_disabled)
+                                .text_color(theme.colors.text_muted)
                                 .child("Downloading Copy…")
                                 .into_any_element(),
                             EditPhase::CheckingRemote => div()
-                                .text_color(theme.colors.text_disabled)
+                                .text_color(theme.colors.text_muted)
                                 .child("Checking Server File…")
                                 .into_any_element(),
                             EditPhase::UploadingBack => div()
-                                .text_color(theme.colors.text_disabled)
+                                .text_color(theme.colors.text_muted)
                                 .child("Uploading Changes…")
                                 .into_any_element(),
                             EditPhase::RemoteConflict => div()

@@ -466,11 +466,13 @@ impl crate::workspace::Workspace {
                     Some(path) => {
                         let segments = breadcrumb_segments(path);
                         let display = breadcrumb_display_indices(segments.len());
+                        let display_len = display.len();
                         // Root label is already "/"; omit the separator after it so we
                         // never render "//Users".
                         let mut skip_next_separator = false;
                         let mut first = true;
                         for (display_i, index_opt) in display.into_iter().enumerate() {
+                            let is_last = display_i + 1 == display_len;
                             if !first && !skip_next_separator {
                                 trail = trail.child(
                                     div()
@@ -511,7 +513,15 @@ impl crate::workspace::Workspace {
                                             .debug_selector(move || {
                                                 format!("breadcrumb-segment-{pane_tag}-{display_i}")
                                             })
-                                            .flex_none()
+                                            .when(is_last, |seg| {
+                                                // Priority to the current directory:
+                                                // shrinks much slower than parent segments (§12.1).
+                                                seg.flex_shrink(1.0).min_w(px(32.0))
+                                            })
+                                            .when(!is_last, |seg| {
+                                                seg.flex_shrink(3.0).min_w(px(16.0))
+                                            })
+                                            .truncate()
                                             .px(px(2.0))
                                             .rounded_sm()
                                             .text_size(px(12.0))
@@ -618,7 +628,7 @@ impl crate::workspace::Workspace {
                     } else {
                         "remote-delete"
                     },
-                    IconName::Close,
+                    IconName::Trash,
                     labeled_shortcut("Delete", "DeleteSelection"),
                 )
                 .on_click(cx.listener(move |workspace, _event, window, cx| {

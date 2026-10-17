@@ -804,9 +804,11 @@ impl crate::workspace::Workspace {
                         .py_1()
                         .min_w_0()
                         .truncate()
+                        .rounded_sm()
                         .cursor_pointer()
                         .text_size(px(12.0))
                         .text_color(theme.colors.text)
+                        .hover(|style| style.bg(theme.colors.element_hover))
                         .on_click(cx.listener(move |workspace, _event, _window, cx| {
                             workspace.select_connect_profile(profile_id, cx);
                         }))
@@ -819,9 +821,11 @@ impl crate::workspace::Workspace {
                     .px_2()
                     .py_1()
                     .min_w_0()
+                    .rounded_sm()
                     .cursor_pointer()
                     .text_size(px(12.0))
                     .text_color(theme.colors.text_muted)
+                    .hover(|style| style.bg(theme.colors.element_hover))
                     .on_click(cx.listener(|workspace, _event, _window, cx| {
                         if let Some(form) = &mut workspace.connect_form_ui.form {
                             form.switch_to_manual_entry();

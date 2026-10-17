@@ -973,6 +973,26 @@ fn path_bar_rules_keep_the_clusters_apart(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui_kit::test]
+fn command_palette_fits_inside_short_window(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.open_command_palette(window, cx);
+    });
+    cx.run_until_parked();
+
+    let card = cx
+        .debug_bounds("command-palette-card")
+        .expect("command palette card is rendered");
+    assert_eq!(card.top(), px(48.0), "palette top padding is 48px");
+    assert!(
+        card.bottom() <= px(480.0),
+        "palette card bottom {:?} must fit within 480px viewport",
+        card.bottom()
+    );
+}
+
 /// A classified error leads with its title and keeps the message on a second,
 /// quieter line instead of splicing both into one line with a dash.
 #[gpui_kit::test]
