@@ -1050,8 +1050,9 @@ async fn command_dispatch_loop(
                     .send_async(TransferManagerRequest::Cancel { transfer_id })
                     .await
                 {
-                    eprintln!(
-                        "WARN: transfer cancellation could not reach transfer manager: {error}"
+                    warn!(
+                        error = %error,
+                        "transfer cancellation could not reach transfer manager"
                     );
                 }
             }
@@ -1069,7 +1070,10 @@ async fn command_dispatch_loop(
                     .send_async(TransferManagerRequest::Retry { transfer_id })
                     .await
                 {
-                    eprintln!("WARN: transfer retry could not reach transfer manager: {error}");
+                    warn!(
+                        error = %error,
+                        "transfer retry could not reach transfer manager"
+                    );
                 }
             }
 

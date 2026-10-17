@@ -354,8 +354,7 @@ impl RemoteSessionActor {
             .shared_connection
             .last_used
             .lock()
-            .expect("shared connection last_used mutex must not be poisoned") =
-            std::time::Instant::now();
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = std::time::Instant::now();
     }
 
     #[allow(clippy::too_many_arguments)]
