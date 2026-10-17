@@ -437,23 +437,43 @@ impl crate::workspace::Workspace {
         })
         .detach();
     }
-    pub(crate) fn apply_sort_field(&mut self, field: FileSortField, cx: &mut Context<Self>) {
+    /// Sort the active tab by `field` in `direction`: where the menu bar and
+    /// the command palette land, since neither can show which field is
+    /// currently active (§12.2).
+    pub(crate) fn set_sort(
+        &mut self,
+        field: FileSortField,
+        direction: SortDirection,
+        cx: &mut Context<Self>,
+    ) {
         let Some(tab) = self.active_tab_mut() else {
             return;
         };
-        if tab.sort.field == field {
-            tab.sort.direction = match tab.sort.direction {
-                SortDirection::Ascending => SortDirection::Descending,
-                SortDirection::Descending => SortDirection::Ascending,
-            };
-        } else {
-            tab.sort.field = field;
-            tab.sort.direction = SortDirection::Ascending;
+        if tab.sort.field == field && tab.sort.direction == direction {
+            return;
         }
+        tab.sort.field = field;
+        tab.sort.direction = direction;
         let sort = tab.sort.clone();
         macsftp_core::sort_entries(&mut tab.local.entries, &sort);
         macsftp_core::sort_entries(&mut tab.remote.entries, &sort);
         cx.notify();
+    }
+    /// File-list header click: the same column toggles direction, a new
+    /// column starts ascending.
+    pub(crate) fn apply_sort_field(&mut self, field: FileSortField, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        let direction = if tab.sort.field == field {
+            match tab.sort.direction {
+                SortDirection::Ascending => SortDirection::Descending,
+                SortDirection::Descending => SortDirection::Ascending,
+            }
+        } else {
+            SortDirection::Ascending
+        };
+        self.set_sort(field, direction, cx);
     }
     /// Request a remote listing. Returns `false` if the command could not be
     /// enqueued (caller must not advance navigation history in that case).

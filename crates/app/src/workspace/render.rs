@@ -23,6 +23,25 @@ use crate::workspace::nav::{breadcrumb_display_indices, breadcrumb_segments};
 use macsftp_core::HistoryOp;
 
 impl crate::workspace::Workspace {
+    /// Native window title (§12.7): the active tab's title — the connection's
+    /// name or host — or the app name while no tab is open. macOS shows it in
+    /// Mission Control and the Window menu; the transparent titlebar keeps it
+    /// out of the window itself.
+    pub(crate) fn window_title(&self) -> String {
+        self.active_tab()
+            .map(|tab| tab.title.clone())
+            .unwrap_or_else(|| crate::APP_NAME.to_string())
+    }
+
+    /// Push [`Self::window_title`] to the platform when it changed. Comparing
+    /// against the platform title keeps unrelated renders free of AppKit work.
+    pub(crate) fn sync_window_title(&self, window: &mut Window) {
+        let title = self.window_title();
+        if window.window_title() != title {
+            window.set_window_title(&title);
+        }
+    }
+
     pub(crate) fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
         let active_tab_id = self.state.tabs.active_tab_id;
