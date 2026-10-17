@@ -55,10 +55,10 @@ impl crate::workspace::Workspace {
                 tab_state.title.clone(),
                 status_color,
                 status_label,
+                // The hover group is derived from the tab id so the close button
+                // appears only while the pointer is on this tab.
+                format!("tab-{}", tab_id.0),
             )
-            // The hover group is derived from the tab id so the close button
-            // appears only while the pointer is on this tab.
-            .hover_group(format!("tab-{}", tab_id.0))
             .active(active_tab_id == Some(tab_id))
             .on_activate(cx.listener(move |workspace, _event, window, cx| {
                 workspace.activate_tab(tab_id, window, cx);

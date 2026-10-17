@@ -416,6 +416,10 @@ impl crate::workspace::Workspace {
     pub(crate) fn reveal_local_selection(&mut self, cx: &mut Context<Self>) {
         let entries = self.selected_fs_entries(PaneSide::Local);
         let Some(entry) = entries.first() else {
+            // Reachable from the palette with the server pane focused, so say
+            // what the command needs instead of doing nothing (§8).
+            self.status_message = Some("Select one file or folder to show in Finder.".into());
+            cx.notify();
             return;
         };
         if let Some(path) = entry.path.as_local() {

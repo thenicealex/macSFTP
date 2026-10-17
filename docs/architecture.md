@@ -201,10 +201,11 @@ Profile 更新由 `ProfileStore` 协调：校验请求和 route → 写入或读
 ### 12.2 交互入口
 
 - 高频操作（新建/关闭/切换 tab、连接、刷新、返回上级、上传、下载、取消传输、重试传输、打开 transfer drawer）至少提供按钮、menu bar item、快捷键、command palette action 中的两种入口。
-- 所有 app-level action 必须可被 command palette 搜索，action 名称使用稳定动词短语（如 `NewTab`、`RefreshPane`、`RetryTransfer`、`OpenSettings`），优先沿用本文中的名称；action id 不随 UI 文案变化。
+- 作用于 tab / pane / 传输 / 设置的 app-level action 必须可被 command palette 搜索，action 名称使用稳定动词短语（如 `NewTab`、`RefreshPane`、`NavigateBack`、`OpenSettings`），优先沿用本文中的名称；action id 不随 UI 文案变化。窗口与应用生命周期命令（New Window、Close Window、Minimize、Zoom、Bring All to Front、Hide/Quit）留在 macOS 标准菜单位置，不进入 palette。
 - 菜单栏由 `app_menus::menu_bar()` 单一定义，菜单项只能引用与快捷键、palette 相同的 action，禁止在菜单里另造一套；`app_menus` 的一致性测试把「菜单项 ↔ 快捷键绑定 ↔ palette id」三者钉在一起，改名或删除命令时三处必须同时更新。
+- 菜单文案遵循 HIG 省略号：会打开需要输入或确认的面板的命令带省略号（New Folder…、Rename…、Delete…、Go to Folder…），即时完成的命令不带。右键菜单与菜单栏对同一命令使用同一写法。
 - Edit 菜单使用 `MenuItem::os_action` 走 AppKit 标准 selector（`cut:`/`copy:`/`paste:`/`selectAll:`/`undo:`/`redo:`），dispatch 的仍是 `gpui-base` input action，不得自造文本编辑 action（§12.14）。
-- 菜单项无法显示当前状态（静态菜单，没有 checkmark），因此有状态的命令在菜单里写成显式取值（例如 Sort By ▸ Name (A→Z)/(Z→A)）；当前排序状态的显示位置只有文件列表表头（§12.3）。
+- 平台支持 `MenuItem::checked`，但菜单栏是应用级的一份，在启动时构建一次（`main.rs` 的 `set_menus(menu_bar())`），而排序状态属于每个 tab（两个 pane 共用），单个 checkmark 无法表达多 tab 下的当前状态——要显示它就必须在排序、tab 或窗口焦点变化时重建整个菜单栏，目前不做。有状态的命令因此写成显式取值（例如 Sort By ▸ Name (A→Z)/(Z→A)）；当前排序状态的显示位置只有文件列表表头（§12.3）。
 - command palette 不得暴露 runtime、channel、actor、crate 等内部实现细节；用户忘记快捷键时必须能用 command palette 完成同一操作。
 - path bar 必须支持复制当前路径，local 和 remote 都保留 back、up、refresh；路径过长从中间省略，loading 时不得消失，只增加局部 spinner 或 progress indicator。
 
@@ -235,7 +236,7 @@ Profile 更新由 `ProfileStore` 协调：校验请求和 route → 写入或读
   - `Theme::shadow_popover`：独立的短命浮层，目前是 command palette、tab switcher 和拖拽预览。
   - `Theme::shadow_modal`：modal / sheet 卡片。
   `elevation_shadow_token_stays_light` 测试守住等级顺序以及透明度、模糊半径的上限。
-- modal 背后的遮罩统一取 `Theme::scrim()`；调用点不写裸色值，一处变暗处处一致。
+- 需要压暗窗口背景的浮层（modal、command palette、tab switcher）背后的遮罩统一取 `Theme::scrim()`；调用点不写裸色值，一处变暗处处一致。
 - 窗口顶边那一行 chrome 用 `Theme::chrome_highlight()` 画 1px 高光边线（dark 取亮线、light 取暗线），这是 chrome 唯一的材质提示；chrome 本身保持不透明，不做玻璃或半透明（§12.15）。
 - 卡片内部的列表、选择面板不叠加 elevation：它们与卡片同层，用 1px 边线区分；浮层阴影只给真正浮在窗口之上的表面，不在卡片里再叠一层卡片。
 - 空态分两行表达：lead 行（13px / MEDIUM / 主文本色）给结论，detail 行（12px / muted / 居中）给原因或恢复提示；单行空态只保留 lead 行。错误的 title 与 message 不得再用破折号拼成一行。层级关系对齐首次连接卡片（`remote_empty_with_recents` 的标题与说明），尺寸整体小一档，因为空态位于 pane 内。
@@ -312,11 +313,11 @@ remote pane 必须覆盖：`Disconnected`（提供连接或重新连接）、`Co
 - 性能烟测的最低场景：10k local entries、10k remote entries、4 active transfers、3 connected tabs。
 - 允许的动效只有下面这些；全部经 `gpui_kit::base::motion` 驱动，不手写弹簧或时间线，hover / press / selection / focus 保持即时。
   - transfer drawer 展开与折叠：`spring(("transfer-drawer", "height"))`，response 300ms、临界阻尼、收敛容差 0.5px。拖动调整高度期间 `with_travel(false)` 把目标钉住，高度 1:1 跟随指针，松手后恢复弹簧。收敛时弹簧精确等于目标，所以 `open == false && height == 0` 才是卸载条件（动画期间必须继续挂载）。给容器 `.h()` 的是动画值，容器自身不能带最小高度，否则关闭时会在最小高度处跳一下；最小高度由存储值上的 clamp 保证。内容判断（例如空态提示是否显示）读存储高度，不读动画值。
-  - 浮层（command palette、tab switcher、About、Go to Path 和状态型对话框）：进入用 150ms 透明度淡入（`workspace::overlay::OverlayFade`，内部为 `Presence`）；关闭瞬时，不做镜像退出。关闭时浮层内容已被清空（palette 查询、go-to-path 输入、确认请求模型），淡出一个已经没有内容的表面只会出现“卡片已消失只剩余晖”，而保留已取消的请求模型会让陈旧操作仍可生效（§6）；macOS 的 alert 同样是立即消失。
+  - 浮层（command palette、tab switcher、About、Go to Path 和状态型对话框）：进入用 150ms 透明度淡入（`workspace::overlay::OverlayFade`，内部为 `Presence`）；关闭瞬时，不做镜像退出。关闭后的采样走零时长过渡，收敛到全透明，因此退出不绘制、也不请求任何动画帧。关闭时浮层内容已被清空（palette 查询、go-to-path 输入、确认请求模型），淡出一个已经没有内容的表面只会出现“卡片已消失只剩余晖”，而保留已取消的请求模型会让陈旧操作仍可生效（§6）；macOS 的 alert 同样是立即消失。
   - 该 GPUI 快照没有任何元素级 transform（只有 `Svg` 带 `Transformation`），浮层只能用透明度表达；计划中的 0.96→1.0 scale 无法实现，也没有用位移或裁剪替代。
   - transfer 进度条：`transition(("transfer-progress", job_id), 200ms)` 让绘制值平滑逼近真实 fraction；文本百分比仍显示真实值，卡顿立刻可见。
   - loading 占位：`icons/refresh.svg` 经 `animate_keyframes` + 无限 `Timing` 旋转（900ms/圈）替代静态 “↻”。
-- 动效状态在 render 期间采样，且每帧都要采样：浮层即使这一帧不渲染也必须调用一次采样，否则时间线错过关闭事件，下次打开不会重新从透明淡入。
+- 动效状态在 render 期间采样，且每帧都要采样：浮层即使这一帧不渲染也必须调用一次采样，否则时间线错过关闭事件（关闭帧的采样把状态立即收回起点），下次打开不会重新从透明淡入。
 - reduced motion：上述动效全部来自 gpui-base motion，自动跟随系统开关并直接返回目标值或静止帧，不需要额外设置项；新增动效不得绕过它。
 
 ### 12.14 GPUI Base 组件约束

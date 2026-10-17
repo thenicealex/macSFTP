@@ -456,8 +456,9 @@ impl crate::workspace::Workspace {
         .detach();
     }
     /// Sort the active tab by `field` in `direction`: where the menu bar and
-    /// the command palette land, since neither can show which field is
-    /// currently active (§12.2).
+    /// the command palette land. The active sort shows in the file-list header
+    /// (§12.3), because one app-wide menu bar cannot mark a per-tab state
+    /// (§12.2).
     pub(crate) fn set_sort(
         &mut self,
         field: FileSortField,

@@ -616,6 +616,15 @@ fn large_directory_selection_smoke(cx: &mut TestAppContext) {
                 workspace.move_selection_extend(side, -1, cx);
                 assert_eq!(workspace.active_tab().expect("active tab").selection.selected_paths.len(), 9_999);
                 eprintln!("10k {side:?}: select-all={select_all_elapsed:?}, range={range_elapsed:?}, shrink={:?}", started.elapsed());
+                let started = std::time::Instant::now();
+                workspace.extend_type_select(side, "entry-09999", std::time::Instant::now(), cx);
+                let type_select_elapsed = started.elapsed();
+                assert_eq!(
+                    workspace.selected_index(side, cx),
+                    Some(9_999),
+                    "a typed prefix selects its entry in a 10k listing"
+                );
+                eprintln!("10k {side:?}: type-select={type_select_elapsed:?}");
                 workspace.pane_filter_mut(side).query = "absent".into();
                 workspace.select_all_visible(side, cx);
                 assert!(workspace.active_tab().expect("active tab").selection.selected_paths.is_empty());
@@ -1211,6 +1220,33 @@ fn an_overlay_fades_in_from_transparent_and_lands_opaque(cx: &mut TestAppContext
         last_sample(&samples),
         1.0,
         "under reduce motion the surface is opaque at once"
+    );
+}
+
+#[gpui_kit::test]
+fn a_dismissed_overlay_settles_without_playing_an_exit(cx: &mut TestAppContext) {
+    let open = Rc::new(Cell::new(true));
+    let samples = Rc::new(RefCell::new(Vec::new()));
+    let window = cx.open_window(size(px(200.0), px(200.0)), {
+        let open = open.clone();
+        let samples = samples.clone();
+        move |_, _| OverlayFadeProbe { open, samples }
+    });
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    advance_frame(&mut cx, OVERLAY_FADE);
+    assert_eq!(
+        last_sample(&samples),
+        1.0,
+        "the surface has finished fading in"
+    );
+
+    samples.borrow_mut().clear();
+    open.set(false);
+    advance_frame(&mut cx, std::time::Duration::ZERO);
+    assert_eq!(
+        last_sample(&samples),
+        0.0,
+        "a dismissed surface is fully transparent on the frame it closes"
     );
 }
 
@@ -7540,6 +7576,32 @@ fn command_palette_esc_closes_before_other_modals(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn show_in_finder_without_a_local_selection_says_so(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _) = init_workspace(cx);
+    let (fixture, base) = temp_local_fixture("show-in-finder");
+    set_local_path_and_wait(&workspace, &mut cx, base);
+
+    workspace.update_in(&mut cx, |ws, window, cx| {
+        assert!(
+            ws.selected_index(PaneSide::Local, cx).is_none(),
+            "the fixture folder is empty"
+        );
+        ws.open_command_palette(window, cx);
+        ws.palette.input.set_value("show in finder");
+        ws.palette.selected = 0;
+        ws.execute_palette_selected(window, cx);
+    });
+    workspace.read_with(&cx, |ws, _| {
+        assert_eq!(
+            ws.status_message_for_test().as_deref(),
+            Some("Select one file or folder to show in Finder.")
+        );
+    });
+
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+#[gpui_kit::test]
 fn restore_session_rebuilds_tabs_without_connect(cx: &mut TestAppContext) {
     let app_paths = temp_app_paths();
     let mut store = SessionStore::open_or_empty(app_paths.session_file.clone());
@@ -8016,22 +8078,65 @@ fn regenerate_workspace_ux_evidence() {
     // Capture 7 (light): Finder-style type-select. Typing "b" jumps the
     // selection to the first matching name and leaves the rest of the list
     // visible — the filter bar stays empty, unlike the old type-to-filter.
-    let type_select_fixture = std::path::Path::new("/tmp/fs-demo");
-    let _ = std::fs::remove_dir_all(type_select_fixture);
-    std::fs::create_dir_all(type_select_fixture).expect("type-select fixture must be creatable");
-    for name in [
+    //
+    // The capture must read the same on every run, so this folder has a fixed
+    // path instead of a per-run temp directory. It is the test's own fixture:
+    // it only writes into an empty folder (creating it when missing and leaving
+    // it empty again), so it can neither overwrite nor delete an entry it did
+    // not create.
+    const TYPE_SELECT_FIXTURE: &str = "/tmp/macsftp-type-select";
+    const TYPE_SELECT_ENTRIES: [&str; 5] = [
         "alpha.txt",
         "beta-report.pdf",
         "brand-audit.log",
         "charlie.txt",
         "docs",
-    ] {
+    ];
+    let type_select_fixture = std::path::PathBuf::from(TYPE_SELECT_FIXTURE);
+    std::fs::create_dir_all(&type_select_fixture).expect("type-select fixture must be creatable");
+    let leftovers: Vec<String> = std::fs::read_dir(&type_select_fixture)
+        .expect("fixture must be readable")
+        .map(|entry| {
+            entry
+                .expect("fixture entries must be readable")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "{TYPE_SELECT_FIXTURE} is not empty ({leftovers:?}); the capture writes only into an \
+         empty folder and leaves it empty, so move its contents away first"
+    );
+    for name in TYPE_SELECT_ENTRIES {
         let path = type_select_fixture.join(name);
         if name == "docs" {
             std::fs::create_dir_all(&path).expect("fixture folder");
         } else {
             std::fs::write(&path, b"evidence").expect("fixture file");
         }
+    }
+    // The listing carries a "Last Modified" column at minute precision and the
+    // entries are written fresh on every run, so their real times would change
+    // the pixels from run to run and break the byte-identical rerun guarantee.
+    // Pin them to one instant (the column renders a UTC civil time); the folder
+    // is included because writing the entries inside it bumps its time.
+    let fixed_mtime =
+        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_767_323_045); // 2026-01-02 03:04:05 UTC
+    for name in TYPE_SELECT_ENTRIES {
+        let path = type_select_fixture.join(name);
+        let handle = if name == "docs" {
+            std::fs::File::open(&path).expect("fixture folder must be openable")
+        } else {
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .expect("fixture file must be openable for writing")
+        };
+        handle
+            .set_times(std::fs::FileTimes::new().set_modified(fixed_mtime))
+            .expect("fixture times must be settable");
     }
     cx.update(|cx| {
         workspace
@@ -8056,7 +8161,14 @@ fn regenerate_workspace_ux_evidence() {
     .expect("window update must succeed");
     cx.run_until_parked();
     capture(&mut cx, "light-type-select-720x480.png");
-    let _ = std::fs::remove_dir_all(type_select_fixture);
+    for name in TYPE_SELECT_ENTRIES {
+        let path = type_select_fixture.join(name);
+        if name == "docs" {
+            std::fs::remove_dir_all(&path).expect("fixture folder removal");
+        } else {
+            std::fs::remove_file(&path).expect("fixture file removal");
+        }
+    }
 }
 
 /// Local pane with a real, sorted fixture listing; returns the fixture dir so

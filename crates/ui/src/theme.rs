@@ -151,9 +151,10 @@ impl Theme {
         ]
     }
 
-    /// Dimming behind a modal overlay. One value for every scrim so the
-    /// backdrop reads the same wherever it appears; it comes from here rather
-    /// than from a literal at the call site.
+    /// Dimming behind a task-modal overlay: a dialog, the command palette, the
+    /// tab switcher. One value for every scrim so the backdrop reads the same
+    /// wherever it appears; it comes from here rather than from a literal at
+    /// the call site.
     pub fn scrim(&self) -> Hsla {
         hsla(0.0, 0.0, 0.0, 0.45)
     }

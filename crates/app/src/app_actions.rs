@@ -16,7 +16,6 @@ actions!(
         FocusRemotePane,
         UploadSelection,
         DownloadSelection,
-        CancelSelectedTransfer,
         OpenCommandPalette,
         ShowTransferDrawer,
         ActivateNextTab,
@@ -59,9 +58,10 @@ actions!(
         BringAllToFront,
         CloseWindow,
         Quit,
-        // View ▸ Sort By sets field and direction explicitly: the menu bar
-        // cannot show which one is active, so it never has to be inferred
-        // (§12.2). The file-list header keeps its click-to-toggle behavior.
+        // View ▸ Sort By sets field and direction explicitly; one app-wide
+        // menu bar cannot mark a per-tab sort state, so the header is where the
+        // active sort shows (§12.2, §12.3). The file-list header keeps its
+        // click-to-toggle behavior.
         SortByNameAscending,
         SortByNameDescending,
         SortBySizeAscending,

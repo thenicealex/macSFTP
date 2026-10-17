@@ -22,8 +22,9 @@ pub struct Tab {
     /// Hover group this tab publishes: the close affordance appears while the
     /// pointer is anywhere on the tab (the Safari convention). Needing a group
     /// rather than a plain `hover` is why the app names it — the button itself
-    /// is not drawn until then.
-    hover_group: Option<SharedString>,
+    /// is not drawn until then — and each tab needs its own name, so the caller
+    /// derives it from the tab id.
+    hover_group: SharedString,
     on_activate: Option<ClickHandler>,
     on_close: Option<ClickHandler>,
 }
@@ -33,6 +34,7 @@ pub fn tab(
     title: impl Into<SharedString>,
     status_color: Hsla,
     status_label: impl Into<SharedString>,
+    hover_group: impl Into<SharedString>,
 ) -> Tab {
     Tab {
         id: id.into(),
@@ -40,7 +42,7 @@ pub fn tab(
         status_color,
         status_label: status_label.into(),
         active: false,
-        hover_group: None,
+        hover_group: hover_group.into(),
         on_activate: None,
         on_close: None,
     }
@@ -49,14 +51,6 @@ pub fn tab(
 impl Tab {
     pub fn active(mut self, active: bool) -> Self {
         self.active = active;
-        self
-    }
-
-    /// Reveal the close affordance while the pointer is on this tab. Pass a
-    /// name unique to the tab; without it the close button stays always
-    /// visible, which is the pre-existing behavior.
-    pub fn hover_group(mut self, group: impl Into<SharedString>) -> Self {
-        self.hover_group = Some(group.into());
         self
     }
 
@@ -94,15 +88,14 @@ impl RenderOnce for Tab {
         let close_id = ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "close".into());
         // The 26x22 close slot keeps its place in the layout on every tab, so
         // revealing it never shifts the title. On an inactive tab it is
-        // `Visibility::Hidden` rather than transparent: a hidden element takes
-        // no clicks, so a click aimed at the tab body can never land on a close
-        // button the user has not seen.
+        // `Visibility::Hidden` until the pointer is on the tab: a hidden element
+        // takes no clicks, so a click aimed at the tab body can never land on a
+        // close button the user has not seen.
         let mut close_slot = div().flex_none().debug_selector(|| "tab-close".into());
         if !self.active {
-            close_slot = close_slot.invisible();
-        }
-        if let Some(group) = self.hover_group.clone() {
-            close_slot = close_slot.group_hover(group, |style| style.visible());
+            close_slot = close_slot
+                .invisible()
+                .group_hover(self.hover_group.clone(), |style| style.visible());
         }
 
         div()
@@ -118,9 +111,7 @@ impl RenderOnce for Tab {
             .bg(background)
             .border_r_1()
             .border_color(theme.colors.border)
-            .when_some(self.hover_group.clone(), |element, group| {
-                element.group(group)
-            })
+            .group(self.hover_group.clone())
             .text_size(px(13.0))
             .text_color(text_color)
             .font_family(theme.fonts.ui_family.clone())
@@ -173,11 +164,16 @@ mod tests {
             let activated = self.activated.clone();
             let closed = self.closed.clone();
             div().flex().w(px(240.0)).h(px(40.0)).child(
-                tab("t1", "example.com", rgb(0x00ff00).into(), "Connected")
-                    .active(self.active)
-                    .hover_group("tab-1")
-                    .on_activate(move |_, _, _| activated.set(activated.get() + 1))
-                    .on_close(move |_, _, _| closed.set(closed.get() + 1)),
+                tab(
+                    "t1",
+                    "example.com",
+                    rgb(0x00ff00).into(),
+                    "Connected",
+                    "tab-1",
+                )
+                .active(self.active)
+                .on_activate(move |_, _, _| activated.set(activated.get() + 1))
+                .on_close(move |_, _, _| closed.set(closed.get() + 1)),
             )
         }
     }
