@@ -10,6 +10,7 @@ use macsftp_core::ConnectionState;
 use macsftp_ui::ActiveTheme;
 
 use crate::palette_commands::{PaletteCommand, PaletteContext, filter_palette_commands};
+use crate::workspace::overlay::OverlayFade;
 use crate::workspace::{PaneSide, Workspace, WorkspaceSurface};
 use macsftp_core::HistoryOp;
 
@@ -194,6 +195,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
+        let fade = OverlayFade::sample("command-palette", self.palette.open, window, cx);
         if !self.palette.open {
             return None;
         }
@@ -277,6 +279,7 @@ impl Workspace {
                 .justify_center()
                 .pt(px(80.0))
                 .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
+                .opacity(fade.opacity())
                 .child(
                     div()
                         .key_context("CommandPalette")

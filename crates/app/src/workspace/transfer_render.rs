@@ -1,8 +1,9 @@
 use std::collections::HashSet;
 
+use gpui_kit::base::motion::{Transition, transition};
 use gpui_kit::{
-    AppContext, Context, CursorStyle, DragMoveEvent, Hsla, IntoElement, MouseButton,
-    MouseDownEvent, ParentElement, SharedString, Styled, Window, div, prelude::*, px,
+    AppContext, Context, CursorStyle, DragMoveEvent, ElementId, Hsla, IntoElement, MouseButton,
+    MouseDownEvent, ParentElement, Pixels, SharedString, Styled, Window, div, prelude::*, px,
 };
 use macsftp_core::{
     EditPhase, EntryPath, TransferId, TransferJob, TransferPlanState, TransferState, TransferStore,
@@ -15,6 +16,30 @@ use macsftp_ui::{
 use crate::palette_commands::labeled_shortcut;
 use crate::resources::ActiveTransfers;
 use crate::workspace::PaneSide;
+
+/// How long the progress bar takes to ease toward a newly reported fraction.
+/// Chunk updates arrive far faster than the eye can resolve, so the bar chases
+/// the real value instead of stepping with it; the percentage label beside it
+/// stays exact, so a stall is still visible immediately.
+pub(crate) const PROGRESS_SMOOTHING: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// The fraction the bar paints for one job: the reported fraction, eased.
+/// The id is keyed per job so concurrent transfers each chase their own value,
+/// and the text beside the bar keeps printing the reported one.
+pub(crate) fn painted_progress(
+    job_id: TransferId,
+    reported: f32,
+    window: &mut Window,
+    cx: &mut gpui_kit::App,
+) -> f32 {
+    transition(
+        ElementId::from(("transfer-progress", job_id.0)),
+        reported,
+        Transition::new(PROGRESS_SMOOTHING),
+        window,
+        cx,
+    )
+}
 
 pub(crate) fn visible_transfer_jobs(store: &TransferStore) -> Vec<&TransferJob> {
     let mut hidden_job_ids = HashSet::new();
@@ -66,18 +91,21 @@ fn can_retry_transfer(job: &TransferJob) -> bool {
 }
 
 impl crate::workspace::Workspace {
+    /// `animated_height` is the open/close spring sampled by `Render::render`.
+    /// Content decisions still read the stored height, so nothing changes
+    /// while the drawer is in flight.
     pub(crate) fn render_transfer_drawer(
         &mut self,
+        animated_height: Pixels,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         use crate::workspace::drawer_height::{
-            MIN_DRAWER_HEIGHT, RESIZE_HANDLE_HEIGHT, ResizeDragGhost, TransferDrawerResize,
+            RESIZE_HANDLE_HEIGHT, ResizeDragGhost, TransferDrawerResize,
         };
 
         // Reclamp after window shrink so stored height never exceeds max.
         self.reclamp_drawer_height(window.viewport_size().height);
-        let height = self.transfer_drawer.height;
 
         let theme = cx.theme().clone();
         let workspace_entity = cx.entity();
@@ -152,13 +180,16 @@ impl crate::workspace::Workspace {
             s
         };
 
+        // The stored height is clamped to the minimum at every write, so the
+        // container carries no min of its own: it must be free to reach zero,
+        // or a closing drawer would unmount from 40px with a visible jump.
         let mut drawer = div()
             .id("transfer-drawer")
+            .debug_selector(|| "transfer-drawer".into())
             .flex()
             .flex_col()
             .flex_none()
-            .h(height)
-            .min_h(MIN_DRAWER_HEIGHT)
+            .h(animated_height)
             .bg(theme.colors.surface)
             .border_t_1()
             .border_color(theme.colors.border);
@@ -320,7 +351,7 @@ impl crate::workspace::Workspace {
                     .children(
                         section_jobs
                             .into_iter()
-                            .map(|job| self.render_transfer_job(job, cx)),
+                            .map(|job| self.render_transfer_job(job, window, cx)),
                     );
             }
         }
@@ -379,7 +410,7 @@ impl crate::workspace::Workspace {
                 content = content.children(
                     section_jobs
                         .into_iter()
-                        .map(|job| self.render_transfer_job(job, cx)),
+                        .map(|job| self.render_transfer_job(job, window, cx)),
                 );
             }
         }
@@ -397,6 +428,7 @@ impl crate::workspace::Workspace {
     pub(crate) fn render_transfer_job(
         &self,
         job: &TransferJob,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> macsftp_ui::TransferRow {
         let theme = cx.theme().clone();
@@ -492,7 +524,8 @@ impl crate::workspace::Workspace {
                     .filter(|total| *total > 0)
                     .map(|total| *bytes_done as f32 / total as f32)
                     .unwrap_or(0.0);
-                row.progress(fraction, theme.colors.accent)
+                let shown = painted_progress(job_id, fraction, window, cx);
+                row.progress(shown, theme.colors.accent)
             }
             TransferState::Completed => row.progress(1.0, theme.colors.success),
             _ => row,

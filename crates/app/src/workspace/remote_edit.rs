@@ -1,4 +1,6 @@
-use gpui_kit::{Context, FontWeight, IntoElement, ParentElement, Styled, div, prelude::*, px};
+use gpui_kit::{
+    Context, FontWeight, IntoElement, ParentElement, Styled, Window, div, prelude::*, px,
+};
 use macsftp_core::{
     AppCommand, CheckRemoteEditSnapshotCommand, ConflictPolicy, ConnectionKey, EditPhase,
     EditSession, EditSessionId, EntryPath, LocalPath, MetadataPolicy, ProfileId, RemotePath,
@@ -11,6 +13,7 @@ use crate::event_coordinator::{open_edit_temp, workspace_windows};
 use crate::resources::ActiveResources;
 use crate::workspace::Workspace;
 use crate::workspace::helpers::connected_edit_session;
+use crate::workspace::overlay::OverlayFade;
 
 pub(crate) const EDIT_SIZE_WARN_THRESHOLD: u64 = 100 * 1024 * 1024;
 
@@ -413,8 +416,11 @@ impl Workspace {
 
     pub(crate) fn render_large_edit_modal(
         &self,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
+        let open = self.modal_inputs.large_edit_confirm.is_some();
+        let fade = OverlayFade::sample("large-edit", open, window, cx);
         let size = self.modal_inputs.large_edit_confirm.as_ref()?.size;
         let theme = cx.theme().clone();
         let body = match size {
@@ -481,6 +487,7 @@ impl Workspace {
                 .items_center()
                 .justify_center()
                 .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
+                .opacity(fade.opacity())
                 .child(card)
                 .into_any_element(),
         )
@@ -488,15 +495,20 @@ impl Workspace {
 
     pub(crate) fn render_edit_conflict_modal(
         &self,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
-        let active_tab_id = self.active_tab()?.id;
-        let id = cx
-            .resources()
-            .edit_sessions
-            .conflict_sessions()
-            .find(|s| s.tab_id == active_tab_id)
-            .map(|s| s.id)?;
+        // One lookup feeds both the fade and the body, so the two can never
+        // disagree about whether a conflict is up.
+        let conflict = self.active_tab().and_then(|tab| {
+            cx.resources()
+                .edit_sessions
+                .conflict_sessions()
+                .find(|session| session.tab_id == tab.id)
+                .map(|session| session.id)
+        });
+        let fade = OverlayFade::sample("edit-conflict", conflict.is_some(), window, cx);
+        let id = conflict?;
         let theme = cx.theme().clone();
 
         let card = div()
@@ -568,6 +580,7 @@ impl Workspace {
                 .items_center()
                 .justify_center()
                 .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
+                .opacity(fade.opacity())
                 .child(card)
                 .into_any_element(),
         )

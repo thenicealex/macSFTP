@@ -3,6 +3,7 @@ use std::path::Path;
 use gpui_kit::{
     App, ClipboardItem, Context, FocusHandle, Focusable, IntoElement, ParentElement, Pixels,
     Render, SharedString, Styled, Subscription, UniformListScrollHandle, Window, div, prelude::*,
+    px,
 };
 use macsftp_core::{
     AppCommand, AppState, CommandDispatchError, ConnectCommand, ConnectionKey,
@@ -962,6 +963,23 @@ impl Render for Workspace {
         let theme = cx.theme().clone();
         let has_tabs = !self.state.tabs.tabs.is_empty();
 
+        // Open and close settle instead of jumping, and a resize drag suspends
+        // travel so the height stays glued to the pointer. The drawer stays in
+        // the tree while it springs shut and leaves once the height is exactly
+        // zero, which is the value a settled spring resolves to.
+        let drawer_height = gpui_kit::base::motion::spring(
+            ("transfer-drawer", "height"),
+            if self.transfer_drawer.open {
+                self.transfer_drawer.height
+            } else {
+                px(0.0)
+            },
+            drawer_height::DRAWER_SPRING.with_travel(self.transfer_drawer.resize.is_none()),
+            window,
+            cx,
+        );
+        let drawer_mounted = self.transfer_drawer.open || drawer_height > px(0.0);
+
         let main_area: gpui_kit::AnyElement = if has_tabs {
             div()
                 .flex()
@@ -999,8 +1017,8 @@ impl Render for Workspace {
                 .min_h_0()
                 .child(self.render_tab_bar(cx))
                 .child(main_area)
-                .when(self.transfer_drawer.open, |workspace_root| {
-                    workspace_root.child(self.render_transfer_drawer(window, cx))
+                .when(drawer_mounted, |workspace_root| {
+                    workspace_root.child(self.render_transfer_drawer(drawer_height, window, cx))
                 })
                 .child(self.render_status_bar(cx))
                 .into_any_element()
@@ -1216,15 +1234,15 @@ impl Render for Workspace {
             .font_family(theme.fonts.ui_family.clone())
             .child(workspace_content)
             .children(self.render_connect_form_modal(window, cx))
-            .children(self.render_keyboard_interactive_modal(cx))
-            .children(self.render_host_key_modal(cx))
-            .children(self.render_transfer_conflict_modal(cx))
-            .children(self.render_delete_confirm_modal(cx))
-            .children(self.render_profile_delete_confirm_modal(cx))
-            .children(self.render_large_edit_modal(cx))
-            .children(self.render_edit_conflict_modal(cx))
-            .children(self.render_go_to_path_modal(cx))
-            .children(self.render_about(cx))
+            .children(self.render_keyboard_interactive_modal(window, cx))
+            .children(self.render_host_key_modal(window, cx))
+            .children(self.render_transfer_conflict_modal(window, cx))
+            .children(self.render_delete_confirm_modal(window, cx))
+            .children(self.render_profile_delete_confirm_modal(window, cx))
+            .children(self.render_large_edit_modal(window, cx))
+            .children(self.render_edit_conflict_modal(window, cx))
+            .children(self.render_go_to_path_modal(window, cx))
+            .children(self.render_about(window, cx))
             .children(self.render_tab_switcher(window, cx))
             .children(self.render_command_palette(window, cx))
     }
@@ -1239,6 +1257,7 @@ mod file_ops;
 mod helpers;
 mod modals;
 mod nav;
+mod overlay;
 mod panes;
 mod profiles;
 mod remote_edit;

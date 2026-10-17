@@ -1,9 +1,11 @@
 use gpui_kit::{
     AnyView, App, ClickEvent, Context, ElementId, Hsla, IntoElement, ParentElement, Render,
-    RenderOnce, SharedString, Styled, Window, div, prelude::*, px, relative,
+    RenderOnce, SharedString, Styled, Transformation, Window, div, prelude::*, px, radians,
+    relative,
 };
 
 use gpui_kit::base::Button;
+use gpui_kit::base::motion::{IterationCount, Keyframe, Keyframes, Timing, animate_keyframes};
 
 use crate::icon::{IconName, icon_with_size};
 use crate::theme::ActiveTheme;
@@ -13,6 +15,11 @@ type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 const ICON_BUTTON_ICON_SIZE: gpui_kit::Pixels = px(16.0);
 const ICON_BUTTON_OPACITY: f32 = 0.65;
 const ICON_BUTTON_DISABLED_OPACITY: f32 = 0.25;
+/// One turn of the busy glyph; macOS activity indicators turn about once a
+/// second, slow enough to read as "working" rather than "flickering".
+const LOADING_SPIN_PERIOD: std::time::Duration = std::time::Duration::from_millis(900);
+/// Slightly larger than an inline icon so the turn stays legible.
+const LOADING_GLYPH_SIZE: gpui_kit::Pixels = px(16.0);
 
 /// Minimal text tooltip view used by icon-only buttons, which must all
 /// carry a label per the accessibility rules.
@@ -310,9 +317,15 @@ pub fn empty_state(
         })
 }
 
-/// First-load / busy placeholder: static activity glyph + short message.
-/// Centered like [`empty_state`]; no animation dependency required.
-pub fn loading_state(message: impl Into<SharedString>, cx: &App) -> impl IntoElement {
+/// First-load / busy placeholder: spinning activity glyph + short message.
+/// Centered like [`empty_state`]. The spin follows the system reduce-motion
+/// switch — no configuration of its own — and under reduce motion the glyph
+/// simply holds its start angle.
+pub fn loading_state(
+    message: impl Into<SharedString>,
+    window: &mut Window,
+    cx: &mut App,
+) -> impl IntoElement {
     let theme = cx.theme();
     div()
         .flex()
@@ -325,12 +338,33 @@ pub fn loading_state(message: impl Into<SharedString>, cx: &App) -> impl IntoEle
         .text_color(theme.colors.text_muted)
         .font_family(theme.fonts.ui_family.clone())
         .child(
-            div()
-                .text_size(px(18.0))
-                .text_color(theme.colors.accent)
-                .child("↻"),
+            icon_with_size(IconName::Refresh, theme.colors.accent, LOADING_GLYPH_SIZE)
+                .with_transformation(Transformation::rotate(radians(spin_angle(window, cx)))),
         )
         .child(message.into())
+}
+
+/// The busy glyph's angle for this frame. The two-frame track is rebuilt per
+/// frame because `Keyframes` holds an `Rc` easing and so cannot live in a
+/// static; two keyframes are negligible next to the text layout in the same
+/// frame, and the loading placeholder is shown in place of the file list.
+fn spin_angle(window: &mut Window, cx: &mut App) -> f32 {
+    let Ok(track) = Keyframes::try_new([
+        Keyframe::new(0.0, 0.0_f32),
+        Keyframe::new(1.0, std::f32::consts::TAU),
+    ]) else {
+        // Two literal frames cannot fail validation; hold the glyph still
+        // rather than take a render down if one ever does.
+        return 0.0;
+    };
+    animate_keyframes(
+        "loading-state-spin",
+        &track,
+        Timing::new(LOADING_SPIN_PERIOD).iterations(IterationCount::Infinite),
+        window,
+        cx,
+    )
+    .value
 }
 
 #[cfg(test)]

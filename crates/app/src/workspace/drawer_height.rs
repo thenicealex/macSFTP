@@ -1,4 +1,7 @@
 use gpui_kit::{Context, IntoElement, Pixels, Render, Styled, Window, div, px};
+use std::time::Duration;
+
+use gpui_kit::base::motion::Spring;
 
 /// Keep the queue visible without taking half of a short window.
 pub(crate) const DEFAULT_DRAWER_HEIGHT: Pixels = px(160.0);
@@ -10,6 +13,13 @@ pub(crate) const MAX_DRAWER_HEIGHT_ABS: Pixels = px(480.0);
 pub(crate) const MAX_DRAWER_HEIGHT_RATIO: f32 = 0.5;
 /// Hit target for the resize grip.
 pub(crate) const RESIZE_HANDLE_HEIGHT: Pixels = px(5.0);
+
+/// Open/close motion for the drawer: critically damped (the height must never
+/// overshoot past the window edge) with a pixel-sized settling tolerance,
+/// because the target is in pixels rather than normalized. A resize drag
+/// suspends travel instead of a shorter response, so the height keeps following
+/// the pointer 1:1 and settles from wherever the drag released it.
+pub(crate) const DRAWER_SPRING: Spring = Spring::new(Duration::from_millis(300)).with_epsilon(0.5);
 
 /// Approximate chrome outside the content area when measuring max height.
 /// tab_bar (~36) + status_bar (theme ~22–28) — keep conservative so max is not too tall.

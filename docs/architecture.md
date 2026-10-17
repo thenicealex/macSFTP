@@ -291,6 +291,14 @@ remote pane 必须覆盖：`Disconnected`（提供连接或重新连接）、`Co
 - 目录滚动、tab 切换、pane focus、drawer 展开不得有明显卡顿；hover、selection、focus 不触发昂贵 layout。
 - transfer progress 的更新频率不得超过 UI 可感知范围，不得由每个 chunk 触发重绘。
 - 性能烟测的最低场景：10k local entries、10k remote entries、4 active transfers、3 connected tabs。
+- 允许的动效只有下面这些；全部经 `gpui_kit::base::motion` 驱动，不手写弹簧或时间线，hover / press / selection / focus 保持即时。
+  - transfer drawer 展开与折叠：`spring(("transfer-drawer", "height"))`，response 300ms、临界阻尼、收敛容差 0.5px。拖动调整高度期间 `with_travel(false)` 把目标钉住，高度 1:1 跟随指针，松手后恢复弹簧。收敛时弹簧精确等于目标，所以 `open == false && height == 0` 才是卸载条件（动画期间必须继续挂载）。给容器 `.h()` 的是动画值，容器自身不能带最小高度，否则关闭时会在最小高度处跳一下；最小高度由存储值上的 clamp 保证。内容判断（例如空态提示是否显示）读存储高度，不读动画值。
+  - 浮层（command palette、tab switcher、About、Go to Path 和状态型对话框）：进入用 150ms 透明度淡入（`workspace::overlay::OverlayFade`，内部为 `Presence`）；关闭瞬时，不做镜像退出。关闭时浮层内容已被清空（palette 查询、go-to-path 输入、确认请求模型），淡出一个已经没有内容的表面只会出现“卡片已消失只剩余晖”，而保留已取消的请求模型会让陈旧操作仍可生效（§6）；macOS 的 alert 同样是立即消失。
+  - 该 GPUI 快照没有任何元素级 transform（只有 `Svg` 带 `Transformation`），浮层只能用透明度表达；计划中的 0.96→1.0 scale 无法实现，也没有用位移或裁剪替代。
+  - transfer 进度条：`transition(("transfer-progress", job_id), 200ms)` 让绘制值平滑逼近真实 fraction；文本百分比仍显示真实值，卡顿立刻可见。
+  - loading 占位：`icons/refresh.svg` 经 `animate_keyframes` + 无限 `Timing` 旋转（900ms/圈）替代静态 “↻”。
+- 动效状态在 render 期间采样，且每帧都要采样：浮层即使这一帧不渲染也必须调用一次采样，否则时间线错过关闭事件，下次打开不会重新从透明淡入。
+- reduced motion：上述动效全部来自 gpui-base motion，自动跟随系统开关并直接返回目标值或静止帧，不需要额外设置项；新增动效不得绕过它。
 
 ### 12.14 GPUI Base 组件约束
 

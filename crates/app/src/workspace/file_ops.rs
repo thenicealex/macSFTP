@@ -15,6 +15,7 @@ use macsftp_ui::{ActiveTheme, IconName, InputState, icon, text_button};
 use tracing::warn;
 
 use crate::resources::ActiveResources;
+use crate::workspace::overlay::OverlayFade;
 use crate::workspace::*;
 
 const DELETE_NAME_PREVIEW_LIMIT: usize = 8;
@@ -424,8 +425,11 @@ impl crate::workspace::Workspace {
 
     pub(crate) fn render_delete_confirm_modal(
         &self,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
+        let open = self.modal_inputs.delete_confirm.is_some();
+        let fade = OverlayFade::sample("delete-confirm", open, window, cx);
         let state = self.modal_inputs.delete_confirm.as_ref()?;
         let theme = cx.theme().clone();
         let presentation = delete_confirm_presentation(&state.entries);
@@ -619,6 +623,7 @@ impl crate::workspace::Workspace {
                 .justify_center()
                 .p_4()
                 .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
+                .opacity(fade.opacity())
                 .child(card)
                 .into_any_element(),
         )

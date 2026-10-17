@@ -19,6 +19,7 @@ use macsftp_ui::{
 use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::connect_form::*;
 use crate::workspace::helpers::*;
+use crate::workspace::overlay::OverlayFade;
 use crate::workspace::profiles::{SettingsSection, profile_list_label};
 use crate::workspace::view_state::KeyboardInteractiveUi;
 use crate::workspace::*;
@@ -478,8 +479,10 @@ impl crate::workspace::Workspace {
 
     pub(crate) fn render_go_to_path_modal(
         &self,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
+        let fade = OverlayFade::sample("go-to-path", self.go_to_path.open, window, cx);
         if !self.go_to_path.open {
             return None;
         }
@@ -499,6 +502,7 @@ impl crate::workspace::Workspace {
                 .items_center()
                 .justify_center()
                 .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
+                .opacity(fade.opacity())
                 .child(
                     div()
                         .key_context("GoToPath")
@@ -562,6 +566,12 @@ impl crate::workspace::Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
+        let fade = OverlayFade::sample(
+            "connect-form",
+            self.connect_form_ui.form.is_some(),
+            window,
+            cx,
+        );
         let form = self.connect_form_ui.form.as_ref()?;
         let theme = cx.theme().clone();
 
@@ -1010,6 +1020,7 @@ impl crate::workspace::Workspace {
                 .items_center()
                 .justify_center()
                 .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
+                .opacity(fade.opacity())
                 .child(card)
                 .into_any_element(),
         )
@@ -1058,8 +1069,11 @@ impl crate::workspace::Workspace {
 
     pub(crate) fn render_keyboard_interactive_modal(
         &self,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
+        let open = self.active_keyboard_interactive_prompt().is_some();
+        let fade = OverlayFade::sample("keyboard-interactive", open, window, cx);
         let prompt = self.active_keyboard_interactive_prompt()?.clone();
         let inputs = self
             .modal_inputs
@@ -1162,6 +1176,7 @@ impl crate::workspace::Workspace {
         Some(
             div()
                 .id("keyboard-interactive-scrim")
+                .debug_selector(|| "keyboard-interactive-scrim".into())
                 .absolute()
                 .inset_0()
                 .occlude()
@@ -1170,6 +1185,7 @@ impl crate::workspace::Workspace {
                 .justify_center()
                 .p_4()
                 .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
+                .opacity(fade.opacity())
                 .child(card)
                 .into_any_element(),
         )
@@ -1177,8 +1193,11 @@ impl crate::workspace::Workspace {
 
     pub(crate) fn render_host_key_modal(
         &self,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
+        let open = self.active_host_key_prompt().is_some();
+        let fade = OverlayFade::sample("host-key", open, window, cx);
         let prompt = self.active_host_key_prompt()?.clone();
         let theme = cx.theme().clone();
         let request_id = prompt.request_id;
@@ -1219,6 +1238,7 @@ impl crate::workspace::Workspace {
                 .items_center()
                 .justify_center()
                 .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
+                .opacity(fade.opacity())
                 .child(
                     div()
                         .key_context("HostKeyModal")
@@ -1291,8 +1311,11 @@ impl crate::workspace::Workspace {
     }
     pub(crate) fn render_transfer_conflict_modal(
         &self,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
+        let open = self.active_transfer_conflict_prompt().is_some();
+        let fade = OverlayFade::sample("transfer-conflict", open, window, cx);
         let prompt = self.active_transfer_conflict_prompt()?.clone();
         let theme = cx.theme().clone();
         let source = match &prompt.source {
@@ -1348,6 +1371,7 @@ impl crate::workspace::Workspace {
                 .items_center()
                 .justify_center()
                 .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
+                .opacity(fade.opacity())
                 .child(
                     div()
                         .key_context("TransferConflictModal")
@@ -1494,8 +1518,11 @@ impl crate::workspace::Workspace {
     /// Confirm deleting a saved connection profile (Settings or Connect form).
     pub(crate) fn render_profile_delete_confirm_modal(
         &self,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
+        let open = self.settings.profile_delete_confirm.is_some();
+        let fade = OverlayFade::sample("profile-delete-confirm", open, window, cx);
         let profile_id = self.settings.profile_delete_confirm?;
         let body = {
             let profile = cx.resources().profiles.find_profile(profile_id)?;
@@ -1573,6 +1600,7 @@ impl crate::workspace::Workspace {
                 .items_center()
                 .justify_center()
                 .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
+                .opacity(fade.opacity())
                 .child(card)
                 .into_any_element(),
         )
