@@ -745,6 +745,148 @@ fn compact_workspace_centers_empty_content(cx: &mut TestAppContext) {
     }
 }
 
+/// The path bar's three rules must keep the clusters apart: navigation, the
+/// breadcrumb trail, file actions, and transfer actions. Each pane is about
+/// 360 points wide in this window, so the trail also has to survive the narrow
+/// case with every segment still laid out inside its own cluster.
+#[gpui_kit::test]
+fn path_bar_rules_keep_the_clusters_apart(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.set_local_path(LocalPath::new("/tmp/test"), window, cx);
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    cx.run_until_parked();
+
+    let navigation_rule = cx
+        .debug_bounds("path-bar-separator-local-navigation-breadcrumb")
+        .expect("rule after the navigation cluster");
+    let first_segment = cx
+        .debug_bounds("breadcrumb-segment-local-0")
+        .expect("first breadcrumb segment");
+    let last_segment = cx
+        .debug_bounds("breadcrumb-segment-local-2")
+        .expect("last breadcrumb segment");
+    let actions_rule = cx
+        .debug_bounds("path-bar-separator-local-breadcrumb-file-actions")
+        .expect("rule after the breadcrumb");
+    let transfer_rule = cx
+        .debug_bounds("path-bar-separator-local-file-actions-transfer")
+        .expect("rule before the transfer cluster");
+
+    // The rules are hairlines, not filler: one pixel wide and shorter than the
+    // bar, so they read as grouping rather than as a border.
+    for rule in [navigation_rule, actions_rule, transfer_rule] {
+        assert_eq!(rule.size.width, px(1.0), "the rule is a hairline: {rule:?}");
+        assert!(
+            rule.size.height <= px(16.0),
+            "the rule must stay shorter than the bar: {rule:?}"
+        );
+    }
+    assert!(
+        navigation_rule.left() < actions_rule.left() && actions_rule.left() < transfer_rule.left(),
+        "the rules run navigation, breadcrumb, actions, transfer: \
+         {navigation_rule:?} {actions_rule:?} {transfer_rule:?}"
+    );
+    assert!(
+        navigation_rule.right() <= first_segment.left(),
+        "the breadcrumb starts after the navigation rule: \
+         {navigation_rule:?} {first_segment:?}"
+    );
+    let trail = cx
+        .debug_bounds("path-breadcrumb-local")
+        .expect("the breadcrumb trail is laid out");
+    assert!(
+        trail.left() >= navigation_rule.right() && trail.right() <= actions_rule.left(),
+        "the trail is its own cluster between the rules: {trail:?}"
+    );
+    // Segment geometry is font dependent, so the guard stays structural: the
+    // trail keeps its segments ordered, and the last one is never dropped.
+    assert!(
+        first_segment.left() < last_segment.left(),
+        "the trail keeps its order: {first_segment:?} {last_segment:?}"
+    );
+    let viewport = cx
+        .debug_bounds("local-list-container-viewport")
+        .expect("local pane viewport");
+    assert!(
+        first_segment.left() >= viewport.left() && first_segment.right() <= viewport.right(),
+        "the breadcrumb starts inside the pane: {first_segment:?} in {viewport:?}"
+    );
+
+    // A trail longer than its slot must not push the rules around: the trail is
+    // the flexible element, the clusters and their rules keep their places.
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.set_local_path(
+            LocalPath::new("/tmp/macsftp-path-bar-test-is-longer-than-its-slot"),
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    for (selector, before) in [
+        (
+            "path-bar-separator-local-navigation-breadcrumb",
+            navigation_rule.left(),
+        ),
+        (
+            "path-bar-separator-local-file-actions-transfer",
+            transfer_rule.left(),
+        ),
+    ] {
+        let after = cx
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} must stay laid out"))
+            .left();
+        assert_eq!(
+            after, before,
+            "a long path must not move {selector}: {after:?} was {before:?}"
+        );
+    }
+    assert!(
+        cx.debug_bounds("breadcrumb-segment-local-2").is_some(),
+        "the last path component stays in the trail, however long the path is"
+    );
+}
+
+/// A classified error leads with its title and keeps the message on a second,
+/// quieter line instead of splicing both into one line with a dash.
+#[gpui_kit::test]
+fn error_state_splits_title_and_message_onto_two_lines(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    workspace.update(&mut cx, |workspace, cx| {
+        let tab = workspace
+            .active_tab_mut()
+            .expect("fixture has an active tab");
+        tab.connection = ConnectionState::Failed {
+            error: macsftp_core::UserFacingError::new(
+                macsftp_core::ErrorCode::PermissionDenied,
+                "Can’t open this folder",
+                "You don’t have permission to view it.",
+            ),
+        };
+        cx.notify();
+    });
+    cx.simulate_resize(size(px(720.0), px(480.0)));
+    cx.run_until_parked();
+
+    let title = cx.debug_bounds("empty-state-message").expect("error title");
+    let detail = cx
+        .debug_bounds("empty-state-detail")
+        .expect("error message");
+    assert!(
+        title.bottom() <= detail.top(),
+        "the message sits under the title: {title:?} {detail:?}"
+    );
+    let viewport = cx
+        .debug_bounds("remote-list-container-viewport")
+        .expect("remote pane viewport");
+    assert!(
+        title.left() >= viewport.left() && detail.right() <= viewport.right(),
+        "both lines stay inside the pane: {title:?} {detail:?} in {viewport:?}"
+    );
+}
+
 #[gpui_kit::test]
 fn compact_workspace_scrolls_recent_connections(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
@@ -7378,6 +7520,9 @@ fn regenerate_workspace_ux_evidence() {
         gpui_kit::platform::current_headless_renderer,
     );
     cx.update(|cx| {
+        // The evidence shows settled surfaces. Motion is sampled per frame, so
+        // a headless capture would otherwise catch a fade part way through.
+        cx.set_reduce_motion(true);
         Theme::one_light().install(cx);
         app_actions::init(cx);
         cx.set_global(crate::resources::AppResources::load_for_test(
@@ -7528,6 +7673,62 @@ fn regenerate_workspace_ux_evidence() {
     .expect("window update must succeed");
     cx.run_until_parked();
     capture(&mut cx, "light-recents-scroll-720x480.png");
+
+    // Capture 4 (light): a classified connection failure. The remote pane leads
+    // with the error title and keeps its message on a second line, next to the
+    // single-line empty state in the local pane.
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, _window, cx| {
+                let tab = workspace
+                    .active_tab_mut()
+                    .expect("the capture window has a tab");
+                tab.connection = ConnectionState::Failed {
+                    error: macsftp_core::UserFacingError::new(
+                        macsftp_core::ErrorCode::NetworkTimeout,
+                        "The server stopped responding",
+                        "No answer for 30 seconds while listing /var/www. \
+                         The network may have dropped.",
+                    ),
+                };
+                cx.notify();
+            })
+            .expect("workspace must be live");
+    });
+    cx.run_until_parked();
+    capture(&mut cx, "light-failed-connection-720x480.png");
+
+    // Capture 5 (light): the command palette over the ordinary workspace — the
+    // scrim token and the popover step of the elevation scale.
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                let tab = workspace
+                    .active_tab_mut()
+                    .expect("the capture window has a tab");
+                tab.connection = ConnectionState::Empty;
+                workspace.open_command_palette(window, cx);
+            })
+            .expect("workspace must be live");
+    });
+    cx.run_until_parked();
+    capture(&mut cx, "light-palette-720x480.png");
+
+    // Capture 6 (light): two tabs. The inactive tab keeps its close button
+    // hidden until the pointer reaches it, while the active tab shows it.
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                workspace.cancel_active_modal(window, cx);
+                workspace.open_new_tab(window, cx);
+            })
+            .expect("workspace must be live");
+    });
+    cx.run_until_parked();
+    capture(&mut cx, "light-two-tabs-720x480.png");
 }
 
 /// Local pane with a real, sorted fixture listing; returns the fixture dir so

@@ -501,7 +501,7 @@ impl crate::workspace::Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
+                .bg(theme.scrim())
                 .opacity(fade.opacity())
                 .child(
                     div()
@@ -517,6 +517,7 @@ impl crate::workspace::Workspace {
                         .border_1()
                         .border_color(theme.colors.border)
                         .rounded_md()
+                        .shadow(theme.shadow_modal())
                         .font_family(theme.fonts.ui_family.clone())
                         .child(
                             div()
@@ -667,6 +668,7 @@ impl crate::workspace::Workspace {
             .border_1()
             .border_color(theme.colors.border)
             .rounded_md()
+            .shadow(theme.shadow_modal())
             .font_family(theme.fonts.ui_family.clone())
             .child(
                 div()
@@ -1019,7 +1021,7 @@ impl crate::workspace::Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
+                .bg(theme.scrim())
                 .opacity(fade.opacity())
                 .child(card)
                 .into_any_element(),
@@ -1092,11 +1094,11 @@ impl crate::workspace::Workspace {
             .w(px(520.0))
             .max_w_full()
             .p_5()
-            .rounded(px(8.0))
+            .rounded_md()
             .border_1()
             .border_color(theme.colors.border)
-            .bg(theme.colors.surface)
-            .shadow_lg()
+            .bg(theme.colors.elevated_surface)
+            .shadow(theme.shadow_modal())
             .child(
                 div()
                     .text_size(px(16.0))
@@ -1184,7 +1186,7 @@ impl crate::workspace::Workspace {
                 .items_center()
                 .justify_center()
                 .p_4()
-                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
+                .bg(theme.scrim())
                 .opacity(fade.opacity())
                 .child(card)
                 .into_any_element(),
@@ -1237,7 +1239,7 @@ impl crate::workspace::Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
+                .bg(theme.scrim())
                 .opacity(fade.opacity())
                 .child(
                     div()
@@ -1252,6 +1254,7 @@ impl crate::workspace::Workspace {
                         .border_1()
                         .border_color(theme.colors.border)
                         .rounded_md()
+                        .shadow(theme.shadow_modal())
                         .font_family(theme.fonts.ui_family.clone())
                         .child(
                             div()
@@ -1370,7 +1373,7 @@ impl crate::workspace::Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
+                .bg(theme.scrim())
                 .opacity(fade.opacity())
                 .child(
                     div()
@@ -1386,6 +1389,7 @@ impl crate::workspace::Workspace {
                         .border_1()
                         .border_color(theme.colors.border)
                         .rounded_md()
+                        .shadow(theme.shadow_modal())
                         .font_family(theme.fonts.ui_family.clone())
                         .child(
                             div()
@@ -1554,6 +1558,7 @@ impl crate::workspace::Workspace {
             .border_1()
             .border_color(theme.colors.border)
             .rounded_md()
+            .shadow(theme.shadow_modal())
             .font_family(theme.fonts.ui_family.clone())
             .child(
                 div()
@@ -1599,7 +1604,7 @@ impl crate::workspace::Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
+                .bg(theme.scrim())
                 .opacity(fade.opacity())
                 .child(card)
                 .into_any_element(),

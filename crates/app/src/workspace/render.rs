@@ -82,6 +82,18 @@ impl crate::workspace::Workspace {
                     })),
                 ),
             )
+            // The window's top edge catches the light (§12.5). The hairline
+            // paints over the first pixel row and is taken out of the flex
+            // flow, so the frozen tab and button heights keep their geometry.
+            .child(
+                div()
+                    .absolute()
+                    .top(px(0.0))
+                    .left(px(0.0))
+                    .w_full()
+                    .h(px(1.0))
+                    .bg(theme.chrome_highlight()),
+            )
     }
 
     /// Elevated MRU list for ctrl-tab. Confirm with Enter; Esc cancels (no key-up required).
@@ -168,7 +180,7 @@ impl crate::workspace::Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.35))
+                .bg(theme.scrim())
                 .opacity(fade.opacity())
                 .child(
                     div()
@@ -184,6 +196,7 @@ impl crate::workspace::Workspace {
                         .border_1()
                         .border_color(theme.colors.border)
                         .rounded_md()
+                        .shadow(theme.shadow_popover())
                         .font_family(theme.fonts.ui_family.clone())
                         .child(
                             div()
@@ -319,13 +332,19 @@ impl crate::workspace::Workspace {
         // Rule between the path bar's functional clusters. The icon buttons keep
         // their frozen 26x22 hit areas, so grouping is carried by the rule and
         // the existing spacing rather than by resizing anything. The rule takes
-        // one pixel plus one gap, so the breadcrumb keeps its width.
-        let bar_separator = || {
+        // one pixel plus one gap, so the breadcrumb keeps its width. Both panes
+        // build the same rules, so each selector names its side.
+        let pane_tag = match side {
+            PaneSide::Local => "local",
+            PaneSide::Remote => "remote",
+        };
+        let bar_separator = |boundary: &'static str| {
             div()
                 .flex_none()
                 .w(px(1.0))
                 .h(px(14.0))
                 .bg(theme.colors.border)
+                .debug_selector(move || format!("path-bar-separator-{pane_tag}-{boundary}"))
         };
 
         let path_bar = div()
@@ -388,7 +407,7 @@ impl crate::workspace::Workspace {
                     workspace.refresh_focused_pane(window, cx);
                 })),
             )
-            .child(bar_separator())
+            .child(bar_separator("navigation-breadcrumb"))
             .child({
                 let text_color = if pane_focused {
                     theme.colors.text
@@ -405,6 +424,7 @@ impl crate::workspace::Workspace {
 
                 let mut trail = div()
                     .id(("path-breadcrumb", side_tag as usize))
+                    .debug_selector(move || format!("path-breadcrumb-{pane_tag}"))
                     .flex()
                     .flex_1()
                     .min_w_0()
@@ -466,6 +486,11 @@ impl crate::workspace::Workspace {
                                     trail = trail.child(
                                         div()
                                             .id(element_id)
+                                            // Per-pane selector so a test can assert
+                                            // the trail stays inside a narrow pane.
+                                            .debug_selector(move || {
+                                                format!("breadcrumb-segment-{pane_tag}-{display_i}")
+                                            })
                                             .flex_none()
                                             .px(px(2.0))
                                             .rounded_sm()
@@ -515,7 +540,7 @@ impl crate::workspace::Workspace {
                         .child("Refreshing…"),
                 )
             })
-            .child(bar_separator())
+            .child(bar_separator("breadcrumb-file-actions"))
             .child(
                 icon_button(
                     copy_id,
@@ -581,7 +606,7 @@ impl crate::workspace::Workspace {
                     workspace.request_delete_selection(window, cx);
                 })),
             )
-            .child(bar_separator())
+            .child(bar_separator("file-actions-transfer"))
             .when(side == PaneSide::Local, |bar| {
                 bar.child(
                     icon_button(
@@ -858,7 +883,6 @@ impl crate::workspace::Workspace {
                                     },
                                 )),
                             ],
-                            cx,
                         )
                         .into_any_element(),
                     )
@@ -873,28 +897,33 @@ impl crate::workspace::Workspace {
                                 },
                             )),
                         ],
-                        cx,
                     )
                     .into_any_element(),
                 ),
                 Some(ConnectionState::Disconnected {
                     reason: macsftp_core::DisconnectReason::Error(error),
-                }) if error.code == macsftp_core::ErrorCode::LocalNetworkPermissionDenied => Some(
-                    empty_state(
-                        format!(
-                            "{} — {} {}",
-                            error.title,
-                            error.message,
-                            error.detail.as_deref().unwrap_or_default()
-                        ),
-                        vec![
-                            open_local_network_settings_button("open-local-network-settings"),
-                            connect_button("retry-connect-remote", "Try Again"),
-                        ],
-                        cx,
-                    )
-                    .into_any_element(),
-                ),
+                }) if error.code == macsftp_core::ErrorCode::LocalNetworkPermissionDenied => {
+                    Some({
+                        // The hint about System Settings is the point of this state,
+                        // so it joins the message on the detail line rather than
+                        // crowding the title with an em dash.
+                        let mut detail = error.message.clone();
+                        if let Some(hint) = error.detail.as_deref().filter(|hint| !hint.is_empty())
+                        {
+                            detail.push(' ');
+                            detail.push_str(hint);
+                        }
+                        empty_state(
+                            error.title.clone(),
+                            vec![
+                                open_local_network_settings_button("open-local-network-settings"),
+                                connect_button("retry-connect-remote", "Try Again"),
+                            ],
+                        )
+                        .detail(detail)
+                        .into_any_element()
+                    })
+                }
                 // Mid-session disconnects carry a classified cause (server
                 // hung up vs network went silent vs other transport error);
                 // show it so users know whether reconnecting is likely to
@@ -923,28 +952,29 @@ impl crate::workspace::Workspace {
                 )),
                 Some(ConnectionState::Failed { error }) => Some(
                     empty_state(
-                        format!("{} — {}", error.title, error.message),
+                        error.title.clone(),
                         vec![
                             connect_button("retry-connect-remote", "Try Again"),
                             edit_connection_button("edit-connection-failed"),
                         ],
-                        cx,
                     )
+                    .detail(error.message.clone())
                     .into_any_element(),
                 ),
                 Some(ConnectionState::Connected { .. }) => remote_error.as_ref().map(|error| {
                     empty_state(
-                        format!("{} — {}", error.title, error.message),
+                        error.title.clone(),
                         vec![retry_directory_button("retry-remote-directory")],
-                        cx,
                     )
+                    .detail(error.message.clone())
                     .into_any_element()
                 }),
                 None => None,
             }
         } else {
             local_error.as_ref().map(|error| {
-                empty_state(format!("{} — {}", error.title, error.message), vec![], cx)
+                empty_state(error.title.clone(), vec![])
+                    .detail(error.message.clone())
                     .into_any_element()
             })
         };
@@ -954,9 +984,9 @@ impl crate::workspace::Workspace {
         } else if entry_count == 0 && is_remote_refreshing {
             loading_state("Loading files…", window, cx).into_any_element()
         } else if entry_count == 0 && !self.filter_query(side).is_empty() {
-            empty_state("No matching items", vec![], cx).into_any_element()
+            empty_state("No matching items", vec![]).into_any_element()
         } else if entry_count == 0 {
-            empty_state("This folder is empty", vec![], cx).into_any_element()
+            empty_state("This folder is empty", vec![]).into_any_element()
         } else {
             let workspace = cx.entity();
             let mut list = uniform_list(
@@ -1348,7 +1378,7 @@ impl crate::workspace::Workspace {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
+                .bg(theme.scrim())
                 .opacity(fade.opacity())
                 .child(
                     div()
@@ -1362,6 +1392,7 @@ impl crate::workspace::Workspace {
                         .bg(theme.colors.elevated_surface)
                         .border_1()
                         .border_color(theme.colors.border)
+                        .shadow(theme.shadow_modal())
                         .child(mark)
                         .child(
                             div()

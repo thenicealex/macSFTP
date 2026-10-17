@@ -105,12 +105,27 @@ impl Theme {
         background
     }
 
-    /// Shadow for floating overlays: drag previews, the command palette,
-    /// tooltips and popovers.
+    /// Elevation scale for floating surfaces. Every overlay takes one of the
+    /// three steps instead of assembling its own shadow.
     ///
-    /// Elevation reads through the border first; the shadow only softens the
-    /// edge. §12.15 forbids heavy shadows, so the levels stay inside this
-    /// range and call sites take a token instead of assembling their own.
+    /// Elevation reads through the border and the scrim first; the shadow only
+    /// softens the edge. §12.15 forbids heavy shadows, so all three steps stay
+    /// light, and the scale is kept ordered so a lower surface can never look
+    /// further from the page than a higher one.
+    ///
+    /// - [`Theme::shadow_chip`]: tooltips and other one-line affordances.
+    /// - [`Theme::shadow_popover`]: palettes, the tab switcher, drag previews.
+    /// - [`Theme::shadow_modal`]: modal and sheet cards.
+    pub fn shadow_chip(&self) -> Vec<BoxShadow> {
+        let color = hsla(0.0, 0.0, 0.0, 0.08);
+        vec![
+            BoxShadow::new(px(0.), px(1.), color)
+                .blur_radius(px(3.))
+                .spread_radius(px(-1.)),
+        ]
+    }
+
+    /// See [`Theme::shadow_chip`] for the scale.
     pub fn shadow_popover(&self) -> Vec<BoxShadow> {
         let color = hsla(0.0, 0.0, 0.0, 0.10);
         vec![
@@ -121,6 +136,39 @@ impl Theme {
                 .blur_radius(px(4.))
                 .spread_radius(px(-2.)),
         ]
+    }
+
+    /// See [`Theme::shadow_chip`] for the scale.
+    pub fn shadow_modal(&self) -> Vec<BoxShadow> {
+        let color = hsla(0.0, 0.0, 0.0, 0.12);
+        vec![
+            BoxShadow::new(px(0.), px(8.), color)
+                .blur_radius(px(16.))
+                .spread_radius(px(-4.)),
+            BoxShadow::new(px(0.), px(2.), color)
+                .blur_radius(px(6.))
+                .spread_radius(px(-2.)),
+        ]
+    }
+
+    /// Dimming behind a modal overlay. One value for every scrim so the
+    /// backdrop reads the same wherever it appears; it comes from here rather
+    /// than from a literal at the call site.
+    pub fn scrim(&self) -> Hsla {
+        hsla(0.0, 0.0, 0.0, 0.45)
+    }
+
+    /// Hairline along the window's top edge, where chrome meets the frame.
+    ///
+    /// macOS windows catch the light along their top edge: a light line in
+    /// dark appearance, a barely darker one in light appearance. §12.15 rules
+    /// out translucent chrome, so this hairline is the only material cue the
+    /// chrome gets.
+    pub fn chrome_highlight(&self) -> Hsla {
+        match self.appearance {
+            Appearance::Dark => hsla(0.0, 0.0, 1.0, 0.08),
+            Appearance::Light => hsla(0.0, 0.0, 0.0, 0.06),
+        }
     }
 
     /// Project tokens are the single source for Base behavior and presentation.
@@ -393,26 +441,80 @@ mod tests {
 
     #[test]
     fn elevation_shadow_token_stays_light() {
-        // §12.15 forbids heavy shadows: the token may only soften an edge, in
+        // §12.15 forbids heavy shadows: every step may only soften an edge, in
         // both appearances, and every call site takes it from here.
         for theme in [Theme::one_dark(), Theme::one_light()] {
-            let shadows = theme.shadow_popover();
-            assert_eq!(shadows.len(), 2, "a soft edge plus a contact line");
-            for shadow in shadows {
+            let steps = [
+                ("chip", theme.shadow_chip()),
+                ("popover", theme.shadow_popover()),
+                ("modal", theme.shadow_modal()),
+            ];
+            let mut previous_reach = px(0.0);
+            for (name, shadows) in steps {
                 assert!(
-                    shadow.color.a <= 0.2,
-                    "shadow alpha {} is heavier than §12.15 allows",
-                    shadow.color.a
+                    !shadows.is_empty(),
+                    "{name} needs at least one soft edge to read as elevated"
                 );
+                for shadow in &shadows {
+                    assert!(
+                        shadow.color.a <= 0.15,
+                        "{name} shadow alpha {} is heavier than §12.15 allows",
+                        shadow.color.a
+                    );
+                    assert!(
+                        shadow.blur_radius <= px(16.0),
+                        "{name} shadow blur {} stops reading as an edge",
+                        shadow.blur_radius
+                    );
+                    assert!(shadow.offset.y >= px(0.0), "overlays cast shadows downward");
+                    assert!(!shadow.inset, "overlay shadows are never inset");
+                }
+                // The steps must stay ordered: a tooltip may never look further
+                // from the page than the modal that contains it.
+                let reach = shadows
+                    .iter()
+                    .map(|shadow| shadow.offset.y + shadow.blur_radius)
+                    .fold(px(0.0), |widest, next| widest.max(next));
                 assert!(
-                    shadow.blur_radius <= px(8.0),
-                    "shadow blur {} stops reading as an edge",
-                    shadow.blur_radius
+                    reach > previous_reach,
+                    "{name} must sit above the step below it"
                 );
-                assert!(shadow.offset.y >= px(0.0), "overlays cast shadows downward");
-                assert!(!shadow.inset, "overlay shadows are never inset");
+                previous_reach = reach;
             }
         }
+    }
+
+    #[test]
+    fn scrim_stays_a_dimming_layer() {
+        // One value for every backdrop: dark enough to separate the card from
+        // the page, light enough that the page stays readable behind it.
+        let scrim = Theme::one_dark().scrim();
+        assert_eq!(scrim, Theme::one_light().scrim());
+        assert!(
+            (0.3..=0.6).contains(&scrim.a),
+            "scrim alpha {} is not a dimming layer",
+            scrim.a
+        );
+    }
+
+    #[test]
+    fn chrome_highlight_is_a_hairline_in_both_appearances() {
+        // One hairline of alpha; anything stronger would read as a drawn border
+        // and §12.15's no-glass rule means the chrome has no other material cue.
+        for theme in [Theme::one_dark(), Theme::one_light()] {
+            let highlight = theme.chrome_highlight();
+            assert!(
+                highlight.a > 0.0 && highlight.a <= 0.1,
+                "chrome highlight alpha {} is not a hairline",
+                highlight.a
+            );
+        }
+        let dark = Theme::one_dark().chrome_highlight();
+        let light = Theme::one_light().chrome_highlight();
+        assert!(
+            dark.l > light.l,
+            "dark chrome catches a light line, light chrome a darker one"
+        );
     }
 
     use gpui_kit::{WindowAppearance, px, rgb};

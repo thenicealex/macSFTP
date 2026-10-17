@@ -278,7 +278,7 @@ impl Workspace {
                 .items_start()
                 .justify_center()
                 .pt(px(80.0))
-                .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.45))
+                .bg(theme.scrim())
                 .opacity(fade.opacity())
                 .child(
                     div()
@@ -307,6 +307,7 @@ impl Workspace {
                         .border_1()
                         .border_color(theme.colors.border)
                         .rounded_md()
+                        .shadow(theme.shadow_popover())
                         .font_family(theme.fonts.ui_family.clone())
                         .child(
                             div()
