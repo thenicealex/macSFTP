@@ -201,7 +201,7 @@ Profile 更新由 `ProfileStore` 协调：校验请求和 route → 写入或读
 ### 12.2 交互入口
 
 - 高频操作（新建/关闭/切换 tab、连接、刷新、返回上级、上传、下载、取消传输、重试传输、打开 transfer drawer）至少提供按钮、menu bar item、快捷键、command palette action 中的两种入口。
-- 作用于 tab / pane / 传输 / 设置的 app-level action 必须可被 command palette 搜索，action 名称使用稳定动词短语（如 `NewTab`、`RefreshPane`、`RetryTransfer`、`OpenSettings`），优先沿用本文中的名称；action id 不随 UI 文案变化。窗口与应用生命周期命令（New Window、Close Window、Minimize、Zoom、Bring All to Front、Hide/Quit）留在 macOS 标准菜单位置，不进入 palette。
+- 作用于 tab / pane / 传输 / 设置的 app-level action 必须可被 command palette 搜索，action 名称使用稳定动词短语（如 `NewTab`、`RefreshPane`、`NavigateBack`、`OpenSettings`），优先沿用本文中的名称；action id 不随 UI 文案变化。窗口与应用生命周期命令（New Window、Close Window、Minimize、Zoom、Bring All to Front、Hide/Quit）留在 macOS 标准菜单位置，不进入 palette。
 - 菜单栏由 `app_menus::menu_bar()` 单一定义，菜单项只能引用与快捷键、palette 相同的 action，禁止在菜单里另造一套；`app_menus` 的一致性测试把「菜单项 ↔ 快捷键绑定 ↔ palette id」三者钉在一起，改名或删除命令时三处必须同时更新。
 - 菜单文案遵循 HIG 省略号：会打开需要输入或确认的面板的命令带省略号（New Folder…、Rename…、Delete…、Go to Folder…），即时完成的命令不带。右键菜单与菜单栏对同一命令使用同一写法。
 - Edit 菜单使用 `MenuItem::os_action` 走 AppKit 标准 selector（`cut:`/`copy:`/`paste:`/`selectAll:`/`undo:`/`redo:`），dispatch 的仍是 `gpui-base` input action，不得自造文本编辑 action（§12.14）。

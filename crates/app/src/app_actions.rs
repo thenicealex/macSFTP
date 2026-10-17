@@ -16,7 +16,6 @@ actions!(
         FocusRemotePane,
         UploadSelection,
         DownloadSelection,
-        CancelSelectedTransfer,
         OpenCommandPalette,
         ShowTransferDrawer,
         ActivateNextTab,
