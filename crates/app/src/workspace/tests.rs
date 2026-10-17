@@ -1214,6 +1214,33 @@ fn an_overlay_fades_in_from_transparent_and_lands_opaque(cx: &mut TestAppContext
     );
 }
 
+#[gpui_kit::test]
+fn a_dismissed_overlay_settles_without_playing_an_exit(cx: &mut TestAppContext) {
+    let open = Rc::new(Cell::new(true));
+    let samples = Rc::new(RefCell::new(Vec::new()));
+    let window = cx.open_window(size(px(200.0), px(200.0)), {
+        let open = open.clone();
+        let samples = samples.clone();
+        move |_, _| OverlayFadeProbe { open, samples }
+    });
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    advance_frame(&mut cx, OVERLAY_FADE);
+    assert_eq!(
+        last_sample(&samples),
+        1.0,
+        "the surface has finished fading in"
+    );
+
+    samples.borrow_mut().clear();
+    open.set(false);
+    advance_frame(&mut cx, std::time::Duration::ZERO);
+    assert_eq!(
+        last_sample(&samples),
+        0.0,
+        "a dismissed surface is fully transparent on the frame it closes"
+    );
+}
+
 /// Reports the fraction `painted_progress` hands to the bar, driven by
 /// `reported`.
 struct ProgressProbe {

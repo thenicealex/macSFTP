@@ -8,7 +8,9 @@
 //!
 //! Sampling runs on every frame, including the frames where the surface is not
 //! drawn, so the timeline learns about each dismissal and the next open fades
-//! in from zero again.
+//! in from zero again. A closed surface samples a zero-duration transition: the
+//! sample that sees the dismissal settles to fully transparent right there,
+//! instead of asking for animation frames that nothing is drawn on.
 //!
 //! Dismissal stays instant. A mirrored fade-out would have to draw a surface
 //! that has already lost its content: the palette query and the go-to-path
@@ -33,8 +35,16 @@ impl OverlayFade {
     /// Sample the fade of the surface whose own state is `open`; pass the raw
     /// flag, not a content check.
     pub(crate) fn sample(id: &'static str, open: bool, window: &mut Window, cx: &mut App) -> Self {
+        // Open surfaces fade in over `OVERLAY_FADE`. A closed one settles at
+        // once, so the frames after a dismissal do not animate an exit that is
+        // never drawn.
+        let transition = if open {
+            Transition::new(OVERLAY_FADE)
+        } else {
+            Transition::new(Duration::ZERO)
+        };
         let sample = Presence::new(id, open)
-            .transition(Transition::new(OVERLAY_FADE))
+            .transition(transition)
             .sample(window, cx);
         Self {
             progress: sample.progress,
