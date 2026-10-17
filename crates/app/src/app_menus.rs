@@ -61,13 +61,16 @@ fn file_menu() -> Menu {
     Menu {
         disabled: false,
         name: "File".into(),
+        // Commands that open a panel asking for input or confirmation carry the
+        // HIG ellipsis — the same rule the pane context menu documents
+        // (workspace::context_menu).
         items: vec![
             MenuItem::action("New Window", NewWindow),
             MenuItem::action("New Connection", NewTab),
             MenuItem::separator(),
-            MenuItem::action("New Folder", NewFolder),
-            MenuItem::action("Rename", RenameEntry),
-            MenuItem::action("Delete", DeleteSelection),
+            MenuItem::action("New Folder…", NewFolder),
+            MenuItem::action("Rename…", RenameEntry),
+            MenuItem::action("Delete…", DeleteSelection),
             MenuItem::separator(),
             MenuItem::action("Upload", UploadSelection),
             MenuItem::action("Download", DownloadSelection),
@@ -121,7 +124,7 @@ fn view_menu() -> Menu {
             MenuItem::submenu(sort_by_submenu()),
             MenuItem::action("Filter Files", FilterPane),
             MenuItem::separator(),
-            MenuItem::action("Go to Folder", GoToPath),
+            MenuItem::action("Go to Folder…", GoToPath),
             MenuItem::separator(),
             MenuItem::action("Refresh", RefreshPane),
             MenuItem::action("Reconnect", ReconnectTab),
@@ -225,19 +228,19 @@ mod tests {
                 Some("NewTab"),
             ),
             (
-                "File ▸ New Folder".to_string(),
+                "File ▸ New Folder…".to_string(),
                 Box::new(NewFolder),
                 Some("cmd-shift-n"),
                 Some("NewFolder"),
             ),
             (
-                "File ▸ Rename".to_string(),
+                "File ▸ Rename…".to_string(),
                 Box::new(RenameEntry),
                 Some("f2"),
                 Some("RenameEntry"),
             ),
             (
-                "File ▸ Delete".to_string(),
+                "File ▸ Delete…".to_string(),
                 Box::new(DeleteSelection),
                 Some("cmd-backspace"),
                 Some("DeleteSelection"),
@@ -327,7 +330,7 @@ mod tests {
                 Some("FilterPane"),
             ),
             (
-                "View ▸ Go to Folder".to_string(),
+                "View ▸ Go to Folder…".to_string(),
                 Box::new(GoToPath),
                 Some("cmd-shift-g"),
                 Some("GoToPath"),
