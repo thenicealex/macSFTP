@@ -1,5 +1,6 @@
 // Tests use unwrap/expect for fixtures; production keeps unwrap_used deny.
 #![allow(clippy::unwrap_used)]
+use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     App, AppContext as _, Context, Entity, IntoElement, Pixels, Render, ScrollDelta,
     ScrollWheelEvent, TestAppContext, VisualTestContext, Window, div, point, px, size,
@@ -29,6 +30,7 @@ use macsftp_ui::{ActiveTheme as _, Appearance, Theme};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use super::{
     PaneSide, STATUS_BUSY_TRY_AGAIN, STATUS_CONNECTION_SERVICE_UNAVAILABLE, Workspace,
@@ -6592,7 +6594,7 @@ fn hidden_files_filtered_by_default(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn type_to_filter_reduces_visible_local_entries(cx: &mut TestAppContext) {
+fn explicit_filter_reduces_visible_local_entries(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     let (fixture, base) = temp_local_fixture("type-to-filter");
     std::fs::write(fixture.join("a.txt"), b"a").expect("write a");
@@ -6666,6 +6668,202 @@ fn type_to_filter_reduces_visible_local_entries(cx: &mut TestAppContext) {
         workspace.open_new_tab(window, cx);
         assert!(!workspace.local.filter.is_active());
         assert!(!workspace.remote.filter.is_active());
+    });
+
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+/// Type one printable key through the real key path (`key_char` is set the
+/// way the platform sets it for letters).
+fn type_letter(cx: &mut VisualTestContext, key: &str) {
+    let mut keystroke = gpui_kit::Keystroke::parse(key).expect("printable key parses");
+    keystroke.key_char = Some(key.to_string());
+    cx.simulate_event(gpui_kit::KeyDownEvent {
+        keystroke: keystroke.clone(),
+        is_held: false,
+        prefer_character_input: false,
+    });
+    cx.simulate_event(gpui_kit::KeyUpEvent { keystroke });
+}
+
+fn selected_local_name(workspace: &Entity<Workspace>, cx: &VisualTestContext) -> String {
+    workspace.read_with(cx, |workspace, cx| {
+        let index = workspace
+            .selected_index(PaneSide::Local, cx)
+            .expect("a local row is selected");
+        match workspace
+            .entry_path_at(PaneSide::Local, index, cx)
+            .expect("the selected row maps to a path")
+        {
+            EntryPath::Local(path) => path
+                .as_str()
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_string(),
+            EntryPath::Remote(_) => panic!("local path expected"),
+        }
+    })
+}
+
+fn type_select_prefix(
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+    typed: &str,
+    now: Instant,
+) {
+    workspace.update_in(cx, |workspace, _window, cx| {
+        workspace.extend_type_select(PaneSide::Local, typed, now, cx);
+    });
+}
+
+#[gpui_kit::test]
+fn typing_letters_jumps_selection_without_filtering(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    let (fixture, base) = temp_local_fixture("type-select-keys");
+    std::fs::write(fixture.join("alpha.txt"), b"a").expect("write alpha");
+    std::fs::write(fixture.join("beta.txt"), b"b").expect("write beta");
+    std::fs::write(fixture.join("brand.txt"), b"c").expect("write brand");
+
+    set_local_path_and_wait(&workspace, &mut cx, base);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.focus_pane(PaneSide::Local, window, cx);
+    });
+
+    type_letter(&mut cx, "b");
+
+    assert_eq!(
+        selected_local_name(&workspace, &cx),
+        "beta.txt",
+        "a typed letter selects the first matching entry"
+    );
+    workspace.read_with(&cx, |workspace, cx| {
+        assert_eq!(
+            workspace.entry_count(PaneSide::Local, cx),
+            3,
+            "type-select must not narrow the list"
+        );
+        assert!(
+            workspace.filter_query(PaneSide::Local).is_empty(),
+            "type-select must not fill the filter field"
+        );
+    });
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            window.find(("file-row", 1usize)).selected(),
+            Some(true),
+            "the jumped row reports its selection to accessibility"
+        );
+    });
+
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+#[gpui_kit::test]
+fn type_select_accumulates_the_prefix_and_cycles_matches(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    let (fixture, base) = temp_local_fixture("type-select-prefix");
+    std::fs::write(fixture.join("alpha.txt"), b"a").expect("write alpha");
+    std::fs::write(fixture.join("beta.txt"), b"b").expect("write beta");
+    std::fs::write(fixture.join("brand.txt"), b"c").expect("write brand");
+
+    set_local_path_and_wait(&workspace, &mut cx, base);
+    let start = Instant::now();
+
+    type_select_prefix(&workspace, &mut cx, "b", start);
+    assert_eq!(selected_local_name(&workspace, &cx), "beta.txt");
+
+    // "br" continues the same session while the keystrokes stay close.
+    type_select_prefix(&workspace, &mut cx, "r", start + Duration::from_millis(50));
+    assert_eq!(
+        selected_local_name(&workspace, &cx),
+        "brand.txt",
+        "letters typed in quick succession extend one prefix"
+    );
+
+    // A pause starts a new prefix; the same letter then scans past the
+    // current row to the next match.
+    type_select_prefix(
+        &workspace,
+        &mut cx,
+        "b",
+        start + Duration::from_millis(2000),
+    );
+    assert_eq!(
+        selected_local_name(&workspace, &cx),
+        "beta.txt",
+        "a stale prefix restarts and scans past the selected row"
+    );
+
+    // Nothing matches "bz", so the session falls back to the typed letter.
+    type_select_prefix(
+        &workspace,
+        &mut cx,
+        "z",
+        start + Duration::from_millis(2100),
+    );
+    assert_eq!(
+        selected_local_name(&workspace, &cx),
+        "beta.txt",
+        "unmatched prefixes leave the selection alone"
+    );
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.pane_type_select(PaneSide::Local).prefix(),
+            "z",
+            "an unmatched prefix restarts on the character just typed"
+        );
+    });
+
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+#[gpui_kit::test]
+fn file_list_rows_header_and_status_bar_expose_a11y_roles(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    let (fixture, base) = temp_local_fixture("a11y-roles");
+    std::fs::write(fixture.join("alpha.txt"), b"a").expect("write alpha");
+    std::fs::create_dir(fixture.join("docs")).expect("create docs");
+
+    set_local_path_and_wait(&workspace, &mut cx, base);
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+
+        let folder = window.find(("file-row", 0usize));
+        let folder_label = folder.label().expect("folder rows expose a label");
+        assert!(
+            folder_label.contains("docs") && folder_label.contains(", folder"),
+            "folders sort first and read as folders: {folder_label}"
+        );
+
+        let row = window.find(("file-row", 1usize));
+        assert_eq!(row.role(), Some(gpui_kit::Role::ListItem));
+        let row_label = row.label().expect("rows expose a label");
+        assert!(
+            row_label.contains("alpha.txt") && row_label.contains(", file"),
+            "row label names the entry and its kind: {row_label}"
+        );
+
+        let list = window.find("local-file-list");
+        assert_eq!(list.role(), Some(gpui_kit::Role::List));
+        assert_eq!(list.label(), Some("Local files"));
+
+        let header = window.within("local-file-pane").find("sort-name");
+        assert_eq!(header.role(), Some(gpui_kit::Role::Button));
+        let header_label = header.label().expect("sort columns expose a label");
+        assert!(
+            header_label.starts_with("Sort by Name"),
+            "sort column label: {header_label}"
+        );
+
+        let status = window.find("status-bar");
+        assert_eq!(status.role(), Some(gpui_kit::Role::Status));
+        let status_label = status.label().expect("the status bar exposes a label");
+        assert!(
+            status_label.contains("Connected"),
+            "status label carries the connection state: {status_label}"
+        );
     });
 
     let _ = std::fs::remove_dir_all(&fixture);
@@ -7795,17 +7993,70 @@ fn regenerate_workspace_ux_evidence() {
 
     // Capture 6 (light): two tabs. The inactive tab keeps its close button
     // hidden until the pointer reaches it, while the active tab shows it.
+    // A fresh tab opens the user's home folder, so pin it to the fixture:
+    // otherwise the capture embeds this machine's home listing.
     cx.update(|cx| {
         workspace
             .downgrade()
             .update_in(cx, |workspace, window, cx| {
                 workspace.cancel_active_modal(window, cx);
                 workspace.open_new_tab(window, cx);
+                workspace.set_local_path(
+                    LocalPath::new(fixture.to_string_lossy().into_owned()),
+                    window,
+                    cx,
+                );
             })
             .expect("workspace must be live");
     });
     cx.run_until_parked();
+    cx.run_until_parked();
     capture(&mut cx, "light-two-tabs-720x480.png");
+
+    // Capture 7 (light): Finder-style type-select. Typing "b" jumps the
+    // selection to the first matching name and leaves the rest of the list
+    // visible — the filter bar stays empty, unlike the old type-to-filter.
+    let type_select_fixture = std::path::Path::new("/tmp/fs-demo");
+    let _ = std::fs::remove_dir_all(type_select_fixture);
+    std::fs::create_dir_all(type_select_fixture).expect("type-select fixture must be creatable");
+    for name in [
+        "alpha.txt",
+        "beta-report.pdf",
+        "brand-audit.log",
+        "charlie.txt",
+        "docs",
+    ] {
+        let path = type_select_fixture.join(name);
+        if name == "docs" {
+            std::fs::create_dir_all(&path).expect("fixture folder");
+        } else {
+            std::fs::write(&path, b"evidence").expect("fixture file");
+        }
+    }
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                workspace.set_local_path(
+                    LocalPath::new(type_select_fixture.to_string_lossy().into_owned()),
+                    window,
+                    cx,
+                );
+                workspace.focus_pane(PaneSide::Local, window, cx);
+            })
+            .expect("workspace must be live");
+    });
+    cx.run_until_parked();
+    cx.run_until_parked();
+    cx.update_window(window, |_, window, cx| {
+        let mut keystroke = gpui_kit::Keystroke::parse("b").expect("keystroke parses");
+        keystroke.key_char = Some("b".into());
+        window.dispatch_keystroke(keystroke, cx);
+    })
+    .expect("window update must succeed");
+    cx.run_until_parked();
+    capture(&mut cx, "light-type-select-720x480.png");
+    let _ = std::fs::remove_dir_all(type_select_fixture);
 }
 
 /// Local pane with a real, sorted fixture listing; returns the fixture dir so

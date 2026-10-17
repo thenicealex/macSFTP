@@ -1,8 +1,9 @@
 use std::rc::Rc;
 use std::time::UNIX_EPOCH;
 
+use gpui_kit::base::{ObservedElement, TestSupportExt as _};
 use gpui_kit::{
-    App, Div, ElementId, IntoElement, ParentElement, Pixels, SharedString, Stateful, Styled,
+    App, Div, ElementId, IntoElement, ParentElement, Pixels, Role, SharedString, Stateful, Styled,
     Window, div, prelude::*, px,
 };
 use macsftp_core::{FileKind, FileSort, FileSortField, SortDirection, Timestamp};
@@ -46,6 +47,17 @@ pub fn file_table_header(
         }
         text
     };
+    let a11y_label = |label: &str, field: FileSortField| -> SharedString {
+        let direction = match sort.direction {
+            SortDirection::Ascending => "ascending",
+            SortDirection::Descending => "descending",
+        };
+        if active_field == field {
+            format!("Sort by {label}, currently {direction}").into()
+        } else {
+            format!("Sort by {label}").into()
+        }
+    };
     let on_field = Rc::new(on_field);
     let hover_background = theme.colors.element_hover;
 
@@ -75,7 +87,10 @@ pub fn file_table_header(
                 .on_click(move |_event, window, cx| {
                     name_handler(FileSortField::Name, window, cx);
                 })
-                .child(column_label("Name", FileSortField::Name)),
+                .child(column_label("Name", FileSortField::Name))
+                .role(Role::Button)
+                .aria_label(a11y_label("Name", FileSortField::Name))
+                .test_support(),
         )
         .child(
             div()
@@ -88,7 +103,10 @@ pub fn file_table_header(
                 .on_click(move |_event, window, cx| {
                     size_handler(FileSortField::Size, window, cx);
                 })
-                .child(column_label("Size", FileSortField::Size)),
+                .child(column_label("Size", FileSortField::Size))
+                .role(Role::Button)
+                .aria_label(a11y_label("Size", FileSortField::Size))
+                .test_support(),
         )
         .child(
             div()
@@ -100,12 +118,54 @@ pub fn file_table_header(
                 .on_click(move |_event, window, cx| {
                     modified_handler(FileSortField::ModifiedAt, window, cx);
                 })
-                .child(column_label("Last Modified", FileSortField::ModifiedAt)),
+                .child(column_label("Last Modified", FileSortField::ModifiedAt))
+                .role(Role::Button)
+                .aria_label(a11y_label("Last Modified", FileSortField::ModifiedAt))
+                .test_support(),
         )
 }
 
+/// VoiceOver summary for one row: name, kind, then the columns that exist.
+/// Blank columns (a folder has no size) and em-dash placeholders stay silent
+/// instead of reading punctuation aloud.
+pub fn file_row_accessibility_label(model: &FileRowModel) -> String {
+    let mut label = model.name.to_string();
+    label.push_str(match model.kind {
+        FileKind::Directory => ", folder",
+        FileKind::Symlink => ", symlink",
+        FileKind::File => ", file",
+        FileKind::Other | FileKind::Unknown => ", item",
+    });
+    if model.is_hidden {
+        label.push_str(", hidden");
+    }
+    if let Some(size) = readable_column(&model.size_label) {
+        label.push_str(", ");
+        label.push_str(size);
+    }
+    if let Some(modified) = readable_column(&model.modified_label) {
+        label.push_str(", modified ");
+        label.push_str(modified);
+    }
+    label
+}
+
+/// Column text worth speaking: non-empty and not the em-dash placeholder.
+fn readable_column(value: &SharedString) -> Option<&str> {
+    let value = value.as_ref();
+    if value.is_empty() || value == "—" {
+        None
+    } else {
+        Some(value)
+    }
+}
+
 /// One virtualized file row. The caller attaches click handlers.
-pub fn file_row(id: impl Into<ElementId>, model: FileRowModel, cx: &App) -> Stateful<Div> {
+pub fn file_row(
+    id: impl Into<ElementId>,
+    model: FileRowModel,
+    cx: &App,
+) -> ObservedElement<Stateful<Div>> {
     let theme = cx.theme();
     let (kind_icon, icon_color) = match model.kind {
         FileKind::Directory => (IconName::Folder, theme.colors.accent),
@@ -120,6 +180,7 @@ pub fn file_row(id: impl Into<ElementId>, model: FileRowModel, cx: &App) -> Stat
         theme.colors.text
     };
     let hover_background = theme.colors.element_hover;
+    let accessibility_label = file_row_accessibility_label(&model);
 
     div()
         .id(id.into())
@@ -163,6 +224,10 @@ pub fn file_row(id: impl Into<ElementId>, model: FileRowModel, cx: &App) -> Stat
                 .font_family(theme.fonts.mono_family.clone())
                 .child(model.modified_label),
         )
+        .role(Role::ListItem)
+        .aria_label(accessibility_label)
+        .aria_selected(model.selected)
+        .test_support()
 }
 
 /// Human-readable size, Finder-style decimal units. `None` renders as
@@ -248,7 +313,10 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
 mod tests {
     use macsftp_core::Timestamp;
 
-    use super::{format_size, format_size_label, format_timestamp};
+    use super::{
+        FileRowModel, file_row_accessibility_label, format_size, format_size_label,
+        format_timestamp,
+    };
     use macsftp_core::FileKind;
 
     #[test]
@@ -286,5 +354,56 @@ mod tests {
             format_timestamp(Some(Timestamp::from_secs_since_epoch(1_782_909_000))).as_ref(),
             "2026-07-01 12:30"
         );
+    }
+
+    fn row(
+        name: &str,
+        kind: FileKind,
+        is_hidden: bool,
+        size: &str,
+        modified: &str,
+    ) -> FileRowModel {
+        FileRowModel {
+            name: name.into(),
+            kind,
+            is_hidden,
+            selected: false,
+            size_label: size.into(),
+            modified_label: modified.into(),
+        }
+    }
+
+    #[test]
+    fn row_labels_speak_name_kind_and_present_columns() {
+        let file = row(
+            "report.pdf",
+            FileKind::File,
+            false,
+            "1.2 KB",
+            "2026-10-16 14:30",
+        );
+        assert_eq!(
+            file_row_accessibility_label(&file),
+            "report.pdf, file, 1.2 KB, modified 2026-10-16 14:30"
+        );
+
+        // A folder has no size column; the blank cell must not read as a pause.
+        let folder = row("src", FileKind::Directory, false, "", "2026-10-16 14:30");
+        assert_eq!(
+            file_row_accessibility_label(&folder),
+            "src, folder, modified 2026-10-16 14:30"
+        );
+    }
+
+    #[test]
+    fn row_labels_mark_hidden_entries_and_drop_em_dash_columns() {
+        let hidden = row(".env", FileKind::File, true, "512 B", "—");
+        assert_eq!(
+            file_row_accessibility_label(&hidden),
+            ".env, file, hidden, 512 B"
+        );
+
+        let symlink = row("latest", FileKind::Symlink, false, "—", "—");
+        assert_eq!(file_row_accessibility_label(&symlink), "latest, symlink");
     }
 }

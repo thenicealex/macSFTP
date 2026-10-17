@@ -47,7 +47,7 @@ pub enum PaneSide {
     Remote,
 }
 
-use crate::workspace::view_state::PaneFilter;
+use crate::workspace::view_state::{PaneFilter, TypeSelect};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspaceSurface {
     Files,

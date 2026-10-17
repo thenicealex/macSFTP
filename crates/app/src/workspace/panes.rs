@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use gpui_kit::{
     App, ClickEvent, ClipboardItem, Context, KeyDownEvent, ScrollStrategy, UniformListScrollHandle,
     Window,
@@ -11,7 +13,9 @@ use macsftp_platform::read_local_directory;
 use tracing::warn;
 
 use crate::resources::ActiveResources;
-use crate::workspace::visible_entries::{visible_local_indices, visible_remote_indices};
+use crate::workspace::visible_entries::{
+    first_prefix_match, visible_local_indices, visible_remote_indices,
+};
 use crate::workspace::*;
 use macsftp_core::HistoryOp;
 
@@ -41,6 +45,20 @@ impl crate::workspace::Workspace {
         match side {
             PaneSide::Local => &mut self.local.filter,
             PaneSide::Remote => &mut self.remote.filter,
+        }
+    }
+
+    pub(crate) fn pane_type_select(&self, side: PaneSide) -> &TypeSelect {
+        match side {
+            PaneSide::Local => &self.local.type_select,
+            PaneSide::Remote => &self.remote.type_select,
+        }
+    }
+
+    pub(crate) fn pane_type_select_mut(&mut self, side: PaneSide) -> &mut TypeSelect {
+        match side {
+            PaneSide::Local => &mut self.local.type_select,
+            PaneSide::Remote => &mut self.remote.type_select,
         }
     }
 
@@ -545,6 +563,9 @@ impl crate::workspace::Workspace {
 
     pub(crate) fn clear_filter(&mut self, side: PaneSide) {
         self.pane_filter_mut(side).clear();
+        // Navigation, tab switches and Escape all funnel through here, so a
+        // type-select session never survives the list it matched against.
+        self.pane_type_select_mut(side).clear();
         self.text_inputs.remove(&if side == PaneSide::Local {
             TextInputTarget::LocalFilter
         } else {
@@ -592,8 +613,9 @@ impl crate::workspace::Workspace {
             || self.surface != WorkspaceSurface::Files
     }
 
-    /// FilePane key path for type-to-filter and explicit filter editing.
-    pub(crate) fn handle_filter_key(
+    /// FilePane key path for Finder-style type-select and explicit filter
+    /// editing.
+    pub(crate) fn handle_type_select_key(
         &mut self,
         side: PaneSide,
         event: &KeyDownEvent,
@@ -606,12 +628,17 @@ impl crate::workspace::Workspace {
 
         let keystroke = &event.keystroke;
 
-        // Escape always clears an active filter for this pane.
+        // Escape clears the explicit filter first; with no filter running it
+        // ends the type-select session.
         if keystroke.key == "escape" && !keystroke.modifiers.modified() {
             if self.pane_filter(side).is_active() {
                 cx.stop_propagation();
                 self.clear_filter(side);
                 window.focus(self.pane_focus(side), cx);
+                cx.notify();
+            } else if !self.pane_type_select(side).prefix().is_empty() {
+                cx.stop_propagation();
+                self.pane_type_select_mut(side).clear();
                 cx.notify();
             }
             return;
@@ -621,38 +648,94 @@ impl crate::workspace::Workspace {
             return;
         }
 
-        // Type-to-filter: printable chars (shift ok) append; backspace pops.
+        // Modifier chords belong to menu commands, not to type-select.
         let modifiers = keystroke.modifiers;
         if modifiers.platform || modifiers.control || modifiers.alt || modifiers.function {
             return;
         }
 
         if keystroke.key == "backspace" {
-            let filter = self.pane_filter_mut(side);
-            if filter.query.is_empty() {
+            if self.pane_type_select(side).prefix().is_empty() {
                 return;
             }
-            filter.query.pop();
-            if filter.query.is_empty() {
-                filter.clear();
-            } else {
-                filter.input.set_value(filter.query.clone());
-            }
             cx.stop_propagation();
-            cx.notify();
+            let prefix = self.pane_type_select_mut(side).pop().to_string();
+            self.jump_to_type_select_match(side, &prefix, cx);
             return;
         }
 
         if let Some(key_char) = &keystroke.key_char
             && !key_char.chars().any(char::is_control)
         {
-            let filter = self.pane_filter_mut(side);
-            filter.query.push_str(key_char);
-            filter.input.set_value(filter.query.clone());
-            filter.explicit_focus = false;
             cx.stop_propagation();
-            cx.notify();
+            self.extend_type_select(side, key_char, Instant::now(), cx);
         }
+    }
+
+    /// Extend the type-select prefix at `now` and move the selection to the
+    /// first visible name that matches it; the list itself never narrows.
+    pub(crate) fn extend_type_select(
+        &mut self,
+        side: PaneSide,
+        typed: &str,
+        now: Instant,
+        cx: &mut Context<Self>,
+    ) {
+        self.pane_type_select_mut(side).extend(typed, now);
+        let mut prefix = self.pane_type_select(side).prefix().to_string();
+        let mut target = self.first_type_select_match(side, &prefix, cx);
+        // A longer prefix that matches nothing falls back to the character
+        // that was just typed, so one stray key never strands the session.
+        if target.is_none() && prefix.chars().count() > 1 {
+            self.pane_type_select_mut(side).restart(typed, now);
+            prefix = typed.to_string();
+            target = self.first_type_select_match(side, &prefix, cx);
+        }
+        match target {
+            Some(index) => self.select_index(side, index, cx),
+            None => cx.notify(),
+        }
+    }
+
+    /// Re-run an existing prefix (backspace) without changing it.
+    fn jump_to_type_select_match(&mut self, side: PaneSide, prefix: &str, cx: &mut Context<Self>) {
+        match self.first_type_select_match(side, prefix, cx) {
+            Some(index) => self.select_index(side, index, cx),
+            None => cx.notify(),
+        }
+    }
+
+    /// First visible index after the current selection (wrapping around)
+    /// whose name starts with `prefix`. Scanning from just past the selection
+    /// makes repeated letters cycle through matches, Finder-style.
+    fn first_type_select_match(&self, side: PaneSide, prefix: &str, cx: &App) -> Option<usize> {
+        let names = self.visible_names(side, cx);
+        let from = self
+            .selected_index(side, cx)
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        first_prefix_match(&names, from, prefix)
+    }
+
+    fn visible_names(&self, side: PaneSide, cx: &App) -> Vec<&str> {
+        let Some(tab) = self.active_tab() else {
+            return Vec::new();
+        };
+        self.visible_indices(side, cx)
+            .into_iter()
+            .filter_map(|real_index| match side {
+                PaneSide::Local => tab
+                    .local
+                    .entries
+                    .get(real_index)
+                    .map(|entry| entry.name.as_str()),
+                PaneSide::Remote => tab
+                    .remote
+                    .entries
+                    .get(real_index)
+                    .map(|entry| entry.name.as_str()),
+            })
+            .collect()
     }
 
     pub(crate) fn navigate_focused(
