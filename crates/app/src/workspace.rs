@@ -1175,7 +1175,8 @@ impl Render for Workspace {
             )
             // View ▸ Sort By. The header's click-to-toggle stays on
             // `apply_sort_field`; these set both field and direction, because
-            // the menu item cannot show which one is active (§12.2).
+            // one app-wide menu bar cannot mark a per-tab sort state, so the
+            // header is where the active sort shows (§12.2, §12.3).
             .on_action(
                 cx.listener(|workspace, _: &SortByNameAscending, _window, cx| {
                     workspace.set_sort(FileSortField::Name, SortDirection::Ascending, cx);
