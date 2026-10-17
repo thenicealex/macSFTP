@@ -155,6 +155,51 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keybinding: Some("⌘⇧G"),
         when: PaletteWhen::HasActiveTab,
     },
+    // Sort sets field and direction explicitly, mirroring View ▸ Sort By: the
+    // palette row and the menu item read the same way, and neither has to
+    // show which sort is active (§12.2).
+    PaletteCommand {
+        id: "SortByNameAscending",
+        title: "Sort by Name (A→Z)",
+        keywords: &["sort", "order", "name", "ascending"],
+        keybinding: None,
+        when: PaletteWhen::HasActiveTab,
+    },
+    PaletteCommand {
+        id: "SortByNameDescending",
+        title: "Sort by Name (Z→A)",
+        keywords: &["sort", "order", "name", "descending", "reverse"],
+        keybinding: None,
+        when: PaletteWhen::HasActiveTab,
+    },
+    PaletteCommand {
+        id: "SortBySizeAscending",
+        title: "Sort by Size (Smallest First)",
+        keywords: &["sort", "order", "size", "ascending"],
+        keybinding: None,
+        when: PaletteWhen::HasActiveTab,
+    },
+    PaletteCommand {
+        id: "SortBySizeDescending",
+        title: "Sort by Size (Largest First)",
+        keywords: &["sort", "order", "size", "descending", "reverse"],
+        keybinding: None,
+        when: PaletteWhen::HasActiveTab,
+    },
+    PaletteCommand {
+        id: "SortByDateModifiedAscending",
+        title: "Sort by Last Modified (Oldest First)",
+        keywords: &["sort", "order", "modified", "date", "ascending"],
+        keybinding: None,
+        when: PaletteWhen::HasActiveTab,
+    },
+    PaletteCommand {
+        id: "SortByDateModifiedDescending",
+        title: "Sort by Last Modified (Newest First)",
+        keywords: &["sort", "order", "modified", "date", "descending", "reverse"],
+        keybinding: None,
+        when: PaletteWhen::HasActiveTab,
+    },
     PaletteCommand {
         id: "NavigateBack",
         title: "Back",
@@ -367,6 +412,12 @@ mod tests {
             ("ReconnectTab", Some("⌘⇧R")),
             ("OpenLogFolder", None),
             ("OpenCommandPalette", Some("⌘⇧P")),
+            ("SortByNameAscending", None),
+            ("SortByNameDescending", None),
+            ("SortBySizeAscending", None),
+            ("SortBySizeDescending", None),
+            ("SortByDateModifiedAscending", None),
+            ("SortByDateModifiedDescending", None),
         ];
         for (id, keybinding) in required {
             let command = by_id.get(id).unwrap_or_else(|| panic!("missing id: {id}"));

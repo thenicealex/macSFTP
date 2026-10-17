@@ -1,4 +1,5 @@
 use gpui_kit::{App, KeyBinding, actions};
+use tracing::warn;
 
 // Stable action names from the plan (§16) plus the file-list and tab
 // navigation actions the workspace needs. Names are the command-palette
@@ -55,7 +56,18 @@ actions!(
         ShowAllApplications,
         MinimizeWindow,
         ZoomWindow,
+        BringAllToFront,
+        CloseWindow,
         Quit,
+        // View ▸ Sort By sets field and direction explicitly: the menu bar
+        // cannot show which one is active, so it never has to be inferred
+        // (§12.2). The file-list header keeps its click-to-toggle behavior.
+        SortByNameAscending,
+        SortByNameDescending,
+        SortBySizeAscending,
+        SortBySizeDescending,
+        SortByDateModifiedAscending,
+        SortByDateModifiedDescending,
     ]
 );
 
@@ -64,8 +76,9 @@ actions!(form, [FocusNextField, FocusPreviousField]);
 pub(crate) const CONNECT_FORM_CONTEXT: &str = "ConnectForm";
 pub(crate) const PROFILE_EDITOR_CONTEXT: &str = "ProfileEditor";
 
-/// Register the default keymap. Bindings live in one place so tests and
-/// `main` agree on them.
+/// Register the default keymap and the app-level action handlers. The menu
+/// bar (`app_menus`) and the command palette (`palette_commands`) mirror this
+/// list; keep them in step.
 pub fn init(cx: &mut App) {
     for context in [CONNECT_FORM_CONTEXT, PROFILE_EDITOR_CONTEXT] {
         for predicate in [context.to_string(), format!("{context} > Input")] {
@@ -75,7 +88,30 @@ pub fn init(cx: &mut App) {
             ]);
         }
     }
-    cx.bind_keys([
+    cx.bind_keys(keybindings());
+
+    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &HideApplication, cx| cx.hide());
+    cx.on_action(|_: &HideOtherApplications, cx| cx.hide_other_apps());
+    cx.on_action(|_: &ShowAllApplications, cx| cx.unhide_other_apps());
+    // "Bring All to Front": gpui has no `arrangeInFront`, and activating the
+    // application is what brings every window of the app forward together.
+    cx.on_action(|_: &BringAllToFront, cx| cx.activate(true));
+    cx.on_action(|_: &CloseWindow, cx| {
+        let Some(window) = cx.active_window() else {
+            return;
+        };
+        if let Err(error) = window.update(cx, |_root, window, _cx| window.remove_window()) {
+            warn!(error = ?error, "failed to close window");
+        }
+    });
+}
+
+/// Every keybinding the app registers. Kept separate from [`init`] so the
+/// menu-bar tests can check the chord an item displays against the chord that
+/// actually fires the action.
+pub(crate) fn keybindings() -> Vec<KeyBinding> {
+    vec![
         KeyBinding::new("cmd-n", NewWindow, None),
         KeyBinding::new("cmd-t", NewTab, Some("Workspace")),
         KeyBinding::new("cmd-w", CloseTab, Some("Workspace")),
@@ -134,11 +170,12 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("escape", CancelActiveModal, Some("Settings")),
         KeyBinding::new("escape", CancelActiveModal, Some("About")),
         KeyBinding::new("escape", CancelActiveModal, Some("CommandPalette")),
+        // App menu: the system chords for Hide/Hide Others. "Show All" has no
+        // chord anywhere in macOS, so neither does its menu item.
+        KeyBinding::new("cmd-h", HideApplication, None),
+        KeyBinding::new("cmd-alt-h", HideOtherApplications, None),
+        // File ▸ Close Window. ⌘W belongs to the tab (§12.7).
+        KeyBinding::new("cmd-shift-w", CloseWindow, None),
         KeyBinding::new("cmd-q", Quit, None),
-    ]);
-
-    cx.on_action(|_: &Quit, cx| cx.quit());
-    cx.on_action(|_: &HideApplication, cx| cx.hide());
-    cx.on_action(|_: &HideOtherApplications, cx| cx.hide_other_apps());
-    cx.on_action(|_: &ShowAllApplications, cx| cx.unhide_other_apps());
+    ]
 }

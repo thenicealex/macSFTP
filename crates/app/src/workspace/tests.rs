@@ -37,7 +37,8 @@ use super::{
 use crate::app_actions::{
     self, ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, FilterPane, GoToPath,
     NavigateBack, NewTab, OpenProfiles, OpenSettings, PageDown, SelectAllEntries, SelectNextEntry,
-    SelectNextEntryExtend, SelectPrevEntry, ShowAbout, ShowTransferDrawer, ToggleHiddenFiles,
+    SelectNextEntryExtend, SelectPrevEntry, ShowAbout, ShowTransferDrawer, SortByNameAscending,
+    SortBySizeAscending, SortBySizeDescending, ToggleHiddenFiles,
 };
 use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::session_coordinator::SessionCoordinator;
@@ -6709,6 +6710,82 @@ fn local_directory_respects_tab_sort_by_size(cx: &mut TestAppContext) {
         assert!(small_i < big_i, "expected size ascending, got {names:?}");
     });
     let _ = std::fs::remove_dir_all(&fixture);
+}
+
+#[gpui_kit::test]
+fn sort_actions_set_field_and_direction_explicitly(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _) = init_workspace(cx);
+    // The default sort is Name ascending. An explicit command is a no-op
+    // there, where the column header's click-to-toggle would flip to Z→A.
+    cx.dispatch_action(SortByNameAscending);
+    cx.run_until_parked();
+    workspace.read_with(&cx, |workspace, _| {
+        let sort = &workspace.active_tab().unwrap().sort;
+        assert_eq!(sort.field, FileSortField::Name);
+        assert_eq!(sort.direction, SortDirection::Ascending);
+    });
+
+    let (fixture, base) = temp_local_fixture("sort-actions");
+    std::fs::write(fixture.join("alpha.txt"), b"a").unwrap();
+    std::fs::write(fixture.join("beta.txt"), b"12345").unwrap();
+    cx.dispatch_action(SortBySizeDescending);
+    cx.run_until_parked();
+    set_local_path_and_wait(&workspace, &mut cx, base);
+    workspace.read_with(&cx, |workspace, _| {
+        let sort = &workspace.active_tab().unwrap().sort;
+        assert_eq!(sort.field, FileSortField::Size);
+        assert_eq!(sort.direction, SortDirection::Descending);
+        let names: Vec<_> = workspace
+            .active_tab()
+            .unwrap()
+            .local
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, ["beta.txt", "alpha.txt"], "largest first");
+    });
+
+    // Dispatching again re-sorts the listing in place, not just the state.
+    cx.dispatch_action(SortBySizeAscending);
+    cx.run_until_parked();
+    workspace.read_with(&cx, |workspace, _| {
+        let names: Vec<_> = workspace
+            .active_tab()
+            .unwrap()
+            .local
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, ["alpha.txt", "beta.txt"], "smallest first");
+    });
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+#[gpui_kit::test]
+fn window_title_follows_the_active_tab(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _) = init_workspace(cx);
+    cx.dispatch_action(NewTab);
+    cx.run_until_parked();
+    workspace.update(&mut cx, |workspace, _| {
+        // A fresh tab is named for what it is; a connected one carries the
+        // connection name. The native title (Mission Control, the Window
+        // menu) is the same string the tab bar shows, and the app name stands
+        // in while no tab is open (§12.7).
+        assert_eq!(workspace.active_tab().unwrap().title, "New Connection");
+        assert_eq!(workspace.window_title(), "New Connection");
+
+        workspace.active_tab_mut().unwrap().title = "example.com".to_string();
+        assert_eq!(workspace.window_title(), "example.com");
+
+        let first_tab = workspace.state.tabs.tabs[0].id;
+        workspace.state.tabs.active_tab_id = Some(first_tab);
+        assert_eq!(workspace.window_title(), "New Connection");
+
+        workspace.state.tabs.active_tab_id = None;
+        assert_eq!(workspace.window_title(), crate::APP_NAME);
+    });
 }
 
 #[gpui_kit::test]

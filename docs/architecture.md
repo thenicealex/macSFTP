@@ -200,8 +200,11 @@ Profile 更新由 `ProfileStore` 协调：校验请求和 route → 写入或读
 
 ### 12.2 交互入口
 
-- 高频操作（新建/关闭/切换 tab、连接、刷新、返回上级、上传、下载、取消传输、重试传输、打开 transfer drawer）至少提供按钮、快捷键、command palette action 中的两种入口。
+- 高频操作（新建/关闭/切换 tab、连接、刷新、返回上级、上传、下载、取消传输、重试传输、打开 transfer drawer）至少提供按钮、menu bar item、快捷键、command palette action 中的两种入口。
 - 所有 app-level action 必须可被 command palette 搜索，action 名称使用稳定动词短语（如 `NewTab`、`RefreshPane`、`RetryTransfer`、`OpenSettings`），优先沿用本文中的名称；action id 不随 UI 文案变化。
+- 菜单栏由 `app_menus::menu_bar()` 单一定义，菜单项只能引用与快捷键、palette 相同的 action，禁止在菜单里另造一套；`app_menus` 的一致性测试把「菜单项 ↔ 快捷键绑定 ↔ palette id」三者钉在一起，改名或删除命令时三处必须同时更新。
+- Edit 菜单使用 `MenuItem::os_action` 走 AppKit 标准 selector（`cut:`/`copy:`/`paste:`/`selectAll:`/`undo:`/`redo:`），dispatch 的仍是 `gpui-base` input action，不得自造文本编辑 action（§12.14）。
+- 菜单项无法显示当前状态（静态菜单，没有 checkmark），因此有状态的命令在菜单里写成显式取值（例如 Sort By ▸ Name (A→Z)/(Z→A)）；当前排序状态的显示位置只有文件列表表头（§12.3）。
 - command palette 不得暴露 runtime、channel、actor、crate 等内部实现细节；用户忘记快捷键时必须能用 command palette 完成同一操作。
 - path bar 必须支持复制当前路径，local 和 remote 都保留 back、up、refresh；路径过长从中间省略，loading 时不得消失，只增加局部 spinner 或 progress indicator。
 
@@ -209,6 +212,7 @@ Profile 更新由 `ProfileStore` 协调：校验请求和 route → 写入或读
 
 - 文件列表必须虚拟化，10k entries 不创建长期 row entity；表头显示排序状态；selection 绑定稳定 id/path，禁止绑定 row index。
 - 键盘导航覆盖上/下、page up/down、home/end、shift 多选和 enter 默认动作；directory、file、symlink 和 hidden row 有可区分但克制的 icon 或 marker；hover action 易于发现但不改变列宽或 row 高度。
+- Enter 打开选中项、F2 重命名，不采用 Finder 的 Return=重命名：行内编辑需要 macOS 完整键盘访问的路径，且会让 Enter 的语义随 selection 状态漂移；重命名另有 File 菜单项与 palette 命令，F2 不是唯一入口。
 - 可滚动 surface 使用统一的 theme-aware scrollbar：虚拟列表和普通 scroll container 各自绑定 handle，但共享 overflow、drag、track paging 和 resize 语义。
 - 只在内容溢出时显示 track/thumb，thumb 必须可拖动、track 点击按 viewport 翻页、滚轮与键盘滚动后位置同步；隐藏原生滚动条避免双滚动条。
 - 窄 pane、短窗口和动态内容变化后，thumb 大小与位置必须重新反映真实 viewport，不能遮挡主要操作或造成列表宽度跳变。
@@ -250,6 +254,7 @@ remote pane 必须覆盖：`Disconnected`（提供连接或重新连接）、`Co
 - 关闭 tab 的行为必须符合传输状态：会取消 transfer 时必须要求明确确认，transfer 独立继续时不得显示错误暗示。
 - 非活动 tab 的关闭钮只在指针位于该 tab 上时出现（Safari 习惯），隐藏时不可点击，避免误关；活动 tab 常显；26×22 的关闭钮槽位恒定占位，出现或消失不得引起标题位移。
 - tab switcher 按最近使用时间排序，不能只按创建顺序。
+- 窗口标题跟随活动 tab 的标题（无 tab 时用 app 名）：标题栏透明不显示标题，但 Mission Control 和 Window 菜单用它命名窗口，不得留空标题或让非活动 tab 的名字覆盖它。
 
 ### 12.8 Transfer Drawer
 
@@ -343,6 +348,7 @@ App 和 UI 通过 workspace 的 `gpui-kit = "=0.7.3"`（gpui-pre snapshot）引�
 
 - 是否保持单窗口内工作上下文完整，并且没有破坏多窗口间的状态隔离？
 - 是否提供 command palette action 或快捷键入口？
+- 菜单栏、快捷键和 command palette 是否仍然描述同一条命令（`app_menus` 的一致性测试覆盖了菜单项、chord 与 palette id）？
 - 是否覆盖 loading、empty、error、disabled、focused、hover、selected 状态？
 - 是否在窄窗口和短窗口下检查 tab、路径、按钮、modal 文本不溢出？
 - 是否避免无关卡片、渐变、装饰图形和大面积空白？
