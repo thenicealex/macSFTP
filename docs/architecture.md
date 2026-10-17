@@ -212,6 +212,7 @@ Profile 更新由 `ProfileStore` 协调：校验请求和 route → 写入或读
 
 - 文件列表必须虚拟化，10k entries 不创建长期 row entity；表头显示排序状态；selection 绑定稳定 id/path，禁止绑定 row index。
 - 键盘导航覆盖上/下、page up/down、home/end、shift 多选和 enter 默认动作；directory、file、symlink 和 hidden row 有可区分但克制的 icon 或 marker；hover action 易于发现但不改变列宽或 row 高度。
+- 聚焦的 pane 里键入字母是 Finder 式 type-select：前缀累积约 1 秒（连续按键继续同一前缀；超时、导航、切 tab、Escape 后重置），跳到第一个匹配项并滚动到它，从当前 selection 之后扫描并在末尾回绕，所以重复按同一字母会依次跳过匹配项；前缀匹配不到时退回最后键入的字符、不改变 selection。列表不缩小、不出现筛选栏。筛选只保留显式入口：⌘F（Filter Files）、菜单/palette 命令或筛选字段本身，筛选栏出现后键入才进入筛选。
 - Enter 打开选中项、F2 重命名，不采用 Finder 的 Return=重命名：行内编辑需要 macOS 完整键盘访问的路径，且会让 Enter 的语义随 selection 状态漂移；重命名另有 File 菜单项与 palette 命令，F2 不是唯一入口。
 - 可滚动 surface 使用统一的 theme-aware scrollbar：虚拟列表和普通 scroll container 各自绑定 handle，但共享 overflow、drag、track paging 和 resize 语义。
 - 只在内容溢出时显示 track/thumb，thumb 必须可拖动、track 点击按 viewport 翻页、滚轮与键盘滚动后位置同步；隐藏原生滚动条避免双滚动条。
@@ -299,6 +300,8 @@ remote pane 必须覆盖：`Disconnected`（提供连接或重新连接）、`Co
 - 所有 icon-only button 必须有 tooltip 或 label。
 - modal 有可测试的 focus order：打开后焦点移到第一个合理控件，关闭后恢复到触发控件。
 - 文件列表 selection 可以纯键盘完成；tab、pane、transfer drawer 可以通过快捷键聚焦。
+- 文件列表的可访问性结构固定且可 headless 断言：列表容器是 `Role::List`（label 为 "Local files"/"Remote files"），每个文件行是 `Role::ListItem`，label 依次读名称、类型（file/folder/symlink/item）、hidden 标记、大小、修改时间，跳过空列与 `—` 占位，并携带 selection 状态；表头三列是 `Role::Button`，label 形如 "Sort by Name, currently ascending"；状态栏是 `Role::Status`，label 汇总连接状态、选中数量和 status message。
+- 需要被测试查询的组件在构造点调用 `TestSupportExt::test_support()`（非 test-support 构建下是零成本的恒等包装），测试用 `gpui_kit::test` 的 `ElementSnapshot` 断言 `role()`/`label()`/`selected()`，不依赖 VoiceOver 手工冒烟。
 - 颜色对比满足基本可读性，低对比文本只用于次要信息。
 
 ### 12.13 性能与动效

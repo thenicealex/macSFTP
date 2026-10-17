@@ -1,7 +1,8 @@
 use crate::workspace::TextInputTarget;
+use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::{
-    AppContext, Context, FontWeight, IntoElement, ParentElement, SharedString, Styled, Window,
-    WindowControlArea, div, prelude::*, px, uniform_list,
+    AppContext, Context, FontWeight, IntoElement, ParentElement, Role, SharedString, Styled,
+    Window, WindowControlArea, div, prelude::*, px, uniform_list,
 };
 use macsftp_core::{ConnectionState, EntryPath, LocalPath, RemotePath};
 use macsftp_ui::{
@@ -1139,7 +1140,7 @@ impl crate::workspace::Workspace {
                     return;
                 }
                 if workspace.pane_focus(side).is_focused(window) {
-                    workspace.handle_filter_key(side, event, window, cx);
+                    workspace.handle_type_select_key(side, event, window, cx);
                 }
             }))
             .when(side == PaneSide::Local, |pane| {
@@ -1336,6 +1337,18 @@ impl crate::workspace::Workspace {
             })
             .child(
                 div()
+                    .id(if side == PaneSide::Local {
+                        "local-file-list"
+                    } else {
+                        "remote-file-list"
+                    })
+                    .role(Role::List)
+                    .aria_label(if side == PaneSide::Local {
+                        "Local files"
+                    } else {
+                        "Remote files"
+                    })
+                    .test_support()
                     .flex()
                     .flex_col()
                     .flex_1()

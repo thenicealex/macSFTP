@@ -6,6 +6,8 @@
 //! are plain data holders: no behavior beyond trivial constructors, and
 //! nothing here is persisted.
 
+use std::time::{Duration, Instant};
+
 use gpui_kit::{Pixels, UniformListScrollHandle};
 use macsftp_ui::{InputState, ScrollbarState};
 
@@ -32,10 +34,64 @@ impl PaneFilter {
     }
 }
 
-/// Filter + scrolling state for one file pane.
+/// Finder-style type-select: the letters typed into a focused pane and when
+/// the last one arrived. A pause longer than [`TypeSelect::CONTINUATION_WINDOW`]
+/// starts a new prefix, so `b` then `a` quickly means "ba" while `b`, pause,
+/// `a` means "a".
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TypeSelect {
+    prefix: String,
+    last_input: Option<Instant>,
+}
+
+impl TypeSelect {
+    /// Keystrokes closer together than this extend the same prefix.
+    pub(crate) const CONTINUATION_WINDOW: Duration = Duration::from_millis(1000);
+
+    pub(crate) fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    /// Extend the prefix with `text`, starting over when the previous
+    /// keystroke is already stale.
+    pub(crate) fn extend(&mut self, text: &str, now: Instant) {
+        if self.is_stale(now) {
+            self.prefix.clear();
+        }
+        self.prefix.push_str(text);
+        self.last_input = Some(now);
+    }
+
+    /// Replace the prefix with `text` (fallback when the longer prefix
+    /// matches nothing).
+    pub(crate) fn restart(&mut self, text: &str, now: Instant) {
+        self.prefix.clear();
+        self.prefix.push_str(text);
+        self.last_input = Some(now);
+    }
+
+    /// Drop the last character and return the prefix that remains.
+    pub(crate) fn pop(&mut self) -> &str {
+        self.prefix.pop();
+        &self.prefix
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.prefix.clear();
+        self.last_input = None;
+    }
+
+    fn is_stale(&self, now: Instant) -> bool {
+        self.last_input
+            .is_some_and(|at| now.duration_since(at) >= Self::CONTINUATION_WINDOW)
+    }
+}
+
+/// Filter, type-select and scrolling state for one file pane.
 #[derive(Default)]
 pub(crate) struct PaneUi {
     pub(crate) filter: PaneFilter,
+    pub(crate) type_select: TypeSelect,
     pub(crate) scroll: UniformListScrollHandle,
     pub(crate) scrollbar: ScrollbarState,
 }
@@ -44,6 +100,7 @@ impl PaneUi {
     pub(crate) fn new() -> Self {
         Self {
             filter: PaneFilter::default(),
+            type_select: TypeSelect::default(),
             scroll: UniformListScrollHandle::new(),
             scrollbar: ScrollbarState::new(),
         }
@@ -276,5 +333,44 @@ impl SettingsUi {
             editor_scroll: gpui_kit::ScrollHandle::new(),
             editor_scrollbar: ScrollbarState::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::TypeSelect;
+
+    #[test]
+    fn quick_keystrokes_extend_one_prefix() {
+        let start = Instant::now();
+        let mut select = TypeSelect::default();
+        select.extend("r", start);
+        select.extend("e", start + Duration::from_millis(120));
+        assert_eq!(select.prefix(), "re");
+    }
+
+    #[test]
+    fn a_pause_starts_a_new_prefix() {
+        let start = Instant::now();
+        let mut select = TypeSelect::default();
+        select.extend("r", start);
+        select.extend("e", start + TypeSelect::CONTINUATION_WINDOW);
+        assert_eq!(select.prefix(), "e", "the stale prefix is replaced");
+    }
+
+    #[test]
+    fn restart_replaces_and_pop_shortens_the_prefix() {
+        let now = Instant::now();
+        let mut select = TypeSelect::default();
+        select.extend("readme", now);
+        assert_eq!(select.pop(), "readm");
+        select.restart("b", now);
+        assert_eq!(select.prefix(), "b");
+        assert_eq!(select.pop(), "");
+        select.extend("x", now);
+        select.clear();
+        assert_eq!(select.prefix(), "");
     }
 }

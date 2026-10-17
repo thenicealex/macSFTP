@@ -1,9 +1,10 @@
 use std::collections::HashSet;
 
+use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::base::motion::{Transition, transition};
 use gpui_kit::{
     AppContext, Context, CursorStyle, DragMoveEvent, ElementId, Hsla, IntoElement, MouseButton,
-    MouseDownEvent, ParentElement, Pixels, SharedString, Styled, Window, div, prelude::*, px,
+    MouseDownEvent, ParentElement, Pixels, Role, SharedString, Styled, Window, div, prelude::*, px,
 };
 use macsftp_core::{
     EditPhase, EntryPath, TransferId, TransferJob, TransferPlanState, TransferState, TransferStore,
@@ -611,6 +612,16 @@ impl crate::workspace::Workspace {
             .count();
         let selected_edit = self.selected_edit_session(cx);
 
+        // One spoken summary for the whole bar: the dot is decorative, and the
+        // trailing counts would otherwise read as separate fragments.
+        let mut spoken = status_text.to_string();
+        if selected_count > 0 {
+            spoken.push_str(&format!(", {selected_count} selected"));
+        }
+        if let Some(message) = &self.status_message {
+            spoken.push_str(&format!(", {message}"));
+        }
+
         div()
             .flex()
             .flex_none()
@@ -623,6 +634,10 @@ impl crate::workspace::Workspace {
             .border_color(theme.colors.border)
             .text_size(px(11.0))
             .text_color(theme.colors.text_muted)
+            .id("status-bar")
+            .role(Role::Status)
+            .aria_label(spoken)
+            .test_support()
             .child(
                 div()
                     .flex()

@@ -1,8 +1,9 @@
 //! Derive the visible file-list index space from stored entries.
 //!
 //! Stored `TabState` listings stay complete and sorted; the UI and keyboard
-//! navigation map through these helpers so hiding dotfiles (and later
-//! type-to-filter) never mutates the underlying snapshot.
+//! navigation map through these helpers so hiding dotfiles, the explicit
+//! filter query, and type-select prefix matching never mutate the underlying
+//! snapshot.
 
 use macsftp_core::{LocalEntry, RemoteEntry};
 
@@ -14,6 +15,23 @@ pub(crate) fn is_dotfile(name: &str) -> bool {
 /// Case-insensitive basename substring match; empty query matches everything.
 pub(crate) fn name_matches(name: &str, query: &str) -> bool {
     query.is_empty() || name.to_lowercase().contains(&query.to_lowercase())
+}
+
+/// Case-insensitive `starts_with` used by type-select jumps.
+pub(crate) fn name_has_prefix(name: &str, prefix: &str) -> bool {
+    !prefix.is_empty() && name.to_lowercase().starts_with(&prefix.to_lowercase())
+}
+
+/// Visible index of the first name starting with `prefix`, scanning from
+/// `from` and wrapping to the top; `None` when nothing matches.
+pub(crate) fn first_prefix_match(names: &[&str], from: usize, prefix: &str) -> Option<usize> {
+    if names.is_empty() || prefix.is_empty() {
+        return None;
+    }
+    let start = from % names.len();
+    (0..names.len())
+        .map(|offset| (start + offset) % names.len())
+        .find(|&index| name_has_prefix(names[index], prefix))
 }
 
 /// Indices into `entries` that should appear in the local file list.
@@ -59,13 +77,44 @@ fn visible_indices<'a>(
 mod tests {
     use macsftp_core::{FileKind, LocalEntry, LocalPath, RemoteEntry, RemotePath};
 
-    use super::{is_dotfile, name_matches, visible_local_indices, visible_remote_indices};
+    use super::{
+        first_prefix_match, is_dotfile, name_has_prefix, name_matches, visible_local_indices,
+        visible_remote_indices,
+    };
 
     #[test]
     fn filter_query_case_insensitive_substring() {
         assert!(name_matches("ReadMe.TXT", "me.t"));
         assert!(!name_matches("ReadMe.TXT", "xyz"));
         assert!(name_matches("ReadMe.TXT", ""));
+    }
+
+    #[test]
+    fn prefix_matching_is_case_insensitive_and_needs_a_prefix() {
+        assert!(name_has_prefix("ReadMe.md", "read"));
+        assert!(name_has_prefix("readme.md", "R"));
+        assert!(!name_has_prefix("readme.md", "e"));
+        assert!(!name_has_prefix("readme.md", ""));
+    }
+
+    #[test]
+    fn first_prefix_match_scans_forward_and_wraps() {
+        let names = ["alpha", "beta", "brand", "gamma"];
+        assert_eq!(first_prefix_match(&names, 0, "b"), Some(1));
+        assert_eq!(
+            first_prefix_match(&names, 2, "b"),
+            Some(2),
+            "starts scanning at the current offset"
+        );
+        assert_eq!(
+            first_prefix_match(&names, 3, "a"),
+            Some(0),
+            "wraps back to the top"
+        );
+        assert_eq!(first_prefix_match(&names, 0, "BR"), Some(2));
+        assert_eq!(first_prefix_match(&names, 0, "zzz"), None);
+        assert_eq!(first_prefix_match(&[], 0, "a"), None);
+        assert_eq!(first_prefix_match(&names, 0, ""), None);
     }
 
     fn local(name: &str) -> LocalEntry {
