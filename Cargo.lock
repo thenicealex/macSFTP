@@ -4440,6 +4440,7 @@ dependencies = [
  "gpui-kit",
  "gpui-pre-apple",
  "macsftp-core",
+ "macsftp-native-menu",
  "macsftp-platform",
  "macsftp-sftp",
  "macsftp-storage",

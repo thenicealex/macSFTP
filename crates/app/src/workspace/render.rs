@@ -1,7 +1,7 @@
 use crate::workspace::TextInputTarget;
 use gpui_kit::{
-    AppContext, ClickEvent, Context, FontWeight, IntoElement, ParentElement, SharedString, Styled,
-    Window, WindowControlArea, div, prelude::*, px, uniform_list,
+    AppContext, Context, FontWeight, IntoElement, ParentElement, SharedString, Styled, Window,
+    WindowControlArea, div, prelude::*, px, uniform_list,
 };
 use macsftp_core::{ConnectionState, EntryPath, LocalPath, RemotePath};
 use macsftp_ui::{
@@ -988,6 +988,7 @@ impl crate::workspace::Workspace {
                                 }
                             };
                             let workspace = workspace.clone();
+                            let menu_workspace = workspace.clone();
                             Some(
                                 file_row(("file-row", visible_index), model, cx)
                                     .on_click(move |event, window, cx| {
@@ -1001,6 +1002,24 @@ impl crate::workspace::Workspace {
                                             );
                                         });
                                     })
+                                    .on_mouse_up(
+                                        gpui_kit::MouseButton::Right,
+                                        move |event, window, cx| {
+                                            // Consume the right click so the pane
+                                            // handler cannot open a second, blank-area
+                                            // menu for the same click.
+                                            cx.stop_propagation();
+                                            menu_workspace.update(cx, |workspace, cx| {
+                                                workspace.show_file_context_menu(
+                                                    side,
+                                                    Some(visible_index),
+                                                    event.position,
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        },
+                                    )
                                     .on_drag(
                                         drag_item,
                                         |value: &EntryPath, _position, _window, cx| {
@@ -1064,13 +1083,15 @@ impl crate::workspace::Workspace {
             } else {
                 "remote-file-pane"
             })
-            .on_click(
-                cx.listener(move |workspace, event: &ClickEvent, window, cx| {
-                    if event.is_right_click() {
-                        workspace.focus_pane(side, window, cx);
-                        workspace.open_context_menu(side, None, cx);
-                    }
-                }),
+            .on_mouse_up(
+                gpui_kit::MouseButton::Right,
+                cx.listener(
+                    move |workspace, event: &gpui_kit::MouseUpEvent, window, cx| {
+                        // Rows consume their own right clicks; anything that
+                        // reaches the pane is a blank-area menu.
+                        workspace.show_file_context_menu(side, None, event.position, window, cx);
+                    },
+                ),
             )
             .on_drop(
                 cx.listener(

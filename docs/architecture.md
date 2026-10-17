@@ -25,7 +25,7 @@ macSFTP 是使用 GPUI 和 `russh + russh-sftp` 构建的 macOS 原生 SFTP 客�
 ## 2. Workspace 边界
 
 ```text
-app -> ui, core, storage, sftp
+app -> ui, core, storage, sftp, native-menu
 ui -> core
 sftp -> core, storage
 storage -> core
@@ -36,6 +36,7 @@ test_support -> core
 - `core`：纯业务模型和状态机（tab、连接状态、command/event、传输、冲突、远程编辑、排序、错误码）。禁止依赖 GPUI、russh、Tokio runtime 或 macOS API。
 - `app`：GPUI 入口、窗口、Entity、Action、事件协调和 UI 状态。可以发送 runtime command 并消费 event，不能直接调用 russh 或 Keychain。
 - `ui`：主题和可复用 GPUI 组件。只接收展示模型，不拥有远端 session 或持久化状态。
+- `native-menu`：macOS AppKit 菜单呈现器（Base `NativeMenu` 模型 → NSMenu），只被 `ui` 的输入右键菜单和 `app` 的文件列表右键菜单调用，不持有 GPUI Entity、Window 借用或业务草稿。
 - `sftp`：Tokio runtime、russh adapter、物理连接池、浏览 actor、传输 planning/执行、host trust 和认证请求。不能持有 GPUI Context、Window 或 Entity。生产 API 只构造真实 SSH runtime；mock actor 和 mock 构造器必须受 `#[cfg(test)]` 限制，不能进入发布构建或公共 API。
 - `storage`：版本化 JSON、原子写入、跨实例锁、Profile/Keychain 协调和 migration。敏感值不能进入普通配置。
 - `platform`：macOS 与本地文件系统边界：应用路径、本地目录读取、编辑器打开、权限/mtime/symlink 和诊断文件。
@@ -309,6 +310,7 @@ App 和 UI 通过 workspace 的 `gpui-kit = "=0.7.3"`（gpui-pre snapshot）引�
 - `IconButton` / `TextButton` 使用 `gpui-base::Button`，保留 keyed focus、Enter/Space、Tab、无障碍 label 和禁用行为；macSFTP theme 拥有按钮尺寸、圆角、文字和焦点环，鼠标点击保留 pane/input 焦点；图标按钮保持冻结的 26×22px 尺寸，tooltip 使用项目 `Tooltip`。
 - Assets 只加载项目嵌入图标，未知资源返回 None，不回退到另一套控件资源。
 - 输入右键菜单使用 Base 的 `NativeMenu` 模型和编辑 action；`macsftp-native-menu` 只呈现 macOS AppKit 菜单，不持有输入 Entity 或业务草稿。NSView 在释放 GPUI Window 借用前被 retain，AppKit tracking loop 在 foreground task 中执行且不持有 GPUI update 借用；呈现前检查窗口/焦点，返回后只向仍存在且焦点未变的窗口派发 action，取消后刷新窗口；非 macOS 返回明确 Unsupported 错误。
+- 文件列表右键菜单同样走 `macsftp-native-menu`（`workspace/context_menu.rs` 构建纯数据菜单模型）：右键在 mouse-up 时先聚焦并选中指针下的行，再以指针位置弹出；菜单条目复用既有 workspace action（Open/Open for Editing、Upload、Download、Rename…、New Folder…、Delete…、Copy Path、Show in Finder、Refresh），暂时不可用的命令以禁用态呈现而不是隐藏，只有 side/kind 不适用的命令才不出现；菜单模型必须可在无窗口环境下单测。
 - 用户已授权 `macsftp-native-menu` 的 `src/macos.rs` 包含必要 unsafe：该 crate 默认 deny，其余 workspace crate 继续 inherit forbid。unsafe 边界检查递归扫描其 Rust 源文件，只允许规范路径 `src/macos.rs` 和唯一 macOS-gated module 例外，拒绝其他 unsafe 语法、lint 覆盖、外部 include/path 和符号链接模块；回归 fixture 覆盖嵌套路径、unsafe fn/impl/extern/attribute、注释与字面量。菜单调度层使用真实 GPUI 窗口更新验证关闭、焦点变更及重复取消，原生界面截图见 `docs/visual-evidence/gpui-base/README.md`。
 - 表单草稿仍由 Workspace 持有；`PlainInput` 只保留选区、撤销和 IME 编辑状态，Change 事件写回草稿，程序修改草稿时只在文本不同时同步控件；关闭 surface 时释放绑定，替换表单或冲突请求后旧控件事件必须被忽略。
 - Connect/Profile 表单的 Tab 使用 scoped action 跨普通和敏感字段移动实际焦点，普通字段的 Enter 通过 Base `PressEnter` 转发原有提交入口；端口、路径、名称及认证校验仍由原有业务入口统一执行，无效提交不能清空草稿。
