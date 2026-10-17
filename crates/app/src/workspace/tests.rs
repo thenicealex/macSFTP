@@ -8081,8 +8081,9 @@ fn regenerate_workspace_ux_evidence() {
     //
     // The capture must read the same on every run, so this folder has a fixed
     // path instead of a per-run temp directory. It is the test's own fixture:
-    // it refuses a folder holding anything it did not write (never deleting
-    // files it does not own) and removes its own entries when it is done.
+    // it only writes into an empty folder (creating it when missing and leaving
+    // it empty again), so it can neither overwrite nor delete an entry it did
+    // not create.
     const TYPE_SELECT_FIXTURE: &str = "/tmp/macsftp-type-select";
     const TYPE_SELECT_ENTRIES: [&str; 5] = [
         "alpha.txt",
@@ -8093,15 +8094,21 @@ fn regenerate_workspace_ux_evidence() {
     ];
     let type_select_fixture = std::path::PathBuf::from(TYPE_SELECT_FIXTURE);
     std::fs::create_dir_all(&type_select_fixture).expect("type-select fixture must be creatable");
-    for entry in std::fs::read_dir(&type_select_fixture).expect("fixture must be readable") {
-        let entry = entry.expect("fixture entries must be readable");
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        assert!(
-            TYPE_SELECT_ENTRIES.contains(&name.as_ref()),
-            "{TYPE_SELECT_FIXTURE} holds `{name}`, which this capture did not write; move it away"
-        );
-    }
+    let leftovers: Vec<String> = std::fs::read_dir(&type_select_fixture)
+        .expect("fixture must be readable")
+        .map(|entry| {
+            entry
+                .expect("fixture entries must be readable")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "{TYPE_SELECT_FIXTURE} is not empty ({leftovers:?}); the capture writes only into an \
+         empty folder and leaves it empty, so move its contents away first"
+    );
     for name in TYPE_SELECT_ENTRIES {
         let path = type_select_fixture.join(name);
         if name == "docs" {
@@ -8113,8 +8120,8 @@ fn regenerate_workspace_ux_evidence() {
     // The listing carries a "Last Modified" column at minute precision and the
     // entries are written fresh on every run, so their real times would change
     // the pixels from run to run and break the byte-identical rerun guarantee.
-    // Pin them to one instant (rendered in the machine's local time); the
-    // folder is included because writing the entries inside it bumps its time.
+    // Pin them to one instant (the column renders a UTC civil time); the folder
+    // is included because writing the entries inside it bumps its time.
     let fixed_mtime =
         std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_767_323_045); // 2026-01-02 03:04:05 UTC
     for name in TYPE_SELECT_ENTRIES {
