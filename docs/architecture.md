@@ -194,6 +194,7 @@ Profile 更新由 `ProfileStore` 协调：校验请求和 route → 写入或读
 - transfer drawer 默认位于底部，可以折叠，不能遮挡主文件列表；折叠后 status bar 仍须简要提示 active 或 failed transfer。
 - 空文件夹、加载和无匹配状态填满列表 viewport 后居中；首次未连接的远端 pane 居中显示连接入口及说明，最近连接列表保持靠上以便扫描，并用统一的 scrollbar 保证短窗口中仍可访问全部入口。
 - 调整 pane 或窗口尺寸时，路径栏、表头、滚动区域和空状态布局必须保持完整。
+- 路径栏按功能成组：导航（后退、前进、上级、刷新）、面包屑、文件操作（复制路径、隐藏文件、新建文件夹、删除）、传输（上传或下载）；组间用 1px 竖线分隔，图标命中区保持冻结的 26×22，窄 pane 下优先保证面包屑的末段（当前目录）可见。
 - 空状态只提供下一步操作（如 `Open Connection`、`Choose Local Folder`、`Retry`），不含长篇功能说明。
 - 文件列表、传输列表、tab、路径栏和状态栏保持紧凑；组件高度稳定，hover、loading、progress 不引发布局变化。
 

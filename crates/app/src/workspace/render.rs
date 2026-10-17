@@ -316,6 +316,18 @@ impl crate::workspace::Workspace {
         let can_upload = connected && local_selected > 0;
         let can_download = connected && remote_selected > 0;
 
+        // Rule between the path bar's functional clusters. The icon buttons keep
+        // their frozen 26x22 hit areas, so grouping is carried by the rule and
+        // the existing spacing rather than by resizing anything. The rule takes
+        // one pixel plus one gap, so the breadcrumb keeps its width.
+        let bar_separator = || {
+            div()
+                .flex_none()
+                .w(px(1.0))
+                .h(px(14.0))
+                .bg(theme.colors.border)
+        };
+
         let path_bar = div()
             .flex()
             .flex_none()
@@ -376,6 +388,7 @@ impl crate::workspace::Workspace {
                     workspace.refresh_focused_pane(window, cx);
                 })),
             )
+            .child(bar_separator())
             .child({
                 let text_color = if pane_focused {
                     theme.colors.text
@@ -454,7 +467,7 @@ impl crate::workspace::Workspace {
                                         div()
                                             .id(element_id)
                                             .flex_none()
-                                            .px_1()
+                                            .px(px(2.0))
                                             .rounded_sm()
                                             .text_size(px(12.0))
                                             .text_color(text_color)
@@ -502,6 +515,7 @@ impl crate::workspace::Workspace {
                         .child("Refreshing…"),
                 )
             })
+            .child(bar_separator())
             .child(
                 icon_button(
                     copy_id,
@@ -567,6 +581,7 @@ impl crate::workspace::Workspace {
                     workspace.request_delete_selection(window, cx);
                 })),
             )
+            .child(bar_separator())
             .when(side == PaneSide::Local, |bar| {
                 bar.child(
                     icon_button(
