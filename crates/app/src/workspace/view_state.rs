@@ -157,8 +157,6 @@ pub(crate) struct ModalInputsUi {
     pub(crate) delete_confirm: Option<crate::workspace::file_ops::DeleteConfirmState>,
     /// Phase 1 inline rename / new-folder editor.
     pub(crate) inline_edit: Option<crate::workspace::file_ops::InlineEditState>,
-    /// Phase 1 context menu for the focused file pane.
-    pub(crate) context_menu: Option<crate::workspace::file_ops::ContextMenuState>,
     /// Confirmation before opening very large remote files for edit.
     pub(crate) large_edit_confirm: Option<crate::workspace::remote_edit::PendingEdit>,
     pub(crate) keyboard_interactive: std::collections::HashMap<
@@ -175,7 +173,6 @@ impl ModalInputsUi {
             conflict_rename_error: None,
             delete_confirm: None,
             inline_edit: None,
-            context_menu: None,
             large_edit_confirm: None,
             keyboard_interactive: std::collections::HashMap::new(),
             about_open: false,

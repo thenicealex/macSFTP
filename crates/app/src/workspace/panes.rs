@@ -840,11 +840,9 @@ impl crate::workspace::Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Right clicks arrive as mouse-up events and open the native context
+        // menu (see `show_file_context_menu`); clicks here are left clicks.
         self.focus_pane(side, window, cx);
-        if event.is_right_click() {
-            self.open_context_menu(side, Some(index), cx);
-            return;
-        }
         if event.click_count() >= 2 {
             self.open_entry_at(side, index, window, cx);
         } else {

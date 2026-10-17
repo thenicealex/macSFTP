@@ -39,6 +39,7 @@ actions!(
         GoToPath,
         FilterPane,
         CopyPath,
+        ShowInFinder,
         DeleteSelection,
         RenameEntry,
         NewFolder,

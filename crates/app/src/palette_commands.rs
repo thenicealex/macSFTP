@@ -65,6 +65,13 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         when: PaletteWhen::HasActiveTab,
     },
     PaletteCommand {
+        id: "OpenSelectedEntry",
+        title: "Open",
+        keywords: &["enter", "open selected", "open file", "launch"],
+        keybinding: Some("↩"),
+        when: PaletteWhen::HasActiveTab,
+    },
+    PaletteCommand {
         id: "UploadSelection",
         title: "Upload",
         keywords: &["put", "send", "transfer", "upload selection"],
@@ -183,6 +190,13 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         title: "Copy Path",
         keywords: &["clipboard", "path"],
         keybinding: Some("⌘⇧C"),
+        when: PaletteWhen::HasActiveTab,
+    },
+    PaletteCommand {
+        id: "ShowInFinder",
+        title: "Show in Finder",
+        keywords: &["reveal", "finder", "locate", "show in finder"],
+        keybinding: None,
         when: PaletteWhen::HasActiveTab,
     },
     PaletteCommand {
@@ -332,6 +346,7 @@ mod tests {
             ("RefreshPane", Some("⌘R")),
             ("FocusLocalPane", Some("⌘1")),
             ("FocusRemotePane", Some("⌘2")),
+            ("OpenSelectedEntry", Some("↩")),
             ("UploadSelection", Some("⌘U")),
             ("DownloadSelection", Some("⌘D")),
             ("ShowTransferDrawer", Some("⌘J")),
@@ -348,6 +363,7 @@ mod tests {
             ("ParentDirectory", Some("⌘↑")),
             ("ToggleHiddenFiles", Some("⌘⇧.")),
             ("CopyPath", Some("⌘⇧C")),
+            ("ShowInFinder", None),
             ("ReconnectTab", Some("⌘⇧R")),
             ("OpenLogFolder", None),
             ("OpenCommandPalette", Some("⌘⇧P")),

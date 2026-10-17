@@ -23,8 +23,8 @@ use crate::app_actions::{
     OpenCommandPalette, OpenLogFolder, OpenProfiles, OpenSelectedEntry, OpenSettings, PageDown,
     PageUp, ParentDirectory, ReconnectTab, RefreshPane, RenameEntry, SelectAllEntries,
     SelectFirstEntry, SelectLastEntry, SelectNextEntry, SelectNextEntryExtend, SelectPrevEntry,
-    SelectPrevEntryExtend, ShowAbout, ShowTransferDrawer, TabSwitcherNext, TabSwitcherPrev,
-    ToggleHiddenFiles, UploadSelection, ZoomWindow,
+    SelectPrevEntryExtend, ShowAbout, ShowInFinder, ShowTransferDrawer, TabSwitcherNext,
+    TabSwitcherPrev, ToggleHiddenFiles, UploadSelection, ZoomWindow,
 };
 use crate::resources::ActiveResources;
 use crate::session_coordinator::SessionCoordinator;
@@ -1136,6 +1136,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|workspace, _: &CopyPath, _window, cx| {
                 workspace.copy_focused_path(cx);
             }))
+            .on_action(cx.listener(|workspace, _: &ShowInFinder, _window, cx| {
+                workspace.reveal_local_selection(cx);
+            }))
             .on_action(cx.listener(|workspace, _: &DeleteSelection, window, cx| {
                 workspace.request_delete_selection(window, cx);
             }))
@@ -1221,7 +1224,6 @@ impl Render for Workspace {
             .children(self.render_large_edit_modal(cx))
             .children(self.render_edit_conflict_modal(cx))
             .children(self.render_go_to_path_modal(cx))
-            .children(self.render_context_menu(cx))
             .children(self.render_about(cx))
             .children(self.render_tab_switcher(window, cx))
             .children(self.render_command_palette(window, cx))
@@ -1230,6 +1232,7 @@ impl Render for Workspace {
 
 mod command_palette;
 mod connect_form;
+mod context_menu;
 mod drawer_height;
 mod event_handling;
 mod file_ops;
