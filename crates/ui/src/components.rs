@@ -1,7 +1,7 @@
 use gpui_kit::{
     AnyView, App, ClickEvent, Context, ElementId, FontWeight, Hsla, IntoElement, ParentElement,
-    Render, RenderOnce, SharedString, Styled, Transformation, Window, div, prelude::*, px, radians,
-    relative,
+    Render, RenderOnce, SharedString, Styled, Transformation, Window, div, hsla, prelude::*, px,
+    radians, relative,
 };
 
 use gpui_kit::base::Button;
@@ -177,6 +177,7 @@ impl TextButton {
 impl RenderOnce for TextButton {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme().clone();
+        let filled = self.primary || self.danger;
         let (background, border_color, text_color) = if self.danger {
             (
                 theme.colors.error,
@@ -201,23 +202,26 @@ impl RenderOnce for TextButton {
             .text_color(text_color)
             .text_size(theme.sizes.button_text_size)
             .font_family(theme.fonts.ui_family.clone())
+            // A filled button keeps its fill on hover — AppKit prominent
+            // buttons do not tint until pressed — and darkens it while held, so
+            // the press reads without touching the label's contrast. A plain
+            // button steps to the shared hover and active fills instead.
             .hover(|style| {
-                style
-                    .border_color(background)
-                    .bg(if self.primary || self.danger {
-                        border_color
-                    } else {
-                        theme.colors.element_hover
-                    })
+                style.border_color(background).bg(if filled {
+                    background
+                } else {
+                    theme.colors.element_hover
+                })
             })
             .active(|style| {
-                style
-                    .border_color(background)
-                    .bg(if self.primary || self.danger {
-                        border_color
-                    } else {
-                        theme.colors.element_active
-                    })
+                if filled {
+                    let pressed = pressed_fill(background);
+                    style.border_color(pressed).bg(pressed)
+                } else {
+                    style
+                        .border_color(background)
+                        .bg(theme.colors.element_active)
+                }
             })
             .accessibility_label(self.label.clone())
             .when_some(self.on_click, |button, handler| {
@@ -231,6 +235,13 @@ impl RenderOnce for TextButton {
                     .child(self.label),
             )
     }
+}
+
+/// Fill for a filled button while it is held down. AppKit darkens such a button
+/// in place instead of tinting it, so the label keeps its contrast; a 15% black
+/// overlay reads the same on the accent and error fills.
+fn pressed_fill(fill: Hsla) -> Hsla {
+    fill.blend(hsla(0.0, 0.0, 0.0, 0.15))
 }
 
 // Keep the same keyed focus handle and mouse focus policy as Component 0.7.1.
@@ -422,6 +433,20 @@ mod tests {
     use super::*;
     use gpui_kit::{FocusHandle, MouseDownEvent, MouseUpEvent, TestAppContext, point, size};
     use std::{cell::Cell, rc::Rc};
+
+    #[test]
+    fn a_filled_button_darkens_while_pressed() {
+        let fill = hsla(0.6, 0.7, 0.55, 1.0);
+        let pressed = pressed_fill(fill);
+        assert!(
+            pressed.l < fill.l,
+            "the pressed fill is darker than the resting fill"
+        );
+        assert_eq!(
+            pressed.a, fill.a,
+            "pressing must not change the button's opacity"
+        );
+    }
 
     struct ButtonHarness {
         clicks: Rc<Cell<usize>>,
