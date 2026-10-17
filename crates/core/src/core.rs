@@ -43,8 +43,9 @@ impl Timestamp {
         Self(UNIX_EPOCH + Duration::from_secs(seconds))
     }
 
-    /// Build a `Timestamp` from a `SystemTime` (e.g. a file mtime). Times
-    /// before the Unix epoch collapse to the epoch rather than underflow.
+    /// Build a `Timestamp` from a `SystemTime` (e.g. a file mtime).
+    /// Sub-second truncation or serialization collapses times before the Unix
+    /// epoch to the epoch.
     pub fn from_system_time(time: SystemTime) -> Self {
         Self(time)
     }
@@ -2531,7 +2532,6 @@ pub struct TransferPlan {
 pub enum TransferPlanState {
     Queued,
     Planning,
-    Running,
     Completed,
     Cancelled,
     Failed { error: UserFacingError },
