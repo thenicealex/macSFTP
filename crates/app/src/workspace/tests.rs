@@ -499,6 +499,118 @@ fn shift_down_extends_selection_range(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn mouse_click_supports_cmd_toggle_and_shift_range(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    let (fixture, base) = temp_local_fixture("mouse-multiselect");
+    for name in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"] {
+        std::fs::write(fixture.join(name), b"x").expect("write file");
+    }
+
+    set_local_path_and_wait(&workspace, &mut cx, base);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        assert_eq!(workspace.entry_count(PaneSide::Local, cx), 5);
+
+        let make_click = |modifiers: gpui_kit::Modifiers| {
+            gpui_kit::ClickEvent::Mouse(gpui_kit::MouseClickEvent {
+                down: gpui_kit::MouseDownEvent {
+                    button: gpui_kit::MouseButton::Left,
+                    position: Default::default(),
+                    modifiers,
+                    click_count: 1,
+                    first_mouse: false,
+                },
+                up: gpui_kit::MouseUpEvent {
+                    button: gpui_kit::MouseButton::Left,
+                    position: Default::default(),
+                    modifiers,
+                    click_count: 1,
+                },
+            })
+        };
+
+        // Plain click on index 1 selects only index 1.
+        let plain_click = make_click(Default::default());
+        workspace.on_row_clicked(PaneSide::Local, 1, &plain_click, window, cx);
+        assert_eq!(
+            workspace
+                .active_tab()
+                .expect("tab")
+                .selection
+                .selected_paths
+                .len(),
+            1
+        );
+
+        // ⌘-click on index 3 adds index 3 to the selection (total 2).
+        let cmd_click = make_click(gpui_kit::Modifiers {
+            platform: true,
+            ..Default::default()
+        });
+        workspace.on_row_clicked(PaneSide::Local, 3, &cmd_click, window, cx);
+        assert_eq!(
+            workspace
+                .active_tab()
+                .expect("tab")
+                .selection
+                .selected_paths
+                .len(),
+            2,
+            "cmd-click adds a row to selection"
+        );
+
+        // ⌘-click on index 1 again deselects it (leaving only index 3).
+        workspace.on_row_clicked(PaneSide::Local, 1, &cmd_click, window, cx);
+        let selected = &workspace
+            .active_tab()
+            .expect("tab")
+            .selection
+            .selected_paths;
+        assert_eq!(
+            selected.len(),
+            1,
+            "cmd-click on selected row toggles it off"
+        );
+        assert_eq!(
+            selected[0],
+            workspace
+                .entry_path_at(PaneSide::Local, 3, cx)
+                .expect("path")
+        );
+
+        // Plain click on index 0 resets selection to only index 0.
+        workspace.on_row_clicked(PaneSide::Local, 0, &plain_click, window, cx);
+        assert_eq!(
+            workspace
+                .active_tab()
+                .expect("tab")
+                .selection
+                .selected_paths
+                .len(),
+            1
+        );
+
+        // Shift-click on index 3 extends range from 0 to 3 (4 items).
+        let shift_click = make_click(gpui_kit::Modifiers {
+            shift: true,
+            ..Default::default()
+        });
+        workspace.on_row_clicked(PaneSide::Local, 3, &shift_click, window, cx);
+        assert_eq!(
+            workspace
+                .active_tab()
+                .expect("tab")
+                .selection
+                .selected_paths
+                .len(),
+            4,
+            "shift-click extends range [0, 3]"
+        );
+    });
+
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+#[gpui_kit::test]
 fn shift_selection_replaces_filtered_out_anchor(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, _window, cx| {

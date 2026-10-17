@@ -936,6 +936,26 @@ impl crate::workspace::Workspace {
             cx.notify();
         }
     }
+    pub(crate) fn toggle_selection_at(
+        &mut self,
+        side: PaneSide,
+        visible_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = self.entry_path_at(side, visible_index, cx) else {
+            return;
+        };
+        self.selection_anchor = Some(path.clone());
+        if let Some(tab) = self.active_tab_mut() {
+            if let Some(position) = tab.selection.selected_paths.iter().position(|p| p == &path) {
+                tab.selection.selected_paths.remove(position);
+            } else {
+                tab.selection.selected_paths.push(path);
+            }
+        }
+        cx.notify();
+    }
+
     pub(crate) fn on_row_clicked(
         &mut self,
         side: PaneSide,
@@ -950,7 +970,14 @@ impl crate::workspace::Workspace {
         if event.click_count() >= 2 {
             self.open_entry_at(side, index, window, cx);
         } else {
-            self.select_index(side, index, cx);
+            let modifiers = event.modifiers();
+            if modifiers.shift {
+                self.extend_selection_to(side, index, cx);
+            } else if modifiers.platform || modifiers.secondary() {
+                self.toggle_selection_at(side, index, cx);
+            } else {
+                self.select_index(side, index, cx);
+            }
         }
     }
 
