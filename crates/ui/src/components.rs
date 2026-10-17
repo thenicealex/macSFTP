@@ -435,7 +435,7 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     #[test]
-    fn a_filled_button_darkens_while_pressed() {
+    fn pressed_fill_darkens_the_fill() {
         let fill = hsla(0.6, 0.7, 0.55, 1.0);
         let pressed = pressed_fill(fill);
         assert!(
