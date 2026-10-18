@@ -365,7 +365,10 @@ impl crate::workspace::Workspace {
     pub(crate) fn toggle_hidden_files(&mut self, cx: &mut Context<Self>) {
         let next = !cx.resources().config.config().show_hidden_files;
         match cx.resources_mut().config.set_show_hidden_files(next) {
-            Ok(()) => self.config_error = None,
+            Ok(()) => {
+                self.config_error = None;
+                cx.refresh_windows();
+            }
             Err(error) => {
                 warn!(error = %error, "could not save show_hidden_files");
                 self.config_error =

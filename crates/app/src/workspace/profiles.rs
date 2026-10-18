@@ -14,11 +14,12 @@ use crate::resources::ActiveResources;
 use crate::workspace::WorkspaceSurface;
 use crate::workspace::helpers::expand_home;
 
-/// Settings sidebar section (General appearance vs Profiles management).
+/// Settings sidebar section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum SettingsSection {
     #[default]
     General,
+    Editor,
     Profiles,
 }
 
