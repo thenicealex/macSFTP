@@ -321,11 +321,15 @@ impl DiffTool {
 
     /// Launch the diff tool comparing `local_path` and `remote_snapshot_path`.
     /// Uses `spawn()` ONLY (NEVER `output()`, as `opendiff` blocks the GUI).
+    ///
+    /// The child is reaped on a detached thread: `opendiff` stays alive for as
+    /// long as its FileMerge window is open, and dropping a `Child` without
+    /// waiting would leave a zombie for the rest of the app's lifetime.
     pub fn launch(
         &self,
         local_path: &std::path::Path,
         remote_path: &std::path::Path,
-    ) -> std::io::Result<std::process::Child> {
+    ) -> std::io::Result<()> {
         let mut command = match self {
             Self::FileMerge(bin) => {
                 let mut cmd = std::process::Command::new(bin);
@@ -338,7 +342,37 @@ impl DiffTool {
                 cmd
             }
         };
-        command.spawn()
+        // Start the reaper first: if the thread cannot be created, the child
+        // has not been spawned yet and nothing leaks.
+        let (child_tx, child_rx) = std::sync::mpsc::channel::<std::process::Child>();
+        std::thread::Builder::new()
+            .name("macsftp-diff-reaper".into())
+            .spawn(move || {
+                while let Ok(mut child) = child_rx.recv() {
+                    match child.wait() {
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!(
+                                error = %error,
+                                "diff tool process could not be reaped"
+                            );
+                        }
+                    }
+                }
+            })
+            .map_err(std::io::Error::other)?;
+        let child = command.spawn()?;
+        if let Err(error) = child_tx.send(child) {
+            let mut child = error.0;
+            if let Err(kill_error) = child.kill() {
+                tracing::warn!(error = %kill_error, "could not kill the diff tool process");
+            }
+            if let Err(wait_error) = child.wait() {
+                tracing::warn!(error = %wait_error, "could not reap the diff tool process");
+            }
+            return Err(std::io::Error::other("diff tool reaper is unavailable"));
+        }
+        Ok(())
     }
 }
 
@@ -398,12 +432,24 @@ pub fn parse_edit_event_path(
     watch_root: &std::path::Path,
     path: &std::path::Path,
 ) -> Option<(macsftp_core::EditSessionId, String)> {
+    parse_edit_event_path_under(watch_root, watch_root, path)
+}
+
+/// Same as [`parse_edit_event_path`], but strips `watched_root` (which may be
+/// canonicalized) and reports the path under `report_root` (the configured
+/// root). FSEvents resolves symlinks, so the reported path must be rebuilt
+/// from the configured root or it will not match an edit session's path.
+fn parse_edit_event_path_under(
+    report_root: &std::path::Path,
+    watched_root: &std::path::Path,
+    path: &std::path::Path,
+) -> Option<(macsftp_core::EditSessionId, String)> {
     let relative = path
-        .strip_prefix(watch_root)
+        .strip_prefix(watched_root)
         .ok()
         .map(|p| p.to_path_buf())
         .or_else(|| {
-            let canon_root = watch_root.canonicalize().ok()?;
+            let canon_root = watched_root.canonicalize().ok()?;
             let canon_path = path.canonicalize().ok()?;
             canon_path
                 .strip_prefix(canon_root)
@@ -420,15 +466,25 @@ pub fn parse_edit_event_path(
         return None;
     }
     let session_num: u64 = session_component.parse().ok()?;
+    // Rebuild the path from the configured root instead of returning the
+    // watcher's path: FSEvents reports resolved paths (`/private/var/...`),
+    // while edit sessions store paths built from `edits_dir`. Returning the
+    // resolved form would make every equality check against a session path
+    // fail, silently disabling dirty detection.
     Some((
         macsftp_core::EditSessionId(session_num),
-        path.to_string_lossy().to_string(),
+        report_root.join(&relative).to_string_lossy().to_string(),
     ))
 }
 
 struct DebounceState {
     pending: std::collections::HashMap<macsftp_core::EditSessionId, (String, Instant)>,
     stopped: bool,
+    /// Bumped by the notify callback. The worker compares it after emitting to
+    /// detect an insert that happened while it was not holding the lock; a
+    /// plain `notify_one` before `wait` starts would otherwise be lost and the
+    /// save would stay undelivered until some unrelated event arrived.
+    generation: u64,
 }
 
 /// Process-wide watcher on `<edits_dir>/<edit_run_id>/` monitoring for
@@ -457,32 +513,47 @@ impl EditWatcher {
     ) -> std::io::Result<Self> {
         // Ensure directory exists at startup before watching.
         std::fs::create_dir_all(&watch_root)?;
-        let canonical_root = watch_root
-            .canonicalize()
-            .unwrap_or_else(|_| watch_root.clone());
+        let canonical_root = match watch_root.canonicalize() {
+            Ok(root) => root,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "could not canonicalize the edit watch root; events may not match session paths"
+                );
+                watch_root.clone()
+            }
+        };
 
         let state = Arc::new((
             Mutex::new(DebounceState {
                 pending: std::collections::HashMap::new(),
                 stopped: false,
+                generation: 0,
             }),
             Condvar::new(),
         ));
 
+        let report_root = watch_root.clone();
         let watch_root_clone = canonical_root.clone();
         let state_clone = Arc::clone(&state);
         let mut watcher = notify::RecommendedWatcher::new(
             move |res: Result<notify::Event, notify::Error>| {
-                if let Ok(event) = res {
-                    for path in event.paths {
-                        if let Some((session_id, path_str)) =
-                            parse_edit_event_path(&watch_root_clone, &path)
-                            && let Ok(mut guard) = state_clone.0.lock()
-                        {
-                            let deadline = Instant::now() + debounce_duration;
-                            guard.pending.insert(session_id, (path_str, deadline));
-                            state_clone.1.notify_one();
-                        }
+                let event = match res {
+                    Ok(event) => event,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "edit watcher reported an error");
+                        return;
+                    }
+                };
+                for path in event.paths {
+                    if let Some((session_id, path_str)) =
+                        parse_edit_event_path_under(&report_root, &watch_root_clone, &path)
+                        && let Ok(mut guard) = state_clone.0.lock()
+                    {
+                        let deadline = Instant::now() + debounce_duration;
+                        guard.pending.insert(session_id, (path_str, deadline));
+                        guard.generation = guard.generation.wrapping_add(1);
+                        state_clone.1.notify_one();
                     }
                 }
             },
@@ -501,7 +572,7 @@ impl EditWatcher {
             .spawn(move || {
                 loop {
                     let mut to_emit = Vec::new();
-                    let wait_opt = {
+                    let (wait_opt, observed_generation) = {
                         let mut guard = match state_worker.0.lock() {
                             Ok(g) => g,
                             Err(_) => break,
@@ -524,11 +595,12 @@ impl EditWatcher {
                         }
 
                         let earliest = guard.pending.values().map(|(_, d)| *d).min();
-                        match earliest {
+                        let wait_opt = match earliest {
                             None => None,
                             Some(d) if d > now => Some(d - now),
                             Some(_) => Some(Duration::from_millis(10)),
-                        }
+                        };
+                        (wait_opt, guard.generation)
                     };
 
                     for (id, path) in to_emit {
@@ -541,6 +613,11 @@ impl EditWatcher {
                     };
                     if guard.stopped {
                         break;
+                    }
+                    // A save may have arrived after `wait_opt` was computed;
+                    // recompute instead of sleeping on the stale decision.
+                    if guard.generation != observed_generation {
+                        continue;
                     }
                     match wait_opt {
                         None => {
@@ -954,12 +1031,15 @@ mod tests {
             Ok((id, p)) => (id, p),
             Err(e) => panic!("failed to receive event: {e}"),
         };
-        let canonical_target = target_file
-            .canonicalize()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| target_file.to_string_lossy().to_string());
         assert_eq!(session_id, macsftp_core::EditSessionId(7));
-        assert_eq!(path, canonical_target);
+        // The watcher reports paths built from its configured root, not the
+        // FSEvents-resolved path, so they compare equal to edit session paths.
+        let expected_path = run_dir
+            .join("7")
+            .join("doc.txt")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(path, expected_path);
 
         drop(watcher);
         if let Err(e) = std::fs::remove_dir_all(&dir) {
