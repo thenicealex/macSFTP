@@ -10,6 +10,13 @@ use crate::runtime::ProgressThrottle;
 pub const DEFAULT_WINDOW_CAPACITY: usize = 16;
 pub const DEFAULT_CHUNK_SIZE: u32 = 256 * 1024;
 
+/// Bytes to request for a chunk of `remaining` bytes. Clamping has to happen in
+/// `u64` before the cast: a `(remaining as u32).min(chunk)` would wrap past
+/// 4 GiB and truncate the transfer.
+fn next_chunk_len(remaining: u64, chunk_size: u32) -> u32 {
+    remaining.min(u64::from(chunk_size)) as u32
+}
+
 fn cancelled_transfer_error() -> UserFacingError {
     UserFacingError::new(
         ErrorCode::Cancelled,
@@ -97,7 +104,7 @@ pub(crate) async fn open_raw_sftp_session(
             )
         })?;
         if extension.max_read_len > 0 {
-            chunk_size = (extension.max_read_len as u32).min(DEFAULT_CHUNK_SIZE);
+            chunk_size = extension.max_read_len.min(DEFAULT_CHUNK_SIZE as u64) as u32;
         }
         raw.set_limits(russh_sftp::client::rawsession::Limits::from(extension));
     }
@@ -159,7 +166,10 @@ impl PipelinedDownloadReader {
     }
 
     pub fn with_chunk_size(mut self, chunk_size: u32) -> Self {
-        self.chunk_size = chunk_size.max(1024);
+        // Keep the negotiated value verbatim: servers that advertise a limit
+        // below 1 KiB reject any read above it, so flooring here would make
+        // every download from such a server fail.
+        self.chunk_size = chunk_size.max(1);
         self
     }
 
@@ -193,6 +203,11 @@ impl PipelinedDownloadReader {
         }
 
         let mut next_request_offset: u64 = 0;
+        // Ranges the server answered with fewer bytes than requested. They are
+        // retried before the cursor moves on so a short read cannot leave a
+        // hole in the file.
+        let mut retry_ranges: std::collections::VecDeque<(u64, u32)> =
+            std::collections::VecDeque::new();
         let mut eof_reached = false;
         let mut in_flight = tokio::task::JoinSet::new();
         let mut bytes_done: u64 = 0;
@@ -204,22 +219,30 @@ impl PipelinedDownloadReader {
                 return Err(cancelled_transfer_error());
             }
 
-            while in_flight.len() < self.window_capacity && !eof_reached {
-                let offset = next_request_offset;
-                let read_len = if let Some(total) = self.bytes_total {
-                    if offset >= total {
-                        eof_reached = true;
+            while in_flight.len() < self.window_capacity {
+                let (offset, read_len) = if let Some((offset, len)) = retry_ranges.pop_front() {
+                    // Retried tails stay eligible even after an empty read
+                    // marked EOF: with an unknown file size, EOF can arrive
+                    // while a short read is still missing bytes.
+                    (offset, len)
+                } else if eof_reached {
+                    break;
+                } else if let Some(total) = self.bytes_total {
+                    if next_request_offset >= total {
                         break;
                     }
-                    ((total - offset) as u32).min(self.chunk_size)
+                    // Clamp in u64 space: `(total - offset) as u32` wraps once
+                    // more than 4 GiB remain and would end the transfer early.
+                    let remaining = total - next_request_offset;
+                    let len = next_chunk_len(remaining, self.chunk_size);
+                    let offset = next_request_offset;
+                    next_request_offset += u64::from(len);
+                    (offset, len)
                 } else {
-                    self.chunk_size
+                    let offset = next_request_offset;
+                    next_request_offset += u64::from(self.chunk_size);
+                    (offset, self.chunk_size)
                 };
-
-                if read_len == 0 {
-                    eof_reached = true;
-                    break;
-                }
 
                 let raw = self.raw.clone();
                 let handle = self.file_handle.clone();
@@ -244,8 +267,6 @@ impl PipelinedDownloadReader {
                         },
                     }
                 });
-
-                next_request_offset += read_len as u64;
             }
 
             if in_flight.is_empty() {
@@ -284,8 +305,34 @@ impl PipelinedDownloadReader {
                 }
             };
 
-            if data.is_empty() || data.len() < chunk.requested_len as usize {
-                eof_reached = true;
+            let received = data.len() as u64;
+            let requested = u64::from(chunk.requested_len);
+            if received == 0 {
+                match self.bytes_total {
+                    None => eof_reached = true,
+                    Some(total) if chunk.offset < total => {
+                        in_flight.abort_all();
+                        return Err(transfer_error(
+                            ErrorCode::Unknown,
+                            "Transfer Incomplete",
+                            "The server stopped sending data before the file was complete.",
+                            format!("Expected {total} bytes, received {bytes_done} bytes"),
+                        ));
+                    }
+                    Some(_) => {}
+                }
+            } else if received < requested {
+                // SFTP permits a short read away from EOF. Only an empty
+                // response ends an unknown-length file; otherwise re-request
+                // the missing tail so nothing is skipped.
+                let received_end = chunk.offset + received;
+                let requested_end = chunk.offset + requested;
+                let missing_end = self
+                    .bytes_total
+                    .map_or(requested_end, |total| requested_end.min(total));
+                if received_end < missing_end {
+                    retry_ranges.push_back((received_end, (missing_end - received_end) as u32));
+                }
             }
 
             if !data.is_empty() {
@@ -315,7 +362,7 @@ impl PipelinedDownloadReader {
                     }
                 }
 
-                bytes_done += data.len() as u64;
+                bytes_done += received;
                 if throttle.should_send(std::time::Instant::now()) {
                     emit_transfer_progress(event_tx, transfer_id, bytes_done, self.bytes_total)
                         .await?;
@@ -359,6 +406,17 @@ mod tests {
     struct MockSftpHandler {
         file_content: Vec<u8>,
         fail_read: bool,
+        /// Cap on bytes returned per read, regardless of the requested length.
+        max_read: Option<usize>,
+        /// Delay the read at offset 0 so later chunks complete first.
+        delay_first_read: bool,
+    }
+
+    #[derive(Default)]
+    struct MockOptions {
+        fail_read: bool,
+        max_read: Option<usize>,
+        delay_first_read: bool,
     }
 
     #[derive(Debug)]
@@ -427,22 +485,44 @@ mod tests {
             if self.fail_read {
                 return Err(MockError::Failed);
             }
+            if self.delay_first_read && offset == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
             let offset = offset as usize;
             if offset >= self.file_content.len() {
                 return Err(MockError::Eof);
             }
-            let end = (offset + len as usize).min(self.file_content.len());
+            let mut end = (offset + len as usize).min(self.file_content.len());
+            if let Some(max_read) = self.max_read {
+                end = end.min(offset + max_read);
+            }
             let data = self.file_content[offset..end].to_vec();
             Ok(Data { id, data })
         }
     }
 
     async fn spawn_mock_raw_session(content: Vec<u8>, fail_read: bool) -> Arc<RawSftpSession> {
+        spawn_mock_raw_session_with(
+            content,
+            MockOptions {
+                fail_read,
+                ..MockOptions::default()
+            },
+        )
+        .await
+    }
+
+    async fn spawn_mock_raw_session_with(
+        content: Vec<u8>,
+        options: MockOptions,
+    ) -> Arc<RawSftpSession> {
         let (client_io, server_io) = tokio::io::duplex(64 * 1024);
         tokio::spawn(async move {
             let handler = MockSftpHandler {
                 file_content: content,
-                fail_read,
+                fail_read: options.fail_read,
+                max_read: options.max_read,
+                delay_first_read: options.delay_first_read,
             };
             server::run(server_io, handler).await;
         });
@@ -636,5 +716,122 @@ mod tests {
             }
             Ok(_) => panic!("server error must return an error"),
         }
+    }
+
+    /// SFTP permits a short read away from EOF. The missing tail must be
+    /// re-requested instead of being treated as the end of the file.
+    #[tokio::test]
+    async fn test_pipelined_download_refetches_short_reads() {
+        let payload: Vec<u8> = (0..4096).map(|i| (i % 241) as u8).collect();
+        let raw = spawn_mock_raw_session_with(
+            payload.clone(),
+            MockOptions {
+                max_read: Some(300),
+                ..MockOptions::default()
+            },
+        )
+        .await;
+        let (event_tx, _event_rx) = flume::bounded(100);
+        let cancel = CancellationToken::new();
+        let mut destination = Cursor::new(vec![0u8; payload.len()]);
+
+        let reader = PipelinedDownloadReader::new(raw, "mock-handle", Some(payload.len() as u64))
+            .with_chunk_size(1024)
+            .with_window_capacity(4);
+
+        let transferred = reader
+            .download_to(&mut destination, TransferId(11), &event_tx, &cancel)
+            .await
+            .expect("short reads must be retried until the file is complete");
+
+        assert_eq!(transferred, payload.len() as u64);
+        assert_eq!(
+            destination.into_inner(),
+            payload,
+            "retried ranges must fill the same offsets"
+        );
+    }
+
+    /// With an unknown file size an empty read marks EOF, but a short read
+    /// that arrived earlier may still have missing bytes. Its retry must run
+    /// even after EOF was observed, or the file is silently truncated.
+    #[tokio::test]
+    async fn test_pipelined_download_unknown_size_retries_after_eof() {
+        let payload: Vec<u8> = (0..4096).map(|i| (i % 233) as u8).collect();
+        let raw = spawn_mock_raw_session_with(
+            payload.clone(),
+            MockOptions {
+                max_read: Some(300),
+                ..MockOptions::default()
+            },
+        )
+        .await;
+        let (event_tx, _event_rx) = flume::bounded(200);
+        let cancel = CancellationToken::new();
+        let mut destination = Cursor::new(vec![0u8; payload.len()]);
+
+        let reader = PipelinedDownloadReader::new(raw, "mock-handle", None)
+            .with_chunk_size(1024)
+            .with_window_capacity(16);
+
+        let transferred = reader
+            .download_to(&mut destination, TransferId(13), &event_tx, &cancel)
+            .await
+            .expect("unknown-length download must retry short reads after EOF");
+
+        assert_eq!(transferred, payload.len() as u64);
+        assert_eq!(
+            destination.into_inner(),
+            payload,
+            "every byte before EOF must be present"
+        );
+    }
+
+    /// Responses may arrive in any order; each one carries its own offset, so
+    /// a slow first read must not shift later chunks.
+    #[tokio::test]
+    async fn test_pipelined_download_out_of_order_completion() {
+        let payload: Vec<u8> = (0..8192).map(|i| (i % 197) as u8).collect();
+        let raw = spawn_mock_raw_session_with(
+            payload.clone(),
+            MockOptions {
+                delay_first_read: true,
+                ..MockOptions::default()
+            },
+        )
+        .await;
+        let (event_tx, _event_rx) = flume::bounded(100);
+        let cancel = CancellationToken::new();
+        let mut destination = Cursor::new(vec![0u8; payload.len()]);
+
+        let reader = PipelinedDownloadReader::new(raw, "mock-handle", Some(payload.len() as u64))
+            .with_chunk_size(1024)
+            .with_window_capacity(4);
+
+        let transferred = reader
+            .download_to(&mut destination, TransferId(12), &event_tx, &cancel)
+            .await
+            .expect("out-of-order completion must still write every offset");
+
+        assert_eq!(transferred, payload.len() as u64);
+        assert_eq!(
+            destination.into_inner(),
+            payload,
+            "out-of-order chunks must be written at their own offsets"
+        );
+    }
+
+    /// Regression guard for the >4 GiB arithmetic: clamping the remaining
+    /// length after casting to `u32` wraps and ends large transfers early.
+    #[test]
+    fn next_chunk_len_does_not_wrap_past_four_gib() {
+        let chunk = DEFAULT_CHUNK_SIZE;
+        let four_gib = 4 * 1024 * 1024 * 1024_u64;
+
+        assert_eq!(next_chunk_len(four_gib, chunk), chunk);
+        assert_eq!(next_chunk_len(four_gib + 17, chunk), chunk);
+        assert_eq!(next_chunk_len(8 * 1024 * 1024 * 1024, chunk), chunk);
+        assert_eq!(next_chunk_len(1234, chunk), 1234);
+        assert_eq!(next_chunk_len(0, chunk), 0);
     }
 }

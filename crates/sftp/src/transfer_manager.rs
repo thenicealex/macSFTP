@@ -1,11 +1,11 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, Weak};
 
 use macsftp_core::{
     AppEvent, ConflictDecision, ConflictPolicy, ConflictRequestId, ConnectionKey, ErrorCode,
-    TransferFailure, TransferId, TransferJob, TransferPlanId, UserFacingError,
+    TransferDirection, TransferFailure, TransferId, TransferJob, TransferPlanId, UserFacingError,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -67,6 +67,13 @@ pub(crate) struct TransferManager {
     pending: VecDeque<QueuedTransfer>,
     running: HashMap<TransferId, RunningTransfer>,
     running_per_plan: HashMap<TransferPlanId, usize>,
+    /// First job a planner emitted for a plan. For folder transfers this is the
+    /// directory job that removes and recreates the destination, so it must
+    /// finish before any child of that plan starts.
+    plan_root_jobs: HashMap<TransferPlanId, TransferId>,
+    /// Plans whose non-root job has started at least once. A retried root must
+    /// not clear the destination again after children wrote into it.
+    plan_children_started: HashSet<TransferPlanId>,
     retry_routes: HashMap<TransferId, RetryRoute>,
     plan_policies: Arc<Mutex<HashMap<TransferPlanId, ConflictPolicy>>>,
     conflict_waiters: Arc<Mutex<HashMap<ConflictRequestId, ConflictWaiter>>>,
@@ -85,6 +92,8 @@ impl TransferManager {
             pending: VecDeque::new(),
             running: HashMap::new(),
             running_per_plan: HashMap::new(),
+            plan_root_jobs: HashMap::new(),
+            plan_children_started: HashSet::new(),
             retry_routes: HashMap::new(),
             plan_policies: Arc::new(Mutex::new(HashMap::new())),
             conflict_waiters: Arc::new(Mutex::new(HashMap::new())),
@@ -123,7 +132,7 @@ impl TransferManager {
                 connection,
                 plan_id,
                 jobs,
-            } => self.enqueue(connection, plan_id, jobs),
+            } => self.enqueue(connection, plan_id, jobs, true),
             TransferManagerRequest::Cancel { transfer_id } => {
                 if let Some(position) = self
                     .pending
@@ -153,7 +162,7 @@ impl TransferManager {
                         .filter(|connection| !connection.connection_lost.is_cancelled())
                         .or_else(|| self.connection_manager.connected(&route.connection_key));
                     if let Some(connection) = connection {
-                        self.enqueue(connection, route.plan_id, vec![route.job]);
+                        self.enqueue(connection, route.plan_id, vec![route.job], false);
                     } else {
                         self.retry_routes.insert(transfer_id, route);
                         let error = UserFacingError::new(
@@ -194,6 +203,7 @@ impl TransferManager {
         connection: Arc<SharedConnection>,
         plan_id: TransferPlanId,
         jobs: Vec<TransferJob>,
+        record_root: bool,
     ) {
         if let Some(job) = jobs.first()
             && let Ok(mut policies) = self.plan_policies.lock()
@@ -201,6 +211,11 @@ impl TransferManager {
             policies
                 .entry(plan_id)
                 .or_insert_with(|| job.conflict_policy.clone());
+        }
+        // A retried single job must never be mistaken for the plan root: the
+        // root mapping survives the plan's lifetime for exactly this reason.
+        if record_root && let Some(root_job) = jobs.first() {
+            self.plan_root_jobs.entry(plan_id).or_insert(root_job.id);
         }
         self.pending
             .extend(jobs.into_iter().map(|job| QueuedTransfer {
@@ -244,20 +259,78 @@ impl TransferManager {
         {
             policies.remove(&plan_id);
         }
+        if !has_pending && !has_running && !has_retry {
+            self.plan_root_jobs.remove(&plan_id);
+            self.plan_children_started.remove(&plan_id);
+        }
+    }
+
+    /// Whether `queued` may start now. For downloads, the first job of a plan
+    /// (the folder job) removes the destination tree and must run alone before
+    /// any child. Upload folder jobs only create directories, so their plans
+    /// keep normal intra-plan concurrency.
+    fn is_eligible(&self, queued: &QueuedTransfer) -> bool {
+        let running = self
+            .running_per_plan
+            .get(&queued.plan_id)
+            .copied()
+            .unwrap_or(0);
+        if running >= MAX_CONCURRENT_PER_PLAN {
+            return false;
+        }
+        if queued.job.direction != TransferDirection::Download {
+            return true;
+        }
+        let Some(root_id) = self.plan_root_jobs.get(&queued.plan_id) else {
+            return running == 0;
+        };
+        if queued.job.id == *root_id {
+            return running == 0;
+        }
+        let root_pending = self
+            .pending
+            .iter()
+            .any(|other| other.plan_id == queued.plan_id && other.job.id == *root_id);
+        !root_pending && !self.running.contains_key(root_id)
+    }
+
+    /// Whether this job may clear its plan's destination before transferring.
+    /// Only the plan root may, and only before any child of that plan started:
+    /// a retried root must not delete output that already completed. Calling
+    /// this for a non-root job records that the plan's tree is now in use.
+    fn take_destination_clear_permission(
+        &mut self,
+        plan_id: TransferPlanId,
+        transfer_id: TransferId,
+    ) -> bool {
+        let is_plan_root = self
+            .plan_root_jobs
+            .get(&plan_id)
+            .is_some_and(|root_id| *root_id == transfer_id);
+        let may_clear = is_plan_root && !self.plan_children_started.contains(&plan_id);
+        if !is_plan_root {
+            self.plan_children_started.insert(plan_id);
+        }
+        may_clear
     }
 
     fn next_queued_position(&self) -> Option<usize> {
+        // Two phases keep planning fair: prefer a plan with nothing running,
+        // then fill remaining slots up to the per-plan cap.
         self.pending
             .iter()
-            .position(|queued| !self.running_per_plan.contains_key(&queued.plan_id))
+            .position(|queued| {
+                self.running_per_plan
+                    .get(&queued.plan_id)
+                    .copied()
+                    .unwrap_or(0)
+                    == 0
+                    && self.is_eligible(queued)
+            })
             .or_else(|| {
-                self.pending.iter().position(|queued| {
-                    self.running_per_plan
-                        .get(&queued.plan_id)
-                        .copied()
-                        .unwrap_or(0)
-                        < MAX_CONCURRENT_PER_PLAN
-                })
+                self.pending
+                    .iter()
+                    .position(|queued| self.is_eligible(queued))
             })
     }
 
@@ -312,6 +385,8 @@ impl TransferManager {
                 };
 
             let transfer_id = job.id;
+            let may_clear_destination =
+                self.take_destination_clear_permission(queued.plan_id, transfer_id);
             let cancel = CancellationToken::new();
             self.running.insert(
                 transfer_id,
@@ -343,6 +418,7 @@ impl TransferManager {
                     cancel,
                     conflict_context,
                     connection_key,
+                    may_clear_destination,
                 )
                 .await;
                 connection.active_channels.fetch_sub(1, Ordering::Relaxed);
@@ -459,33 +535,128 @@ mod tests {
         let plan_1 = TransferPlanId(1);
         let plan_2 = TransferPlanId(2);
 
-        // Enqueue jobs for plan 1 (jobs 1..4)
-        for i in 1..=4 {
-            manager.enqueue(
-                connection.clone(),
-                plan_1,
-                vec![dummy_job(i, TransferDirection::Upload)],
-            );
-        }
-        // Enqueue a job for plan 2 (job 5)
+        // Plans are enqueued as a whole, root job first.
+        manager.enqueue(
+            connection.clone(),
+            plan_1,
+            (1..=4)
+                .map(|id| dummy_job(id, TransferDirection::Upload))
+                .collect(),
+            true,
+        );
         manager.enqueue(
             connection.clone(),
             plan_2,
             vec![dummy_job(5, TransferDirection::Upload)],
+            true,
         );
 
         // Case A: Neither plan is running. Queue arrival order applies -> index 0 (job 1).
         assert_eq!(manager.next_queued_position(), Some(0));
 
-        // Case B: Plan 1 has 1 job running, Plan 2 has 0 running.
+        // Simulate starting plan 1's root (job 1): it leaves the queue.
+        let Some(root_1) = manager.pending.remove(0) else {
+            panic!("plan 1 root must be queued");
+        };
+        manager.running.insert(
+            root_1.job.id,
+            RunningTransfer {
+                plan_id: plan_1,
+                cancel: CancellationToken::new(),
+            },
+        );
         manager.running_per_plan.insert(plan_1, 1);
-        // Phase 1 prioritizes Plan 2 because it has 0 running jobs, even though it's at index 4!
-        assert_eq!(manager.next_queued_position(), Some(4));
 
-        // Case C: Plan 2 also has 1 job running.
+        // Case B: Plan 1 has 1 job running, Plan 2 has 0 running.
+        // Phase 1 prioritizes Plan 2 because it has 0 running jobs, even though
+        // its root sits after plan 1's children.
+        assert_eq!(manager.next_queued_position(), Some(3));
+
+        // The root finished; one of its children is now the running job.
+        manager.running.remove(&TransferId(1));
+        // Plan 2's root starts running as well.
+        let Some(root_2) = manager.pending.remove(3) else {
+            panic!("plan 2 root must be queued");
+        };
+        manager.running.insert(
+            root_2.job.id,
+            RunningTransfer {
+                plan_id: plan_2,
+                cancel: CancellationToken::new(),
+            },
+        );
         manager.running_per_plan.insert(plan_2, 1);
-        // Phase 1 finds none with 0 running. Phase 2 selects first with < 4 running -> index 0 (Plan 1).
+
+        // Case C: Phase 1 finds no idle plan; phase 2 picks plan 1's first
+        // child, whose root already completed.
         assert_eq!(manager.next_queued_position(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_plan_root_blocks_children_until_it_completes() {
+        let Some(server) = SshTestServer::spawn() else {
+            eprintln!("skipping test: sshd not available");
+            return;
+        };
+        let connection = connect_test_server(&server).await;
+        let (event_tx, _event_rx) = flume::bounded(64);
+        let next_conflict_id = Arc::new(AtomicU64::new(1));
+        let cm = Arc::new(ConnectionManager::new());
+        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
+
+        let plan_id = TransferPlanId(9);
+        let jobs: Vec<TransferJob> = (1..=4)
+            .map(|id| dummy_job(id, TransferDirection::Download))
+            .collect();
+        manager.enqueue(connection, plan_id, jobs, true);
+
+        // A folder plan's first job removes the destination tree; it must run
+        // alone before any child starts.
+        assert_eq!(manager.next_queued_position(), Some(0));
+        let Some(root) = manager.pending.remove(0) else {
+            panic!("root job must be queued");
+        };
+        manager.running.insert(
+            root.job.id,
+            RunningTransfer {
+                plan_id,
+                cancel: CancellationToken::new(),
+            },
+        );
+        manager.running_per_plan.insert(plan_id, 1);
+        assert_eq!(
+            manager.next_queued_position(),
+            None,
+            "children must wait while the plan root is running"
+        );
+
+        // Root finished: its children may now fill the per-plan window.
+        manager.running.remove(&root.job.id);
+        manager.running_per_plan.insert(plan_id, 0);
+        assert_eq!(manager.next_queued_position(), Some(0));
+    }
+
+    #[test]
+    fn retried_plan_root_may_not_clear_destination_after_children_started() {
+        let (event_tx, _event_rx) = flume::bounded(1);
+        let next_conflict_id = Arc::new(AtomicU64::new(1));
+        let cm = Arc::new(ConnectionManager::new());
+        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
+        let plan_id = TransferPlanId(4);
+        manager.plan_root_jobs.insert(plan_id, TransferId(1));
+
+        assert!(
+            manager.take_destination_clear_permission(plan_id, TransferId(1)),
+            "the root may clear the destination before any child starts"
+        );
+        assert!(
+            !manager.take_destination_clear_permission(plan_id, TransferId(2)),
+            "children never clear the destination"
+        );
+        assert!(
+            !manager.take_destination_clear_permission(plan_id, TransferId(1)),
+            "a retried root must not delete output written by children"
+        );
     }
 
     #[tokio::test]
@@ -508,6 +679,7 @@ mod tests {
                 connection.clone(),
                 plan_1,
                 vec![dummy_job(i, TransferDirection::Upload)],
+                true,
             );
         }
 
@@ -524,6 +696,7 @@ mod tests {
             connection.clone(),
             plan_2,
             vec![dummy_job(10, TransferDirection::Upload)],
+            true,
         );
 
         // Plan 2 is not at cap (0 running), so its position should be returned (index 5)
@@ -730,6 +903,7 @@ mod tests {
             connection.clone(),
             plan_1,
             vec![dummy_job(100, TransferDirection::Upload)],
+            true,
         );
         assert_eq!(manager.pending.len(), 1);
 
