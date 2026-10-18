@@ -361,7 +361,7 @@ impl crate::workspace::Workspace {
                 div()
                     .text_size(px(12.0))
                     .text_color(theme.colors.text_muted)
-                    .child("No rules configured. Files use the fallback editor or your Mac’s default app."),
+                    .child("No rules configured. Files open in the fallback editor, or in the system text editor."),
             );
         } else {
             for (index, rule) in rules.iter().enumerate() {
@@ -458,6 +458,8 @@ impl crate::workspace::Workspace {
             .to_string();
 
         if pattern.is_empty() || app_name.is_empty() {
+            self.config_error = Some("Enter both a pattern and an app name.".into());
+            cx.notify();
             return;
         }
 
