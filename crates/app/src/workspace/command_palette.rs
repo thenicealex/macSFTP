@@ -96,6 +96,7 @@ impl Workspace {
             "FocusRemotePane" => self.focus_pane(PaneSide::Remote, window, cx),
             "OpenSelectedEntry" => self.open_selected_entry(window, cx),
             "UploadSelection" => self.upload_selection(cx),
+            "UploadEditedFile" => self.upload_selected_edit(cx),
             "DownloadSelection" => self.download_selection(cx),
             "ShowTransferDrawer" => {
                 self.transfer_drawer.open = !self.transfer_drawer.open;

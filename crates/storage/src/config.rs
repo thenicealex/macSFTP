@@ -25,6 +25,9 @@ pub struct AppConfig {
     /// 远程编辑用的外部编辑器应用名。None = 系统默认关联应用。
     #[serde(default)]
     pub external_editor: Option<String>,
+    /// 外部编辑器扩展名/模式关联规则。
+    #[serde(default)]
+    pub editor_rules: Vec<macsftp_core::EditorRule>,
 }
 
 impl AppConfig {
@@ -39,6 +42,7 @@ impl Default for AppConfig {
             confirm_delete: true,
             show_hidden_files: false,
             external_editor: None,
+            editor_rules: Vec::new(),
         }
     }
 }
@@ -189,6 +193,10 @@ impl ConfigStore {
 
     pub fn set_external_editor(&mut self, editor: Option<String>) -> Result<(), ConfigError> {
         self.modify(|config| config.external_editor = editor)
+    }
+
+    pub fn set_editor_rules(&mut self, rules: Vec<macsftp_core::EditorRule>) -> Result<(), ConfigError> {
+        self.modify(|config| config.editor_rules = rules)
     }
 
     fn save(&self) -> Result<(), ConfigError> {
@@ -409,6 +417,31 @@ mod tests {
             restored.config().external_editor.as_deref(),
             Some("Visual Studio Code")
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn editor_rules_defaults_empty_and_round_trips() {
+        let dir = std::env::temp_dir().join(format!("macsftp-rules-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create rules config dir");
+        let path = LocalPath::new(dir.join("config.json").to_string_lossy().to_string());
+        let mut store = ConfigStore::with_defaults(path.clone());
+        assert!(store.config().editor_rules.is_empty());
+
+        let rules = vec![
+            macsftp_core::EditorRule::new("*.py", "PyCharm"),
+            macsftp_core::EditorRule::new("*.md", "Typora"),
+        ];
+        store.set_editor_rules(rules.clone()).expect("persist rules");
+        let restored = ConfigStore::open(path).expect("reopen");
+        assert_eq!(restored.config().editor_rules, rules);
+
+        // Verify JSON serialization format
+        let json = serde_json::to_string(&restored.config()).expect("serialize");
+        assert!(json.contains("editor_rules"));
+        assert!(json.contains("*.py"));
+        assert!(json.contains("PyCharm"));
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }

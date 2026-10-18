@@ -3595,6 +3595,8 @@ fn duplicate_edit_reopens_existing_temp_without_downloading(cx: &mut TestAppCont
             },
             pending_check_id: None,
             checking_local_mtime: None,
+            local_modified: false,
+            local_baseline: None,
         });
         (session_id, temp_path)
     });
@@ -3673,6 +3675,8 @@ fn upload_modified_file_is_explicit_and_checks_remote_first(cx: &mut TestAppCont
             },
             pending_check_id: None,
             checking_local_mtime: None,
+            local_modified: false,
+            local_baseline: None,
         });
         let tab = workspace.active_tab_mut().expect("active tab");
         tab.selection.selected_paths = vec![EntryPath::Remote(remote_path.clone())];
@@ -3747,6 +3751,8 @@ fn edit_metadata_failure_preserves_session_and_temp_directory(cx: &mut TestAppCo
             },
             pending_check_id: None,
             checking_local_mtime: None,
+            local_modified: false,
+            local_baseline: None,
         });
         workspace
             .active_tab_mut()
@@ -3819,6 +3825,8 @@ fn edit_reaps_orphaned_existing_session_and_retries(cx: &mut TestAppContext) {
             },
             pending_check_id: None,
             checking_local_mtime: None,
+            local_modified: false,
+            local_baseline: None,
         });
         id
     });
@@ -4302,6 +4310,8 @@ fn register_conflict_session(
             },
             pending_check_id: None,
             checking_local_mtime: None,
+            local_modified: false,
+            local_baseline: None,
         });
         id
     })
@@ -4474,6 +4484,8 @@ fn edit_dedup_follows_captured_connection_key_not_profile_id(cx: &mut TestAppCon
             },
             pending_check_id: None,
             checking_local_mtime: None,
+            local_modified: false,
+            local_baseline: None,
         });
     });
     while channels.command_rx.try_recv().is_ok() {}
@@ -4580,6 +4592,8 @@ fn saved_profile_host_change_does_not_hit_old_connections_edit(cx: &mut TestAppC
             },
             pending_check_id: None,
             checking_local_mtime: None,
+            local_modified: false,
+            local_baseline: None,
         });
         key
     });
@@ -4966,6 +4980,8 @@ fn seed_editing_session_on_tab1(
             remote_snapshot: snapshot,
             pending_check_id: None,
             checking_local_mtime: None,
+            local_modified: false,
+            local_baseline: None,
         });
         id
     })
@@ -7503,6 +7519,8 @@ fn close_tab_tears_down_its_edit_sessions_and_temp_dir(cx: &mut TestAppContext) 
             },
             pending_check_id: None,
             checking_local_mtime: None,
+            local_modified: false,
+            local_baseline: None,
         });
         id
     });
@@ -7555,6 +7573,8 @@ fn window_closed_callback_reaps_orphaned_edit_session(cx: &mut TestAppContext) {
             },
             pending_check_id: None,
             checking_local_mtime: None,
+            local_modified: false,
+            local_baseline: None,
         });
         id
     });
@@ -8432,4 +8452,231 @@ fn right_click_on_blank_space_keeps_the_selection(cx: &mut TestAppContext) {
         assert_eq!(tab.selection.selected_paths, vec![expected]);
     });
     let _ = std::fs::remove_dir_all(&fixture);
+}
+
+#[gpui_kit::test]
+fn remote_row_shows_dirty_indicator_when_locally_modified(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+    cx.run_until_parked();
+
+    let remote_path = RemotePath::new("/home/tester/notes.txt");
+    let session_dir = std::env::temp_dir().join(format!(
+        "macsftp-dirty-indicator-{}-{}",
+        std::process::id(),
+        "test"
+    ));
+    std::fs::create_dir_all(&session_dir).expect("create session dir");
+    let temp_file = session_dir.join("notes.txt");
+    std::fs::write(&temp_file, b"content").expect("write temp file");
+    let temp_path = LocalPath::new(temp_file.to_string_lossy().to_string());
+
+    let session_id = workspace.update_in(&mut cx, |workspace, _window, cx| {
+        let tab = workspace.active_tab_mut().expect("active tab should exist");
+        tab.remote.entries = vec![RemoteEntry {
+            name: "notes.txt".to_string(),
+            path: remote_path.clone(),
+            kind: FileKind::File,
+            size: Some(100),
+            permissions: Some(0o644),
+            modified_at: None,
+            link_target: None,
+        }];
+        tab.selection.selected_paths = vec![EntryPath::Remote(remote_path.clone())];
+
+        let id = cx.resources_mut().edit_sessions.next_id();
+        cx.resources_mut().edit_sessions.register(EditSession {
+            id,
+            remote_path: remote_path.clone(),
+            tab_id: TabId(1),
+            session_epoch: 1,
+            profile_id: ProfileId(0),
+            connection_key: manual_connection_key(),
+            local_temp_path: temp_path,
+            phase: EditPhase::Editing,
+            remote_snapshot: RemoteSnapshot {
+                size: Some(7),
+                modified_at: None,
+            },
+            pending_check_id: None,
+            checking_local_mtime: None,
+            local_modified: false,
+            local_baseline: None,
+        });
+        id
+    });
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        let row = window.within("remote-file-pane").find(("file-row", 0usize));
+        let label = row.label().expect("row exposes a label");
+        assert!(
+            !label.starts_with("●"),
+            "unmodified edit session must not show dirty dot: {label}"
+        );
+    });
+
+    // Mark session dirty
+    workspace.update_in(&mut cx, |_workspace, _window, cx| {
+        if let Some(session) = cx.resources_mut().edit_sessions.get_mut(session_id) {
+            session.local_modified = true;
+        }
+        cx.refresh_windows();
+    });
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        let row = window.within("remote-file-pane").find(("file-row", 0usize));
+        let label = row.label().expect("row exposes a label");
+        assert!(
+            label.starts_with("●"),
+            "locally modified edit session must show dirty dot: {label}"
+        );
+    });
+
+    std::fs::remove_dir_all(&session_dir).ok();
+}
+
+#[gpui_kit::test]
+fn upload_edited_file_action_dispatches_check(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+    cx.run_until_parked();
+
+    let remote_path = RemotePath::new("/home/tester/notes.txt");
+    let session_dir = std::env::temp_dir().join(format!(
+        "macsftp-upload-action-{}-{}",
+        std::process::id(),
+        "test"
+    ));
+    std::fs::create_dir_all(&session_dir).expect("create session dir");
+    let temp_file = session_dir.join("notes.txt");
+    std::fs::write(&temp_file, b"content").expect("write temp file");
+    let temp_path = LocalPath::new(temp_file.to_string_lossy().to_string());
+
+    let session_id = workspace.update_in(&mut cx, |workspace, _window, cx| {
+        let id = cx.resources_mut().edit_sessions.next_id();
+        cx.resources_mut().edit_sessions.register(EditSession {
+            id,
+            remote_path: remote_path.clone(),
+            tab_id: TabId(1),
+            session_epoch: 1,
+            profile_id: ProfileId(0),
+            connection_key: manual_connection_key(),
+            local_temp_path: temp_path,
+            phase: EditPhase::Editing,
+            remote_snapshot: RemoteSnapshot {
+                size: Some(7),
+                modified_at: None,
+            },
+            pending_check_id: None,
+            checking_local_mtime: None,
+            local_modified: true,
+            local_baseline: None,
+        });
+        let tab = workspace.active_tab_mut().expect("active tab");
+        tab.selection.selected_paths = vec![EntryPath::Remote(remote_path.clone())];
+        id
+    });
+
+    cx.dispatch_action(crate::app_actions::UploadEditedFile);
+
+    let command = channels
+        .command_rx
+        .try_recv()
+        .expect("UploadEditedFile action must dispatch remote check");
+    let AppCommand::CheckRemoteEditSnapshot(cmd) = command else {
+        panic!("expected CheckRemoteEditSnapshot, got {command:?}");
+    };
+    assert_eq!(cmd.edit_session_id, session_id);
+    assert_eq!(cmd.path, remote_path);
+
+    std::fs::remove_dir_all(&session_dir).ok();
+}
+
+#[gpui_kit::test]
+fn settings_editor_rules_ui_add_and_remove(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    workspace.update_in(&mut cx, |ws, window, cx| {
+        ws.settings.section = SettingsSection::General;
+        ws.settings.new_rule_pattern.update(cx, |input, cx| {
+            input.set_value("*.rs", window, cx);
+        });
+        ws.settings.new_rule_app.update(cx, |input, cx| {
+            input.set_value("RustRover", window, cx);
+        });
+        ws.add_editor_rule(window, cx);
+
+        let rules = cx.resources().config.config().editor_rules.clone();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].pattern, "*.rs");
+        assert_eq!(rules[0].app_name, "RustRover");
+
+        ws.remove_editor_rule(0, cx);
+        let rules_after = cx.resources().config.config().editor_rules.clone();
+        assert!(rules_after.is_empty(), "rule should be removed");
+    });
+}
+
+#[gpui_kit::test]
+fn compare_edit_conflict_dispatches_download_transfer(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+    cx.run_until_parked();
+
+    let remote_path = RemotePath::new("/home/tester/notes.txt");
+    let session_dir = std::env::temp_dir().join(format!(
+        "macsftp-compare-conflict-{}-{}",
+        std::process::id(),
+        "test"
+    ));
+    std::fs::create_dir_all(&session_dir).expect("create session dir");
+    let temp_file = session_dir.join("notes.txt");
+    std::fs::write(&temp_file, b"content").expect("write temp file");
+    let temp_path = LocalPath::new(temp_file.to_string_lossy().to_string());
+
+    let session_id = workspace.update_in(&mut cx, |_ws, _window, cx| {
+        let id = cx.resources_mut().edit_sessions.next_id();
+        cx.resources_mut().edit_sessions.register(EditSession {
+            id,
+            remote_path: remote_path.clone(),
+            tab_id: TabId(1),
+            session_epoch: 1,
+            profile_id: ProfileId(0),
+            connection_key: manual_connection_key(),
+            local_temp_path: temp_path.clone(),
+            phase: EditPhase::RemoteConflict,
+            remote_snapshot: RemoteSnapshot {
+                size: Some(7),
+                modified_at: None,
+            },
+            pending_check_id: None,
+            checking_local_mtime: None,
+            local_modified: true,
+            local_baseline: None,
+        });
+        id
+    });
+
+    workspace.update_in(&mut cx, |ws, _window, cx| {
+        ws.compare_edit_conflict(session_id, cx);
+        assert!(
+            ws.modal_inputs.conflict_compare_loading,
+            "starting compare must set conflict_compare_loading"
+        );
+    });
+
+    let command = channels
+        .command_rx
+        .try_recv()
+        .expect("compare_edit_conflict must dispatch StartTransfer");
+    let AppCommand::StartTransfer(cmd) = command else {
+        panic!("expected StartTransfer, got {command:?}");
+    };
+    assert_eq!(cmd.tab_id, TabId(1));
+    assert_eq!(cmd.sources, vec![TransferEndpoint::Remote(remote_path)]);
+    let expected_dest = crate::workspace::conflict_remote_path(&temp_path);
+    assert_eq!(cmd.destination, TransferEndpoint::Local(expected_dest));
+
+    std::fs::remove_dir_all(&session_dir).ok();
 }

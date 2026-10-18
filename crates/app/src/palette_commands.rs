@@ -79,6 +79,13 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         when: PaletteWhen::HasActiveTab,
     },
     PaletteCommand {
+        id: "UploadEditedFile",
+        title: "Upload Edited File",
+        keywords: &["upload", "edit", "save", "remote edit", "changes"],
+        keybinding: Some("⌘U"),
+        when: PaletteWhen::ConnectedRemote,
+    },
+    PaletteCommand {
         id: "DownloadSelection",
         title: "Download",
         keywords: &["get", "receive", "transfer", "download selection"],
@@ -393,6 +400,7 @@ mod tests {
             ("FocusRemotePane", Some("⌘2")),
             ("OpenSelectedEntry", Some("↩")),
             ("UploadSelection", Some("⌘U")),
+            ("UploadEditedFile", Some("⌘U")),
             ("DownloadSelection", Some("⌘D")),
             ("ShowTransferDrawer", Some("⌘J")),
             ("OpenSettings", Some("⌘,")),

@@ -1051,9 +1051,23 @@ impl crate::workspace::Workspace {
                                 }
                                 PaneSide::Remote => {
                                     let entry = tab.remote.entries.get(real_index)?;
+                                    let is_dirty = cx
+                                        .resources()
+                                        .edit_sessions
+                                        .sessions()
+                                        .any(|session| {
+                                            session.tab_id == tab.id
+                                                && session.remote_path == entry.path
+                                                && session.local_modified
+                                        });
+                                    let display_name = if is_dirty {
+                                        format!("● {}", entry.name)
+                                    } else {
+                                        entry.name.clone()
+                                    };
                                     (
                                         FileRowModel {
-                                            name: entry.name.clone().into(),
+                                            name: display_name.into(),
                                             kind: entry.kind,
                                             is_hidden: entry.name.starts_with('.'),
                                             selected: selected_paths

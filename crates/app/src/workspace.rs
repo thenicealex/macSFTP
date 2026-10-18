@@ -27,7 +27,7 @@ use crate::app_actions::{
     SelectPrevEntryExtend, ShowAbout, ShowInFinder, ShowTransferDrawer,
     SortByDateModifiedAscending, SortByDateModifiedDescending, SortByNameAscending,
     SortByNameDescending, SortBySizeAscending, SortBySizeDescending, TabSwitcherNext,
-    TabSwitcherPrev, ToggleHiddenFiles, UploadSelection, ZoomWindow,
+    TabSwitcherPrev, ToggleHiddenFiles, UploadEditedFile, UploadSelection, ZoomWindow,
 };
 use crate::resources::ActiveResources;
 use crate::session_coordinator::SessionCoordinator;
@@ -76,7 +76,7 @@ pub struct Workspace {
     log_file: LocalPath,
     connect_form_ui: view_state::ConnectFormUi,
 
-    modal_inputs: view_state::ModalInputsUi,
+    pub(crate) modal_inputs: view_state::ModalInputsUi,
     /// Go to Path modal (`cmd-shift-g`).
     go_to_path: view_state::GoToPathUi,
 
@@ -144,6 +144,13 @@ impl Workspace {
             },
         );
 
+        let new_rule_pattern = cx.new(|cx| {
+            gpui_kit::base::input::InputState::new(window, cx).placeholder("e.g. *.rs or *.png")
+        });
+        let new_rule_app = cx.new(|cx| {
+            gpui_kit::base::input::InputState::new(window, cx).placeholder("e.g. Visual Studio Code")
+        });
+
         let appearance_subscription =
             cx.observe_window_appearance(window, |_workspace, window, cx| {
                 if cx.resources().config.config().appearance == AppearancePreference::System {
@@ -168,6 +175,8 @@ impl Workspace {
             settings: view_state::SettingsUi::new(
                 external_editor_input,
                 external_editor_subscription,
+                new_rule_pattern,
+                new_rule_app,
             ),
 
             default_local_path,
@@ -1083,6 +1092,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|workspace, _: &UploadSelection, _window, cx| {
                 workspace.upload_selection(cx);
             }))
+            .on_action(cx.listener(|workspace, _: &UploadEditedFile, _window, cx| {
+                workspace.upload_selected_edit(cx);
+            }))
             .on_action(
                 cx.listener(|workspace, _: &DownloadSelection, _window, cx| {
                     workspace.download_selection(cx);
@@ -1314,3 +1326,4 @@ pub(crate) use remote_edit::build_edit_upload_command;
 pub(crate) use remote_edit::cleanup_edit_sessions_for_tab;
 pub(crate) use remote_edit::cleanup_edit_temp_dir;
 pub(crate) use remote_edit::cleanup_orphaned_edit_sessions;
+pub(crate) use remote_edit::conflict_remote_path;

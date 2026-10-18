@@ -24,7 +24,7 @@ use crate::app_actions::{
     RefreshPane, RenameEntry, ShowAbout, ShowAllApplications, ShowTransferDrawer,
     SortByDateModifiedAscending, SortByDateModifiedDescending, SortByNameAscending,
     SortByNameDescending, SortBySizeAscending, SortBySizeDescending, ToggleHiddenFiles,
-    UploadSelection, ZoomWindow,
+    UploadEditedFile, UploadSelection, ZoomWindow,
 };
 
 pub(crate) fn menu_bar() -> Vec<Menu> {
@@ -73,6 +73,7 @@ fn file_menu() -> Menu {
             MenuItem::action("Delete…", DeleteSelection),
             MenuItem::separator(),
             MenuItem::action("Upload", UploadSelection),
+            MenuItem::action("Upload Edited File", UploadEditedFile),
             MenuItem::action("Download", DownloadSelection),
             MenuItem::separator(),
             MenuItem::action("Close Tab", CloseTab),
@@ -250,6 +251,12 @@ mod tests {
                 Box::new(UploadSelection),
                 Some("cmd-u"),
                 Some("UploadSelection"),
+            ),
+            (
+                "File ▸ Upload Edited File".to_string(),
+                Box::new(UploadEditedFile),
+                Some("cmd-u"),
+                Some("UploadEditedFile"),
             ),
             (
                 "File ▸ Download".to_string(),

@@ -17,6 +17,17 @@ use crate::workspace::overlay::OverlayFade;
 
 pub(crate) const EDIT_SIZE_WARN_THRESHOLD: u64 = 100 * 1024 * 1024;
 
+pub(crate) fn conflict_remote_path(local_temp_path: &LocalPath) -> LocalPath {
+    let path = std::path::Path::new(local_temp_path.as_str());
+    let parent = path.parent().unwrap_or(path);
+    let ext = path.extension().and_then(|e| e.to_str());
+    let file_name = match ext {
+        Some(e) if !e.is_empty() => format!("conflict-remote.{}", e),
+        _ => "conflict-remote".to_string(),
+    };
+    LocalPath::new(parent.join(file_name).to_string_lossy().to_string())
+}
+
 /// Best-effort removal of a remote-edit session's temp directory
 /// (`<edits>/<run>/<id>/`). NotFound is treated as success; any other failure
 /// is logged so a leaked remote-file copy is at least diagnosable instead of
@@ -197,8 +208,17 @@ impl Workspace {
             if owner_is_live {
                 self.status_message = Some(match existing_phase {
                     EditPhase::Editing | EditPhase::UploadingBack => {
-                        let editor = cx.resources().config.config().external_editor.clone();
-                        match open_edit_temp(&existing_temp_path, editor.as_deref()) {
+                        let config = cx.resources().config.config();
+                        let file_name = std::path::Path::new(existing_temp_path.as_str())
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        let editor = macsftp_core::resolve_editor_app(
+                            &file_name,
+                            &config.editor_rules,
+                            config.external_editor.as_deref(),
+                        );
+                        match open_edit_temp(&existing_temp_path, editor) {
                             Ok(()) => "Your copy is open for editing.".into(),
                             Err(error) => {
                                 warn!(error = %error, "could not reopen editor for remote edit");
@@ -278,6 +298,8 @@ impl Workspace {
             },
             pending_check_id: None,
             checking_local_mtime: None,
+            local_modified: false,
+            local_baseline: None,
         };
         cx.resources_mut().edit_sessions.register(session);
         let command = AppCommand::StartTransfer(StartTransferCommand {
@@ -364,6 +386,8 @@ impl Workspace {
         if session.phase != EditPhase::RemoteConflict {
             return;
         }
+        self.modal_inputs.conflict_compare_loading = false;
+        self.modal_inputs.conflict_compare_error = None;
         match choice {
             ConflictChoice::Overwrite => {
                 let command = build_edit_upload_command(
@@ -410,6 +434,72 @@ impl Workspace {
                     s.phase = EditPhase::Editing;
                 }
             }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn compare_edit_conflict(
+        &mut self,
+        id: EditSessionId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = cx.resources().edit_sessions.get(id).cloned() else {
+            return;
+        };
+        if session.phase != EditPhase::RemoteConflict {
+            return;
+        }
+        let Some(tool) = macsftp_platform::detect_default_diff_tool() else {
+            self.modal_inputs.conflict_compare_error =
+                Some("No supported diff tool found (/usr/bin/opendiff or code).".into());
+            cx.notify();
+            return;
+        };
+        let compare_path = conflict_remote_path(&session.local_temp_path);
+        if std::path::Path::new(compare_path.as_str()).exists() {
+            let local = std::path::Path::new(session.local_temp_path.as_str());
+            let remote = std::path::Path::new(compare_path.as_str());
+            match tool.launch(local, remote) {
+                Ok(_) => {
+                    self.modal_inputs.conflict_compare_loading = false;
+                    self.modal_inputs.conflict_compare_error = None;
+                }
+                Err(error) => {
+                    warn!(error = %error, "could not launch diff tool");
+                    self.modal_inputs.conflict_compare_loading = false;
+                    self.modal_inputs.conflict_compare_error =
+                        Some(format!("Could not launch {}: {}", tool.name(), error));
+                }
+            }
+            cx.notify();
+            return;
+        }
+
+        self.modal_inputs.conflict_compare_loading = true;
+        self.modal_inputs.conflict_compare_error = None;
+
+        let transfer_profile_id = self
+            .state
+            .tabs
+            .find_tab(session.tab_id)
+            .map(|tab| tab.profile_id.unwrap_or(ProfileId(0)))
+            .unwrap_or(session.profile_id);
+
+        let command = AppCommand::StartTransfer(StartTransferCommand {
+            tab_id: session.tab_id,
+            session_epoch: session.session_epoch,
+            profile_id: transfer_profile_id,
+            direction: TransferDirection::Download,
+            sources: vec![TransferEndpoint::Remote(session.remote_path)],
+            destination: TransferEndpoint::Local(compare_path),
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: ConflictPolicy::OverwriteAll,
+        });
+
+        if !self.send_command(command, cx) {
+            self.modal_inputs.conflict_compare_loading = false;
+            self.modal_inputs.conflict_compare_error =
+                Some("Could not start comparison download. Try again.".into());
         }
         cx.notify();
     }
@@ -512,11 +602,15 @@ impl Workspace {
         let id = conflict?;
         let theme = cx.theme().clone();
 
+        let diff_tool = macsftp_platform::detect_default_diff_tool();
+        let diff_tool_available = diff_tool.is_some();
+        let is_loading = self.modal_inputs.conflict_compare_loading;
+
         let card = div()
             .flex()
             .flex_col()
             .gap_3()
-            .w(px(420.0))
+            .w(px(460.0))
             .p_4()
             .bg(theme.colors.elevated_surface)
             .border_1()
@@ -539,36 +633,84 @@ impl Workspace {
                         "The server file changed after you opened it. Replacing it will discard those changes.",
                     ),
             )
+            .when(!diff_tool_available, |card| {
+                card.child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.colors.text_muted)
+                        .child("No supported diff tool found (/usr/bin/opendiff or code)."),
+                )
+            })
+            .when_some(self.modal_inputs.conflict_compare_error.as_ref(), |card, error| {
+                card.child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme.colors.error)
+                        .child(error.clone()),
+                )
+            })
             .child(
                 div()
                     .flex()
                     .flex_wrap()
-                    .justify_end()
+                    .justify_between()
+                    .items_center()
                     .gap_2()
-                    .child(
-                        text_button("edit-conflict-later", "Decide Later").on_click(cx.listener(
-                            move |workspace, _event, _window, cx| {
-                                workspace.resolve_edit_conflict(id, ConflictChoice::Later, cx);
+                    .child({
+                        let is_disabled = !diff_tool_available || is_loading;
+                        let mut compare_button = text_button(
+                            "edit-conflict-compare",
+                            if is_loading {
+                                "Comparing…"
+                            } else {
+                                "Compare Changes…"
                             },
-                        )),
-                    )
+                        );
+                        if !is_disabled {
+                            compare_button = compare_button.on_click(cx.listener(move |workspace, _event, _window, cx| {
+                                workspace.compare_edit_conflict(id, cx);
+                            }));
+                        }
+                        div()
+                            .when(is_disabled, |this| this.opacity(0.5))
+                            .child(compare_button)
+                    })
                     .child(
-                        text_button("edit-conflict-discard", "Discard My Changes").on_click(
-                            cx.listener(move |workspace, _event, _window, cx| {
-                                workspace.resolve_edit_conflict(
-                                    id,
-                                    ConflictChoice::DiscardLocal,
-                                    cx,
-                                );
-                            }),
-                        ),
-                    )
-                    .child(
-                        text_button("edit-conflict-overwrite", "Replace Server File")
-                            .danger(true)
-                            .on_click(cx.listener(move |workspace, _event, _window, cx| {
-                                workspace.resolve_edit_conflict(id, ConflictChoice::Overwrite, cx);
-                            })),
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                text_button("edit-conflict-later", "Decide Later").on_click(
+                                    cx.listener(move |workspace, _event, _window, cx| {
+                                        workspace.resolve_edit_conflict(
+                                            id,
+                                            ConflictChoice::Later,
+                                            cx,
+                                        );
+                                    }),
+                                ),
+                            )
+                            .child(
+                                text_button("edit-conflict-discard", "Discard My Changes")
+                                    .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                                        workspace.resolve_edit_conflict(
+                                            id,
+                                            ConflictChoice::DiscardLocal,
+                                            cx,
+                                        );
+                                    })),
+                            )
+                            .child(
+                                text_button("edit-conflict-overwrite", "Replace Server File")
+                                    .danger(true)
+                                    .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                                        workspace.resolve_edit_conflict(
+                                            id,
+                                            ConflictChoice::Overwrite,
+                                            cx,
+                                        );
+                                    })),
+                            ),
                     ),
             );
 

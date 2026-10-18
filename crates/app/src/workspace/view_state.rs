@@ -221,6 +221,8 @@ pub(crate) struct ModalInputsUi {
         KeyboardInteractiveUi,
     >,
     pub(crate) about_open: bool,
+    pub(crate) conflict_compare_loading: bool,
+    pub(crate) conflict_compare_error: Option<String>,
 }
 
 impl ModalInputsUi {
@@ -233,6 +235,8 @@ impl ModalInputsUi {
             large_edit_confirm: None,
             keyboard_interactive: std::collections::HashMap::new(),
             about_open: false,
+            conflict_compare_loading: false,
+            conflict_compare_error: None,
         }
     }
 }
@@ -298,6 +302,8 @@ pub(crate) struct SettingsUi {
     /// on every edit (empty → None).
     pub(crate) external_editor_input: gpui_kit::Entity<gpui_kit::base::input::InputState>,
     _external_editor_subscription: gpui_kit::Subscription,
+    pub(crate) new_rule_pattern: gpui_kit::Entity<gpui_kit::base::input::InputState>,
+    pub(crate) new_rule_app: gpui_kit::Entity<gpui_kit::base::input::InputState>,
     /// Selected profile in Settings → Profiles (None when the list is empty).
     pub(crate) selected_profile_id: Option<macsftp_core::ProfileId>,
     /// Draft for New / Edit profile in Settings → Profiles.
@@ -316,6 +322,8 @@ impl SettingsUi {
     pub(crate) fn new(
         external_editor_input: gpui_kit::Entity<gpui_kit::base::input::InputState>,
         external_editor_subscription: gpui_kit::Subscription,
+        new_rule_pattern: gpui_kit::Entity<gpui_kit::base::input::InputState>,
+        new_rule_app: gpui_kit::Entity<gpui_kit::base::input::InputState>,
     ) -> Self {
         Self {
             section: crate::workspace::profiles::SettingsSection::General,
@@ -323,6 +331,8 @@ impl SettingsUi {
             profile_filter_focused: false,
             external_editor_input,
             _external_editor_subscription: external_editor_subscription,
+            new_rule_pattern,
+            new_rule_app,
             selected_profile_id: None,
             profile_editor: None,
             profile_delete_confirm: None,
