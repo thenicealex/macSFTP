@@ -48,6 +48,7 @@ impl crate::workspace::Workspace {
             remote_directory
         };
         let tab_id = tab.id;
+        let metadata_policy = cx.resources().config.config().metadata_policy.clone();
         let command = AppCommand::StartTransfer(macsftp_core::StartTransferCommand {
             tab_id,
             session_epoch,
@@ -55,7 +56,7 @@ impl crate::workspace::Workspace {
             direction: macsftp_core::TransferDirection::Upload,
             sources: sources.into_iter().map(TransferEndpoint::Local).collect(),
             destination: TransferEndpoint::Remote(destination),
-            metadata_policy: Default::default(),
+            metadata_policy,
             conflict_policy: Default::default(),
         });
         if self.send_command(command, cx) {
@@ -89,6 +90,7 @@ impl crate::workspace::Workspace {
             return;
         };
         let tab_id = tab.id;
+        let metadata_policy = cx.resources().config.config().metadata_policy.clone();
         let command = AppCommand::StartTransfer(macsftp_core::StartTransferCommand {
             tab_id,
             session_epoch,
@@ -96,7 +98,7 @@ impl crate::workspace::Workspace {
             direction: macsftp_core::TransferDirection::Download,
             sources: sources.into_iter().map(TransferEndpoint::Remote).collect(),
             destination: TransferEndpoint::Local(destination),
-            metadata_policy: Default::default(),
+            metadata_policy,
             conflict_policy: Default::default(),
         });
         if self.send_command(command, cx) {
@@ -147,6 +149,9 @@ impl crate::workspace::Workspace {
             cx.notify();
         }
     }
+    /// Retries the job's original plan, including the metadata and conflict
+    /// policies captured when it started; a Settings change applies only to
+    /// new transfers.
     pub(crate) fn retry_transfer(
         &mut self,
         transfer_id: macsftp_core::TransferId,
