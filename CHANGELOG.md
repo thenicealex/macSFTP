@@ -5,6 +5,20 @@ based on Keep a Changelog, and releases use semantic versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Pipelined SFTP downloads: 16 in-flight read requests, 256 KiB chunks, a 4 MiB
+  channel window, and up to four concurrent transfers per plan (six overall).
+- A `●` dirty marker on remote files whose temporary edit copy changed on disk,
+  plus per-pattern external editor rules in Settings.
+- **Compare Changes…** in the remote-change conflict modal, opening a detected
+  external diff tool against a fresh copy of the remote file.
+
+### Changed
+
+- macSFTP now watches saves of the temporary edit copy to show the dirty marker.
+  Uploading stays explicit: nothing is uploaded until you choose **Upload Changes**.
+
 ## [0.4.0] - 2026-10-18
 
 ### Added

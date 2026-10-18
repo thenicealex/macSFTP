@@ -21,13 +21,13 @@
   - [x] 3.1 `macsftp-platform` 显式声明 `notify`（8.x）依赖，启动时创建 `<edits_dir>/<edit_run_id>/` 并递归监听
   - [x] 3.2 防抖、临时副产物过滤、**自身写盘抑制**（基线 size+mtime 比对）
   - [x] 3.3 `EditSession.local_modified` + `AppEvent::LocalEditModified`，进入 `Editing` 时记录基线
-  - [x] 3.4 UI：`●` 标记、状态栏 Accent 高亮；`⌘U` 需新增 Action 并注册到 keymap / menu / palette
+  - [x] 3.4 UI：`●` 标记、状态栏 Accent 高亮；`⌘⇧U` 需新增 Action 并注册到 keymap / menu / palette
   - [x] 3.5 严格恪守 §9：绝不自动静默上传
   - [x] 3.6 原子保存、自身写盘抑制、Tab 销毁清理的生命周期测试
 - [x] Phase 4: SFTP 下载通道滑动窗口流水线 (P1)
   - [x] 4.1 自行构造 `RawSftpSession`：`new_with_config` → `init` → `limits` 协商 → `set_limits`
   - [x] 4.2 实现 `PipelinedDownloadReader`（16 个在途 `SSH_FXP_READ`），保留取消、进度节流与 `shutdown` 契约
-  - [x] 4.3 编写高延迟对比测试、取消与断链测试
+  - [x] 4.3 编写短读重取、乱序完成、未知长度重试、取消与端到端集成测试；1 GiB 吞吐对比与断链场景未纳入自动化门禁
 - [x] Phase 5: 远端冲突时的外部 Diff 工具联动 (P2)
   - [x] 5.1 点击 Compare 时按需懒拉取远端快照，禁止冲突即下载
   - [x] 5.2 `platform` 用绝对路径探测 Diff 工具（`/usr/bin/opendiff`、`/usr/local/bin/code`、`/opt/homebrew/bin/code`），只 `spawn`
@@ -144,6 +144,14 @@ let position = self
 ```
 
 递增只在 `open_transfer_sftp` **成功之后**、`self.running.insert(...)` 同时进行。
+
+> 下载目录计划的第一个 job 是目录本身：它先 `remove_dir_all` 目标目录再重建。若子 job 并发启动，刚写入的文件会被这次删除抹掉。因此对 `direction == Download` 的 Plan 追加一道排他门：Plan 的首个 job 必须独自运行并结束后，其余 job 才能启动；非首个目录 job 只 `create_dir_all`，不重复删除目标（整棵树已由首个 job 清空）。上传目录 job 只创建远端目录、从不删除，因此不设这道门，保留 per-plan 并发。`plan_root_jobs` 随 Plan 空闲一并清理，避免长期累积。
+>
+> 排他门只管“删除顺序”，不传播成功：根 job 失败或取消后，子 job 仍会启动（与串行队列的既有语义一致）。但删除权限是**一次性**的：只要该 Plan 有任一非根 job 启动过，后续重试的根 job 就不再删除目标，只做合并，否则会删掉已完成的子任务输出。重试通过单独请求重新入队，必须显式标记为非根，不能重新推断“首个 job 即根”。
+>
+> 已知取舍：若用户在根 job 运行之后才把冲突策略升级为 `OverwriteAll`，根 job 已经合并过目标目录，此时只会覆盖冲突文件，不删除本地独有文件。根 job 启动时若已是 `OverwriteAll`，整棵树仍会被清空。
+>
+> 删除权限同样约束文件/软链分支：无权限时若目标路径是目录，直接以 “Destination Changed Type” 失败而不是 `remove_dir_all`。这样即使远端条目在两次尝试之间从目录变成文件/软链，重试也不会抹掉已完成子任务的输出；普通文件覆盖不受影响。比较下载被用户取消（`TransferSkipped`）也必须清掉 “Comparing…” 状态。
 
 #### 5. 递减计数必须同步三处
 
@@ -279,9 +287,9 @@ VS Code / JetBrains / Vim 的“安全保存”是写临时文件再 `rename` �
 
 ### 4.4 UI 与快捷键（需要新增 Action）
 
-现状：`upload_selected_edit` 只由状态栏按钮直接调用（`crates/app/src/workspace/transfer_render.rs:692`），没有 Action。加 `⌘U` 必须同时改四处，否则菜单/调色板/键盘行为会不一致（`crates/app/src/app_menus.rs:1-14` 的边界测试会直接失败）：
+现状：`upload_selected_edit` 只由状态栏按钮直接调用（`crates/app/src/workspace/transfer_render.rs:692`），没有 Action。加 `⌘⇧U` 必须同时改四处，否则菜单/调色板/键盘行为会不一致（`crates/app/src/app_menus.rs:1-14` 的边界测试会直接失败）：
 
-1. `crates/app/src/app_actions.rs`：新增 `UploadEditedFile`，`KeyBinding::new("cmd-u", ..., Some("Workspace"))`。
+1. `crates/app/src/app_actions.rs`：新增 `UploadEditedFile`，`KeyBinding::new("cmd-shift-u", ..., Some("Workspace"))`（`⌘U` 已被 `UploadSelection` 占用）。
 2. `crates/app/src/app_menus.rs`：File（或 Edit）菜单项。
 3. `crates/app/src/palette_commands.rs`：命令面板项。
 4. enabled 判定：无选中、选中非远端文件、或该文件不在 `Editing` 阶段时禁用，并在状态栏给出一句原因。
@@ -390,10 +398,10 @@ pub const DIFF_CANDIDATES: &[&str] = &[
 | core 单测 | `EditorRule::matches` 大小写不敏感、`*`/`?` 语义、最长后缀优先、`None` 兜底 | `cargo test -p macsftp-core` |
 | storage 单测 | `editor_rules` 缺省为空、往返序列化、**version 1 仍可读且 future-version 断言不变** | `cargo test -p macsftp-storage` |
 | platform 单测 | `build_open_command` 两条分支不变；`detect_diff_tool` 用候选路径注入覆盖“只有 opendiff / 只有 code / 都没有” | `cargo test -p macsftp-platform` |
-| sftp 单测 | `start_queued` 的 per-plan 上限、两 Plan 并行推进不互相饿死、三个递减点后计数归零、`cleanup_plan_if_idle` 不提前清策略 | `cargo test -p macsftp-sftp` |
-| sftp 集成 | 目录并发上传完整性与冲突策略；1 GiB 下载的吞吐对比、取消后无残留；EOF 与已知长度校验 | `cargo test -p macsftp-sftp --test integration`（无 Docker 时明确 skip） |
-| app 单测 | 自身写盘不标脏、编辑器保存标脏、`DiscardLocal` 与上传成功复位、跨 Tab 迟到事件被丢弃、`⌘U` 在不可编辑选区时禁用 | `cargo test -p macsftp-app` |
-| 手动 | 720×480 窄窗口下 `●` 不挤压文件名；浅色/深色对比度；`⌘U` 可达性 | 记录到 `docs/visual-evidence/` |
+| sftp 单测 | `start_queued` 的 per-plan 上限、两 Plan 并行推进不互相饿死、三个递减点后计数归零、`cleanup_plan_if_idle` 不提前清策略；下载 Plan 根 job 排他、重试根不得删除已完成的子任务输出；短读重取、乱序完成、未知长度重试 | `cargo test -p macsftp-sftp` |
+| sftp 集成 | 目录并发上传完整性与冲突策略；目录下载后不再被兄弟目录 job 删除；取消后无残留；EOF 与已知长度校验。**未覆盖**：1 GiB 吞吐对比、断链 | `cargo test -p macsftp-sftp --test integration`（无 Docker 时明确 skip） |
+| app 单测 | 自身写盘不标脏、编辑器保存标脏、`DiscardLocal` 与上传成功复位、跨 Tab 迟到事件被丢弃、`⌘⇧U` 在不可编辑选区时禁用 | `cargo test -p macsftp-app` |
+| 手动 | 720×480 窄窗口下 `●` 不挤压文件名；浅色/深色对比度；`⌘⇧U` 可达性 | 记录到 `docs/visual-evidence/` |
 
 ---
 
