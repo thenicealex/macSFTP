@@ -315,6 +315,10 @@ impl LocalUploadPlanner {
             self.finish_error(error);
             return false;
         }
+        if self.cancel.is_cancelled() {
+            self.cancelled();
+            return false;
+        }
         self.event_tx
             .send(AppEvent::TransferPlanCompleted {
                 plan_id: self.plan_id,
@@ -719,7 +723,7 @@ mod tests {
             TransferId(1),
             macsftp_core::Timestamp::from_secs_since_epoch(1),
         );
-        let (event_tx, event_rx) = flume::bounded(64);
+        let (event_tx, event_rx) = flume::bounded(1);
         let cancel = CancellationToken::new();
 
         let handle = std::thread::spawn({
@@ -740,44 +744,49 @@ mod tests {
             }
         });
 
-        // Wait until the planner has published at least one child (flushed a
-        // progress event) before cancelling. This deterministically exercises
-        // the cancel-after-progress path instead of cancelling before any work
-        // starts. The planner cannot reach `finish()` before we cancel because
-        // the directory is large enough that traversal is still in flight.
-        let mut progress_seen = false;
-        while !progress_seen {
-            if let Ok(AppEvent::TransferPlanProgress(progress)) = event_rx.try_recv() {
-                progress_seen = true;
+        // The bounded channel of size 1 guarantees backpressure: the planner flushes the
+        // root folder progress event (planned_count == 1), and then blocks attempting to send
+        // the next progress batch (at batch size 128) until we receive from event_rx.
+        // This ensures the planner is deterministically in flight and cannot complete before cancellation.
+        let first_event = event_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("first progress event must arrive");
+        match first_event {
+            AppEvent::TransferPlanProgress(progress) => {
                 assert!(
                     !progress.child_jobs.is_empty(),
                     "first progress must carry a published child"
                 );
-            } else {
-                std::thread::yield_now();
             }
+            other => panic!("expected first event to be TransferPlanProgress, got {other:?}"),
         }
         cancel.cancel();
+
+        // Drain events until cancellation is observed, unblocking the planner thread if it is
+        // waiting on the bounded channel.
+        let mut seen_cancelled = false;
+        let mut seen_completed = false;
+        while let Ok(event) = event_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            match event {
+                AppEvent::TransferPlanProgress(_) => {}
+                AppEvent::TransferPlanCancelled { plan_id } => {
+                    seen_cancelled = true;
+                    assert_eq!(plan_id, TransferPlanId(1));
+                    break;
+                }
+                AppEvent::TransferPlanCompleted { .. } => {
+                    seen_completed = true;
+                    break;
+                }
+                other => panic!("unexpected planning event: {other:?}"),
+            }
+        }
 
         let planned = handle.join().expect("planner thread panicked");
         assert!(
             planned.is_none(),
             "cancelled planning must not produce jobs"
         );
-
-        let mut seen_cancelled = false;
-        let mut seen_completed = false;
-        while let Ok(event) = event_rx.try_recv() {
-            match event {
-                AppEvent::TransferPlanProgress(_) => {}
-                AppEvent::TransferPlanCancelled { plan_id } => {
-                    seen_cancelled = true;
-                    assert_eq!(plan_id, TransferPlanId(1));
-                }
-                AppEvent::TransferPlanCompleted { .. } => seen_completed = true,
-                other => panic!("unexpected planning event: {other:?}"),
-            }
-        }
         assert!(
             seen_cancelled,
             "cancellation must be published after progress"
