@@ -92,7 +92,7 @@ The workspace is intentionally split by responsibility:
 | --- | --- |
 | `macsftp-core` | Pure models and state machines |
 | `macsftp-ui` | Project-styled GPUI Base controls, themes, and presentation |
-| `macsftp-native-menu` | Isolated macOS AppKit presenter for input context menus |
+| `macsftp-native-menu` | Isolated macOS AppKit presenter for input and file-pane context menus |
 | `macsftp-app` | Windows, actions, UI state, and event orchestration |
 | `macsftp-sftp` | Tokio runtime, russh adapters, sessions, and transfers |
 | `macsftp-storage` | Profiles, known hosts, Keychain references, and migrations |
