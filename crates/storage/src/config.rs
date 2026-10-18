@@ -28,6 +28,11 @@ pub struct AppConfig {
     /// 外部编辑器扩展名/模式关联规则。
     #[serde(default)]
     pub editor_rules: Vec<macsftp_core::EditorRule>,
+    /// Metadata carried from the source item by user-initiated transfers.
+    /// Remote-edit uploads deliberately ignore this and keep the default: the
+    /// edit baseline depends on the uploaded file preserving its mtime.
+    #[serde(default)]
+    pub metadata_policy: macsftp_core::MetadataPolicy,
 }
 
 impl AppConfig {
@@ -43,6 +48,7 @@ impl Default for AppConfig {
             show_hidden_files: false,
             external_editor: None,
             editor_rules: Vec::new(),
+            metadata_policy: macsftp_core::MetadataPolicy::default(),
         }
     }
 }
@@ -200,6 +206,20 @@ impl ConfigStore {
         rules: Vec<macsftp_core::EditorRule>,
     ) -> Result<(), ConfigError> {
         self.modify(|config| config.editor_rules = rules)
+    }
+
+    /// Update one metadata field through the same serialized read-modify-write
+    /// cycle as every other preference. A whole-policy setter would let two
+    /// windows overwrite each other's change from stale snapshots.
+    pub fn set_metadata_preserve_mtime(&mut self, preserve_mtime: bool) -> Result<(), ConfigError> {
+        self.modify(|config| config.metadata_policy.preserve_mtime = preserve_mtime)
+    }
+
+    pub fn set_metadata_preserve_permissions(
+        &mut self,
+        preserve_permissions: bool,
+    ) -> Result<(), ConfigError> {
+        self.modify(|config| config.metadata_policy.preserve_permissions = preserve_permissions)
     }
 
     fn save(&self) -> Result<(), ConfigError> {
@@ -448,5 +468,78 @@ mod tests {
         assert!(json.contains("PyCharm"));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn metadata_policy_defaults_true_and_round_trips() {
+        let path = temp_config_path("metadata-policy");
+        cleanup(&path);
+
+        let store = ConfigStore::open(path.clone()).expect("defaults");
+        assert_eq!(
+            store.config().metadata_policy,
+            macsftp_core::MetadataPolicy::default()
+        );
+        assert!(store.config().metadata_policy.preserve_mtime);
+        assert!(store.config().metadata_policy.preserve_permissions);
+
+        // A config written before this field existed loads with the defaults.
+        std::fs::write(
+            path.as_str(),
+            r#"{"version":1,"appearance":"system","confirm_delete":true}"#,
+        )
+        .expect("write legacy config");
+        let mut store = ConfigStore::open(path.clone()).expect("parse legacy config");
+        assert_eq!(
+            store.config().metadata_policy,
+            macsftp_core::MetadataPolicy::default()
+        );
+
+        store
+            .set_metadata_preserve_permissions(false)
+            .expect("persist metadata permissions");
+
+        let restored = ConfigStore::open(path.clone()).expect("reload");
+        assert!(!restored.config().metadata_policy.preserve_permissions);
+        assert!(
+            restored.config().metadata_policy.preserve_mtime,
+            "changing one metadata field must leave the other unchanged"
+        );
+        assert_eq!(
+            restored.config().version,
+            AppConfig::CURRENT_VERSION,
+            "adding a serde-default field must not require a version bump"
+        );
+        let json = serde_json::to_string(&restored.config()).expect("serialize");
+        assert!(json.contains("metadata_policy"));
+        assert!(json.contains("preserve_permissions"));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn concurrent_metadata_field_updates_do_not_overwrite_each_other() {
+        let path = temp_config_path("metadata-concurrent");
+        let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
+        cleanup(&path);
+
+        // Both instances open before either writes, so each starts from the
+        // same snapshot; field-level setters must still preserve both changes.
+        let mut first = ConfigStore::open(path.clone()).expect("first instance");
+        let mut second = ConfigStore::open(path.clone()).expect("second instance");
+        first
+            .set_metadata_preserve_mtime(false)
+            .expect("first instance saves mtime");
+        second
+            .set_metadata_preserve_permissions(false)
+            .expect("second instance saves permissions");
+
+        let final_config = ConfigStore::open(path.clone())
+            .expect("reload after both writes")
+            .config()
+            .clone();
+        assert!(!final_config.metadata_policy.preserve_mtime);
+        assert!(!final_config.metadata_policy.preserve_permissions);
+        cleanup(&path);
+        let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
     }
 }
