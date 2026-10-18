@@ -202,10 +202,13 @@ impl crate::workspace::Workspace {
             div()
                 .id("transfer-drawer-resize-handle")
                 .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
                 .w_full()
                 .h(RESIZE_HANDLE_HEIGHT)
                 .cursor_row_resize()
-                .bg(theme.colors.border)
+                .bg(theme.colors.surface)
                 .hover(|style| style.bg(hover_background))
                 .tooltip(text_tooltip("Drag to resize. Double-click to reset."))
                 .on_mouse_down(
@@ -251,7 +254,14 @@ impl crate::workspace::Workspace {
                         cx.set_active_drag_cursor_style(CursorStyle::ResizeRow, window);
                         cx.notify();
                     },
-                )),
+                ))
+                .child(
+                    div()
+                        .w(px(36.0))
+                        .h(px(2.0))
+                        .rounded_full()
+                        .bg(theme.colors.text_disabled),
+                ),
         );
 
         drawer = drawer.child(

@@ -63,6 +63,7 @@ pub struct IconButton {
     icon: IconName,
     tooltip_label: SharedString,
     icon_color: Option<Hsla>,
+    emphasis: bool,
     disabled: bool,
     on_click: Option<ClickHandler>,
 }
@@ -77,6 +78,7 @@ pub fn icon_button(
         icon,
         tooltip_label: tooltip_label.into(),
         icon_color: None,
+        emphasis: false,
         disabled: false,
         on_click: None,
     }
@@ -85,6 +87,13 @@ pub fn icon_button(
 impl IconButton {
     pub fn icon_color(mut self, color: Hsla) -> Self {
         self.icon_color = Some(color);
+        self
+    }
+
+    /// Gives an available action the accent treatment used by the path bar
+    /// transfer buttons. Disabled buttons stay neutral.
+    pub fn emphasis(mut self, emphasis: bool) -> Self {
+        self.emphasis = emphasis;
         self
     }
 
@@ -105,11 +114,20 @@ impl IconButton {
 impl RenderOnce for IconButton {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let icon_color = self.icon_color.unwrap_or(theme.colors.text);
+        let emphasized = self.emphasis && !self.disabled;
+        let icon_color = self.icon_color.unwrap_or(if emphasized {
+            theme.colors.accent
+        } else {
+            theme.colors.text
+        });
         button_base(self.id, None, self.disabled, window, cx)
             .w(theme.sizes.icon_button_width)
             .h(theme.sizes.icon_button_height)
-            .bg(gpui_kit::hsla(0.0, 0.0, 0.0, 0.0))
+            .bg(if emphasized {
+                theme.colors.element_selected
+            } else {
+                gpui_kit::hsla(0.0, 0.0, 0.0, 0.0)
+            })
             .text_color(icon_color)
             .disabled(self.disabled)
             .accessibility_label(self.tooltip_label.clone())

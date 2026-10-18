@@ -8,7 +8,7 @@ use gpui_kit::{
 };
 use macsftp_core::{FileKind, FileSort, FileSortField, SortDirection, Timestamp};
 
-use crate::icon::{ICON_SIZE, IconName, icon};
+use crate::icon::{ICON_SIZE, IconName, icon, icon_with_size};
 use crate::theme::ActiveTheme;
 
 /// Fixed trailing column widths shared by the header and every row so
@@ -35,17 +35,26 @@ pub fn file_table_header(
     on_field: impl Fn(FileSortField, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     let theme = cx.theme();
-    let sort_marker = match sort.direction {
-        SortDirection::Ascending => " ↑",
-        SortDirection::Descending => " ↓",
+    let sort_icon = match sort.direction {
+        SortDirection::Ascending => IconName::ArrowUp,
+        SortDirection::Descending => IconName::ArrowDown,
     };
     let active_field = sort.field;
-    let column_label = |label: &str, field: FileSortField| {
-        let mut text = String::from(label);
-        if active_field == field {
-            text.push_str(sort_marker);
-        }
-        text
+    let column_label = |label: &'static str, field: FileSortField| {
+        let active = active_field == field;
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .text_color(if active {
+                theme.colors.text
+            } else {
+                theme.colors.text_muted
+            })
+            .child(label)
+            .when(active, |column| {
+                column.child(icon_with_size(sort_icon, theme.colors.text_muted, px(10.0)))
+            })
     };
     let a11y_label = |label: &str, field: FileSortField| -> SharedString {
         let direction = match sort.direction {
@@ -96,15 +105,20 @@ pub fn file_table_header(
         .child(
             div()
                 .id("sort-size")
+                .debug_selector(|| "file-header-sort-size".into())
                 .w(SIZE_COLUMN_WIDTH)
                 .flex_none()
-                .text_right()
+                .flex()
+                .justify_end()
                 .cursor_pointer()
                 .hover(move |style| style.bg(hover_background))
                 .on_click(move |_event, window, cx| {
                     size_handler(FileSortField::Size, window, cx);
                 })
-                .child(column_label("Size", FileSortField::Size))
+                .child(
+                    column_label("Size", FileSortField::Size)
+                        .debug_selector(|| "file-header-sort-size-label".into()),
+                )
                 .role(Role::Button)
                 .aria_label(a11y_label("Size", FileSortField::Size))
                 .test_support(),
@@ -181,6 +195,11 @@ pub fn file_row(
         theme.colors.text
     };
     let hover_background = theme.colors.element_hover;
+    let secondary_color = if model.selected {
+        theme.colors.text
+    } else {
+        theme.colors.text_muted
+    };
     let accessibility_label = file_row_accessibility_label(&model);
 
     div()
@@ -212,7 +231,7 @@ pub fn file_row(
                 .flex_none()
                 .text_right()
                 .text_size(px(11.0))
-                .text_color(theme.colors.text_muted)
+                .text_color(secondary_color)
                 .font_family(theme.fonts.mono_family.clone())
                 .child(model.size_label),
         )
@@ -221,7 +240,7 @@ pub fn file_row(
                 .w(MODIFIED_COLUMN_WIDTH)
                 .flex_none()
                 .text_size(px(11.0))
-                .text_color(theme.colors.text_muted)
+                .text_color(secondary_color)
                 .font_family(theme.fonts.mono_family.clone())
                 .child(model.modified_label),
         )
@@ -315,10 +334,45 @@ mod tests {
     use macsftp_core::Timestamp;
 
     use super::{
-        FileRowModel, file_row_accessibility_label, format_size, format_size_label,
-        format_timestamp,
+        FileRowModel, file_row_accessibility_label, file_table_header, format_size,
+        format_size_label, format_timestamp,
     };
     use macsftp_core::FileKind;
+
+    struct HeaderHarness {
+        sort: macsftp_core::FileSort,
+    }
+
+    impl gpui_kit::Render for HeaderHarness {
+        fn render(
+            &mut self,
+            _window: &mut gpui_kit::Window,
+            cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            file_table_header(&self.sort, cx, |_, _, _| {})
+        }
+    }
+
+    #[gpui_kit::test]
+    fn size_header_label_is_flush_right_with_its_column(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(|cx| crate::theme::Theme::one_light().install(cx));
+        let (_view, cx) = cx.add_window_view(|_, _| HeaderHarness {
+            sort: macsftp_core::FileSort::default(),
+        });
+        cx.simulate_resize(gpui_kit::size(gpui_kit::px(480.0), gpui_kit::px(80.0)));
+        cx.run_until_parked();
+        let column = cx
+            .debug_bounds("file-header-sort-size")
+            .expect("size column must render");
+        let label = cx
+            .debug_bounds("file-header-sort-size-label")
+            .expect("size label must render");
+        assert_eq!(
+            label.right(),
+            column.right(),
+            "the Size header must align with its right-aligned values"
+        );
+    }
 
     #[test]
     fn size_labels_use_decimal_units() {
