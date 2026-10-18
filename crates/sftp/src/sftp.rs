@@ -3,6 +3,7 @@ mod known_hosts;
 #[cfg(test)]
 mod mock_actor;
 mod physical_connection;
+pub(crate) mod pipelined_reader;
 pub mod pool;
 mod runtime;
 mod session_actor;

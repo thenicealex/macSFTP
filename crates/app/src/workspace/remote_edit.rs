@@ -438,11 +438,7 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(crate) fn compare_edit_conflict(
-        &mut self,
-        id: EditSessionId,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn compare_edit_conflict(&mut self, id: EditSessionId, cx: &mut Context<Self>) {
         let Some(session) = cx.resources().edit_sessions.get(id).cloned() else {
             return;
         };

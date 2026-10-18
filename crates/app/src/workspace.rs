@@ -148,7 +148,8 @@ impl Workspace {
             gpui_kit::base::input::InputState::new(window, cx).placeholder("e.g. *.rs or *.png")
         });
         let new_rule_app = cx.new(|cx| {
-            gpui_kit::base::input::InputState::new(window, cx).placeholder("e.g. Visual Studio Code")
+            gpui_kit::base::input::InputState::new(window, cx)
+                .placeholder("e.g. Visual Studio Code")
         });
 
         let appearance_subscription =

@@ -195,7 +195,10 @@ impl ConfigStore {
         self.modify(|config| config.external_editor = editor)
     }
 
-    pub fn set_editor_rules(&mut self, rules: Vec<macsftp_core::EditorRule>) -> Result<(), ConfigError> {
+    pub fn set_editor_rules(
+        &mut self,
+        rules: Vec<macsftp_core::EditorRule>,
+    ) -> Result<(), ConfigError> {
         self.modify(|config| config.editor_rules = rules)
     }
 
@@ -432,7 +435,9 @@ mod tests {
             macsftp_core::EditorRule::new("*.py", "PyCharm"),
             macsftp_core::EditorRule::new("*.md", "Typora"),
         ];
-        store.set_editor_rules(rules.clone()).expect("persist rules");
+        store
+            .set_editor_rules(rules.clone())
+            .expect("persist rules");
         let restored = ConfigStore::open(path).expect("reopen");
         assert_eq!(restored.config().editor_rules, rules);
 

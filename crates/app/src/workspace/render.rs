@@ -1051,11 +1051,8 @@ impl crate::workspace::Workspace {
                                 }
                                 PaneSide::Remote => {
                                     let entry = tab.remote.entries.get(real_index)?;
-                                    let is_dirty = cx
-                                        .resources()
-                                        .edit_sessions
-                                        .sessions()
-                                        .any(|session| {
+                                    let is_dirty =
+                                        cx.resources().edit_sessions.sessions().any(|session| {
                                             session.tab_id == tab.id
                                                 && session.remote_path == entry.path
                                                 && session.local_modified

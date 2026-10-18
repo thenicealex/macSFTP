@@ -74,23 +74,21 @@ impl AppEventCoordinator {
         let edit_run_id = cx.resources().edit_run_id.clone();
         let watch_root = std::path::PathBuf::from(edits_dir.as_str()).join(edit_run_id);
 
-        let edit_watcher = match macsftp_platform::EditWatcher::start(
-            watch_root,
-            move |session_id, temp_path| {
+        let edit_watcher =
+            match macsftp_platform::EditWatcher::start(watch_root, move |session_id, temp_path| {
                 if let Err(error) = local_tx.try_send(AppEvent::LocalEditModified {
                     session_id,
                     temp_path,
                 }) {
                     warn!(error = %error, "could not queue local edit modified event");
                 }
-            },
-        ) {
-            Ok(watcher) => Some(watcher),
-            Err(error) => {
-                warn!(error = %error, "could not start edit watcher");
-                None
-            }
-        };
+            }) {
+                Ok(watcher) => Some(watcher),
+                Err(error) => {
+                    warn!(error = %error, "could not start edit watcher");
+                    None
+                }
+            };
 
         let local_event_drain = cx.spawn(async move |cx| {
             while let Some(event) = local_rx.recv().await {
@@ -2145,7 +2143,8 @@ mod tests {
         );
 
         // 2. Modify the file on disk
-        std::fs::write(&temp_file, b"initial content with modifications").expect("modify temp file");
+        std::fs::write(&temp_file, b"initial content with modifications")
+            .expect("modify temp file");
 
         cx.update(|cx| {
             dispatch_event(

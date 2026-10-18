@@ -2583,9 +2583,7 @@ pub fn pattern_suffix_len(pattern: &str) -> usize {
 /// Sort rules in place by longest pattern suffix descending, preserving
 /// original relative order on equal suffix lengths (stable sort).
 pub fn sort_editor_rules(rules: &mut [EditorRule]) {
-    rules.sort_by(|a, b| {
-        pattern_suffix_len(&b.pattern).cmp(&pattern_suffix_len(&a.pattern))
-    });
+    rules.sort_by(|a, b| pattern_suffix_len(&b.pattern).cmp(&pattern_suffix_len(&a.pattern)));
 }
 
 /// Evaluate editor rules against `file_name`:
@@ -4784,10 +4782,7 @@ mod tests {
             crate::resolve_editor_app("readme.txt", &rules, Some("DefaultText")),
             Some("DefaultText")
         );
-        assert_eq!(
-            crate::resolve_editor_app("readme.txt", &rules, None),
-            None
-        );
+        assert_eq!(crate::resolve_editor_app("readme.txt", &rules, None), None);
     }
 
     #[test]

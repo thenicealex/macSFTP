@@ -405,7 +405,10 @@ pub fn parse_edit_event_path(
         .or_else(|| {
             let canon_root = watch_root.canonicalize().ok()?;
             let canon_path = path.canonicalize().ok()?;
-            canon_path.strip_prefix(canon_root).ok().map(|p| p.to_path_buf())
+            canon_path
+                .strip_prefix(canon_root)
+                .ok()
+                .map(|p| p.to_path_buf())
         })?;
     let mut components = relative.components();
     let session_component = components.next()?.as_os_str().to_str()?;
@@ -454,7 +457,9 @@ impl EditWatcher {
     ) -> std::io::Result<Self> {
         // Ensure directory exists at startup before watching.
         std::fs::create_dir_all(&watch_root)?;
-        let canonical_root = watch_root.canonicalize().unwrap_or_else(|_| watch_root.clone());
+        let canonical_root = watch_root
+            .canonicalize()
+            .unwrap_or_else(|_| watch_root.clone());
 
         let state = Arc::new((
             Mutex::new(DebounceState {
@@ -927,11 +932,9 @@ mod tests {
         let watcher = super::EditWatcher::start_with_debounce(
             run_dir.clone(),
             std::time::Duration::from_millis(50),
-            move |session_id, path| {
-                match tx.send((session_id, path)) {
-                    Ok(_) => {}
-                    Err(e) => eprintln!("send err: {e}"),
-                }
+            move |session_id, path| match tx.send((session_id, path)) {
+                Ok(_) => {}
+                Err(e) => eprintln!("send err: {e}"),
             },
         );
         let watcher = match watcher {

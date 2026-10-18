@@ -411,35 +411,34 @@ impl crate::workspace::Workspace {
             }
         }
 
-        let add_form = div()
+        let add_form = div().flex().flex_col().gap_2().mt_2().child(
+            div()
+                .flex()
+                .gap_2()
+                .child(div().flex_1().child(ordinary_text_field(
+                    "new-rule-pattern",
+                    &self.settings.new_rule_pattern,
+                )))
+                .child(div().flex_1().child(ordinary_text_field(
+                    "new-rule-app",
+                    &self.settings.new_rule_app,
+                )))
+                .child(
+                    text_button("add-editor-rule-button", "Add Rule")
+                        .primary(true)
+                        .on_click(cx.listener(|workspace, _event, window, cx| {
+                            workspace.add_editor_rule(window, cx);
+                        })),
+                ),
+        );
+
+        div()
             .flex()
             .flex_col()
             .gap_2()
-            .mt_2()
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(ordinary_text_field("new-rule-pattern", &self.settings.new_rule_pattern)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(ordinary_text_field("new-rule-app", &self.settings.new_rule_app)),
-                    )
-                    .child(
-                        text_button("add-editor-rule-button", "Add Rule")
-                            .primary(true)
-                            .on_click(cx.listener(|workspace, _event, window, cx| {
-                                workspace.add_editor_rule(window, cx);
-                            })),
-                    ),
-            );
-
-        div().flex().flex_col().gap_2().child(list).child(add_form).into_any_element()
+            .child(list)
+            .child(add_form)
+            .into_any_element()
     }
 
     pub(crate) fn add_editor_rule(&mut self, window: &mut Window, cx: &mut Context<Self>) {
