@@ -159,6 +159,8 @@ host-key mismatch 必须阻断连接，不提供一键覆盖。unknown key 可�
 
 普通配置只保存非敏感字段和 `SecretRef`。password 和 private-key passphrase 只能进入 Keychain；agent socket、私钥路径和 ProxyCommand 也不能出现在默认诊断日志中。
 
+`config.json` 的 `metadata_policy.preserve_mtime` / `.preserve_permissions` 是新建用户上传、下载的默认元数据策略；旧文件缺少该字段时按 `true` 读取，因此新增字段只使用 `serde(default)`，不 bump `CURRENT_VERSION`。偏好只影响新 plan：retry 复用 job 已捕获的策略；remote-edit 回传固定保留 mtime，因为其冲突基线由本地临时文件的 mtime 推导。UI 不暴露没有生产消费者的 `preserve_symlinks`。目标端无法应用元数据时只能记录 warning，已成功传输的数据不能因此变成整体失败。
+
 Profile 更新由 `ProfileStore` 协调：校验请求和 route → 写入或读取 Keychain → 原子替换版本化 profiles 文件 → 未提交失败时补偿回滚 Keychain → 提交成功后 best-effort 删除孤立 secret，并把失败作为 warning 返回。
 
 - Profile 写入只有一个产品入口：Settings → Saved Connections 将编辑草稿转换为 `ProfileSaveRequest`，storage 通过 `ProfileStore::save_request` 提交。Connect 表单只选择已有 Profile 或建立临时连接，并通过 “Manage Connections…” 进入 Settings；禁止为 Connect 或其他 UI 增加并行的保存适配器。
@@ -278,8 +280,12 @@ remote pane 必须覆盖：`Disconnected`（提供连接或重新连接）、`Co
 
 - Settings 使用主窗口内的独立 surface，不创建第二个窗口、不使用阻塞 modal；关闭后恢复原 tab、pane、selection 和 transfer drawer 状态。
 - Settings 可通过 `macSFTP > Settings…`、`⌘,` 和 `OpenSettings` action 打开，并通过 Done 或 Escape 返回工作区。
+- Settings 固定为三个分类：General（外观、行为、传输偏好、诊断）、Editor（外部编辑器与关联规则）、Saved Connections（Profile 管理）；不按单项设置拆分更多分类。
 - 外观选择立即预览；`System` 跟随窗口 appearance，固定为 Light 或 Dark 时不被系统外观变化覆盖。
-- 配置保存失败必须在 Settings 内行内展示，不能使用 toast，也不能静默丢弃错误。
+- General 中的 `Confirm before delete` 是删除 modal 里 “Don’t ask again” 的唯一恢复入口；`Show hidden files` 与路径栏、菜单和快捷键读写同一份配置。
+- 传输元数据偏好（保留 mtime / permissions）适用于用户发起的上传和下载；remote-edit 回传固定保留 mtime，因为其冲突基线由本地临时文件的 mtime 推导。
+- 配置保存失败必须在 Settings 内行内展示，且每个分类都要能看到该错误，不能使用 toast，也不能静默丢弃错误。
+- 文件表头的排序列使用嵌入的 `arrow_up.svg` / `arrow_down.svg` 图标，不用文本箭头；排序按钮的无障碍 label 必须保留方向和列名。
 - Settings → Saved Connections 是创建、编辑和删除保存 Profile 的唯一入口；Connect modal 只能选择已有 Profile 或填写临时连接，`Manage Connections…` 关闭 Connect 并进入 Settings。
 - Profile 列表使用紧凑双行条目：名称是主层级，`username@host` 是可截断的次层级，port 独立显示；选中、hover 和焦点不能改变条目高度或挤压地址文本。
 - Profile editor 明确显示认证与 route 字段；密码和 passphrase 输入遮罩，保存失败不得清空用户仍可修正的草稿。
@@ -329,6 +335,7 @@ App 和 UI 通过 workspace 的 `gpui-kit = "=0.7.3"`（gpui-pre snapshot）引�
 - `Theme::install` 从 macSFTP 主题 token 派生 Base 语义主题并刷新所有窗口；项目的 `WindowPresentation` Root 插件统一设置 13px rem、字体、背景和文字色，明暗切换只通过该入口更新。
 - 普通输入由 `ui::OrdinaryTextField` 使用 `gpui-base::InputBase` / `Input` 绘制：Settings 外部编辑器、Connect、Saved Connections、路径跳转、重命名、新建目录、文件/Profile 筛选和 command palette 复用同一个 Base Entity。macSFTP theme 拥有尺寸、内边距、边框、焦点环、占位符、光标和选区色，保持冻结的紧凑高度（13px UI 字体下 19.5px），不读取 Component 输入外观 token。
 - `IconButton` / `TextButton` 使用 `gpui-base::Button`，保留 keyed focus、Enter/Space、Tab、无障碍 label 和禁用行为；macSFTP theme 拥有按钮尺寸、圆角、文字和焦点环，鼠标点击保留 pane/input 焦点；图标按钮保持冻结的 26×22px 尺寸，tooltip 使用项目 `Tooltip`。
+- Settings 的开关使用 `gpui-base::Toggle`：Base 负责 Tab、Enter/Space 和 `aria_toggled`，macSFTP theme 负责 track/knob 外观；不得用裸 `div().on_click` 实现设置开关。
 - Assets 只加载项目嵌入图标，未知资源返回 None，不回退到另一套控件资源。
 - 输入右键菜单使用 Base 的 `NativeMenu` 模型和编辑 action；`macsftp-native-menu` 只呈现 macOS AppKit 菜单，不持有输入 Entity 或业务草稿。NSView 在释放 GPUI Window 借用前被 retain，AppKit tracking loop 在 foreground task 中执行且不持有 GPUI update 借用；呈现前检查窗口/焦点，返回后只向仍存在且焦点未变的窗口派发 action，取消后刷新窗口；非 macOS 返回明确 Unsupported 错误。
 - 文件列表右键菜单同样走 `macsftp-native-menu`（`workspace/context_menu.rs` 构建纯数据菜单模型）：右键在 mouse-up 时先聚焦并选中指针下的行，再以指针位置弹出；菜单条目复用既有 workspace action（Open/Open for Editing、Upload、Download、Rename…、New Folder…、Delete…、Copy Path、Show in Finder、Refresh），暂时不可用的命令以禁用态呈现而不是隐藏，只有 side/kind 不适用的命令才不出现；菜单模型必须可在无窗口环境下单测。

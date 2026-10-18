@@ -46,6 +46,9 @@ pub struct ThemeColors {
     pub element_active: Hsla,
     /// Selected rows and tabs; accent-tinted, low alpha.
     pub element_selected: Hsla,
+    /// Knob of an on/off switch. Kept light in both themes so it reads
+    /// against the accent-filled on state.
+    pub switch_knob: Hsla,
     pub accent: Hsla,
     pub error: Hsla,
     pub warning: Hsla,
@@ -233,6 +236,7 @@ impl Theme {
                 element_hover: hsla(0.0, 0.0, 1.0, 0.04),
                 element_active: hsla(0.0, 0.0, 1.0, 0.08),
                 element_selected: hsla(214.0 / 360.0, 0.6, 0.6, 0.16),
+                switch_knob: rgb(0xfafafa).into(),
                 accent: rgb(0x61afef).into(),
                 error: rgb(0xe06c75).into(),
                 warning: rgb(0xe5c07b).into(),
@@ -267,6 +271,7 @@ impl Theme {
                 element_hover: hsla(0.0, 0.0, 0.0, 0.04),
                 element_active: hsla(0.0, 0.0, 0.0, 0.08),
                 element_selected: hsla(214.0 / 360.0, 0.55, 0.5, 0.14),
+                switch_knob: rgb(0xffffff).into(),
                 accent: rgb(0x4078f2).into(),
                 error: rgb(0xe45649).into(),
                 warning: rgb(0xc18401).into(),

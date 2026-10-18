@@ -332,7 +332,7 @@ pub(crate) struct SettingsUi {
     pub(crate) profile_filter: InputState,
     /// `true` while the Profiles filter field owns key events.
     pub(crate) profile_filter_focused: bool,
-    /// Settings → General external-editor override field. Committed to config
+    /// Settings → Editor external-editor override field. Committed to config
     /// on every edit (empty → None).
     pub(crate) external_editor_input: gpui_kit::Entity<gpui_kit::base::input::InputState>,
     _external_editor_subscription: gpui_kit::Subscription,
@@ -348,6 +348,12 @@ pub(crate) struct SettingsUi {
     pub(crate) picker_scrollbar: ScrollbarState,
     pub(crate) profile_list_scroll: gpui_kit::ScrollHandle,
     pub(crate) profile_list_scrollbar: ScrollbarState,
+    /// Settings → General form scroll (short windows).
+    pub(crate) general_scroll: gpui_kit::ScrollHandle,
+    pub(crate) general_scrollbar: ScrollbarState,
+    /// Settings → Editor form scroll (short windows).
+    pub(crate) editor_page_scroll: gpui_kit::ScrollHandle,
+    pub(crate) editor_page_scrollbar: ScrollbarState,
     pub(crate) editor_scroll: gpui_kit::ScrollHandle,
     pub(crate) editor_scrollbar: ScrollbarState,
 }
@@ -374,6 +380,10 @@ impl SettingsUi {
             picker_scrollbar: ScrollbarState::new(),
             profile_list_scroll: gpui_kit::ScrollHandle::new(),
             profile_list_scrollbar: ScrollbarState::new(),
+            general_scroll: gpui_kit::ScrollHandle::new(),
+            general_scrollbar: ScrollbarState::new(),
+            editor_page_scroll: gpui_kit::ScrollHandle::new(),
+            editor_page_scrollbar: ScrollbarState::new(),
             editor_scroll: gpui_kit::ScrollHandle::new(),
             editor_scrollbar: ScrollbarState::new(),
         }

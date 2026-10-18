@@ -1531,6 +1531,145 @@ fn settings_action_switches_surface_and_persists_appearance(cx: &mut TestAppCont
 }
 
 #[gpui_kit::test]
+fn settings_sections_render_and_toggles_persist(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.dispatch_action(OpenSettings);
+    cx.simulate_resize(size(px(760.0), px(480.0)));
+    cx.run_until_parked();
+
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        let toggle = window.find("settings-confirm-delete");
+        assert_eq!(toggle.label(), Some("Confirm before delete"));
+        assert_eq!(toggle.role(), Some(gpui_kit::Role::Button));
+        assert_eq!(
+            window.find("settings-show-hidden-files").label(),
+            Some("Show hidden files")
+        );
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("settings-general-scroll-scrollbar-thumb")
+            .is_some(),
+        "the General form must scroll instead of clipping in a short window"
+    );
+
+    // A taller window keeps every switch visible so the test can click each
+    // one instead of calling its setter directly.
+    cx.simulate_resize(size(px(760.0), px(760.0)));
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        window.click("settings-confirm-delete", cx);
+        window.render_frame(cx);
+        window.click("settings-show-hidden-files", cx);
+        window.render_frame(cx);
+        window.click("settings-preserve-mtime", cx);
+        window.render_frame(cx);
+        window.click("settings-preserve-permissions", cx);
+        window.render_frame(cx);
+        assert_eq!(
+            window.find("settings-confirm-delete").checked(),
+            Some(false),
+            "the clicked switch must repaint in its new state"
+        );
+        assert_eq!(
+            window.find("settings-show-hidden-files").checked(),
+            Some(true)
+        );
+        assert_eq!(
+            window.find("settings-preserve-mtime").checked(),
+            Some(false)
+        );
+        assert_eq!(
+            window.find("settings-preserve-permissions").checked(),
+            Some(false)
+        );
+    });
+    workspace.read_with(&cx, |_workspace, cx| {
+        let config = cx.resources().config.config();
+        assert!(!config.confirm_delete);
+        assert!(config.show_hidden_files);
+        assert!(!config.metadata_policy.preserve_mtime);
+        assert!(!config.metadata_policy.preserve_permissions);
+    });
+
+    // A config error is surfaced on every section, not only General.
+    for section in [
+        SettingsSection::General,
+        SettingsSection::Editor,
+        SettingsSection::Profiles,
+    ] {
+        workspace.update_in(&mut cx, |workspace, _window, cx| {
+            workspace.config_error = Some("Settings couldn’t be saved.".into());
+            workspace.settings.section = section;
+            cx.notify();
+        });
+        cx.update(|window, cx| window.render_frame(cx));
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds("settings-config-error").is_some(),
+            "the config error banner must be visible on {section:?}"
+        );
+    }
+
+    // The sidebar entry is a Base Button, so it is keyboard reachable and
+    // dispatches the section change like a pointer click.
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        workspace.config_error = None;
+        workspace.settings.section = SettingsSection::General;
+        cx.notify();
+    });
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        window.click("settings-section-editor", cx);
+    });
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(workspace.settings.section, SettingsSection::Editor);
+    });
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        window.find("settings-external-editor-input");
+    });
+}
+
+#[gpui_kit::test]
+fn settings_switch_is_keyboard_reachable_and_activates(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.dispatch_action(OpenSettings);
+    cx.simulate_resize(size(px(760.0), px(760.0)));
+    cx.run_until_parked();
+
+    let mut reached = false;
+    cx.update(|window, cx| {
+        for _ in 0..12 {
+            window.focus_next(cx);
+            window.render_frame(cx);
+            if window.find("settings-confirm-delete").focused() == Some(true) {
+                reached = true;
+                break;
+            }
+        }
+    });
+    assert!(reached, "Tab traversal must reach the confirm switch");
+
+    let mut space = gpui_kit::Keystroke::parse("space").expect("space key must parse");
+    space.key_char = Some(" ".into());
+    cx.simulate_event(gpui_kit::KeyDownEvent {
+        keystroke: space.clone(),
+        is_held: false,
+        prefer_character_input: false,
+    });
+    cx.simulate_event(gpui_kit::KeyUpEvent { keystroke: space });
+    workspace.read_with(&cx, |_workspace, cx| {
+        assert!(
+            !cx.resources().config.config().confirm_delete,
+            "Space must activate the focused switch"
+        );
+    });
+}
+
+#[gpui_kit::test]
 fn open_profiles_action_opens_settings_profiles_section(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
@@ -3349,6 +3488,84 @@ fn drag_remote_file_onto_local_pane_begins_download(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn transfers_use_the_configured_metadata_policy(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.connect_with(test_settings(), None, window, cx);
+    });
+    let _ = channels.command_rx.try_recv();
+    let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.handle_app_event(
+            AppEvent::TabConnected(RemoteScoped::new(
+                scope,
+                TabConnected {
+                    remote_root: RemotePath::new(TEST_REMOTE_ROOT),
+                },
+            )),
+            window,
+            cx,
+        );
+    });
+    while channels.command_rx.try_recv().is_ok() {}
+
+    let policy = MetadataPolicy {
+        preserve_permissions: false,
+        preserve_mtime: false,
+        preserve_symlinks: true,
+    };
+    workspace.update_in(&mut cx, |_workspace, _window, cx| {
+        cx.resources_mut()
+            .config
+            .set_metadata_preserve_mtime(false)
+            .expect("persist metadata mtime");
+        cx.resources_mut()
+            .config
+            .set_metadata_preserve_permissions(false)
+            .expect("persist metadata permissions");
+    });
+
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        workspace.begin_upload(vec![LocalPath::new("/tmp/foo.txt")], cx);
+    });
+    let upload = channels
+        .command_rx
+        .try_recv()
+        .expect("upload must enqueue a StartTransfer");
+    let AppCommand::StartTransfer(upload) = upload else {
+        panic!("expected StartTransfer for upload, got {upload:?}");
+    };
+    assert_eq!(upload.metadata_policy, policy);
+
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        workspace.begin_download(vec![RemotePath::new("/home/tester/bar.txt")], cx);
+    });
+    let download = channels
+        .command_rx
+        .try_recv()
+        .expect("download must enqueue a StartTransfer");
+    let AppCommand::StartTransfer(download) = download else {
+        panic!("expected StartTransfer for download, got {download:?}");
+    };
+    assert_eq!(download.metadata_policy, policy);
+
+    // Remote-edit upload-back keeps the default policy on purpose: its
+    // conflict baseline is derived from the local temp file's mtime, so
+    // disabling mtime preservation here would fabricate a conflict.
+    let edit = super::remote_edit::build_edit_upload_command(
+        &LocalPath::new("/tmp/edit.txt"),
+        &RemotePath::new("/home/tester/edit.txt"),
+        1,
+        ProfileId(1),
+        TabId(1),
+    );
+    let AppCommand::StartTransfer(edit) = edit else {
+        panic!("expected StartTransfer for edit upload, got {edit:?}");
+    };
+    assert_eq!(edit.metadata_policy, MetadataPolicy::default());
+}
+
+#[gpui_kit::test]
 fn directory_selection_starts_a_download_plan(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -4200,10 +4417,12 @@ fn open_remote_directory_navigates_instead_of_editing(cx: &mut TestAppContext) {
 fn settings_external_editor_typing_persists_and_round_trips(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
-    // Open Settings → General and focus the external-editor field, then type
+    // Open Settings → Editor and focus the external-editor field, then type
     // a value through the real key handler the GUI routes to.
     cx.dispatch_action(OpenSettings);
     let config_path = workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.settings.section = SettingsSection::Editor;
+        cx.notify();
         workspace.focus_external_editor(window, cx);
         cx.resources().app_paths.config_file.clone()
     });
@@ -4251,6 +4470,8 @@ fn component_input_keeps_unicode_and_focus_across_redraws(cx: &mut TestAppContex
     let (workspace, mut cx, _channels) = init_workspace(cx);
     cx.dispatch_action(OpenSettings);
     workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.settings.section = SettingsSection::Editor;
+        cx.notify();
         workspace.focus_external_editor(window, cx);
     });
     cx.simulate_input("编辑器");
@@ -5818,6 +6039,8 @@ fn ordinary_input_theme_change_preserves_composition_and_focus(cx: &mut TestAppC
     let (workspace, mut cx, _) = init_workspace(cx);
     cx.dispatch_action(OpenSettings);
     let input = workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.settings.section = SettingsSection::Editor;
+        cx.notify();
         workspace.focus_external_editor(window, cx);
         workspace.settings.external_editor_input.clone()
     });
@@ -5848,6 +6071,8 @@ fn ordinary_input_readonly_and_disabled_survive_parent_redraw(cx: &mut TestAppCo
     let (workspace, mut cx, _) = init_workspace(cx);
     cx.dispatch_action(OpenSettings);
     let input = workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.settings.section = SettingsSection::Editor;
+        cx.notify();
         workspace.focus_external_editor(window, cx);
         workspace.settings.external_editor_input.clone()
     });
@@ -8321,6 +8546,98 @@ fn regenerate_workspace_ux_evidence() {
             std::fs::remove_file(&path).expect("fixture file removal");
         }
     }
+
+    // Capture 8 (light): Settings → General. One surface, three sections, and
+    // the immediate-effect switches that replaced the old dead-end prompts.
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                workspace.surface = WorkspaceSurface::Settings;
+                workspace.settings.section = SettingsSection::General;
+                window.focus(&workspace.workspace_focus, cx);
+                cx.notify();
+            })
+            .expect("workspace must be live");
+    });
+    cx.run_until_parked();
+    capture(&mut cx, "light-settings-general-720x480.png");
+
+    // Capture 9 (dark): Settings → Editor. The editor page owns the external
+    // editor field and the association rules that used to crowd General.
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                workspace.set_appearance(AppearancePreference::Dark, window, cx);
+                workspace.settings.section = SettingsSection::Editor;
+                window.focus(&workspace.workspace_focus, cx);
+                cx.notify();
+            })
+            .expect("workspace must be live");
+    });
+    cx.run_until_parked();
+    capture(&mut cx, "dark-settings-editor-720x480.png");
+
+    // Capture 10 (light): Settings → Saved Connections. Two profiles give the
+    // list/editor split real content; passwords stay in the in-memory fixture
+    // keychain and never reach the rendered frame.
+    cx.update(|cx| {
+        workspace.update(cx, |_workspace, cx| {
+            for (index, (name, host, username)) in [
+                ("Production", "prod.example.com", "deploy"),
+                ("Staging", "staging.example.com", "alex"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                cx.resources_mut()
+                    .profiles
+                    .save_request(ProfileSaveRequest {
+                        profile_id: ProfileId(index as u64 + 1),
+                        name: name.into(),
+                        host: host.into(),
+                        port: 22,
+                        username: username.into(),
+                        auth: ProfileAuthUpdate::Password {
+                            password: Some("fixture-password".into()),
+                        },
+                        route: macsftp_core::ConnectionRoute::Direct,
+                        default_remote_path: None,
+                    })
+                    .expect("seed profile fixture");
+            }
+        });
+    });
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                workspace.set_appearance(AppearancePreference::Light, window, cx);
+                workspace.set_settings_section(SettingsSection::Profiles, cx);
+                window.focus(&workspace.workspace_focus, cx);
+                cx.notify();
+            })
+            .expect("workspace must be live");
+    });
+    cx.run_until_parked();
+    capture(&mut cx, "light-settings-saved-connections-720x480.png");
+
+    // Capture 11 (dark): Settings → General. The switch track and knob tokens
+    // must keep their contrast when the surface and controls both go dark.
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                workspace.set_appearance(AppearancePreference::Dark, window, cx);
+                workspace.settings.section = SettingsSection::General;
+                window.focus(&workspace.workspace_focus, cx);
+                cx.notify();
+            })
+            .expect("workspace must be live");
+    });
+    cx.run_until_parked();
+    capture(&mut cx, "dark-settings-general-720x480.png");
 }
 
 /// Local pane with a real, sorted fixture listing; returns the fixture dir so

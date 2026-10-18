@@ -778,6 +778,13 @@ pub(crate) fn cleanup_orphaned_edit_sessions(cx: &mut gpui_kit::App) {
         cleanup_edit_sessions_for_tab(cx, tab_id);
     }
 }
+
+/// Uploads changes from a remote-edit session. This deliberately keeps the
+/// default metadata policy instead of the user's transfer preference:
+/// `advance_uploading_back` rebases the remote snapshot from the local temp
+/// file's mtime, which is only valid when the upload preserved mtime.
+/// Letting the preference disable mtime here would make the next refresh
+/// report a spurious conflict.
 pub(crate) fn build_edit_upload_command(
     temp: &LocalPath,
     remote_path: &RemotePath,

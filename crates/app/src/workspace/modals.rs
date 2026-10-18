@@ -1275,22 +1275,35 @@ impl crate::workspace::Workspace {
                                     "This server’s identity isn’t verified. Check its fingerprint with your administrator before trusting it.",
                                 ),
                         )
-                        .child(info_row(
-                            "Server Address",
-                            format!("{}:{}", prompt.host, prompt.port).into(),
-                            false,
-                        ))
-                        .child(info_row("Key Type", prompt.algorithm.clone().into(), false))
-                        .child(info_row(
-                            "Server Fingerprint",
-                            prompt.fingerprint_sha256.clone().into(),
-                            true,
-                        ))
-                        .child(info_row(
-                            "Save Location",
-                            "~/Library/Application Support/macSFTP/known_hosts".into(),
-                            true,
-                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .p_3()
+                                .rounded_sm()
+                                .bg(theme.colors.element_hover)
+                                .child(info_row(
+                                    "Server Address",
+                                    format!("{}:{}", prompt.host, prompt.port).into(),
+                                    false,
+                                ))
+                                .child(info_row(
+                                    "Key Type",
+                                    prompt.algorithm.clone().into(),
+                                    false,
+                                ))
+                                .child(info_row(
+                                    "Server Fingerprint",
+                                    prompt.fingerprint_sha256.clone().into(),
+                                    true,
+                                ))
+                                .child(info_row(
+                                    "Save Location",
+                                    "~/Library/Application Support/macSFTP/known_hosts".into(),
+                                    true,
+                                )),
+                        )
                         .child(
                             div()
                                 .flex()
@@ -1408,13 +1421,22 @@ impl crate::workspace::Workspace {
                                 .text_color(theme.colors.text_muted)
                                 .child("A file with this name already exists. Choose what to do."),
                         )
-                        .child(detail_row("Incoming File", source.into()))
-                        .child(detail_row("Destination", destination.into()))
-                        .child(detail_row("Size", format_size(prompt.source_size)))
-                        .child(detail_row(
-                            "Last Modified",
-                            format_timestamp(prompt.source_modified_at),
-                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .p_3()
+                                .rounded_sm()
+                                .bg(theme.colors.element_hover)
+                                .child(detail_row("Incoming File", source.into()))
+                                .child(detail_row("Destination", destination.into()))
+                                .child(detail_row("Size", format_size(prompt.source_size)))
+                                .child(detail_row(
+                                    "Last Modified",
+                                    format_timestamp(prompt.source_modified_at),
+                                )),
+                        )
                         .child(
                             div()
                                 .text_size(px(11.0))

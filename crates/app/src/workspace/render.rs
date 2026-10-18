@@ -7,7 +7,7 @@ use gpui_kit::{
 use macsftp_core::{ConnectionState, EntryPath, LocalPath, RemotePath};
 use macsftp_ui::{
     ActiveTheme, DragPreview, FileRowModel, IconName, connection_status, empty_state, file_row,
-    file_table_header, format_size_label, format_timestamp, icon_button, loading_state, tab,
+    file_table_header, format_size_label, format_timestamp, icon, icon_button, loading_state, tab,
     text_button, text_tooltip,
 };
 
@@ -644,6 +644,7 @@ impl crate::workspace::Workspace {
                         IconName::Upload,
                         labeled_shortcut("Upload", "UploadSelection"),
                     )
+                    .emphasis(can_upload)
                     .disabled(!can_upload)
                     .on_click(cx.listener(
                         move |workspace, _event, _window, cx| {
@@ -660,6 +661,7 @@ impl crate::workspace::Workspace {
                         IconName::Download,
                         labeled_shortcut("Download", "DownloadSelection"),
                     )
+                    .emphasis(can_download)
                     .disabled(!can_download)
                     .on_click(cx.listener(
                         move |workspace, _event, _window, cx| {
@@ -707,17 +709,34 @@ impl crate::workspace::Workspace {
             }))
         };
 
-        let recent_rows: Vec<(u64, SharedString)> = if side == PaneSide::Remote {
-            cx.resources()
-                .recents
-                .entries()
-                .iter()
-                .take(6)
-                .map(|entry| (entry.id, SharedString::from(format_recent_label(entry))))
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let recent_rows: Vec<(u64, SharedString, Option<SharedString>, SharedString)> =
+            if side == PaneSide::Remote {
+                cx.resources()
+                    .recents
+                    .entries()
+                    .iter()
+                    .take(6)
+                    .map(|entry| {
+                        let full = SharedString::from(format_recent_label(entry));
+                        let endpoint = format!("{}@{}:{}", entry.username, entry.host, entry.port);
+                        match entry
+                            .display_name
+                            .as_deref()
+                            .filter(|name| !name.is_empty())
+                        {
+                            Some(name) => (
+                                entry.id,
+                                SharedString::from(name),
+                                Some(SharedString::from(endpoint)),
+                                full,
+                            ),
+                            None => (entry.id, SharedString::from(endpoint), None, full),
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
         // Center the first connection action; recent connections retain their
         // top-aligned browsing layout.
         let remote_empty_with_recents =
@@ -787,34 +806,55 @@ impl crate::workspace::Workspace {
                                             .text_color(theme.colors.text_muted)
                                             .child("Recent Connections"),
                                     )
-                                    .children(rows.into_iter().map(|(id, label)| {
-                                        div()
-                                            .id(SharedString::from(format!("recent-{id}")))
-                                            .flex()
-                                            .items_center()
-                                            .h(px(30.0))
-                                            .mb(px(2.0))
-                                            .px(px(10.0))
-                                            .rounded_md()
-                                            .cursor_pointer()
-                                            .hover(|style| style.bg(theme.colors.element_hover))
-                                            .active(|style| style.bg(theme.colors.element_active))
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .truncate()
-                                                    .text_size(px(13.0))
-                                                    .text_color(theme.colors.text)
-                                                    .child(label),
-                                            )
-                                            .on_click(cx.listener(
-                                                move |workspace, _event, window, cx| {
-                                                    workspace
-                                                        .open_recent_connection(id, window, cx);
-                                                },
-                                            ))
-                                    })),
+                                    .children(rows.into_iter().map(
+                                        |(id, primary, endpoint, full)| {
+                                            div()
+                                                .id(SharedString::from(format!("recent-{id}")))
+                                                .flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .h(px(30.0))
+                                                .mb(px(2.0))
+                                                .px(px(10.0))
+                                                .rounded_md()
+                                                .cursor_pointer()
+                                                .tooltip(text_tooltip(full))
+                                                .hover(|style| style.bg(theme.colors.element_hover))
+                                                .active(|style| {
+                                                    style.bg(theme.colors.element_active)
+                                                })
+                                                .child(icon(
+                                                    IconName::Server,
+                                                    theme.colors.text_muted,
+                                                ))
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .text_size(px(13.0))
+                                                        .text_color(theme.colors.text)
+                                                        .child(primary),
+                                                )
+                                                .when_some(endpoint, |row, endpoint| {
+                                                    row.child(
+                                                        div()
+                                                            .flex_none()
+                                                            .max_w(px(150.0))
+                                                            .truncate()
+                                                            .text_size(px(11.0))
+                                                            .text_color(theme.colors.text_muted)
+                                                            .child(endpoint),
+                                                    )
+                                                })
+                                                .on_click(cx.listener(
+                                                    move |workspace, _event, window, cx| {
+                                                        workspace
+                                                            .open_recent_connection(id, window, cx);
+                                                    },
+                                                ))
+                                        },
+                                    )),
                             )
                         }),
                 );

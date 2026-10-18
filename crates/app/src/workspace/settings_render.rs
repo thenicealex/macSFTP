@@ -1,16 +1,18 @@
 use crate::workspace::TextInputTarget;
+use gpui_kit::base::{Button, Toggle};
 use gpui_kit::{
-    Context, FontWeight, IntoElement, ParentElement, Styled, Window, WindowControlArea, div,
-    prelude::*, px,
+    App, ClickEvent, Context, FontWeight, IntoElement, ParentElement, Styled, Window,
+    WindowControlArea, div, prelude::*, px,
 };
 use macsftp_core::{AuthMethodKind, ConnectionRoute};
 use macsftp_ui::{
-    ActiveTheme, IconName, InputState, TextFieldModel, empty_state, icon, ordinary_text_field,
-    plain_text_field, text_button, text_field, text_tooltip,
+    ActiveTheme, IconName, InputState, TextFieldModel, ThemeColors, empty_state, icon,
+    ordinary_text_field, plain_text_field, text_button, text_field, text_tooltip,
 };
 use tracing::warn;
 
 use crate::resources::ActiveResources;
+use crate::workspace::Workspace;
 use crate::workspace::profiles::{
     PassphrasePolicy, ProfileEditorField, ProfileRouteKind, SettingsSection, profile_list_label,
 };
@@ -24,65 +26,36 @@ impl crate::workspace::Workspace {
     ) -> gpui_kit::AnyElement {
         let theme = cx.theme().clone();
         let selected_section = self.settings.section;
-        let selected_appearance = cx.resources().config.config().appearance;
-        let appearance_button = |id: &'static str,
-                                 label: &'static str,
-                                 appearance: AppearancePreference,
-                                 cx: &mut Context<Self>| {
-            let selected = selected_appearance == appearance;
-            div()
-                .id(id)
-                .flex_1()
-                .px_3()
-                .py_2()
-                .text_center()
-                .text_size(px(12.0))
-                .rounded_sm()
-                .border_1()
-                .border_color(if selected {
-                    theme.colors.accent
-                } else {
-                    theme.colors.border
-                })
-                .bg(if selected {
-                    theme.colors.element_selected
-                } else {
-                    theme.colors.background
-                })
-                .text_color(if selected {
-                    theme.colors.accent
-                } else {
-                    theme.colors.text
-                })
-                .hover(|style| style.bg(theme.colors.element_hover))
-                .on_click(cx.listener(move |workspace, _event, window, cx| {
-                    workspace.set_appearance(appearance, window, cx);
-                }))
-                .child(label)
-        };
-
         let sidebar_item = |id: &'static str,
                             label: &'static str,
                             section: SettingsSection,
                             cx: &mut Context<Self>| {
             let selected = selected_section == section;
-            div()
-                .id(id)
+            Button::new(id)
+                .w_full()
+                .justify_start()
                 .px_2()
                 .py_2()
                 .rounded_sm()
+                // The transparent border reserves the one pixel the focus ring
+                // needs, so focusing never shifts the label.
+                .border_1()
+                .border_color(gpui_kit::transparent_black())
                 .bg(if selected {
                     theme.colors.element_selected
                 } else {
                     theme.colors.surface
                 })
                 .text_size(px(12.0))
+                .line_height(gpui_kit::relative(1.2))
                 .text_color(if selected {
                     theme.colors.text
                 } else {
                     theme.colors.text_muted
                 })
                 .hover(|style| style.bg(theme.colors.element_hover))
+                .focus_visible(|style| style.border_color(theme.colors.border_focused))
+                .accessibility_label(label)
                 .on_click(cx.listener(move |workspace, _event, _window, cx| {
                     workspace.set_settings_section(section, cx);
                 }))
@@ -90,157 +63,8 @@ impl crate::workspace::Workspace {
         };
 
         let body = match self.settings.section {
-            SettingsSection::General => div()
-                .flex_1()
-                .min_w_0()
-                .p_6()
-                .track_focus(&self.workspace_focus)
-                .child(
-                    div()
-                        .max_w(px(560.0))
-                        .flex()
-                        .flex_col()
-                        .gap_5()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .text_size(px(14.0))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child("Appearance"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .text_color(theme.colors.text_muted)
-                                        .child(
-                                            "Match your Mac’s appearance, or always use Light or Dark.",
-                                        ),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .gap_2()
-                                .child(appearance_button(
-                                    "appearance-system",
-                                    "Automatic",
-                                    AppearancePreference::System,
-                                    cx,
-                                ))
-                                .child(appearance_button(
-                                    "appearance-light",
-                                    "Light",
-                                    AppearancePreference::Light,
-                                    cx,
-                                ))
-                                .child(appearance_button(
-                                    "appearance-dark",
-                                    "Dark",
-                                    AppearancePreference::Dark,
-                                    cx,
-                                )),
-                        )
-                        .children(self.config_error.clone().map(|error| {
-                            div()
-                                .p_3()
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(theme.colors.error)
-                                .text_size(px(12.0))
-                                .text_color(theme.colors.error)
-                                .child(error)
-                        }))
-                        .child(div().h(px(1.0)).bg(theme.colors.border))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .text_size(px(14.0))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child("File Editor"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .text_color(theme.colors.text_muted)
-                                        .child(
-                                            "Enter an app or command. Leave blank to use your Mac’s default app.",
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .id("settings-external-editor")
-                                        .on_click(cx.listener(|workspace, _event, window, cx| {
-                                            workspace.focus_external_editor(window, cx);
-                                        }))
-                                        .child(ordinary_text_field("settings-external-editor-input", &self.settings.external_editor_input)),
-                                ),
-                        )
-                        .child(div().h(px(1.0)).bg(theme.colors.border))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .text_size(px(14.0))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child("Editor Associations"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .text_color(theme.colors.text_muted)
-                                        .child(
-                                            "Route files to specific editors by filename pattern (e.g. *.rs or *.png).",
-                                        ),
-                                )
-                                .child(self.render_editor_rules(cx)),
-                        )
-                        .child(div().h(px(1.0)).bg(theme.colors.border))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .text_size(px(14.0))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child("Troubleshooting"),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .gap_2()
-                                        .child(
-                                            text_button("open-log-folder", "Show Logs")
-                                                .on_click(cx.listener(
-                                                    |workspace, _event, _window, cx| {
-                                                        workspace.open_log_folder(cx);
-                                                    },
-                                                )),
-                                        )
-                                        .child(
-                                            text_button("copy-version", "Copy Version Info")
-                                                .on_click(cx.listener(
-                                                    |workspace, _event, _window, cx| {
-                                                        workspace.copy_version_info(cx);
-                                                    },
-                                                )),
-                                        ),
-                                ),
-                        ),
-                )
-                .into_any_element(),
+            SettingsSection::General => self.render_settings_general(window, cx),
+            SettingsSection::Editor => self.render_settings_editor(window, cx),
             SettingsSection::Profiles => self.render_settings_profiles(window, cx),
         };
 
@@ -305,18 +129,421 @@ impl crate::workspace::Workspace {
                                 cx,
                             ))
                             .child(sidebar_item(
+                                "settings-section-editor",
+                                "Editor",
+                                SettingsSection::Editor,
+                                cx,
+                            ))
+                            .child(sidebar_item(
                                 "settings-section-profiles",
                                 "Saved Connections",
                                 SettingsSection::Profiles,
                                 cx,
                             )),
                     )
-                    .child(body),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .children(self.config_error.clone().map(|error| {
+                                div()
+                                    .debug_selector(|| "settings-config-error".into())
+                                    .mx_6()
+                                    .mt_3()
+                                    .p_3()
+                                    .rounded_sm()
+                                    .border_1()
+                                    .border_color(theme.colors.error)
+                                    .text_size(px(12.0))
+                                    .text_color(theme.colors.error)
+                                    .child(error)
+                            }))
+                            .child(body),
+                    ),
             )
             .into_any_element()
     }
 
-    /// Focus the Settings → General external-editor field (click or key entry).
+    pub(crate) fn render_settings_general(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let theme = cx.theme().clone();
+        let selected_appearance = cx.resources().config.config().appearance;
+        let confirm_delete = cx.resources().config.config().confirm_delete;
+        let show_hidden_files = cx.resources().config.config().show_hidden_files;
+        let preserve_mtime = cx
+            .resources()
+            .config
+            .config()
+            .metadata_policy
+            .preserve_mtime;
+        let preserve_permissions = cx
+            .resources()
+            .config
+            .config()
+            .metadata_policy
+            .preserve_permissions;
+
+        let appearance_button = |id: &'static str,
+                                 label: &'static str,
+                                 appearance: AppearancePreference,
+                                 cx: &mut Context<Self>| {
+            let selected = selected_appearance == appearance;
+            div()
+                .id(id)
+                .flex_1()
+                .px_3()
+                .py_2()
+                .text_center()
+                .text_size(px(12.0))
+                .rounded_sm()
+                .border_1()
+                .border_color(if selected {
+                    theme.colors.accent
+                } else {
+                    theme.colors.border
+                })
+                .bg(if selected {
+                    theme.colors.element_selected
+                } else {
+                    theme.colors.background
+                })
+                .text_color(if selected {
+                    theme.colors.accent
+                } else {
+                    theme.colors.text
+                })
+                .hover(|style| style.bg(theme.colors.element_hover))
+                .on_click(cx.listener(move |workspace, _event, window, cx| {
+                    workspace.set_appearance(appearance, window, cx);
+                }))
+                .child(label)
+        };
+
+        let section_heading = |title: &'static str, description: &'static str| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(14.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(theme.colors.text_muted)
+                        .child(description),
+                )
+        };
+
+        let weak = cx.weak_entity();
+        let on_confirm_delete =
+            settings_toggle_handler(weak.clone(), Workspace::set_confirm_delete_setting);
+        let on_show_hidden =
+            settings_toggle_handler(weak.clone(), Workspace::set_show_hidden_files_setting);
+        let on_preserve_mtime =
+            settings_toggle_handler(weak.clone(), Workspace::set_metadata_preserve_mtime);
+        let on_preserve_permissions =
+            settings_toggle_handler(weak, Workspace::set_metadata_preserve_permissions);
+
+        let form = div()
+            .flex_none()
+            .w_full()
+            .p_6()
+            .track_focus(&self.workspace_focus)
+            .child(
+                div()
+                    .max_w(px(560.0))
+                    .flex()
+                    .flex_col()
+                    .gap_5()
+                    .child(section_heading(
+                        "Appearance",
+                        "Match your Mac’s appearance, or always use Light or Dark.",
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(appearance_button(
+                                "appearance-system",
+                                "Automatic",
+                                AppearancePreference::System,
+                                cx,
+                            ))
+                            .child(appearance_button(
+                                "appearance-light",
+                                "Light",
+                                AppearancePreference::Light,
+                                cx,
+                            ))
+                            .child(appearance_button(
+                                "appearance-dark",
+                                "Dark",
+                                AppearancePreference::Dark,
+                                cx,
+                            )),
+                    )
+                    .child(div().h(px(1.0)).bg(theme.colors.border))
+                    .child(section_heading(
+                        "Behavior",
+                        "Choose what macSFTP asks before destructive actions and which items it lists.",
+                    ))
+                    .child(settings_switch_row(
+                        "settings-confirm-delete",
+                        "Confirm before delete",
+                        "Ask before removing files. Turn this back on if you dismissed the prompt earlier.",
+                        confirm_delete,
+                        on_confirm_delete,
+                        &theme.colors,
+                    ))
+                    .child(settings_switch_row(
+                        "settings-show-hidden-files",
+                        "Show hidden files",
+                        "Include items whose names start with a dot.",
+                        show_hidden_files,
+                        on_show_hidden,
+                        &theme.colors,
+                    ))
+                    .child(div().h(px(1.0)).bg(theme.colors.border))
+                    .child(section_heading(
+                        "Transfers",
+                        "Applied to new uploads and downloads; retries keep the policy they started with. Remote-edit uploads always keep their timestamp. If the destination can’t apply metadata, the transfer still completes with a warning.",
+                    ))
+                    .child(settings_switch_row(
+                        "settings-preserve-mtime",
+                        "Preserve modification time",
+                        "Keep the source date. When off, the destination keeps the time written by the transfer.",
+                        preserve_mtime,
+                        on_preserve_mtime,
+                        &theme.colors,
+                    ))
+                    .child(settings_switch_row(
+                        "settings-preserve-permissions",
+                        "Preserve permissions",
+                        "Keep the source file mode where the server allows it. When off, the destination applies its own defaults.",
+                        preserve_permissions,
+                        on_preserve_permissions,
+                        &theme.colors,
+                    ))
+                    .child(div().h(px(1.0)).bg(theme.colors.border))
+                    .child(section_heading(
+                        "Troubleshooting",
+                        "Open the log folder or copy build details for a bug report.",
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                text_button("open-log-folder", "Show Logs").on_click(
+                                    cx.listener(|workspace, _event, _window, cx| {
+                                        workspace.open_log_folder(cx);
+                                    }),
+                                ),
+                            )
+                            .child(
+                                text_button("copy-version", "Copy Version Info").on_click(
+                                    cx.listener(|workspace, _event, _window, cx| {
+                                        workspace.copy_version_info(cx);
+                                    }),
+                                ),
+                            ),
+                    ),
+            );
+
+        macsftp_ui::scroll_area(
+            "settings-general-scroll",
+            form,
+            &self.settings.general_scroll,
+            &self.settings.general_scrollbar,
+            window,
+            cx,
+        )
+        .into_any_element()
+    }
+
+    pub(crate) fn render_settings_editor(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let theme = cx.theme().clone();
+
+        let form = div()
+            .flex_none()
+            .w_full()
+            .p_6()
+            .track_focus(&self.workspace_focus)
+            .child(
+                div()
+                    .max_w(px(560.0))
+                    .flex()
+                    .flex_col()
+                    .gap_5()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .text_size(px(14.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child("File Editor"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(theme.colors.text_muted)
+                                    .child(
+                                        "Enter an app or command. Leave blank to use your Mac’s default app.",
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .id("settings-external-editor")
+                                    .on_click(cx.listener(|workspace, _event, window, cx| {
+                                        workspace.focus_external_editor(window, cx);
+                                    }))
+                                    .child(ordinary_text_field(
+                                        "settings-external-editor-input",
+                                        &self.settings.external_editor_input,
+                                    )),
+                            ),
+                    )
+                    .child(div().h(px(1.0)).bg(theme.colors.border))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .text_size(px(14.0))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child("Editor Associations"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(theme.colors.text_muted)
+                                    .child(
+                                        "Route files to specific editors by filename pattern (e.g. *.rs or *.png).",
+                                    ),
+                            )
+                            .child(self.render_editor_rules(cx)),
+                    ),
+            );
+
+        macsftp_ui::scroll_area(
+            "settings-editor-scroll",
+            form,
+            &self.settings.editor_page_scroll,
+            &self.settings.editor_page_scrollbar,
+            window,
+            cx,
+        )
+        .into_any_element()
+    }
+
+    pub(crate) fn set_confirm_delete_setting(
+        &mut self,
+        confirm_delete: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match cx.resources_mut().config.set_confirm_delete(confirm_delete) {
+            Ok(()) => {
+                self.config_error = None;
+                cx.refresh_windows();
+            }
+            Err(error) => {
+                warn!(error = %error, "could not save confirm_delete");
+                self.config_error =
+                    Some("Settings couldn’t be saved. Check file permissions.".into());
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn set_show_hidden_files_setting(
+        &mut self,
+        show_hidden_files: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match cx
+            .resources_mut()
+            .config
+            .set_show_hidden_files(show_hidden_files)
+        {
+            Ok(()) => {
+                self.config_error = None;
+                cx.refresh_windows();
+            }
+            Err(error) => {
+                warn!(error = %error, "could not save show_hidden_files");
+                self.config_error =
+                    Some("Settings couldn’t be saved. Check file permissions.".into());
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn set_metadata_preserve_mtime(
+        &mut self,
+        preserve_mtime: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match cx
+            .resources_mut()
+            .config
+            .set_metadata_preserve_mtime(preserve_mtime)
+        {
+            Ok(()) => {
+                self.config_error = None;
+                cx.refresh_windows();
+            }
+            Err(error) => {
+                warn!(error = %error, "could not save metadata preserve_mtime");
+                self.config_error =
+                    Some("Settings couldn’t be saved. Check file permissions.".into());
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn set_metadata_preserve_permissions(
+        &mut self,
+        preserve_permissions: bool,
+        cx: &mut Context<Self>,
+    ) {
+        match cx
+            .resources_mut()
+            .config
+            .set_metadata_preserve_permissions(preserve_permissions)
+        {
+            Ok(()) => {
+                self.config_error = None;
+                cx.refresh_windows();
+            }
+            Err(error) => {
+                warn!(error = %error, "could not save metadata preserve_permissions");
+                self.config_error =
+                    Some("Settings couldn’t be saved. Check file permissions.".into());
+            }
+        }
+        cx.notify();
+    }
+
+    /// Focus the Settings → Editor external-editor field (click or key entry).
     pub(crate) fn focus_external_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings
             .external_editor_input
@@ -1260,4 +1487,86 @@ impl crate::workspace::Workspace {
 
         form.into_any_element()
     }
+}
+
+/// Bridges a `Toggle` change (which carries the new pressed state, not an
+/// event) back to a workspace method.
+fn settings_toggle_handler(
+    workspace: gpui_kit::WeakEntity<Workspace>,
+    apply: fn(&mut Workspace, bool, &mut Context<Workspace>),
+) -> impl Fn(bool, &ClickEvent, &mut Window, &mut App) + 'static {
+    move |pressed, _event, _window, cx| {
+        if workspace
+            .update(cx, |workspace, cx| apply(workspace, pressed, cx))
+            .is_err()
+        {
+            // Settings closed before the toggle fired.
+        }
+    }
+}
+
+/// A settings row with a label, explanation, and a controlled native-style
+/// switch. The Base `Toggle` owns focus, Enter/Space activation and the
+/// toggled accessibility state; this helper owns the macOS-like track.
+fn settings_switch_row(
+    id: &'static str,
+    title: &'static str,
+    description: &'static str,
+    pressed: bool,
+    on_change: impl Fn(bool, &ClickEvent, &mut Window, &mut App) + 'static,
+    colors: &ThemeColors,
+) -> gpui_kit::AnyElement {
+    let track = if pressed {
+        colors.accent
+    } else {
+        colors.text_disabled
+    };
+    let toggle = Toggle::new(id)
+        .pressed(pressed)
+        .accessibility_label(title)
+        .w(px(32.0))
+        .h(px(20.0))
+        .flex_none()
+        .p(px(2.0))
+        .rounded_full()
+        .bg(track)
+        .when(pressed, |toggle| toggle.justify_end())
+        .when(!pressed, |toggle| toggle.justify_start())
+        .hover(|style| style.opacity(0.9))
+        .focus_visible(|style| style.border_1().border_color(colors.border_focused))
+        .on_change(on_change)
+        .child(
+            div()
+                .size(px(14.0))
+                .flex_none()
+                .rounded_full()
+                .bg(colors.switch_knob),
+        );
+
+    div()
+        .flex()
+        .items_start()
+        .justify_between()
+        .gap_4()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(colors.text)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(colors.text_muted)
+                        .child(description),
+                ),
+        )
+        .child(toggle)
+        .into_any_element()
 }
