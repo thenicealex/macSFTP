@@ -1364,14 +1364,11 @@ mod tests {
 
     #[test]
     fn runtime_client_try_send_rejects_when_channel_full() {
-        let config = RuntimeBridgeConfig {
-            command_channel_capacity: 1,
-            event_channel_capacity: 16,
-            transfer_progress_hz: 10,
-            shutdown_timeout: Duration::from_secs(1),
-        };
-        let controller = RuntimeController::start_mock(config);
-        let client = controller.client();
+        // A live bridge drains its command channel on a runtime thread, so
+        // "the channel is full" is a race. Exercise the non-blocking contract
+        // directly against a bounded channel with no consumer instead.
+        let (command_tx, command_rx) = flume::bounded(1);
+        let client = RuntimeClient::new(command_tx);
 
         // Fill the single-slot command channel.
         client
@@ -1382,7 +1379,9 @@ mod tests {
         let result = client.try_send(AppCommand::CloseTab { tab_id: TabId(2) });
         assert_eq!(result, Err(CommandDispatchError::ChannelFull));
 
-        controller.shutdown();
+        // Keep the receiver alive until the assertion above, so the channel is
+        // full rather than disconnected.
+        drop(command_rx);
     }
 
     #[test]
