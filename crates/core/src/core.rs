@@ -2549,29 +2549,51 @@ fn chars_eq_ci(a: char, b: char) -> bool {
 }
 
 fn match_glob(pattern: &[char], text: &[char]) -> bool {
-    match (pattern.first(), text.first()) {
-        (None, None) => true,
-        (None, Some(_)) => false,
-        (Some(&'*'), _) => {
-            let mut next_pat = &pattern[1..];
-            while let Some(&'*') = next_pat.first() {
-                next_pat = &next_pat[1..];
+    // Iterative wildcard match with a single backtrack point. The recursive
+    // version is exponential for patterns like `*a*a*a*b`, and rules come from
+    // a user-editable config file.
+    let mut pattern_index = 0;
+    let mut text_index = 0;
+    let mut star_pattern: Option<usize> = None;
+    let mut star_text = 0;
+
+    while text_index < text.len() {
+        match pattern.get(pattern_index) {
+            Some(&'*') => {
+                star_pattern = Some(pattern_index);
+                star_text = text_index;
+                pattern_index += 1;
             }
-            if match_glob(next_pat, text) {
-                return true;
+            Some(&'?') if text[text_index] != '/' => {
+                pattern_index += 1;
+                text_index += 1;
             }
-            if let Some(&t) = text.first()
-                && t != '/'
-                && match_glob(pattern, &text[1..])
+            Some(&candidate)
+                if candidate != '*'
+                    && candidate != '?'
+                    && chars_eq_ci(candidate, text[text_index]) =>
             {
-                return true;
+                pattern_index += 1;
+                text_index += 1;
             }
-            false
+            _ => {
+                let Some(star) = star_pattern else {
+                    return false;
+                };
+                if text[star_text] == '/' {
+                    return false;
+                }
+                star_text += 1;
+                text_index = star_text;
+                pattern_index = star + 1;
+            }
         }
-        (Some(&'?'), Some(&t)) if t != '/' => match_glob(&pattern[1..], &text[1..]),
-        (Some(&p), Some(&t)) if chars_eq_ci(p, t) => match_glob(&pattern[1..], &text[1..]),
-        _ => false,
     }
+
+    while matches!(pattern.get(pattern_index), Some(&'*')) {
+        pattern_index += 1;
+    }
+    pattern_index == pattern.len()
 }
 
 /// Calculate the suffix length of a pattern (characters following the last `*`,
@@ -2583,7 +2605,7 @@ pub fn pattern_suffix_len(pattern: &str) -> usize {
 /// Sort rules in place by longest pattern suffix descending, preserving
 /// original relative order on equal suffix lengths (stable sort).
 pub fn sort_editor_rules(rules: &mut [EditorRule]) {
-    rules.sort_by(|a, b| pattern_suffix_len(&b.pattern).cmp(&pattern_suffix_len(&a.pattern)));
+    rules.sort_by_key(|rule| std::cmp::Reverse(pattern_suffix_len(&rule.pattern)));
 }
 
 /// Evaluate editor rules against `file_name`:
@@ -4751,6 +4773,17 @@ mod tests {
         assert!(rule_exact.matches("makefile"));
         assert!(rule_exact.matches("MAKEFILE"));
         assert!(!rule_exact.matches("Makefile.bak"));
+    }
+
+    #[test]
+    fn editor_rule_glob_does_not_backtrack_exponentially() {
+        // A pattern with many stars against a long non-match is the classic
+        // exponential case for naive recursion; the matcher must stay linear.
+        let pathological = crate::EditorRule::new("*a*a*a*a*a*a*a*a*a*a*b", "Slow");
+        assert!(!pathological.matches(&"a".repeat(200)));
+
+        let long_match = crate::EditorRule::new("*a*a*b", "Fast");
+        assert!(long_match.matches(&format!("{}b", "a".repeat(200))));
     }
 
     #[test]
