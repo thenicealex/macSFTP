@@ -5,6 +5,35 @@ based on Keep a Changelog, and releases use semantic versioning.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-19
+
+### Added
+
+- Three-section Settings surface: **General** for appearance, behavior and
+  transfer preferences, **Editor** for the external editor and its association
+  rules, and **Saved Connections** for profile management.
+- Immediate **Confirm before delete**, **Show hidden files**, **Preserve
+  modification time** and **Preserve permissions** switches. The delete prompt's
+  “Don’t ask again” choice is recoverable from General.
+- Keyboard-reachable Settings sections and switches with standard toggle
+  semantics (`aria_toggled`, Space/Enter activation).
+
+### Changed
+
+- Transfer metadata preferences apply to new uploads and downloads. Retries keep
+  the policy captured by the original plan, and remote-edit uploads always keep
+  their timestamp so the conflict baseline stays valid.
+- Configuration save errors appear above the active Settings section, so Editor
+  and Saved Connections failures are visible instead of being hidden with the
+  General form.
+- File-table sort indicators use vector arrows, selected rows keep their size
+  and modified text readable, and available upload/download actions are
+  emphasized in the path bar.
+- Recent connections show a server icon, display name and a truncatable
+  `user@host:port` endpoint with the full value in a tooltip.
+- The transfer drawer uses a centered grabber, and Host Key and Transfer
+  Conflict detail rows share an inset information block.
+
 ## [0.5.0] - 2026-10-19
 
 ### Added
