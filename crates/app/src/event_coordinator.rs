@@ -3,7 +3,7 @@ use gpui_kit::{AnyWindowHandle, App, Context, Global, Task, Window, WindowHandle
 use macsftp_core::{
     AppCommand, AppEvent, ConflictRequest, EditPhase, EditSessionId, LocalPath, ProfileId,
     RemotePath, RemoteSnapshot, TabId, Timestamp, TransferConflictPrompt, TransferDirection,
-    TransferEndpoint,
+    TransferEndpoint, TransferId, TransferPlanId,
 };
 use macsftp_sftp::EventReceiver;
 use tracing::warn;
@@ -777,18 +777,80 @@ fn handle_local_edit_modified(session_id: EditSessionId, temp_path: &str, cx: &m
 }
 
 fn advance_conflict_compare(event: &AppEvent, cx: &mut App) {
-    let (transfer_id, succeeded) = match event {
-        AppEvent::TransferCompleted { transfer_id } => (*transfer_id, true),
-        AppEvent::TransferFailed(failure) => (failure.transfer_id, false),
+    let (dest_path, outcome) = match event {
+        AppEvent::TransferCompleted { transfer_id } => {
+            let Some(dest_path) = compare_destination_for_transfer(*transfer_id, cx) else {
+                return;
+            };
+            (dest_path, Ok(()))
+        }
+        AppEvent::TransferFailed(failure) => {
+            let Some(dest_path) = compare_destination_for_transfer(failure.transfer_id, cx) else {
+                return;
+            };
+            (
+                dest_path,
+                Err("Download of remote copy for comparison failed.".to_string()),
+            )
+        }
+        // Planning and dispatch failures never reach `TransferFailed`, so a
+        // plan that dies before its job runs would otherwise leave the modal
+        // stuck on “Comparing…”. The plan's destination root identifies the
+        // comparison request.
+        AppEvent::TransferPlanFailed { plan_id, error } => {
+            let Some(dest_path) = compare_destination_for_plan(*plan_id, cx) else {
+                return;
+            };
+            (
+                dest_path,
+                Err(format!(
+                    "Could not download the remote copy: {}",
+                    error.title
+                )),
+            )
+        }
+        AppEvent::TransferPlanCancelled { plan_id } => {
+            let Some(dest_path) = compare_destination_for_plan(*plan_id, cx) else {
+                return;
+            };
+            (
+                dest_path,
+                Err("Comparison download was cancelled.".to_string()),
+            )
+        }
+        // Cancelling a queued transfer emits only `TransferSkipped`; the plan
+        // itself is finalized without a `TransferPlanCancelled` event.
+        AppEvent::TransferSkipped { transfer_id } => {
+            let Some(dest_path) = compare_destination_for_transfer(*transfer_id, cx) else {
+                return;
+            };
+            (
+                dest_path,
+                Err("Comparison download was cancelled.".to_string()),
+            )
+        }
         _ => return,
     };
-    let dest_path = match cx.transfers().find_job(transfer_id) {
-        Some(job) => match &job.destination {
-            TransferEndpoint::Local(path) => path.clone(),
-            _ => return,
-        },
-        None => return,
-    };
+    apply_compare_outcome(&dest_path, outcome, cx);
+}
+
+fn compare_destination_for_transfer(transfer_id: TransferId, cx: &App) -> Option<LocalPath> {
+    let job = cx.transfers().find_job(transfer_id)?;
+    match &job.destination {
+        TransferEndpoint::Local(path) => Some(path.clone()),
+        _ => None,
+    }
+}
+
+fn compare_destination_for_plan(plan_id: TransferPlanId, cx: &App) -> Option<LocalPath> {
+    let plan = cx.transfers().find_plan(plan_id)?;
+    match &plan.destination_root {
+        TransferEndpoint::Local(path) => Some(path.clone()),
+        _ => None,
+    }
+}
+
+fn apply_compare_outcome(dest_path: &LocalPath, outcome: Result<(), String>, cx: &mut App) {
     if !dest_path.as_str().contains("conflict-remote") {
         return;
     }
@@ -808,28 +870,45 @@ fn advance_conflict_compare(event: &AppEvent, cx: &mut App) {
     };
 
     for window in workspace_windows(cx) {
-        let _ = window.update(cx, |workspace, _window, cx| {
+        if let Err(error) = window.update(cx, |workspace, _window, cx| {
             if !workspace.owns_tab(session.tab_id) {
                 return;
             }
+            // Only the workspace that started this session's comparison may
+            // consume its result; another tab's modal owns different state.
+            if workspace.modal_inputs.conflict_compare_session != Some(session.id) {
+                return;
+            }
             workspace.modal_inputs.conflict_compare_loading = false;
-            if succeeded {
-                workspace.modal_inputs.conflict_compare_error = None;
-                if let Some(tool) = macsftp_platform::detect_default_diff_tool() {
-                    let local = std::path::Path::new(session.local_temp_path.as_str());
-                    let remote = std::path::Path::new(dest_path.as_str());
-                    if let Err(error) = tool.launch(local, remote) {
-                        warn!(error = %error, "could not launch diff tool after download");
-                        workspace.modal_inputs.conflict_compare_error =
-                            Some(format!("Could not launch {}: {}", tool.name(), error));
+            match &outcome {
+                Ok(()) => {
+                    workspace.modal_inputs.conflict_compare_error = None;
+                    if let Some(tool) = macsftp_platform::detect_default_diff_tool() {
+                        let local = std::path::Path::new(session.local_temp_path.as_str());
+                        let remote = std::path::Path::new(dest_path.as_str());
+                        if !local.is_file() || !remote.is_file() {
+                            workspace.modal_inputs.conflict_compare_error = Some(
+                                "The comparison copy is missing. Try Compare Changes again.".into(),
+                            );
+                        } else if let Err(error) = tool.launch(local, remote) {
+                            warn!(error = %error, "could not launch diff tool after download");
+                            workspace.modal_inputs.conflict_compare_error =
+                                Some(format!("Could not launch {}: {}", tool.name(), error));
+                        }
+                    } else {
+                        workspace.modal_inputs.conflict_compare_error = Some(
+                            "No supported diff tool found (/usr/bin/opendiff or code).".into(),
+                        );
                     }
                 }
-            } else {
-                workspace.modal_inputs.conflict_compare_error =
-                    Some("Download of remote copy for comparison failed.".into());
+                Err(message) => {
+                    workspace.modal_inputs.conflict_compare_error = Some(message.clone());
+                }
             }
             cx.notify();
-        });
+        }) {
+            warn!(error = %error, "could not update conflict compare state");
+        }
     }
 }
 
@@ -2228,8 +2307,7 @@ mod tests {
 
         window
             .update(cx, |workspace, _window, _cx| {
-                workspace.modal_inputs.conflict_compare_loading = true;
-                workspace.modal_inputs.conflict_compare_error = None;
+                workspace.modal_inputs.begin_conflict_compare(_id);
             })
             .expect("update workspace");
 
@@ -2243,6 +2321,16 @@ mod tests {
                 assert!(
                     !workspace.modal_inputs.conflict_compare_loading,
                     "completed compare download must clear loading flag"
+                );
+                // The test never writes the downloaded copy, so the launch is
+                // refused instead of spawning a real diff tool during tests.
+                assert!(
+                    workspace
+                        .modal_inputs
+                        .conflict_compare_error
+                        .as_deref()
+                        .is_some_and(|error| error.contains("comparison copy")),
+                    "missing comparison copy must surface an actionable error"
                 );
             })
             .expect("read workspace");
@@ -2264,8 +2352,7 @@ mod tests {
 
         window
             .update(cx, |workspace, _window, _cx| {
-                workspace.modal_inputs.conflict_compare_loading = true;
-                workspace.modal_inputs.conflict_compare_error = None;
+                workspace.modal_inputs.begin_conflict_compare(_id);
             })
             .expect("update workspace");
 
@@ -2292,6 +2379,126 @@ mod tests {
                 assert!(
                     workspace.modal_inputs.conflict_compare_error.is_some(),
                     "failed compare download must surface error message"
+                );
+            })
+            .expect("read workspace");
+
+        // Cancelling a queued compare job emits only `TransferSkipped`; the
+        // modal must not stay on “Comparing…”.
+        let skipped_transfer_id = TransferId(45);
+        let skipped_job = TransferJob {
+            id: skipped_transfer_id,
+            direction: TransferDirection::Download,
+            source: TransferEndpoint::Remote(RemotePath::new("/srv/conflict.txt")),
+            destination: TransferEndpoint::Local(crate::workspace::conflict_remote_path(
+                &temp_path,
+            )),
+            state: TransferState::Queued,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: Timestamp::from_secs_since_epoch(10),
+        };
+        seed_transfer(cx, skipped_job);
+
+        window
+            .update(cx, |workspace, _window, _cx| {
+                workspace.modal_inputs.begin_conflict_compare(_id);
+            })
+            .expect("update workspace");
+
+        cx.update(|cx| {
+            dispatch_event(
+                AppEvent::TransferSkipped {
+                    transfer_id: skipped_transfer_id,
+                },
+                cx,
+            );
+        });
+
+        window
+            .read_with(cx, |workspace, _cx| {
+                assert!(
+                    !workspace.modal_inputs.conflict_compare_loading,
+                    "skipped compare download must clear loading flag"
+                );
+                assert!(
+                    workspace
+                        .modal_inputs
+                        .conflict_compare_error
+                        .as_deref()
+                        .is_some_and(|error| error.contains("cancelled")),
+                    "skipped compare download must surface the cancellation"
+                );
+            })
+            .expect("read workspace");
+
+        // Planning failures never produce TransferFailed; the plan event must
+        // clear the loading state on its own.
+        let plan_id = TransferPlanId(7);
+        let plan_conflict_path = crate::workspace::conflict_remote_path(&temp_path);
+        let plan = TransferPlan {
+            id: plan_id,
+            root_job_id: TransferId(44),
+            source_root: TransferEndpoint::Remote(RemotePath::new("/srv/conflict.txt")),
+            destination_root: TransferEndpoint::Local(plan_conflict_path),
+            state: TransferPlanState::Planning,
+            planned_count: 0,
+            total_bytes: None,
+            child_jobs: Vec::new(),
+            conflict_policy: ConflictPolicy::default(),
+        };
+        let root_job = TransferJob {
+            id: TransferId(44),
+            direction: TransferDirection::Download,
+            source: TransferEndpoint::Remote(RemotePath::new("/srv/conflict.txt")),
+            destination: plan.destination_root.clone(),
+            state: TransferState::Planning,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: Timestamp::from_secs_since_epoch(10),
+        };
+        cx.update(|cx| {
+            dispatch_event(
+                AppEvent::TransferPlanStarted(Box::new(TransferPlanSnapshot { plan, root_job })),
+                cx,
+            );
+        });
+
+        window
+            .update(cx, |workspace, _window, _cx| {
+                workspace.modal_inputs.begin_conflict_compare(_id);
+            })
+            .expect("update workspace");
+
+        cx.update(|cx| {
+            dispatch_event(
+                AppEvent::TransferPlanFailed {
+                    plan_id,
+                    error: UserFacingError::new(
+                        ErrorCode::NetworkError,
+                        "planning failed",
+                        "could not reach the server",
+                    ),
+                },
+                cx,
+            );
+        });
+
+        window
+            .read_with(cx, |workspace, _cx| {
+                assert!(
+                    !workspace.modal_inputs.conflict_compare_loading,
+                    "plan failure must not leave the modal stuck on Comparing…"
+                );
+                assert!(
+                    workspace
+                        .modal_inputs
+                        .conflict_compare_error
+                        .as_deref()
+                        .is_some_and(|error| error.contains("Could not download the remote copy")),
+                    "plan failure must surface the reason"
                 );
             })
             .expect("read workspace");

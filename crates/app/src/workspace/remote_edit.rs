@@ -25,7 +25,18 @@ pub(crate) fn conflict_remote_path(local_temp_path: &LocalPath) -> LocalPath {
         Some(e) if !e.is_empty() => format!("conflict-remote.{}", e),
         _ => "conflict-remote".to_string(),
     };
-    LocalPath::new(parent.join(file_name).to_string_lossy().to_string())
+    // Keep the snapshot in a subdirectory. Sharing the session directory would
+    // collide with a remote file literally named `conflict-remote.<ext>`, and
+    // the comparison download would overwrite the user's edited copy. The
+    // watcher only understands `<session>/<file>`, so writing this snapshot
+    // can never mark the session dirty either.
+    LocalPath::new(
+        parent
+            .join("compare")
+            .join(file_name)
+            .to_string_lossy()
+            .to_string(),
+    )
 }
 
 /// Best-effort removal of a remote-edit session's temp directory
@@ -386,8 +397,7 @@ impl Workspace {
         if session.phase != EditPhase::RemoteConflict {
             return;
         }
-        self.modal_inputs.conflict_compare_loading = false;
-        self.modal_inputs.conflict_compare_error = None;
+        self.modal_inputs.reset_conflict_compare();
         match choice {
             ConflictChoice::Overwrite => {
                 let command = build_edit_upload_command(
@@ -445,34 +455,20 @@ impl Workspace {
         if session.phase != EditPhase::RemoteConflict {
             return;
         }
-        let Some(tool) = macsftp_platform::detect_default_diff_tool() else {
+        if macsftp_platform::detect_default_diff_tool().is_none() {
+            self.modal_inputs.begin_conflict_compare(id);
+            self.modal_inputs.conflict_compare_loading = false;
             self.modal_inputs.conflict_compare_error =
                 Some("No supported diff tool found (/usr/bin/opendiff or code).".into());
             cx.notify();
             return;
-        };
-        let compare_path = conflict_remote_path(&session.local_temp_path);
-        if std::path::Path::new(compare_path.as_str()).exists() {
-            let local = std::path::Path::new(session.local_temp_path.as_str());
-            let remote = std::path::Path::new(compare_path.as_str());
-            match tool.launch(local, remote) {
-                Ok(_) => {
-                    self.modal_inputs.conflict_compare_loading = false;
-                    self.modal_inputs.conflict_compare_error = None;
-                }
-                Err(error) => {
-                    warn!(error = %error, "could not launch diff tool");
-                    self.modal_inputs.conflict_compare_loading = false;
-                    self.modal_inputs.conflict_compare_error =
-                        Some(format!("Could not launch {}: {}", tool.name(), error));
-                }
-            }
-            cx.notify();
-            return;
         }
+        // Always re-download. A snapshot from an earlier comparison is stale
+        // once the server file changes again, and diffing against it would
+        // present old remote content as if it were current.
+        let compare_path = conflict_remote_path(&session.local_temp_path);
 
-        self.modal_inputs.conflict_compare_loading = true;
-        self.modal_inputs.conflict_compare_error = None;
+        self.modal_inputs.begin_conflict_compare(id);
 
         let transfer_profile_id = self
             .state
@@ -581,7 +577,7 @@ impl Workspace {
     }
 
     pub(crate) fn render_edit_conflict_modal(
-        &self,
+        &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
@@ -598,9 +594,20 @@ impl Workspace {
         let id = conflict?;
         let theme = cx.theme().clone();
 
-        let diff_tool = macsftp_platform::detect_default_diff_tool();
-        let diff_tool_available = diff_tool.is_some();
-        let is_loading = self.modal_inputs.conflict_compare_loading;
+        // Probe once per conflict session, not once per frame: detection hits
+        // the filesystem and this modal can stay open for a long time.
+        let diff_tool_available = match self.modal_inputs.conflict_diff_tool {
+            Some((cached_id, available)) if cached_id == id => available,
+            _ => {
+                let available = macsftp_platform::detect_default_diff_tool().is_some();
+                self.modal_inputs.conflict_diff_tool = Some((id, available));
+                available
+            }
+        };
+        let (is_loading, compare_error) = self
+            .modal_inputs
+            .conflict_compare_for(id)
+            .unwrap_or((false, None));
 
         let card = div()
             .flex()
@@ -637,12 +644,12 @@ impl Workspace {
                         .child("No supported diff tool found (/usr/bin/opendiff or code)."),
                 )
             })
-            .when_some(self.modal_inputs.conflict_compare_error.as_ref(), |card, error| {
+            .when_some(compare_error, |card, error| {
                 card.child(
                     div()
                         .text_size(px(11.0))
                         .text_color(theme.colors.error)
-                        .child(error.clone()),
+                        .child(error.to_string()),
                 )
             })
             .child(
