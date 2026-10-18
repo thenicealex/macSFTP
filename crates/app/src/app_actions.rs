@@ -15,6 +15,7 @@ actions!(
         FocusLocalPane,
         FocusRemotePane,
         UploadSelection,
+        UploadEditedFile,
         DownloadSelection,
         OpenCommandPalette,
         ShowTransferDrawer,
@@ -128,6 +129,9 @@ pub(crate) fn keybindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-r", RefreshPane, Some("Workspace")),
         KeyBinding::new("cmd-shift-r", ReconnectTab, Some("Workspace")),
         KeyBinding::new("cmd-u", UploadSelection, Some("Workspace")),
+        // Shift variant: plain ⌘U already belongs to UploadSelection, and two
+        // bindings on the same chord leave the second one unreachable.
+        KeyBinding::new("cmd-shift-u", UploadEditedFile, Some("Workspace")),
         KeyBinding::new("cmd-d", DownloadSelection, Some("Workspace")),
         KeyBinding::new("down", SelectNextEntry, Some("FilePane")),
         KeyBinding::new("up", SelectPrevEntry, Some("FilePane")),

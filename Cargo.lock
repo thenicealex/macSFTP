@@ -4477,6 +4477,7 @@ name = "macsftp-platform"
 version = "0.4.0"
 dependencies = [
  "macsftp-core",
+ "notify",
  "tracing",
 ]
 

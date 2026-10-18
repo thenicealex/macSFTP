@@ -15,9 +15,9 @@ use macsftp_core::{
     UserFacingError,
 };
 use russh::client;
-use russh_sftp::client::SftpSession;
 use russh_sftp::client::error::Error as SftpError;
 use russh_sftp::client::fs::DirEntry;
+use russh_sftp::client::{RawSftpSession, SftpSession};
 use russh_sftp::protocol::{FileAttributes, FileType as SftpFileType, OpenFlags, StatusCode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
@@ -130,8 +130,14 @@ const MAX_CONCURRENT_TRANSFERS: usize = 4;
 
 struct TransferQueue {
     pending: VecDeque<QueuedTransfer>,
-    running: HashMap<macsftp_core::TransferId, CancellationToken>,
+    running: HashMap<macsftp_core::TransferId, (TransferPlanId, CancellationToken)>,
     plan_policies: Arc<Mutex<HashMap<TransferPlanId, ConflictPolicy>>>,
+    /// First job of each plan: the folder job for directory transfers, which
+    /// removes the destination before any child may start.
+    plan_root_jobs: HashMap<TransferPlanId, TransferId>,
+    /// Plans whose non-root job started at least once; a retried root must not
+    /// clear the destination again.
+    children_started: std::collections::HashSet<TransferPlanId>,
 }
 
 struct QueuedTransfer {
@@ -176,10 +182,12 @@ impl TransferQueue {
             pending: VecDeque::new(),
             running: HashMap::new(),
             plan_policies: Arc::new(Mutex::new(HashMap::new())),
+            plan_root_jobs: HashMap::new(),
+            children_started: std::collections::HashSet::new(),
         }
     }
 
-    fn enqueue(&mut self, plan_id: TransferPlanId, jobs: Vec<TransferJob>) {
+    fn enqueue(&mut self, plan_id: TransferPlanId, jobs: Vec<TransferJob>, record_root: bool) {
         if let Some(job) = jobs.first()
             && let Ok(mut policies) = self.plan_policies.lock()
         {
@@ -187,12 +195,36 @@ impl TransferQueue {
                 .entry(plan_id)
                 .or_insert_with(|| job.conflict_policy.clone());
         }
+        // A retried single job is never the plan root, even when the plan's
+        // root mapping was already cleaned up.
+        if record_root && let Some(root_job) = jobs.first() {
+            self.plan_root_jobs.entry(plan_id).or_insert(root_job.id);
+        }
         self.pending
             .extend(jobs.into_iter().map(|job| QueuedTransfer { plan_id, job }));
     }
 
     fn next(&mut self) -> Option<QueuedTransfer> {
-        self.pending.pop_front()
+        let position = self.pending.iter().position(|queued| {
+            if queued.job.direction != TransferDirection::Download {
+                return true;
+            }
+            let Some(root_id) = self.plan_root_jobs.get(&queued.plan_id) else {
+                return true;
+            };
+            if queued.job.id == *root_id {
+                return !self
+                    .running
+                    .values()
+                    .any(|(plan_id, _)| *plan_id == queued.plan_id);
+            }
+            let root_pending = self
+                .pending
+                .iter()
+                .any(|other| other.plan_id == queued.plan_id && other.job.id == *root_id);
+            !root_pending && !self.running.contains_key(root_id)
+        });
+        position.and_then(|position| self.pending.remove(position))
     }
 
     fn has_capacity(&self) -> bool {
@@ -200,7 +232,18 @@ impl TransferQueue {
     }
 
     fn finish(&mut self, transfer_id: macsftp_core::TransferId) {
-        self.running.remove(&transfer_id);
+        let Some((plan_id, _)) = self.running.remove(&transfer_id) else {
+            return;
+        };
+        let plan_busy = self.pending.iter().any(|queued| queued.plan_id == plan_id)
+            || self
+                .running
+                .values()
+                .any(|(running_plan, _)| *running_plan == plan_id);
+        if !plan_busy {
+            self.plan_root_jobs.remove(&plan_id);
+            self.children_started.remove(&plan_id);
+        }
     }
 
     fn policy_for(&self, plan_id: TransferPlanId, fallback: &ConflictPolicy) -> ConflictPolicy {
@@ -217,10 +260,21 @@ impl TransferQueue {
             .iter()
             .position(|transfer| transfer.job.id == transfer_id)
         {
-            self.pending.remove(position);
+            let plan_id = self.pending.remove(position).map(|queued| queued.plan_id);
+            if let Some(plan_id) = plan_id {
+                let plan_busy = self.pending.iter().any(|queued| queued.plan_id == plan_id)
+                    || self
+                        .running
+                        .values()
+                        .any(|(running_plan, _)| *running_plan == plan_id);
+                if !plan_busy {
+                    self.plan_root_jobs.remove(&plan_id);
+                    self.children_started.remove(&plan_id);
+                }
+            }
             return Some(true);
         }
-        if let Some(cancel) = self.running.get(&transfer_id) {
+        if let Some((_, cancel)) = self.running.get(&transfer_id) {
             cancel.cancel();
             return Some(false);
         }
@@ -417,7 +471,7 @@ impl RemoteSessionActor {
                 }
             },
             RemoteSessionRequest::RunTransferJobs { plan_id, jobs } => {
-                transfer_queue.enqueue(plan_id, jobs);
+                transfer_queue.enqueue(plan_id, jobs, true);
                 self.start_queued_transfer_jobs(
                     cancel,
                     transfer_queue,
@@ -435,7 +489,7 @@ impl RemoteSessionActor {
                 }
             }
             RemoteSessionRequest::RetryTransfer { plan_id, job } => {
-                transfer_queue.enqueue(plan_id, vec![job]);
+                transfer_queue.enqueue(plan_id, vec![job], false);
                 self.start_queued_transfer_jobs(
                     cancel,
                     transfer_queue,
@@ -587,31 +641,46 @@ impl RemoteSessionActor {
             let mut job = queued_transfer.job;
             job.conflict_policy =
                 transfer_queue.policy_for(queued_transfer.plan_id, &job.conflict_policy);
-            let transfer_sftp = match open_transfer_sftp(&self.shared_connection.handle).await {
-                Ok(sftp) => sftp,
-                Err(error) => {
-                    if self
-                        .event_tx
-                        .send_async(AppEvent::TransferFailed(TransferFailure {
-                            transfer_id: job.id,
-                            error,
-                        }))
-                        .await
-                        .is_err()
-                    {
-                        return;
+            let transfer_session =
+                match open_transfer_session(&self.shared_connection.handle, job.direction).await {
+                    Ok(session) => session,
+                    Err(error) => {
+                        if self
+                            .event_tx
+                            .send_async(AppEvent::TransferFailed(TransferFailure {
+                                transfer_id: job.id,
+                                error,
+                            }))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                        continue;
                     }
-                    continue;
-                }
-            };
+                };
             let event_tx = self.event_tx.clone();
             let transfer_cancel = cancel.child_token();
             let transfer_id = job.id;
+            let is_plan_root = transfer_queue
+                .plan_root_jobs
+                .get(&queued_transfer.plan_id)
+                .is_some_and(|root_id| *root_id == transfer_id);
+            let may_clear_destination = is_plan_root
+                && !transfer_queue
+                    .children_started
+                    .contains(&queued_transfer.plan_id);
+            if !is_plan_root {
+                transfer_queue
+                    .children_started
+                    .insert(queued_transfer.plan_id);
+            }
             let next_conflict_id = self.next_conflict_id.clone();
             let plan_policies = transfer_queue.plan_policies.clone();
-            transfer_queue
-                .running
-                .insert(transfer_id, transfer_cancel.clone());
+            transfer_queue.running.insert(
+                transfer_id,
+                (queued_transfer.plan_id, transfer_cancel.clone()),
+            );
             let transfer_complete_tx = transfer_complete_tx.clone();
             let conflict_waiters = conflict_waiters.clone();
             let conflict_context = TransferConflictContext {
@@ -621,16 +690,19 @@ impl RemoteSessionActor {
             };
             std::mem::drop(tokio::spawn(async move {
                 run_transfer_job(
-                    transfer_sftp,
+                    transfer_session,
                     job,
                     queued_transfer.plan_id,
                     event_tx,
                     transfer_cancel,
                     conflict_context,
                     connection_key.clone(),
+                    may_clear_destination,
                 )
                 .await;
-                let _ = transfer_complete_tx.send_async(transfer_id).await;
+                if let Err(error) = transfer_complete_tx.send_async(transfer_id).await {
+                    warn!(error = %error, "transfer complete notification dropped");
+                }
             }));
         }
     }
@@ -705,7 +777,12 @@ pub(crate) async fn open_transfer_sftp(
                 error.to_string(),
             )
         })?;
-    SftpSession::new(channel.into_stream())
+    let sftp_config = russh_sftp::client::Config {
+        max_packet_len: 262144,
+        max_concurrent_writes: 16,
+        request_timeout_secs: 30,
+    };
+    SftpSession::new_with_config(channel.into_stream(), sftp_config)
         .await
         .map_err(|error| {
             transfer_error(
@@ -715,6 +792,67 @@ pub(crate) async fn open_transfer_sftp(
                 error.to_string(),
             )
         })
+}
+
+pub(crate) enum TransferSession {
+    Standard(SftpSession),
+    Raw {
+        session: Arc<RawSftpSession>,
+        chunk_size: u32,
+    },
+}
+
+impl From<SftpSession> for TransferSession {
+    fn from(sftp: SftpSession) -> Self {
+        Self::Standard(sftp)
+    }
+}
+
+impl TransferSession {
+    pub(crate) async fn symlink_metadata(&self, path: &str) -> Result<FileAttributes, SftpError> {
+        match self {
+            Self::Standard(sftp) => sftp.symlink_metadata(path).await,
+            Self::Raw { session, .. } => session.lstat(path).await.map(|attrs| attrs.attrs),
+        }
+    }
+
+    pub(crate) async fn metadata(&self, path: &str) -> Result<FileAttributes, SftpError> {
+        match self {
+            Self::Standard(sftp) => sftp.metadata(path).await,
+            Self::Raw { session, .. } => session.stat(path).await.map(|attrs| attrs.attrs),
+        }
+    }
+
+    pub(crate) async fn read_link(&self, path: &str) -> Result<String, SftpError> {
+        match self {
+            Self::Standard(sftp) => sftp.read_link(path).await,
+            Self::Raw { session, .. } => {
+                let name = session.readlink(path).await?;
+                match name.files.first() {
+                    Some(file) => Ok(file.filename.clone()),
+                    None => Err(SftpError::UnexpectedBehavior("no file".to_string())),
+                }
+            }
+        }
+    }
+}
+
+pub(crate) async fn open_transfer_session(
+    handle: &client::Handle<crate::physical_connection::ClientHandler>,
+    direction: macsftp_core::TransferDirection,
+) -> Result<TransferSession, UserFacingError> {
+    match direction {
+        macsftp_core::TransferDirection::Upload => open_transfer_sftp(handle)
+            .await
+            .map(TransferSession::Standard),
+        macsftp_core::TransferDirection::Download => {
+            let (raw, chunk_size) = crate::pipelined_reader::open_transfer_raw_sftp(handle).await?;
+            Ok(TransferSession::Raw {
+                session: raw,
+                chunk_size,
+            })
+        }
+    }
 }
 
 /// Stream a remote download plan from a dedicated SFTP channel. Planning
@@ -1013,17 +1151,19 @@ pub(crate) enum TransferJobOutcome {
     Failed { retryable: bool },
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_transfer_job(
-    sftp: SftpSession,
+    transfer_session: TransferSession,
     mut job: TransferJob,
     plan_id: TransferPlanId,
     event_tx: flume::Sender<AppEvent>,
     cancel: CancellationToken,
     conflict_context: TransferConflictContext,
     connection_key: String,
+    may_clear_destination: bool,
 ) -> TransferJobOutcome {
     let result = match resolve_transfer_conflict(
-        &sftp,
+        &transfer_session,
         &mut job,
         plan_id,
         &event_tx,
@@ -1032,12 +1172,45 @@ pub(crate) async fn run_transfer_job(
     )
     .await
     {
-        Ok(()) => match job.direction {
-            macsftp_core::TransferDirection::Upload => {
+        Ok(()) => match (job.direction, transfer_session) {
+            (macsftp_core::TransferDirection::Upload, TransferSession::Standard(sftp)) => {
                 upload_transfer(&sftp, &job, &event_tx, &cancel, &connection_key).await
             }
-            macsftp_core::TransferDirection::Download => {
-                download_single_file(&sftp, &job, &event_tx, &cancel, "local").await
+            (
+                macsftp_core::TransferDirection::Download,
+                TransferSession::Raw {
+                    session,
+                    chunk_size,
+                },
+            ) => {
+                download_single_file_pipelined(
+                    &session,
+                    chunk_size,
+                    &job,
+                    &event_tx,
+                    &cancel,
+                    &connection_key,
+                    may_clear_destination,
+                )
+                .await
+            }
+            (macsftp_core::TransferDirection::Download, TransferSession::Standard(sftp)) => {
+                download_single_file(
+                    &sftp,
+                    &job,
+                    &event_tx,
+                    &cancel,
+                    &connection_key,
+                    may_clear_destination,
+                )
+                .await
+            }
+            (macsftp_core::TransferDirection::Upload, TransferSession::Raw { .. }) => {
+                Err(UserFacingError::new(
+                    ErrorCode::Unknown,
+                    "Invalid transfer session",
+                    "Expected standard SFTP session for upload.",
+                ))
             }
         },
         Err(error) => Err(error),
@@ -1074,17 +1247,17 @@ pub(crate) async fn run_transfer_job(
 }
 
 async fn resolve_transfer_conflict(
-    sftp: &SftpSession,
+    session: &TransferSession,
     job: &mut TransferJob,
     plan_id: TransferPlanId,
     event_tx: &flume::Sender<AppEvent>,
     cancel: &CancellationToken,
     conflict_context: TransferConflictContext,
 ) -> Result<(), UserFacingError> {
-    if directories_can_merge(sftp, job).await? {
+    if directories_can_merge(session, job).await? {
         return Ok(());
     }
-    if !destination_exists(sftp, job).await? {
+    if !destination_exists(session, job).await? {
         return Ok(());
     }
     match job.conflict_policy.clone() {
@@ -1096,7 +1269,7 @@ async fn resolve_transfer_conflict(
                 RenameStrategy::ExplicitName(name) => name,
             };
             rename_destination(job, &new_name)?;
-            if destination_exists(sftp, job).await? {
+            if destination_exists(session, job).await? {
                 return Err(UserFacingError::new(
                     ErrorCode::FileExists,
                     "Destination already exists",
@@ -1124,7 +1297,7 @@ async fn resolve_transfer_conflict(
                     "The existing-file choice couldn’t be shown. Try again.",
                 ));
             }
-            let (source_size, source_modified_at) = conflict_source_details(sftp, job).await;
+            let (source_size, source_modified_at) = conflict_source_details(session, job).await;
             event_tx
                 .send_async(AppEvent::TransferConflict(TransferConflictPrompt {
                     request_id,
@@ -1189,7 +1362,7 @@ async fn resolve_transfer_conflict(
                     apply_to_all,
                 } => {
                     rename_destination(job, &new_name)?;
-                    if destination_exists(sftp, job).await? {
+                    if destination_exists(session, job).await? {
                         return Err(UserFacingError::new(
                             ErrorCode::FileExists,
                             "Destination already exists",
@@ -1212,7 +1385,7 @@ async fn resolve_transfer_conflict(
 }
 
 async fn directories_can_merge(
-    sftp: &SftpSession,
+    session: &TransferSession,
     job: &TransferJob,
 ) -> Result<bool, UserFacingError> {
     match (&job.source, &job.destination) {
@@ -1223,7 +1396,7 @@ async fn directories_can_merge(
             if !source_metadata.is_dir() {
                 return Ok(false);
             }
-            match sftp.symlink_metadata(destination.as_str()).await {
+            match session.symlink_metadata(destination.as_str()).await {
                 Ok(metadata) => Ok(metadata.file_type() == SftpFileType::Dir),
                 Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => {
                     Ok(false)
@@ -1238,7 +1411,8 @@ async fn directories_can_merge(
         }
         (TransferEndpoint::Remote(source), TransferEndpoint::Local(destination)) => {
             let source_metadata =
-                sftp.symlink_metadata(source.as_str())
+                session
+                    .symlink_metadata(source.as_str())
                     .await
                     .map_err(|error| {
                         transfer_error(
@@ -1262,7 +1436,7 @@ async fn directories_can_merge(
 }
 
 async fn conflict_source_details(
-    sftp: &SftpSession,
+    session: &TransferSession,
     job: &TransferJob,
 ) -> (Option<u64>, Option<Timestamp>) {
     match &job.source {
@@ -1277,7 +1451,7 @@ async fn conflict_source_details(
                 (None, None)
             }
         },
-        TransferEndpoint::Remote(source) => match sftp.symlink_metadata(source.as_str()).await {
+        TransferEndpoint::Remote(source) => match session.symlink_metadata(source.as_str()).await {
             Ok(metadata) => (
                 metadata.size,
                 metadata
@@ -1293,11 +1467,12 @@ async fn conflict_source_details(
 }
 
 async fn destination_exists(
-    sftp: &SftpSession,
+    session: &TransferSession,
     job: &TransferJob,
 ) -> Result<bool, UserFacingError> {
     match &job.destination {
-        TransferEndpoint::Remote(destination) => match sftp.metadata(destination.as_str()).await {
+        TransferEndpoint::Remote(destination) => match session.metadata(destination.as_str()).await
+        {
             Ok(_) => Ok(true),
             Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => {
                 Ok(false)
@@ -1731,12 +1906,173 @@ async fn create_remote_directory(
     Ok(())
 }
 
+async fn download_symlink_raw(
+    raw: &Arc<RawSftpSession>,
+    job: &TransferJob,
+    event_tx: &flume::Sender<AppEvent>,
+    cancel: &CancellationToken,
+    may_clear_destination: bool,
+) -> Result<(), UserFacingError> {
+    let (TransferEndpoint::Remote(source), TransferEndpoint::Local(destination)) =
+        (&job.source, &job.destination)
+    else {
+        return Err(UserFacingError::new(
+            ErrorCode::UnsupportedSymlink,
+            "Invalid symlink download",
+            "The remote symlink source or local destination is invalid.",
+        ));
+    };
+    emit_transfer_running(event_tx, job, Some(0)).await?;
+    if cancel.is_cancelled() {
+        return Err(cancelled_transfer_error());
+    }
+    let session = TransferSession::Raw {
+        session: Arc::clone(raw),
+        chunk_size: 0,
+    };
+    let target = session.read_link(source.as_str()).await.map_err(|error| {
+        transfer_error(
+            ErrorCode::UnsupportedSymlink,
+            "Server Link Unavailable",
+            "The remote symlink target could not be read. Check server support and try again.",
+            error.to_string(),
+        )
+    })?;
+    if matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
+        remove_downloaded_file_destination(destination.as_str(), may_clear_destination).await?;
+    }
+    ensure_local_parent_directory(destination, cancel).await?;
+    tokio::fs::symlink(target, destination.as_str())
+        .await
+        .map_err(|error| local_transfer_error("Local Link Creation Failed", &error))
+}
+
+async fn download_single_file_pipelined(
+    raw: &Arc<RawSftpSession>,
+    chunk_size: u32,
+    job: &TransferJob,
+    event_tx: &flume::Sender<AppEvent>,
+    cancel: &CancellationToken,
+    connection_key: &str,
+    may_clear_destination: bool,
+) -> Result<(), UserFacingError> {
+    let (TransferEndpoint::Remote(source), TransferEndpoint::Local(destination)) =
+        (&job.source, &job.destination)
+    else {
+        return Err(UserFacingError::new(
+            ErrorCode::Unknown,
+            "Invalid download job",
+            "The download source or destination is invalid.",
+        ));
+    };
+    let source_metadata = raw
+        .lstat(source.as_str())
+        .await
+        .map(|attrs| attrs.attrs)
+        .map_err(|error| {
+            transfer_error(
+                ErrorCode::Unknown,
+                "Server File Unavailable",
+                "The remote file could not be read. Check permissions and try again.",
+                error.to_string(),
+            )
+        })?;
+    if source_metadata.file_type() == SftpFileType::Symlink {
+        return download_symlink_raw(raw, job, event_tx, cancel, may_clear_destination).await;
+    }
+    if source_metadata.file_type() == SftpFileType::Dir {
+        return download_directory(
+            job,
+            &source_metadata,
+            event_tx,
+            cancel,
+            may_clear_destination,
+        )
+        .await;
+    }
+    let bytes_total = source_metadata.size;
+    emit_transfer_running(event_tx, job, bytes_total).await?;
+
+    ensure_local_parent_directory(destination, cancel).await?;
+    let temporary_destination = local_temporary_path(destination, job.id);
+    emit_residual_temp_created(
+        event_tx,
+        ResidualTempRecord {
+            connection_key: connection_key.to_string(),
+            direction: job.direction,
+            transfer_id: job.id,
+            path: temporary_destination.as_str().to_string(),
+            created_at: Timestamp::from_system_time(std::time::SystemTime::now()),
+        },
+    )
+    .await;
+    if !cleanup_local_temp(&temporary_destination, event_tx, job.id, Some(job.id)).await {
+        return Err(UserFacingError::new(
+            ErrorCode::Unknown,
+            "Download Preparation Failed",
+            "A previous temporary download file could not be removed. Retry the transfer.",
+        )
+        .with_retryable(true));
+    }
+    let copy_result = async {
+        let handle_packet = raw
+            .open(source.as_str(), OpenFlags::READ, FileAttributes::empty())
+            .await
+            .map_err(|error| {
+                transfer_error(
+                    ErrorCode::Unknown,
+                    "Server File Unavailable",
+                    "The remote file could not be opened. Check permissions and try again.",
+                    error.to_string(),
+                )
+            })?;
+        let handle = handle_packet.handle;
+        let mut destination_file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(temporary_destination.as_str())
+            .await
+            .map_err(local_destination_create_error)?;
+        let reader = crate::pipelined_reader::PipelinedDownloadReader::new(
+            raw.clone(),
+            handle.clone(),
+            bytes_total,
+        )
+        .with_chunk_size(chunk_size)
+        .with_window_capacity(crate::pipelined_reader::DEFAULT_WINDOW_CAPACITY);
+        let result = reader
+            .download_to(&mut destination_file, job.id, event_tx, cancel)
+            .await;
+        if let Err(close_error) = raw.close(handle).await {
+            warn!(error = %close_error, "failed to close remote file handle");
+        }
+        result
+    }
+    .await;
+    if let Err(error) = copy_result {
+        cleanup_local_temp(&temporary_destination, event_tx, job.id, Some(job.id)).await;
+        return Err(error);
+    }
+    if matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
+        verify_local_hardlink(&temporary_destination, event_tx, job.id).await?;
+        remove_downloaded_file_destination(destination.as_str(), may_clear_destination).await?;
+    }
+    if let Err(error) = commit_local_temp(&temporary_destination, destination).await {
+        cleanup_local_temp(&temporary_destination, event_tx, job.id, Some(job.id)).await;
+        return Err(error);
+    }
+    cleanup_local_temp(&temporary_destination, event_tx, job.id, Some(job.id)).await;
+    preserve_download_metadata(job, &source_metadata, event_tx).await;
+    Ok(())
+}
+
 async fn download_single_file(
     sftp: &SftpSession,
     job: &TransferJob,
     event_tx: &flume::Sender<AppEvent>,
     cancel: &CancellationToken,
     connection_key: &str,
+    may_clear_destination: bool,
 ) -> Result<(), UserFacingError> {
     let (TransferEndpoint::Remote(source), TransferEndpoint::Local(destination)) =
         (&job.source, &job.destination)
@@ -1759,10 +2095,17 @@ async fn download_single_file(
             )
         })?;
     if source_metadata.file_type() == SftpFileType::Symlink {
-        return download_symlink(sftp, job, event_tx, cancel).await;
+        return download_symlink(sftp, job, event_tx, cancel, may_clear_destination).await;
     }
     if source_metadata.file_type() == SftpFileType::Dir {
-        return download_directory(job, &source_metadata, event_tx, cancel).await;
+        return download_directory(
+            job,
+            &source_metadata,
+            event_tx,
+            cancel,
+            may_clear_destination,
+        )
+        .await;
     }
     let bytes_total = source_metadata.size;
     emit_transfer_running(event_tx, job, bytes_total).await?;
@@ -1820,7 +2163,7 @@ async fn download_single_file(
     }
     if matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
         verify_local_hardlink(&temporary_destination, event_tx, job.id).await?;
-        remove_local_destination(destination.as_str()).await?;
+        remove_downloaded_file_destination(destination.as_str(), may_clear_destination).await?;
     }
     if let Err(error) = commit_local_temp(&temporary_destination, destination).await {
         cleanup_local_temp(&temporary_destination, event_tx, job.id, Some(job.id)).await;
@@ -1836,6 +2179,7 @@ async fn download_directory(
     source_metadata: &FileAttributes,
     event_tx: &flume::Sender<AppEvent>,
     cancel: &CancellationToken,
+    may_clear_destination: bool,
 ) -> Result<(), UserFacingError> {
     let TransferEndpoint::Local(destination) = &job.destination else {
         return Err(UserFacingError::new(
@@ -1848,7 +2192,11 @@ async fn download_directory(
     if cancel.is_cancelled() {
         return Err(cancelled_transfer_error());
     }
-    if matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
+    // Only a root directory job that runs before any child has started clears
+    // the destination. A nested directory job shares the freshly created tree
+    // with concurrently running children, and a retried root must not delete
+    // output that already completed.
+    if may_clear_destination && matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
         remove_local_destination(destination.as_str()).await?;
     }
     tokio::select! {
@@ -1910,6 +2258,7 @@ async fn download_symlink(
     job: &TransferJob,
     event_tx: &flume::Sender<AppEvent>,
     cancel: &CancellationToken,
+    may_clear_destination: bool,
 ) -> Result<(), UserFacingError> {
     let (TransferEndpoint::Remote(source), TransferEndpoint::Local(destination)) =
         (&job.source, &job.destination)
@@ -1933,7 +2282,7 @@ async fn download_symlink(
         )
     })?;
     if matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
-        remove_local_destination(destination.as_str()).await?;
+        remove_downloaded_file_destination(destination.as_str(), may_clear_destination).await?;
     }
     ensure_local_parent_directory(destination, cancel).await?;
     tokio::fs::symlink(target, destination.as_str())
@@ -2006,6 +2355,27 @@ fn remote_destination_create_error(error: SftpError) -> UserFacingError {
         "The remote destination already exists or could not be created. Refresh and try again.",
         error.to_string(),
     )
+}
+
+/// Replace an existing file or symlink at `destination`. When this job does not
+/// own the destination tree, a directory at that path is refused instead of
+/// recursively deleted: it may hold output from children of a plan whose
+/// server item changed type between attempts (dir → file/symlink).
+async fn remove_downloaded_file_destination(
+    destination: &str,
+    may_clear_destination: bool,
+) -> Result<(), UserFacingError> {
+    if !may_clear_destination
+        && let Ok(metadata) = tokio::fs::symlink_metadata(destination).await
+        && metadata.is_dir()
+    {
+        return Err(UserFacingError::new(
+            ErrorCode::FileExists,
+            "Destination Changed Type",
+            "The destination path is a folder, but the server item is a file or link. Resolve the conflict manually.",
+        ));
+    }
+    remove_local_destination(destination).await
 }
 
 async fn remove_local_destination(destination: &str) -> Result<(), UserFacingError> {
@@ -2190,7 +2560,7 @@ where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
-    const BUFFER_SIZE: usize = 64 * 1024;
+    const BUFFER_SIZE: usize = 256 * 1024;
     let mut buffer = vec![0; BUFFER_SIZE];
     let mut bytes_done = 0;
     let mut throttle = crate::ProgressThrottle::new(10);
@@ -2468,15 +2838,178 @@ fn remote_snapshot_from_metadata(metadata: &russh_sftp::client::fs::Metadata) ->
 mod tests {
     use macsftp_core::{
         ConflictPolicy, ErrorCode, LocalPath, MetadataPolicy, RemotePath, Timestamp,
-        TransferDirection, TransferEndpoint, TransferId, TransferJob, TransferState,
+        TransferDirection, TransferEndpoint, TransferId, TransferJob, TransferPlanId,
+        TransferState,
     };
     use russh_sftp::client::error::Error as SftpError;
     use russh_sftp::protocol::{Status, StatusCode};
+    use tokio_util::sync::CancellationToken;
 
     use super::{
-        local_download_destination, local_temporary_path, read_directory_error,
+        TransferQueue, local_download_destination, local_temporary_path, read_directory_error,
         remote_temporary_path, rename_destination,
     };
+
+    fn queue_job(id: u64, direction: TransferDirection) -> TransferJob {
+        TransferJob {
+            id: TransferId(id),
+            direction,
+            source: TransferEndpoint::Remote(RemotePath::new(format!("/srv/{id}"))),
+            destination: TransferEndpoint::Local(LocalPath::new(format!("/tmp/{id}"))),
+            state: TransferState::Queued,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: Timestamp::from_secs_since_epoch(0),
+        }
+    }
+
+    #[test]
+    fn transfer_queue_blocks_download_children_behind_the_root() {
+        let mut queue = TransferQueue::new();
+        let plan_id = TransferPlanId(1);
+        queue.enqueue(
+            plan_id,
+            vec![
+                queue_job(1, TransferDirection::Download),
+                queue_job(2, TransferDirection::Download),
+            ],
+            true,
+        );
+
+        let root = queue.next().expect("the plan root must start first");
+        assert_eq!(root.job.id, TransferId(1));
+        queue
+            .running
+            .insert(root.job.id, (plan_id, CancellationToken::new()));
+        assert!(
+            queue.next().is_none(),
+            "children must wait while the root runs"
+        );
+
+        queue.finish(root.job.id);
+        let child = queue
+            .next()
+            .expect("children start after the root finishes");
+        assert_eq!(child.job.id, TransferId(2));
+    }
+
+    #[test]
+    fn transfer_queue_does_not_promote_a_retried_child_to_root() {
+        let mut queue = TransferQueue::new();
+        let plan_id = TransferPlanId(2);
+        queue.enqueue(
+            plan_id,
+            vec![
+                queue_job(1, TransferDirection::Download),
+                queue_job(2, TransferDirection::Download),
+            ],
+            true,
+        );
+
+        let root = queue.next().expect("root must be queued");
+        queue
+            .running
+            .insert(root.job.id, (plan_id, CancellationToken::new()));
+        queue.finish(root.job.id);
+        assert_eq!(
+            queue.plan_root_jobs.get(&plan_id),
+            Some(&TransferId(1)),
+            "the root mapping survives while the plan still has work"
+        );
+
+        let child = queue.next().expect("child must be queued");
+        queue
+            .running
+            .insert(child.job.id, (plan_id, CancellationToken::new()));
+        queue.finish(child.job.id);
+        assert!(
+            !queue.plan_root_jobs.contains_key(&plan_id),
+            "an idle plan releases its root mapping"
+        );
+
+        queue.enqueue(
+            plan_id,
+            vec![queue_job(2, TransferDirection::Download)],
+            false,
+        );
+        assert!(
+            !queue.plan_root_jobs.contains_key(&plan_id),
+            "a retried child must not become the plan root"
+        );
+    }
+
+    #[test]
+    fn transfer_queue_keeps_upload_jobs_concurrent() {
+        let mut queue = TransferQueue::new();
+        let plan_id = TransferPlanId(3);
+        queue.enqueue(
+            plan_id,
+            vec![
+                queue_job(1, TransferDirection::Upload),
+                queue_job(2, TransferDirection::Upload),
+            ],
+            true,
+        );
+
+        assert_eq!(
+            queue.next().map(|queued| queued.job.id),
+            Some(TransferId(1))
+        );
+        assert_eq!(
+            queue.next().map(|queued| queued.job.id),
+            Some(TransferId(2))
+        );
+    }
+
+    fn unique_test_dir(label: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "macsftp-session-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&path).expect("test directory must be created");
+        path
+    }
+
+    #[tokio::test]
+    async fn file_download_refuses_to_delete_a_directory_without_clear_permission() {
+        let dir = unique_test_dir("file-over-directory");
+        let nested = dir.join("nested");
+        std::fs::create_dir_all(&nested).expect("nested directory must be created");
+        std::fs::write(nested.join("keep.txt"), b"keep").expect("child output must be written");
+        let destination = dir.to_string_lossy().to_string();
+
+        let error = super::remove_downloaded_file_destination(&destination, false)
+            .await
+            .expect_err("a job without clear permission must not delete a directory");
+        assert_eq!(error.title, "Destination Changed Type");
+        assert!(
+            nested.join("keep.txt").exists(),
+            "completed child output must survive the refused replacement"
+        );
+
+        super::remove_downloaded_file_destination(&destination, true)
+            .await
+            .expect("the plan root may clear the tree");
+        assert!(!dir.exists(), "the root clears the destination tree");
+    }
+
+    #[tokio::test]
+    async fn file_download_replaces_a_file_without_clear_permission() {
+        let dir = unique_test_dir("file-over-file");
+        let destination = dir.join("item.txt");
+        std::fs::write(&destination, b"old").expect("existing file must be written");
+        let destination = destination.to_string_lossy().to_string();
+
+        super::remove_downloaded_file_destination(&destination, false)
+            .await
+            .expect("an existing file may be replaced by a nested job");
+        assert!(!std::path::Path::new(&destination).exists());
+    }
 
     fn status_error(status_code: StatusCode) -> SftpError {
         SftpError::Status(Status {

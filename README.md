@@ -46,6 +46,8 @@ No credentials or personal files are shown.
 - Local and remote browsing, navigation, filtering, sorting, and file operations
 - Upload/download plans with progress, conflict handling, cancellation, and retry
 - External-editor workflow with an explicit, conflict-checked **Upload Changes** action
+- Dirty markers for locally edited files and per-pattern external editor rules
+- Pipelined downloads with up to four concurrent transfers per plan
 - Process-wide transfer queue shown in each window; jobs are not restored after relaunch
 
 Connection profiles are created, edited, and deleted only in
@@ -55,8 +57,10 @@ a temporary connection; its **Manage Connections…** button opens the profile e
 Remote editing is intentionally explicit: double-click a remote file to open a
 temporary copy in the configured editor, save it there, reselect the remote
 file in macSFTP, and choose **Upload Changes** in the status bar. macSFTP
-checks current remote metadata before uploading and asks for a decision if the
-remote file changed. It does not watch local saves or upload them automatically.
+marks files it detects as locally modified with a `●` in the list, but it never
+uploads automatically. Before uploading it checks current remote metadata and
+asks for a decision if the remote file changed; **Compare Changes…** opens a
+detected diff tool against a fresh copy of the remote file.
 
 ## Requirements
 

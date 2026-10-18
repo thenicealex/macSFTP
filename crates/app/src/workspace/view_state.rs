@@ -221,6 +221,16 @@ pub(crate) struct ModalInputsUi {
         KeyboardInteractiveUi,
     >,
     pub(crate) about_open: bool,
+    pub(crate) conflict_compare_loading: bool,
+    pub(crate) conflict_compare_error: Option<String>,
+    /// Session whose comparison download owns the loading/error pair above.
+    /// Without this, a comparison started in one tab shows its progress on
+    /// another tab's conflict modal.
+    pub(crate) conflict_compare_session: Option<macsftp_core::EditSessionId>,
+    /// Cached diff-tool availability for the conflict modal, keyed by session.
+    /// Detecting on every render frame would run filesystem probes on the UI
+    /// thread for as long as the modal stays open.
+    pub(crate) conflict_diff_tool: Option<(macsftp_core::EditSessionId, bool)>,
 }
 
 impl ModalInputsUi {
@@ -233,7 +243,35 @@ impl ModalInputsUi {
             large_edit_confirm: None,
             keyboard_interactive: std::collections::HashMap::new(),
             about_open: false,
+            conflict_compare_loading: false,
+            conflict_compare_error: None,
+            conflict_compare_session: None,
+            conflict_diff_tool: None,
         }
+    }
+
+    pub(crate) fn begin_conflict_compare(&mut self, session_id: macsftp_core::EditSessionId) {
+        self.conflict_compare_session = Some(session_id);
+        self.conflict_compare_loading = true;
+        self.conflict_compare_error = None;
+    }
+
+    pub(crate) fn reset_conflict_compare(&mut self) {
+        self.conflict_compare_session = None;
+        self.conflict_compare_loading = false;
+        self.conflict_compare_error = None;
+    }
+
+    /// Loading flag and error belonging to `session_id`, or `None` when the
+    /// state belongs to another session (another tab's conflict modal).
+    pub(crate) fn conflict_compare_for(
+        &self,
+        session_id: macsftp_core::EditSessionId,
+    ) -> Option<(bool, Option<&str>)> {
+        (self.conflict_compare_session == Some(session_id)).then_some((
+            self.conflict_compare_loading,
+            self.conflict_compare_error.as_deref(),
+        ))
     }
 }
 
@@ -298,6 +336,8 @@ pub(crate) struct SettingsUi {
     /// on every edit (empty → None).
     pub(crate) external_editor_input: gpui_kit::Entity<gpui_kit::base::input::InputState>,
     _external_editor_subscription: gpui_kit::Subscription,
+    pub(crate) new_rule_pattern: gpui_kit::Entity<gpui_kit::base::input::InputState>,
+    pub(crate) new_rule_app: gpui_kit::Entity<gpui_kit::base::input::InputState>,
     /// Selected profile in Settings → Profiles (None when the list is empty).
     pub(crate) selected_profile_id: Option<macsftp_core::ProfileId>,
     /// Draft for New / Edit profile in Settings → Profiles.
@@ -316,6 +356,8 @@ impl SettingsUi {
     pub(crate) fn new(
         external_editor_input: gpui_kit::Entity<gpui_kit::base::input::InputState>,
         external_editor_subscription: gpui_kit::Subscription,
+        new_rule_pattern: gpui_kit::Entity<gpui_kit::base::input::InputState>,
+        new_rule_app: gpui_kit::Entity<gpui_kit::base::input::InputState>,
     ) -> Self {
         Self {
             section: crate::workspace::profiles::SettingsSection::General,
@@ -323,6 +365,8 @@ impl SettingsUi {
             profile_filter_focused: false,
             external_editor_input,
             _external_editor_subscription: external_editor_subscription,
+            new_rule_pattern,
+            new_rule_app,
             selected_profile_id: None,
             profile_editor: None,
             profile_delete_confirm: None,

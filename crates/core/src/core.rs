@@ -1929,6 +1929,12 @@ pub enum AppEvent {
     /// remote-session-scoped: the coordinator matches it only by the exact
     /// `tab_id`/`session_epoch`/`edit_session_id`/`check_id`/`path` tuple.
     RemoteEditSnapshotDispatchFailed(RemoteEditSnapshotDispatchFailed),
+    /// A local edit file in `<edits_dir>/<edit_run_id>/<session_id>/...` was
+    /// modified by an external editor. FSEvents watcher emits this.
+    LocalEditModified {
+        session_id: EditSessionId,
+        temp_path: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2314,6 +2320,12 @@ pub enum EditPhase {
     RemoteConflict,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalBaseline {
+    pub size: u64,
+    pub mtime: std::time::SystemTime,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditSession {
     pub id: EditSessionId,
@@ -2340,6 +2352,12 @@ pub struct EditSession {
     /// result time; if the user saves again mid-flight the session requires a
     /// new explicit upload rather than authorizing a stale result.
     pub checking_local_mtime: Option<Timestamp>,
+    /// Whether the local temporary file was modified by an external editor
+    /// since the baseline was established.
+    pub local_modified: bool,
+    /// Baseline captured when entering `Editing` (or after successful upload)
+    /// to suppress false dirty events from our own writes.
+    pub local_baseline: Option<LocalBaseline>,
 }
 
 #[derive(Debug, Default)]
@@ -2482,6 +2500,10 @@ impl EditSessionStore {
             .filter(|s| s.phase == EditPhase::RemoteConflict)
     }
 
+    pub fn sessions(&self) -> impl Iterator<Item = &EditSession> {
+        self.sessions.iter()
+    }
+
     /// The distinct `tab_id`s across all registered sessions. Used after a
     /// window closes to find sessions whose owning tab no longer exists in any
     /// surviving window so they can be torn down.
@@ -2494,6 +2516,126 @@ impl EditSessionStore {
         }
         ids
     }
+}
+
+/// External editor routing rule. Pattern matching is case-insensitive
+/// and supports simple glob syntax with `*` and `?`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EditorRule {
+    pub pattern: String,
+    pub app_name: String,
+}
+
+impl EditorRule {
+    pub fn new(pattern: impl Into<String>, app_name: impl Into<String>) -> Self {
+        Self {
+            pattern: pattern.into(),
+            app_name: app_name.into(),
+        }
+    }
+
+    /// Case-insensitive match against a file name or path component.
+    /// Supports `*` (zero or more characters, except `/`) and
+    /// `?` (exactly one character, except `/`).
+    pub fn matches(&self, file_name: &str) -> bool {
+        let pattern_chars: Vec<char> = self.pattern.chars().collect();
+        let text_chars: Vec<char> = file_name.chars().collect();
+        match_glob(&pattern_chars, &text_chars)
+    }
+}
+
+fn chars_eq_ci(a: char, b: char) -> bool {
+    a.to_lowercase().eq(b.to_lowercase())
+}
+
+fn match_glob(pattern: &[char], text: &[char]) -> bool {
+    // Iterative wildcard match with a single backtrack point. The recursive
+    // version is exponential for patterns like `*a*a*a*b`, and rules come from
+    // a user-editable config file.
+    let mut pattern_index = 0;
+    let mut text_index = 0;
+    let mut star_pattern: Option<usize> = None;
+    let mut star_text = 0;
+
+    while text_index < text.len() {
+        match pattern.get(pattern_index) {
+            Some(&'*') => {
+                star_pattern = Some(pattern_index);
+                star_text = text_index;
+                pattern_index += 1;
+            }
+            Some(&'?') if text[text_index] != '/' => {
+                pattern_index += 1;
+                text_index += 1;
+            }
+            Some(&candidate)
+                if candidate != '*'
+                    && candidate != '?'
+                    && chars_eq_ci(candidate, text[text_index]) =>
+            {
+                pattern_index += 1;
+                text_index += 1;
+            }
+            _ => {
+                let Some(star) = star_pattern else {
+                    return false;
+                };
+                if text[star_text] == '/' {
+                    return false;
+                }
+                star_text += 1;
+                text_index = star_text;
+                pattern_index = star + 1;
+            }
+        }
+    }
+
+    while matches!(pattern.get(pattern_index), Some(&'*')) {
+        pattern_index += 1;
+    }
+    pattern_index == pattern.len()
+}
+
+/// Calculate the suffix length of a pattern (characters following the last `*`,
+/// or the entire pattern length if no `*` exists).
+pub fn pattern_suffix_len(pattern: &str) -> usize {
+    pattern.rsplit('*').next().map_or(0, |s| s.len())
+}
+
+/// Sort rules in place by longest pattern suffix descending, preserving
+/// original relative order on equal suffix lengths (stable sort).
+pub fn sort_editor_rules(rules: &mut [EditorRule]) {
+    rules.sort_by_key(|rule| std::cmp::Reverse(pattern_suffix_len(&rule.pattern)));
+}
+
+/// Evaluate editor rules against `file_name`:
+/// Matches against `rules`, selecting the matching rule with the longest pattern suffix.
+/// Ties in suffix length are resolved by first-match-wins.
+/// Falls back to `fallback` if no rule matches.
+pub fn resolve_editor_app<'a>(
+    file_name: &str,
+    rules: &'a [EditorRule],
+    fallback: Option<&'a str>,
+) -> Option<&'a str> {
+    let mut best: Option<&EditorRule> = None;
+    let mut best_len = 0;
+    for rule in rules {
+        if rule.matches(file_name) {
+            let len = pattern_suffix_len(&rule.pattern);
+            match best {
+                None => {
+                    best = Some(rule);
+                    best_len = len;
+                }
+                Some(_) if len > best_len => {
+                    best = Some(rule);
+                    best_len = len;
+                }
+                _ => {}
+            }
+        }
+    }
+    best.map(|rule| rule.app_name.as_str()).or(fallback)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3926,6 +4068,8 @@ mod tests {
             },
             pending_check_id: None,
             checking_local_mtime: None,
+            local_modified: false,
+            local_baseline: None,
         }
     }
 
@@ -4598,5 +4742,103 @@ mod tests {
             }],
         });
         assert_eq!(event.remote_scope(), Some(scope));
+    }
+
+    #[test]
+    fn editor_rule_matches_case_insensitive_and_glob() {
+        let rule_py = crate::EditorRule::new("*.py", "VSCode");
+        assert!(rule_py.matches("main.py"));
+        assert!(rule_py.matches("MAIN.PY"));
+        assert!(rule_py.matches("script.Py"));
+        assert!(!rule_py.matches("main.rs"));
+        // '*' must not match '/'
+        assert!(!rule_py.matches("sub/main.py"));
+
+        let rule_docker = crate::EditorRule::new("Dockerfile*", "VSCode");
+        assert!(rule_docker.matches("Dockerfile"));
+        assert!(rule_docker.matches("dockerfile.dev"));
+        assert!(rule_docker.matches("DOCKERFILE.PROD"));
+        assert!(!rule_docker.matches("other.txt"));
+
+        let rule_single = crate::EditorRule::new("test_?.rs", "RustRover");
+        assert!(rule_single.matches("test_1.rs"));
+        assert!(rule_single.matches("TEST_A.RS"));
+        assert!(!rule_single.matches("test_12.rs"));
+        assert!(!rule_single.matches("test_.rs"));
+        // '?' must not match '/'
+        assert!(!rule_single.matches("test_/.rs"));
+
+        let rule_exact = crate::EditorRule::new("Makefile", "Sublime");
+        assert!(rule_exact.matches("Makefile"));
+        assert!(rule_exact.matches("makefile"));
+        assert!(rule_exact.matches("MAKEFILE"));
+        assert!(!rule_exact.matches("Makefile.bak"));
+    }
+
+    #[test]
+    fn editor_rule_glob_does_not_backtrack_exponentially() {
+        // A pattern with many stars against a long non-match is the classic
+        // exponential case for naive recursion; the matcher must stay linear.
+        let pathological = crate::EditorRule::new("*a*a*a*a*a*a*a*a*a*a*b", "Slow");
+        assert!(!pathological.matches(&"a".repeat(200)));
+
+        let long_match = crate::EditorRule::new("*a*a*b", "Fast");
+        assert!(long_match.matches(&format!("{}b", "a".repeat(200))));
+    }
+
+    #[test]
+    fn editor_rules_longest_suffix_first_and_fallback() {
+        let rules = vec![
+            crate::EditorRule::new("*.gz", "GzipViewer"),
+            crate::EditorRule::new("*.tar.gz", "ArchiveUtility"),
+            crate::EditorRule::new("*.json", "JSONEditor1"),
+            crate::EditorRule::new("*.json", "JSONEditor2"),
+        ];
+
+        // Longest suffix wins even when *.gz is defined earlier in the slice
+        assert_eq!(
+            crate::resolve_editor_app("backup.tar.gz", &rules, None),
+            Some("ArchiveUtility")
+        );
+        // Single extension matches when tar.gz does not
+        assert_eq!(
+            crate::resolve_editor_app("data.gz", &rules, None),
+            Some("GzipViewer")
+        );
+        // Ties in suffix length resolve with first-match-wins
+        assert_eq!(
+            crate::resolve_editor_app("settings.json", &rules, None),
+            Some("JSONEditor1")
+        );
+        // Fallback is used when no rule matches
+        assert_eq!(
+            crate::resolve_editor_app("readme.txt", &rules, Some("DefaultText")),
+            Some("DefaultText")
+        );
+        assert_eq!(crate::resolve_editor_app("readme.txt", &rules, None), None);
+    }
+
+    #[test]
+    fn sort_editor_rules_orders_by_suffix_length_descending() {
+        let mut rules = vec![
+            crate::EditorRule::new("*.gz", "GzipViewer"),
+            crate::EditorRule::new("Dockerfile", "DockerApp"),
+            crate::EditorRule::new("*.tar.gz", "ArchiveUtility"),
+            crate::EditorRule::new("*.txt", "TextA"),
+            crate::EditorRule::new("*.md", "TextB"),
+        ];
+
+        crate::sort_editor_rules(&mut rules);
+
+        // Dockerfile has suffix length 10
+        assert_eq!(rules[0].pattern, "Dockerfile");
+        // *.tar.gz has suffix length 7
+        assert_eq!(rules[1].pattern, "*.tar.gz");
+        // *.txt, *.md, *.gz all have suffix length 3 or 4:
+        // .tar.gz (7), .gz (3), .txt (4), .md (3)
+        assert_eq!(rules[2].pattern, "*.txt");
+        // Equal suffix lengths preserve relative order: *.gz came before *.md
+        assert_eq!(rules[3].pattern, "*.gz");
+        assert_eq!(rules[4].pattern, "*.md");
     }
 }

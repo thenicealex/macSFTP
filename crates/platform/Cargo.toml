@@ -12,6 +12,7 @@ path = "src/platform.rs"
 
 [dependencies]
 macsftp-core = { path = "../core" }
+notify = "8"
 tracing = "0.1"
 
 [lints]

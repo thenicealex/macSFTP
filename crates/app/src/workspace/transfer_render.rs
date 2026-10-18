@@ -15,7 +15,7 @@ use macsftp_ui::{
 };
 
 use crate::palette_commands::labeled_shortcut;
-use crate::resources::ActiveTransfers;
+use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::PaneSide;
 
 /// How long the progress bar takes to ease toward a newly reported fraction.
@@ -672,27 +672,47 @@ impl crate::workspace::Workspace {
                     .flex_none()
                     .items_center()
                     .gap_1()
-                    .when_some(selected_edit, |row, (_, phase)| {
+                    .when_some(selected_edit, |row, (session_id, phase)| {
                         row.child(match phase {
-                            EditPhase::Editing => div()
-                                .id("upload-modified-file")
-                                .flex()
-                                .items_center()
-                                .h(px(18.0))
-                                .px_2()
-                                .rounded_sm()
-                                .border_1()
-                                .border_color(theme.colors.border)
-                                .text_size(px(11.0))
-                                .text_color(theme.colors.text)
-                                .cursor_pointer()
-                                .hover(|style| style.bg(theme.colors.element_hover))
-                                .active(|style| style.bg(theme.colors.element_active))
-                                .on_click(cx.listener(|workspace, _event, _window, cx| {
-                                    workspace.upload_selected_edit(cx);
-                                }))
-                                .child("Upload Changes")
-                                .into_any_element(),
+                            EditPhase::Editing => {
+                                let is_modified = cx
+                                    .resources()
+                                    .edit_sessions
+                                    .get(session_id)
+                                    .is_some_and(|s| s.local_modified);
+                                div()
+                                    .id("upload-modified-file")
+                                    .flex()
+                                    .items_center()
+                                    .h(px(18.0))
+                                    .px_2()
+                                    .rounded_sm()
+                                    .border_1()
+                                    .border_color(if is_modified {
+                                        theme.colors.accent
+                                    } else {
+                                        theme.colors.border
+                                    })
+                                    .bg(if is_modified {
+                                        theme.colors.element_selected
+                                    } else {
+                                        theme.colors.surface
+                                    })
+                                    .text_size(px(11.0))
+                                    .text_color(if is_modified {
+                                        theme.colors.accent
+                                    } else {
+                                        theme.colors.text
+                                    })
+                                    .cursor_pointer()
+                                    .hover(|style| style.bg(theme.colors.element_hover))
+                                    .active(|style| style.bg(theme.colors.element_active))
+                                    .on_click(cx.listener(|workspace, _event, _window, cx| {
+                                        workspace.upload_selected_edit(cx);
+                                    }))
+                                    .child("Upload Changes")
+                                    .into_any_element()
+                            }
                             EditPhase::Downloading => div()
                                 .text_color(theme.colors.text_muted)
                                 .child("Downloading Copy…")

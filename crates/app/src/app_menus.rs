@@ -24,7 +24,7 @@ use crate::app_actions::{
     RefreshPane, RenameEntry, ShowAbout, ShowAllApplications, ShowTransferDrawer,
     SortByDateModifiedAscending, SortByDateModifiedDescending, SortByNameAscending,
     SortByNameDescending, SortBySizeAscending, SortBySizeDescending, ToggleHiddenFiles,
-    UploadSelection, ZoomWindow,
+    UploadEditedFile, UploadSelection, ZoomWindow,
 };
 
 pub(crate) fn menu_bar() -> Vec<Menu> {
@@ -73,6 +73,7 @@ fn file_menu() -> Menu {
             MenuItem::action("Delete…", DeleteSelection),
             MenuItem::separator(),
             MenuItem::action("Upload", UploadSelection),
+            MenuItem::action("Upload Edited File", UploadEditedFile),
             MenuItem::action("Download", DownloadSelection),
             MenuItem::separator(),
             MenuItem::action("Close Tab", CloseTab),
@@ -250,6 +251,12 @@ mod tests {
                 Box::new(UploadSelection),
                 Some("cmd-u"),
                 Some("UploadSelection"),
+            ),
+            (
+                "File ▸ Upload Edited File".to_string(),
+                Box::new(UploadEditedFile),
+                Some("cmd-shift-u"),
+                Some("UploadEditedFile"),
             ),
             (
                 "File ▸ Download".to_string(),
@@ -572,5 +579,32 @@ mod tests {
                 action.name()
             );
         }
+    }
+
+    /// ⌘U already belongs to UploadSelection. Two bindings on one chord and
+    /// context leave the later action unreachable (the keymap keeps the first
+    /// match), so the edited-file upload needs its own chord.
+    #[test]
+    fn upload_commands_bind_distinct_chords() {
+        fn chords_for(action_name: &str) -> Vec<Keystroke> {
+            keybindings()
+                .into_iter()
+                .filter(|binding| binding.action().name().ends_with(action_name))
+                .flat_map(|binding| {
+                    binding
+                        .keystrokes()
+                        .iter()
+                        .map(|stroke| stroke.inner().clone())
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        }
+
+        let parse = |chord: &str| {
+            Keystroke::parse(chord).unwrap_or_else(|_| panic!("{chord} must be a valid chord"))
+        };
+
+        assert_eq!(chords_for("UploadSelection"), vec![parse("cmd-u")]);
+        assert_eq!(chords_for("UploadEditedFile"), vec![parse("cmd-shift-u")]);
     }
 }

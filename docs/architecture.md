@@ -131,7 +131,7 @@ route 支持 Direct、单跳 saved-profile JumpHost（jump profile 自身必须 
 
 远程编辑 session 属于进程级状态，因为外部编辑器和传输可能跨窗口存活。tab 关闭必须清理该 tab 的 session 和临时目录；应用启动时使用新的 run namespace，避免外部编辑器缓存旧路径。
 
-应用不监视外部编辑器的保存动作。用户在选中已打开编辑的远端文件后，通过明确的 **Upload Changes** 操作发起上传。上传不能依赖 UI 缓存的目录 listing 授权覆盖远端文件。流程为：
+应用监视编辑会话临时目录中的保存动作，但只用于在文件列表和状态栏显示 dirty 标记；它绝不触发上传，也不因此放宽远端一致性检查。应用自身写入临时副本（下载完成、`DiscardLocal` 重新下载）必须按 size+mtime baseline 抑制，不能被误报成本地修改。用户在选中已打开编辑的远端文件后，通过明确的 **Upload Changes** 操作发起上传。上传不能依赖 UI 缓存的目录 listing 授权覆盖远端文件。流程为：
 
 ```text
 Editing
@@ -287,7 +287,8 @@ remote pane 必须覆盖：`Disconnected`（提供连接或重新连接）、`Co
 
 ### 12.11 远程编辑 UI
 
-- 双击远端文件只下载临时副本并打开外部编辑器；应用不监视本地保存，也不自动上传。
+- 双击远端文件只下载临时副本并打开外部编辑器；应用只监视本地保存以显示 dirty 标记，不自动上传。
+- 冲突状态下 **Compare Changes…** 每次重新下载远端快照到会话目录的独立子目录，不复用旧快照，避免把过期内容当作当前远端版本对比。
 - 用户重新选中该远端文件时，status bar 提供明确的 **Upload Changes** 操作，并在 checking、uploading 和 conflict 阶段显示不可歧义的状态。
 - 上传前必须读取实时远端 metadata；缓存目录 listing 不能授权覆盖；远端变化时进入冲突决策，不能静默覆盖。
 - 校验或上传失败后保留本地临时副本并允许重试；tab 或窗口关闭后结束其编辑 session 并清理临时目录。

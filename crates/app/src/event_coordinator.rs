@@ -3,7 +3,7 @@ use gpui_kit::{AnyWindowHandle, App, Context, Global, Task, Window, WindowHandle
 use macsftp_core::{
     AppCommand, AppEvent, ConflictRequest, EditPhase, EditSessionId, LocalPath, ProfileId,
     RemotePath, RemoteSnapshot, TabId, Timestamp, TransferConflictPrompt, TransferDirection,
-    TransferEndpoint,
+    TransferEndpoint, TransferId, TransferPlanId,
 };
 use macsftp_sftp::EventReceiver;
 use tracing::warn;
@@ -55,6 +55,8 @@ pub(crate) fn open_edit_temp(temp: &LocalPath, editor: Option<&str>) -> std::io:
 /// stale-event guard decides whether that window owns the referenced tab.
 pub struct AppEventCoordinator {
     _event_drain: Task<()>,
+    _local_event_drain: Task<()>,
+    _edit_watcher: Option<macsftp_platform::EditWatcher>,
 }
 
 impl Global for AppEventCoordinator {}
@@ -66,8 +68,38 @@ impl AppEventCoordinator {
                 cx.update(|cx| dispatch_event(event, cx));
             }
         });
+
+        let (local_tx, mut local_rx) = tokio::sync::mpsc::channel::<AppEvent>(64);
+        let edits_dir = cx.resources().app_paths.edits_dir.clone();
+        let edit_run_id = cx.resources().edit_run_id.clone();
+        let watch_root = std::path::PathBuf::from(edits_dir.as_str()).join(edit_run_id);
+
+        let edit_watcher =
+            match macsftp_platform::EditWatcher::start(watch_root, move |session_id, temp_path| {
+                if let Err(error) = local_tx.try_send(AppEvent::LocalEditModified {
+                    session_id,
+                    temp_path,
+                }) {
+                    warn!(error = %error, "could not queue local edit modified event");
+                }
+            }) {
+                Ok(watcher) => Some(watcher),
+                Err(error) => {
+                    warn!(error = %error, "could not start edit watcher");
+                    None
+                }
+            };
+
+        let local_event_drain = cx.spawn(async move |cx| {
+            while let Some(event) = local_rx.recv().await {
+                cx.update(|cx| dispatch_event(event, cx));
+            }
+        });
+
         Self {
             _event_drain: event_drain,
+            _local_event_drain: local_event_drain,
+            _edit_watcher: edit_watcher,
         }
     }
 }
@@ -79,6 +111,7 @@ fn dispatch_event(event: AppEvent, cx: &mut App) {
             present_orphaned_transfer_conflicts(cx);
         }
         advance_edit_sessions(&event, cx);
+        advance_conflict_compare(&event, cx);
         cx.refresh_windows();
         return;
     }
@@ -93,6 +126,13 @@ fn dispatch_event(event: AppEvent, cx: &mut App) {
         | AppEvent::RemoteEditSnapshotCheckFailed(_)
         | AppEvent::RemoteEditSnapshotDispatchFailed(_) => {
             apply_remote_edit_check_event(&event, cx);
+            return;
+        }
+        AppEvent::LocalEditModified {
+            session_id,
+            temp_path,
+        } => {
+            handle_local_edit_modified(*session_id, temp_path, cx);
             return;
         }
         _ => {}
@@ -249,17 +289,33 @@ fn advance_downloading(
         return;
     }
 
-    let editor = cx.resources().config.config().external_editor.clone();
-    let Some(tab_id) = cx
-        .resources_mut()
-        .edit_sessions
-        .get_mut(session_id)
-        .map(|session| {
-            session.phase = EditPhase::Editing;
-            session.tab_id
-        })
-    else {
-        return;
+    let (tab_id, editor) = {
+        let resources = cx.resources_mut();
+        let config = resources.config.config();
+        let file_name = std::path::Path::new(temp_path.as_str())
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let editor = macsftp_core::resolve_editor_app(
+            &file_name,
+            &config.editor_rules,
+            config.external_editor.as_deref(),
+        )
+        .map(str::to_string);
+        let Some(session) = resources.edit_sessions.get_mut(session_id) else {
+            return;
+        };
+        session.phase = EditPhase::Editing;
+        session.local_modified = false;
+        if let Ok(meta) = std::fs::metadata(temp_path.as_str())
+            && let Ok(mtime) = meta.modified()
+        {
+            session.local_baseline = Some(macsftp_core::LocalBaseline {
+                size: meta.len(),
+                mtime,
+            });
+        }
+        (session.tab_id, editor)
     };
     match open_edit_temp(temp_path, editor.as_deref()) {
         Ok(()) => show_edit_status(
@@ -303,6 +359,17 @@ fn advance_uploading_back(
         });
     if let Some(session) = cx.resources_mut().edit_sessions.get_mut(session_id) {
         session.phase = EditPhase::Editing;
+        if succeeded {
+            session.local_modified = false;
+            if let Ok(meta) = std::fs::metadata(temp_path.as_str())
+                && let Ok(mtime) = meta.modified()
+            {
+                session.local_baseline = Some(macsftp_core::LocalBaseline {
+                    size: meta.len(),
+                    mtime,
+                });
+            }
+        }
         if let Some(snapshot) = refreshed {
             session.remote_snapshot = snapshot;
         }
@@ -681,6 +748,170 @@ fn conflict_prompt(conflict: ConflictRequest) -> TransferConflictPrompt {
     }
 }
 
+fn handle_local_edit_modified(session_id: EditSessionId, temp_path: &str, cx: &mut App) {
+    {
+        let resources = cx.resources_mut();
+        let Some(session) = resources.edit_sessions.get_mut(session_id) else {
+            return;
+        };
+        if session.local_temp_path.as_str() != temp_path {
+            return;
+        }
+        if session.phase != EditPhase::Editing {
+            return;
+        }
+        if let Ok(meta) = std::fs::metadata(temp_path) {
+            let current_size = meta.len();
+            let current_mtime = meta.modified().ok();
+            if let (Some(base), Some(current_mtime)) = (session.local_baseline, current_mtime)
+                && base.size == current_size
+                && base.mtime == current_mtime
+            {
+                // Exactly matches our baseline (our own write or metadata only) -> suppress!
+                return;
+            }
+        }
+        session.local_modified = true;
+    }
+    cx.refresh_windows();
+}
+
+fn advance_conflict_compare(event: &AppEvent, cx: &mut App) {
+    let (dest_path, outcome) = match event {
+        AppEvent::TransferCompleted { transfer_id } => {
+            let Some(dest_path) = compare_destination_for_transfer(*transfer_id, cx) else {
+                return;
+            };
+            (dest_path, Ok(()))
+        }
+        AppEvent::TransferFailed(failure) => {
+            let Some(dest_path) = compare_destination_for_transfer(failure.transfer_id, cx) else {
+                return;
+            };
+            (
+                dest_path,
+                Err("Download of remote copy for comparison failed.".to_string()),
+            )
+        }
+        // Planning and dispatch failures never reach `TransferFailed`, so a
+        // plan that dies before its job runs would otherwise leave the modal
+        // stuck on “Comparing…”. The plan's destination root identifies the
+        // comparison request.
+        AppEvent::TransferPlanFailed { plan_id, error } => {
+            let Some(dest_path) = compare_destination_for_plan(*plan_id, cx) else {
+                return;
+            };
+            (
+                dest_path,
+                Err(format!(
+                    "Could not download the remote copy: {}",
+                    error.title
+                )),
+            )
+        }
+        AppEvent::TransferPlanCancelled { plan_id } => {
+            let Some(dest_path) = compare_destination_for_plan(*plan_id, cx) else {
+                return;
+            };
+            (
+                dest_path,
+                Err("Comparison download was cancelled.".to_string()),
+            )
+        }
+        // Cancelling a queued transfer emits only `TransferSkipped`; the plan
+        // itself is finalized without a `TransferPlanCancelled` event.
+        AppEvent::TransferSkipped { transfer_id } => {
+            let Some(dest_path) = compare_destination_for_transfer(*transfer_id, cx) else {
+                return;
+            };
+            (
+                dest_path,
+                Err("Comparison download was cancelled.".to_string()),
+            )
+        }
+        _ => return,
+    };
+    apply_compare_outcome(&dest_path, outcome, cx);
+}
+
+fn compare_destination_for_transfer(transfer_id: TransferId, cx: &App) -> Option<LocalPath> {
+    let job = cx.transfers().find_job(transfer_id)?;
+    match &job.destination {
+        TransferEndpoint::Local(path) => Some(path.clone()),
+        _ => None,
+    }
+}
+
+fn compare_destination_for_plan(plan_id: TransferPlanId, cx: &App) -> Option<LocalPath> {
+    let plan = cx.transfers().find_plan(plan_id)?;
+    match &plan.destination_root {
+        TransferEndpoint::Local(path) => Some(path.clone()),
+        _ => None,
+    }
+}
+
+fn apply_compare_outcome(dest_path: &LocalPath, outcome: Result<(), String>, cx: &mut App) {
+    if !dest_path.as_str().contains("conflict-remote") {
+        return;
+    }
+    let matching_session = cx
+        .resources()
+        .edit_sessions
+        .sessions()
+        .find(|session| {
+            session.phase == EditPhase::RemoteConflict
+                && crate::workspace::conflict_remote_path(&session.local_temp_path).as_str()
+                    == dest_path.as_str()
+        })
+        .cloned();
+
+    let Some(session) = matching_session else {
+        return;
+    };
+
+    for window in workspace_windows(cx) {
+        if let Err(error) = window.update(cx, |workspace, _window, cx| {
+            if !workspace.owns_tab(session.tab_id) {
+                return;
+            }
+            // Only the workspace that started this session's comparison may
+            // consume its result; another tab's modal owns different state.
+            if workspace.modal_inputs.conflict_compare_session != Some(session.id) {
+                return;
+            }
+            workspace.modal_inputs.conflict_compare_loading = false;
+            match &outcome {
+                Ok(()) => {
+                    workspace.modal_inputs.conflict_compare_error = None;
+                    if let Some(tool) = macsftp_platform::detect_default_diff_tool() {
+                        let local = std::path::Path::new(session.local_temp_path.as_str());
+                        let remote = std::path::Path::new(dest_path.as_str());
+                        if !local.is_file() || !remote.is_file() {
+                            workspace.modal_inputs.conflict_compare_error = Some(
+                                "The comparison copy is missing. Try Compare Changes again.".into(),
+                            );
+                        } else if let Err(error) = tool.launch(local, remote) {
+                            warn!(error = %error, "could not launch diff tool after download");
+                            workspace.modal_inputs.conflict_compare_error =
+                                Some(format!("Could not launch {}: {}", tool.name(), error));
+                        }
+                    } else {
+                        workspace.modal_inputs.conflict_compare_error = Some(
+                            "No supported diff tool found (/usr/bin/opendiff or code).".into(),
+                        );
+                    }
+                }
+                Err(message) => {
+                    workspace.modal_inputs.conflict_compare_error = Some(message.clone());
+                }
+            }
+            cx.notify();
+        }) {
+            warn!(error = %error, "could not update conflict compare state");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use gpui_kit::base::Root;
@@ -796,6 +1027,8 @@ mod tests {
                 },
                 pending_check_id: None,
                 checking_local_mtime: None,
+                local_modified: false,
+                local_baseline: None,
             };
             cx.resources_mut().edit_sessions.register(session);
             id
@@ -851,6 +1084,8 @@ mod tests {
                 remote_snapshot: baseline,
                 pending_check_id: None,
                 checking_local_mtime: None,
+                local_modified: false,
+                local_baseline: None,
             };
             cx.resources_mut().edit_sessions.register(session);
             id
@@ -1392,6 +1627,8 @@ mod tests {
                 remote_snapshot: baseline,
                 pending_check_id: Some(check_id),
                 checking_local_mtime: Some(checking_mtime),
+                local_modified: false,
+                local_baseline: None,
             };
             cx.resources_mut().edit_sessions.register(session);
             id
@@ -1917,5 +2154,355 @@ mod tests {
             channels.command_rx.try_recv().is_err(),
             "no upload may be dispatched for a changed local save"
         );
+    }
+
+    #[gpui_kit::test]
+    fn local_edit_modified_suppresses_baseline_and_marks_dirty_on_change(cx: &mut TestAppContext) {
+        install_test_globals(cx, "self-write-suppression");
+        let session_dir = std::env::temp_dir().join(format!(
+            "macsftp-selfwrite-{}-{}",
+            std::process::id(),
+            "suppression"
+        ));
+        std::fs::create_dir_all(&session_dir).expect("create session dir for self-write test");
+        let temp_file = session_dir.join("file.txt");
+        std::fs::write(&temp_file, b"initial content").expect("write temp file for test");
+        let meta = std::fs::metadata(&temp_file).expect("read metadata of temp file");
+        let initial_baseline = macsftp_core::LocalBaseline {
+            size: meta.len(),
+            mtime: meta.modified().expect("read initial mtime"),
+        };
+        let temp_path = LocalPath::new(temp_file.to_string_lossy().as_ref());
+
+        let id = cx.update(|cx| {
+            let id = cx.resources_mut().edit_sessions.next_id();
+            let session = EditSession {
+                id,
+                remote_path: RemotePath::new("/srv/file.txt"),
+                tab_id: TabId(1),
+                session_epoch: 1,
+                profile_id: ProfileId(1),
+                connection_key: test_connection_key(),
+                local_temp_path: temp_path.clone(),
+                phase: EditPhase::Editing,
+                remote_snapshot: RemoteSnapshot {
+                    size: Some(initial_baseline.size),
+                    modified_at: None,
+                },
+                pending_check_id: None,
+                checking_local_mtime: None,
+                local_modified: false,
+                local_baseline: Some(initial_baseline),
+            };
+            cx.resources_mut().edit_sessions.register(session);
+            id
+        });
+
+        // 1. Dispatch LocalEditModified when file is untouched (matches baseline)
+        cx.update(|cx| {
+            dispatch_event(
+                AppEvent::LocalEditModified {
+                    session_id: id,
+                    temp_path: temp_path.as_str().to_string(),
+                },
+                cx,
+            );
+        });
+
+        let modified_after_suppression = cx.read(|cx| {
+            cx.resources()
+                .edit_sessions
+                .get(id)
+                .expect("session exists")
+                .local_modified
+        });
+        assert!(
+            !modified_after_suppression,
+            "untouched file matching baseline must be suppressed as self-write"
+        );
+
+        // 2. Modify the file on disk
+        std::fs::write(&temp_file, b"initial content with modifications")
+            .expect("modify temp file");
+
+        cx.update(|cx| {
+            dispatch_event(
+                AppEvent::LocalEditModified {
+                    session_id: id,
+                    temp_path: temp_path.as_str().to_string(),
+                },
+                cx,
+            );
+        });
+
+        let modified_after_change = cx.read(|cx| {
+            cx.resources()
+                .edit_sessions
+                .get(id)
+                .expect("session exists")
+                .local_modified
+        });
+        assert!(
+            modified_after_change,
+            "modified file differing from baseline must be marked dirty"
+        );
+
+        std::fs::remove_dir_all(&session_dir).ok();
+    }
+
+    #[gpui_kit::test]
+    fn conflict_compare_download_lifecycle_updates_workspace_state(cx: &mut TestAppContext) {
+        install_test_globals(cx, "conflict-compare-lifecycle");
+        let (window, channels) = open_owning_window(cx, 1);
+        while channels.command_rx.try_recv().is_ok() {}
+
+        let session_dir = std::env::temp_dir().join(format!(
+            "macsftp-conflict-compare-test-{}-{}",
+            std::process::id(),
+            "lifecycle"
+        ));
+        std::fs::create_dir_all(&session_dir).expect("create test session dir");
+        let temp_file = session_dir.join("conflict.txt");
+        std::fs::write(&temp_file, b"local version").expect("write local version");
+        let temp_path = LocalPath::new(temp_file.to_string_lossy().as_ref());
+        let conflict_path = crate::workspace::conflict_remote_path(&temp_path);
+
+        let _id = cx.update(|cx| {
+            let id = cx.resources_mut().edit_sessions.next_id();
+            let session = EditSession {
+                id,
+                remote_path: RemotePath::new("/srv/conflict.txt"),
+                tab_id: TabId(1),
+                session_epoch: 1,
+                profile_id: ProfileId(1),
+                connection_key: test_connection_key(),
+                local_temp_path: temp_path.clone(),
+                phase: EditPhase::RemoteConflict,
+                remote_snapshot: RemoteSnapshot {
+                    size: Some(20),
+                    modified_at: None,
+                },
+                pending_check_id: None,
+                checking_local_mtime: None,
+                local_modified: true,
+                local_baseline: None,
+            };
+            cx.resources_mut().edit_sessions.register(session);
+            id
+        });
+
+        let transfer_id = TransferId(42);
+        let job = TransferJob {
+            id: transfer_id,
+            direction: TransferDirection::Download,
+            source: TransferEndpoint::Remote(RemotePath::new("/srv/conflict.txt")),
+            destination: TransferEndpoint::Local(conflict_path.clone()),
+            state: TransferState::Queued,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: Timestamp::from_secs_since_epoch(10),
+        };
+        seed_transfer(cx, job);
+
+        window
+            .update(cx, |workspace, _window, _cx| {
+                workspace.modal_inputs.begin_conflict_compare(_id);
+            })
+            .expect("update workspace");
+
+        // Simulate successful download of remote snapshot for comparison
+        cx.update(|cx| {
+            dispatch_event(AppEvent::TransferCompleted { transfer_id }, cx);
+        });
+
+        window
+            .read_with(cx, |workspace, _cx| {
+                assert!(
+                    !workspace.modal_inputs.conflict_compare_loading,
+                    "completed compare download must clear loading flag"
+                );
+                // The test never writes the downloaded copy, so the launch is
+                // refused instead of spawning a real diff tool during tests.
+                assert!(
+                    workspace
+                        .modal_inputs
+                        .conflict_compare_error
+                        .as_deref()
+                        .is_some_and(|error| error.contains("comparison copy")),
+                    "missing comparison copy must surface an actionable error"
+                );
+            })
+            .expect("read workspace");
+
+        // Now test failure case
+        let fail_transfer_id = TransferId(43);
+        let fail_job = TransferJob {
+            id: fail_transfer_id,
+            direction: TransferDirection::Download,
+            source: TransferEndpoint::Remote(RemotePath::new("/srv/conflict.txt")),
+            destination: TransferEndpoint::Local(conflict_path),
+            state: TransferState::Queued,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: Timestamp::from_secs_since_epoch(10),
+        };
+        seed_transfer(cx, fail_job);
+
+        window
+            .update(cx, |workspace, _window, _cx| {
+                workspace.modal_inputs.begin_conflict_compare(_id);
+            })
+            .expect("update workspace");
+
+        cx.update(|cx| {
+            dispatch_event(
+                AppEvent::TransferFailed(TransferFailure {
+                    transfer_id: fail_transfer_id,
+                    error: UserFacingError::new(
+                        ErrorCode::NetworkError,
+                        "network error",
+                        "download failed",
+                    ),
+                }),
+                cx,
+            );
+        });
+
+        window
+            .read_with(cx, |workspace, _cx| {
+                assert!(
+                    !workspace.modal_inputs.conflict_compare_loading,
+                    "failed compare download must clear loading flag"
+                );
+                assert!(
+                    workspace.modal_inputs.conflict_compare_error.is_some(),
+                    "failed compare download must surface error message"
+                );
+            })
+            .expect("read workspace");
+
+        // Cancelling a queued compare job emits only `TransferSkipped`; the
+        // modal must not stay on “Comparing…”.
+        let skipped_transfer_id = TransferId(45);
+        let skipped_job = TransferJob {
+            id: skipped_transfer_id,
+            direction: TransferDirection::Download,
+            source: TransferEndpoint::Remote(RemotePath::new("/srv/conflict.txt")),
+            destination: TransferEndpoint::Local(crate::workspace::conflict_remote_path(
+                &temp_path,
+            )),
+            state: TransferState::Queued,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: Timestamp::from_secs_since_epoch(10),
+        };
+        seed_transfer(cx, skipped_job);
+
+        window
+            .update(cx, |workspace, _window, _cx| {
+                workspace.modal_inputs.begin_conflict_compare(_id);
+            })
+            .expect("update workspace");
+
+        cx.update(|cx| {
+            dispatch_event(
+                AppEvent::TransferSkipped {
+                    transfer_id: skipped_transfer_id,
+                },
+                cx,
+            );
+        });
+
+        window
+            .read_with(cx, |workspace, _cx| {
+                assert!(
+                    !workspace.modal_inputs.conflict_compare_loading,
+                    "skipped compare download must clear loading flag"
+                );
+                assert!(
+                    workspace
+                        .modal_inputs
+                        .conflict_compare_error
+                        .as_deref()
+                        .is_some_and(|error| error.contains("cancelled")),
+                    "skipped compare download must surface the cancellation"
+                );
+            })
+            .expect("read workspace");
+
+        // Planning failures never produce TransferFailed; the plan event must
+        // clear the loading state on its own.
+        let plan_id = TransferPlanId(7);
+        let plan_conflict_path = crate::workspace::conflict_remote_path(&temp_path);
+        let plan = TransferPlan {
+            id: plan_id,
+            root_job_id: TransferId(44),
+            source_root: TransferEndpoint::Remote(RemotePath::new("/srv/conflict.txt")),
+            destination_root: TransferEndpoint::Local(plan_conflict_path),
+            state: TransferPlanState::Planning,
+            planned_count: 0,
+            total_bytes: None,
+            child_jobs: Vec::new(),
+            conflict_policy: ConflictPolicy::default(),
+        };
+        let root_job = TransferJob {
+            id: TransferId(44),
+            direction: TransferDirection::Download,
+            source: TransferEndpoint::Remote(RemotePath::new("/srv/conflict.txt")),
+            destination: plan.destination_root.clone(),
+            state: TransferState::Planning,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: Timestamp::from_secs_since_epoch(10),
+        };
+        cx.update(|cx| {
+            dispatch_event(
+                AppEvent::TransferPlanStarted(Box::new(TransferPlanSnapshot { plan, root_job })),
+                cx,
+            );
+        });
+
+        window
+            .update(cx, |workspace, _window, _cx| {
+                workspace.modal_inputs.begin_conflict_compare(_id);
+            })
+            .expect("update workspace");
+
+        cx.update(|cx| {
+            dispatch_event(
+                AppEvent::TransferPlanFailed {
+                    plan_id,
+                    error: UserFacingError::new(
+                        ErrorCode::NetworkError,
+                        "planning failed",
+                        "could not reach the server",
+                    ),
+                },
+                cx,
+            );
+        });
+
+        window
+            .read_with(cx, |workspace, _cx| {
+                assert!(
+                    !workspace.modal_inputs.conflict_compare_loading,
+                    "plan failure must not leave the modal stuck on Comparing…"
+                );
+                assert!(
+                    workspace
+                        .modal_inputs
+                        .conflict_compare_error
+                        .as_deref()
+                        .is_some_and(|error| error.contains("Could not download the remote copy")),
+                    "plan failure must surface the reason"
+                );
+            })
+            .expect("read workspace");
+
+        std::fs::remove_dir_all(&session_dir).ok();
     }
 }

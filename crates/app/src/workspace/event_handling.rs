@@ -276,7 +276,8 @@ impl crate::workspace::Workspace {
             | AppEvent::ResidualTempCleared { .. }
             | AppEvent::RemoteEditSnapshotChecked(_)
             | AppEvent::RemoteEditSnapshotCheckFailed(_)
-            | AppEvent::RemoteEditSnapshotDispatchFailed(_) => {
+            | AppEvent::RemoteEditSnapshotDispatchFailed(_)
+            | AppEvent::LocalEditModified { .. } => {
                 debug_assert!(false, "process-owned event reached a Workspace")
             }
         }

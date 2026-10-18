@@ -193,6 +193,28 @@ impl crate::workspace::Workspace {
                                     div()
                                         .text_size(px(14.0))
                                         .font_weight(FontWeight::MEDIUM)
+                                        .child("Editor Associations"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .text_color(theme.colors.text_muted)
+                                        .child(
+                                            "Route files to specific editors by filename pattern (e.g. *.rs or *.png).",
+                                        ),
+                                )
+                                .child(self.render_editor_rules(cx)),
+                        )
+                        .child(div().h(px(1.0)).bg(theme.colors.border))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .text_size(px(14.0))
+                                        .font_weight(FontWeight::MEDIUM)
                                         .child("Troubleshooting"),
                                 )
                                 .child(
@@ -325,6 +347,159 @@ impl crate::workspace::Workspace {
                 self.config_error =
                     Some("Settings couldn’t be saved. Check file permissions.".into());
             }
+        }
+    }
+
+    pub(crate) fn render_editor_rules(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let theme = cx.theme().clone();
+        let rules = cx.resources().config.config().editor_rules.clone();
+
+        let mut list = div().flex().flex_col().gap_2();
+
+        if rules.is_empty() {
+            list = list.child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme.colors.text_muted)
+                    .child("No rules configured. Files open in the fallback editor, or in the system text editor."),
+            );
+        } else {
+            for (index, rule) in rules.iter().enumerate() {
+                list = list.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .p_2()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(theme.colors.border)
+                        .bg(theme.colors.surface)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .font_family(theme.fonts.mono_family.clone())
+                                        .text_color(theme.colors.text)
+                                        .child(rule.pattern.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .text_color(theme.colors.text_muted)
+                                        .child("→"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .text_color(theme.colors.text)
+                                        .child(rule.app_name.clone()),
+                                ),
+                        )
+                        .child(
+                            text_button(("remove-rule", index), "Remove")
+                                .danger(true)
+                                .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                                    workspace.remove_editor_rule(index, cx);
+                                })),
+                        ),
+                );
+            }
+        }
+
+        let add_form = div().flex().flex_col().gap_2().mt_2().child(
+            div()
+                .flex()
+                .gap_2()
+                .child(div().flex_1().child(ordinary_text_field(
+                    "new-rule-pattern",
+                    &self.settings.new_rule_pattern,
+                )))
+                .child(div().flex_1().child(ordinary_text_field(
+                    "new-rule-app",
+                    &self.settings.new_rule_app,
+                )))
+                .child(
+                    text_button("add-editor-rule-button", "Add Rule")
+                        .primary(true)
+                        .on_click(cx.listener(|workspace, _event, window, cx| {
+                            workspace.add_editor_rule(window, cx);
+                        })),
+                ),
+        );
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(list)
+            .child(add_form)
+            .into_any_element()
+    }
+
+    pub(crate) fn add_editor_rule(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let pattern = self
+            .settings
+            .new_rule_pattern
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        let app_name = self
+            .settings
+            .new_rule_app
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+
+        if pattern.is_empty() || app_name.is_empty() {
+            self.config_error = Some("Enter both a pattern and an app name.".into());
+            cx.notify();
+            return;
+        }
+
+        let mut rules = cx.resources().config.config().editor_rules.clone();
+        rules.push(macsftp_core::EditorRule { pattern, app_name });
+        macsftp_core::sort_editor_rules(&mut rules);
+
+        match cx.resources_mut().config.set_editor_rules(rules) {
+            Ok(()) => {
+                self.config_error = None;
+                self.settings
+                    .new_rule_pattern
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+                self.settings
+                    .new_rule_app
+                    .update(cx, |input, cx| input.set_value("", window, cx));
+            }
+            Err(error) => {
+                warn!(error = %error, "could not save editor rules");
+                self.config_error =
+                    Some("Settings couldn’t be saved. Check file permissions.".into());
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn remove_editor_rule(&mut self, index: usize, cx: &mut Context<Self>) {
+        let mut rules = cx.resources().config.config().editor_rules.clone();
+        if index < rules.len() {
+            rules.remove(index);
+            macsftp_core::sort_editor_rules(&mut rules);
+            match cx.resources_mut().config.set_editor_rules(rules) {
+                Ok(()) => self.config_error = None,
+                Err(error) => {
+                    warn!(error = %error, "could not save editor rules after removal");
+                    self.config_error =
+                        Some("Settings couldn’t be saved. Check file permissions.".into());
+                }
+            }
+            cx.notify();
         }
     }
 
