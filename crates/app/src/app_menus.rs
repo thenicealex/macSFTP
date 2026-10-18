@@ -255,7 +255,7 @@ mod tests {
             (
                 "File ▸ Upload Edited File".to_string(),
                 Box::new(UploadEditedFile),
-                Some("cmd-u"),
+                Some("cmd-shift-u"),
                 Some("UploadEditedFile"),
             ),
             (
@@ -579,5 +579,32 @@ mod tests {
                 action.name()
             );
         }
+    }
+
+    /// ⌘U already belongs to UploadSelection. Two bindings on one chord and
+    /// context leave the later action unreachable (the keymap keeps the first
+    /// match), so the edited-file upload needs its own chord.
+    #[test]
+    fn upload_commands_bind_distinct_chords() {
+        fn chords_for(action_name: &str) -> Vec<Keystroke> {
+            keybindings()
+                .into_iter()
+                .filter(|binding| binding.action().name().ends_with(action_name))
+                .flat_map(|binding| {
+                    binding
+                        .keystrokes()
+                        .iter()
+                        .map(|stroke| stroke.inner().clone())
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        }
+
+        let parse = |chord: &str| {
+            Keystroke::parse(chord).unwrap_or_else(|_| panic!("{chord} must be a valid chord"))
+        };
+
+        assert_eq!(chords_for("UploadSelection"), vec![parse("cmd-u")]);
+        assert_eq!(chords_for("UploadEditedFile"), vec![parse("cmd-shift-u")]);
     }
 }
