@@ -5,19 +5,34 @@ based on Keep a Changelog, and releases use semantic versioning.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-19
+
 ### Added
 
 - Pipelined SFTP downloads: 16 in-flight read requests, 256 KiB chunks, a 4 MiB
   channel window, and up to four concurrent transfers per plan (six overall).
 - A `●` dirty marker on remote files whose temporary edit copy changed on disk,
-  plus per-pattern external editor rules in Settings.
-- **Compare Changes…** in the remote-change conflict modal, opening a detected
-  external diff tool against a fresh copy of the remote file.
+  with an Accent-highlighted status bar indicator.
+- External editor rules in **Settings → General**, allowing per-glob or per-extension
+  routing to specific external applications (`open -a <app>`) with safe fallback to `/usr/bin/open -t`.
+- **Compare Changes…** in the remote-change conflict modal, lazy-fetching a fresh
+  copy of the remote file and opening a detected system diff tool (`opendiff` or `code --diff`).
+- Dedicated `⌘⇧U` shortcut for **Upload Edited File**, preserving `⌘U` for **Upload Selection**.
 
 ### Changed
 
-- macSFTP now watches saves of the temporary edit copy to show the dirty marker.
-  Uploading stays explicit: nothing is uploaded until you choose **Upload Changes**.
+- Process-wide FSEvents monitoring watches saves of the temporary edit copy with
+  an 800ms debounce and self-write suppression based on baseline size and mtime.
+  Uploading stays strictly explicit: nothing is uploaded until you choose **Upload Edited File** (`⌘⇧U`).
+- Expand `copy_file_chunks` buffer from 64 KiB to 256 KiB and configure 16 concurrent writes with a 30s timeout on transfer SFTP sessions.
+- Replace recursive glob matching with an iterative single-backtrack matcher for editor rules, preventing exponential backtracking on complex patterns.
+- Transfer scheduling runs a download plan's root directory job exclusively before child transfers, preventing destination clearing races.
+
+### Fixed
+
+- Prevent a 4 GiB length wrap in pipelined download chunk calculation and re-request short reads.
+- Re-check cancellation after progress flushing in `transfer_planner` to prevent cancelled plans from emitting completion events.
+- Ensure retried download plan roots lose destination clearing permissions once child jobs have started.
 
 ## [0.4.0] - 2026-10-18
 
