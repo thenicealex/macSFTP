@@ -5,6 +5,52 @@ based on Keep a Changelog, and releases use semantic versioning.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-18
+
+### Added
+
+- Add continuous (Shift-click) and discrete (Command-click or Ctrl-click) multi-selection
+  in file panes, matching macOS Finder keyboard-and-mouse selection conventions.
+- Replace self-drawn context menus with native AppKit `NSMenu` for both file panes and
+  input fields, featuring mouse-following popups, keyboard navigation, item highlighting,
+  separators, confirmation ellipsis, and VoiceOver support.
+- Complete the macOS application menu bar: provide standard `Edit` actions (Undo, Redo,
+  Cut, Copy, Paste, Select All via `MenuItem::os_action`), enrich `File`, `View`, and
+  `Window` menus, and dynamically synchronize window titles to the active tab title.
+- Add Finder-style type-select to file lists: typing letters on a focused list jumps the
+  selection to the first matching entry without filtering out non-matching rows.
+- Add Apple-native physical motion and tactile feedback: spring physics animation for the
+  transfer drawer (`spring(0.3, 1.0)`), smooth `Presence` entry/exit transitions for modals
+  and overlays, progress bar transition easing, and animated activity spinners, with
+  automatic degradation when macOS "Reduce Motion" is enabled.
+- Add accessibility metadata across the workspace: file rows, headers, and the status bar
+  now expose standard `Role::List`, `Role::Button`, and detailed descriptions.
+- Add hover tooltips displaying complete error messages for truncated transfer failure details.
+
+### Changed
+
+- Adopt `gpui-kit` as the single unified UI dependency, consolidating GPUI Base components,
+  themes, and controls.
+- Reorganize the path bar into navigation, breadcrumb, and action clusters with visual
+  separators, with higher shrink rates on parent breadcrumbs to protect current-directory tail
+  visibility on narrow viewports (§12.1).
+- Indent the table header "Name" sort column by `ICON_SIZE + 8px` to align vertically with
+  row file names.
+- Improve Command Palette and dialog ergonomics: adapt Command Palette height to the window
+  viewport to prevent bottom shortcut hint clipping on 480pt short windows, and use standard
+  `IconName::Trash` for delete actions.
+- Unify elevated surface tokens, shadows, and Settings section title typography.
+- Change tab close buttons to reveal only on hover or when active, following Safari conventions.
+- Upgrade core runtime and platform dependencies (`tokio`, `aws-lc-rs`, `rustix`, `objc2`).
+
+### Fixed
+
+- Safely recover poisoned locks on transfer channel tracking in `session_actor` without panicking,
+  and unify warning logs across retries and cancellations.
+- Remove obsolete dead-code variant `TransferPlanState::Running` and correct timestamp conversion
+  documentation.
+- Ensure selection anchors hidden by active filters do not corrupt subsequent Shift-selection ranges.
+
 ## [0.3.0] - 2026-09-20
 
 ### Added
