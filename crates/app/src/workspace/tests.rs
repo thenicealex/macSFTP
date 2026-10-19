@@ -11,12 +11,12 @@ use macsftp_core::{
     ConnectionSettings, ConnectionState, DisconnectReason, EditPhase, EntryPath, ErrorCode,
     FileKind, FileSortField, HostKeyPrompt, KeyboardInteractivePrompt,
     KeyboardInteractivePromptField, KeyboardInteractiveRequestId, LocalPath, MetadataPolicy,
-    ProfileId, RemoteDirSnapshot, RemoteEntry, RemoteEventScope, RemoteOperationFailure,
-    RemotePath, RemoteScoped, RestoredTabTarget, RuntimeBridgeConfig, SessionId, SortDirection,
-    TabConnected, TabDisconnected, TabId, TabState, Timestamp, TransferConflictPrompt,
-    TransferDirection, TransferEndpoint, TransferId, TransferJob, TransferPlanId,
-    TransferPlanProgress, TransferPlanSnapshot, TransferPlanState, TransferState, TrustRequestId,
-    UserFacingError, WindowSessionId,
+    ProfileId, RemoteDirSnapshot, RemoteEntry, RemoteEntryResolution, RemoteEventScope,
+    RemoteOperationFailure, RemotePath, RemoteScoped, RestoredTabTarget, RuntimeBridgeConfig,
+    SessionId, SortDirection, TabConnected, TabDisconnected, TabId, TabState, Timestamp,
+    TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferId, TransferJob,
+    TransferPlanId, TransferPlanProgress, TransferPlanSnapshot, TransferPlanState, TransferState,
+    TrustRequestId, UserFacingError, WindowSessionId,
 };
 use macsftp_core::{EditSession, EditSessionId, RemoteSnapshot};
 use macsftp_platform::AppPaths;
@@ -3825,6 +3825,7 @@ fn duplicate_edit_reopens_existing_temp_without_downloading(cx: &mut TestAppCont
         cx.resources_mut().edit_sessions.register(EditSession {
             id: session_id,
             remote_path: remote_path.clone(),
+            io_path: remote_path.clone(),
             tab_id: TabId(1),
             session_epoch: 1,
             profile_id: ProfileId(0),
@@ -3883,6 +3884,79 @@ fn duplicate_edit_reopens_existing_temp_without_downloading(cx: &mut TestAppCont
 }
 
 #[gpui_kit::test]
+fn symlink_edit_uploads_through_to_the_resolved_target(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+    let link_path = RemotePath::new("/home/tester/latest.txt");
+    let target_path = RemotePath::new("/home/tester/releases/2.txt");
+
+    let (session_id, _temp_path) = workspace.update_in(&mut cx, |workspace, _window, cx| {
+        let session_id = cx.resources_mut().edit_sessions.next_id();
+        let temp_path = LocalPath::new(format!(
+            "{}/{}/{}/2.txt",
+            cx.resources().app_paths.edits_dir.as_str(),
+            cx.resources().edit_run_id,
+            session_id.0
+        ));
+        let parent = std::path::Path::new(temp_path.as_str())
+            .parent()
+            .expect("edit temp has a parent directory");
+        std::fs::create_dir_all(parent).expect("create edit temp directory");
+        std::fs::write(temp_path.as_str(), b"modified through link").expect("write edit temp");
+        cx.resources_mut().edit_sessions.register(EditSession {
+            id: session_id,
+            remote_path: link_path.clone(),
+            io_path: target_path.clone(),
+            tab_id: TabId(1),
+            session_epoch: 1,
+            profile_id: ProfileId(0),
+            connection_key: manual_connection_key(),
+            local_temp_path: temp_path.clone(),
+            phase: EditPhase::Editing,
+            remote_snapshot: RemoteSnapshot {
+                size: Some(9),
+                modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+            },
+            pending_check_id: None,
+            checking_local_mtime: None,
+            local_modified: false,
+            local_baseline: None,
+        });
+        let tab = workspace.active_tab_mut().expect("active tab");
+        tab.selection.selected_paths = vec![EntryPath::Remote(link_path.clone())];
+        cx.refresh_windows();
+        (session_id, temp_path)
+    });
+
+    // Selecting the link in the pane still maps to its edit session.
+    workspace.read_with(&cx, |workspace, cx| {
+        assert_eq!(
+            workspace.selected_edit_session(cx),
+            Some((session_id, EditPhase::Editing))
+        );
+    });
+
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        workspace.upload_selected_edit(cx);
+    });
+    let command = channels
+        .command_rx
+        .try_recv()
+        .expect("upload must check the live remote target");
+    let AppCommand::CheckRemoteEditSnapshot(command) = command else {
+        panic!("expected CheckRemoteEditSnapshot, got {command:?}");
+    };
+    assert_eq!(
+        command.path, target_path,
+        "the authoritative check must stat the file the link points at"
+    );
+    assert_eq!(
+        command.edit_session_id, session_id,
+        "the check stays bound to the link's edit session"
+    );
+}
+
+#[gpui_kit::test]
 fn upload_modified_file_is_explicit_and_checks_remote_first(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     connect_and_drain(&workspace, &mut cx, &channels);
@@ -3905,6 +3979,7 @@ fn upload_modified_file_is_explicit_and_checks_remote_first(cx: &mut TestAppCont
         cx.resources_mut().edit_sessions.register(EditSession {
             id: session_id,
             remote_path: remote_path.clone(),
+            io_path: remote_path.clone(),
             tab_id: TabId(1),
             session_epoch: 1,
             profile_id: ProfileId(0),
@@ -3981,6 +4056,7 @@ fn edit_metadata_failure_preserves_session_and_temp_directory(cx: &mut TestAppCo
         cx.resources_mut().edit_sessions.register(EditSession {
             id: session_id,
             remote_path: remote_path.clone(),
+            io_path: remote_path.clone(),
             tab_id: TabId(1),
             session_epoch: 1,
             profile_id: ProfileId(0),
@@ -4055,6 +4131,7 @@ fn edit_reaps_orphaned_existing_session_and_retries(cx: &mut TestAppContext) {
         cx.resources_mut().edit_sessions.register(EditSession {
             id,
             remote_path: remote_path.clone(),
+            io_path: remote_path.clone(),
             tab_id: TabId(999),
             session_epoch: 1,
             profile_id: ProfileId(0),
@@ -4543,6 +4620,7 @@ fn register_conflict_session(
         let id = cx.resources_mut().edit_sessions.next_id();
         cx.resources_mut().edit_sessions.register(EditSession {
             id,
+            io_path: remote_path.clone(),
             remote_path,
             tab_id: TabId(1),
             session_epoch: 1,
@@ -4718,6 +4796,7 @@ fn edit_dedup_follows_captured_connection_key_not_profile_id(cx: &mut TestAppCon
         cx.resources_mut().edit_sessions.register(EditSession {
             id,
             remote_path: remote_path.clone(),
+            io_path: remote_path.clone(),
             tab_id: TabId(99),
             session_epoch: 1,
             profile_id: ProfileId(0),
@@ -4826,6 +4905,7 @@ fn saved_profile_host_change_does_not_hit_old_connections_edit(cx: &mut TestAppC
         cx.resources_mut().edit_sessions.register(EditSession {
             id,
             remote_path: remote_path.clone(),
+            io_path: remote_path.clone(),
             tab_id: TabId(1),
             session_epoch: 1,
             profile_id: ProfileId(1),
@@ -5217,6 +5297,7 @@ fn seed_editing_session_on_tab1(
         cx.resources_mut().edit_sessions.register(EditSession {
             id,
             remote_path: RemotePath::new("/home/tester/doc.txt"),
+            io_path: RemotePath::new("/home/tester/doc.txt"),
             tab_id: TabId(1),
             session_epoch: 1,
             profile_id: ProfileId(1),
@@ -5773,6 +5854,757 @@ fn remote_navigation_and_refresh_keep_the_previous_listing_visible(cx: &mut Test
         Ok(AppCommand::ReadRemoteDir { tab_id: TabId(1), path })
             if path == RemotePath::new(TEST_REMOTE_ROOT)
     ));
+}
+
+#[gpui_kit::test]
+fn remote_symlink_entry_is_resolved_on_open_instead_of_edited(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+
+    let link_path = RemotePath::new("/home/tester/latest");
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        let tab = workspace.active_tab_mut().expect("active tab");
+        tab.remote.entries = vec![RemoteEntry {
+            name: "latest".to_string(),
+            path: link_path.clone(),
+            kind: FileKind::Symlink,
+            size: Some(12),
+            permissions: Some(0o777),
+            modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+            link_target: None,
+        }];
+        tab.selection.selected_paths = vec![EntryPath::Remote(link_path.clone())];
+        workspace.focus_pane(PaneSide::Remote, window, cx);
+        workspace.open_selected_entry(window, cx);
+    });
+
+    assert!(
+        matches!(
+            channels.command_rx.try_recv(),
+            Ok(AppCommand::ResolveRemoteEntry {
+                tab_id: TabId(1),
+                session_epoch: 1,
+                path,
+            }) if path == link_path
+        ),
+        "a link must be resolved by the actor, not guessed from the listing"
+    );
+    workspace.read_with(&cx, |_workspace, cx| {
+        assert!(
+            cx.resources()
+                .edit_sessions
+                .find_active(&manual_connection_key(), &link_path)
+                .is_none(),
+            "a link is not edited before its target type is known"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn resolved_remote_directory_link_navigates_by_its_listed_path(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+
+    let link_path = RemotePath::new("/home/tester/latest");
+    let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.handle_app_event(
+            AppEvent::RemoteEntryResolved(RemoteScoped::new(
+                scope,
+                RemoteEntryResolution {
+                    path: link_path.clone(),
+                    kind: FileKind::Directory,
+                    target: None,
+                    size: None,
+                    modified_at: None,
+                    error: None,
+                },
+            )),
+            window,
+            cx,
+        );
+    });
+
+    assert!(matches!(
+        channels.command_rx.try_recv(),
+        Ok(AppCommand::ReadRemoteDir { tab_id: TabId(1), path }) if path == link_path
+    ));
+    workspace.read_with(&cx, |workspace, _| {
+        let tab = workspace.state.tabs.active_tab().expect("tab must exist");
+        assert_eq!(tab.remote.path.as_ref(), Some(&link_path));
+    });
+}
+
+#[gpui_kit::test]
+fn resolved_remote_file_link_edits_the_write_through_target(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+
+    let link_path = RemotePath::new("/home/tester/latest.txt");
+    let target_path = RemotePath::new("/home/tester/releases/2.txt");
+    let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.handle_app_event(
+            AppEvent::RemoteEntryResolved(RemoteScoped::new(
+                scope,
+                RemoteEntryResolution {
+                    path: link_path.clone(),
+                    kind: FileKind::File,
+                    target: Some(target_path.clone()),
+                    size: Some(2_048),
+                    modified_at: Some(Timestamp::from_secs_since_epoch(120)),
+                    error: None,
+                },
+            )),
+            window,
+            cx,
+        );
+    });
+
+    let command = channels
+        .command_rx
+        .try_recv()
+        .expect("a resolved file link must start an edit download");
+    let AppCommand::StartTransfer(command) = command else {
+        panic!("expected StartTransfer for edit download, got {command:?}");
+    };
+    assert_eq!(command.direction, TransferDirection::Download);
+    assert_eq!(
+        command.sources,
+        vec![TransferEndpoint::Remote(target_path.clone())],
+        "the download must follow the link, not copy the link itself"
+    );
+    workspace.read_with(&cx, |_workspace, cx| {
+        let session = cx
+            .resources()
+            .edit_sessions
+            .find_active(&manual_connection_key(), &target_path)
+            .expect("session is keyed by the write-through path");
+        assert_eq!(session.remote_path, link_path, "UI identity stays the link");
+        assert_eq!(session.io_path, target_path);
+    });
+}
+
+#[gpui_kit::test]
+fn remote_entry_resolution_is_dropped_when_the_pane_moved_on(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+
+    let link_path = RemotePath::new("/home/tester/latest");
+    let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        // The pane has navigated into a different directory since the request.
+        workspace.active_tab_mut().expect("active tab").remote.path =
+            Some(RemotePath::new("/home/tester/archive"));
+        workspace.handle_app_event(
+            AppEvent::RemoteEntryResolved(RemoteScoped::new(
+                scope,
+                RemoteEntryResolution {
+                    path: link_path.clone(),
+                    kind: FileKind::Directory,
+                    target: None,
+                    size: None,
+                    modified_at: None,
+                    error: None,
+                },
+            )),
+            window,
+            cx,
+        );
+    });
+    assert!(
+        channels.command_rx.try_recv().is_err(),
+        "a resolution for a directory the pane left must not navigate"
+    );
+    workspace.read_with(&cx, |workspace, _| {
+        let tab = workspace.state.tabs.active_tab().expect("tab must exist");
+        assert_eq!(
+            tab.remote.path.as_ref(),
+            Some(&RemotePath::new("/home/tester/archive")),
+            "the newer navigation wins"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn remote_entry_resolution_for_a_non_active_tab_is_ignored(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        // A second, genuinely connected tab that is not the active one. Both
+        // tabs pass the core scope guard, so this exercises the app's
+        // active-tab check rather than the stale-event guard.
+        let mut second = TabState::new(TabId(2), "second");
+        second.session_epoch = 1;
+        second.connection = ConnectionState::Connected {
+            session_id: SessionId(2),
+            session_epoch: 1,
+            connected_at: Timestamp::from_secs_since_epoch(1),
+        };
+        second.remote.path = Some(RemotePath::new("/srv/other"));
+        workspace.state.tabs.open_tab(second);
+        workspace.state.tabs.active_tab_id = Some(TabId(1));
+        workspace.begin_link_check(
+            TabId(2),
+            EntryPath::Remote(RemotePath::new("/srv/other/latest")),
+            Some(1),
+            cx,
+        );
+    });
+
+    let scope = RemoteEventScope::new(TabId(2), SessionId(2), 1);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.handle_app_event(
+            AppEvent::RemoteEntryResolved(RemoteScoped::new(
+                scope,
+                RemoteEntryResolution {
+                    path: RemotePath::new("/srv/other/latest"),
+                    kind: FileKind::Directory,
+                    target: None,
+                    size: None,
+                    modified_at: None,
+                    error: None,
+                },
+            )),
+            window,
+            cx,
+        );
+    });
+    assert!(
+        channels.command_rx.try_recv().is_err(),
+        "the active tab must not navigate for another tab's resolution"
+    );
+    workspace.read_with(&cx, |workspace, _| {
+        let active = workspace.state.tabs.active_tab().expect("active tab");
+        assert_eq!(
+            active.remote.path.as_ref(),
+            Some(&RemotePath::new(TEST_REMOTE_ROOT))
+        );
+        let second = workspace.state.tabs.find_tab(TabId(2)).expect("second tab");
+        assert_eq!(
+            second.remote.path.as_ref(),
+            Some(&RemotePath::new("/srv/other")),
+            "the other tab keeps its own path"
+        );
+        assert_eq!(
+            workspace.status_message_for_test(),
+            None,
+            "dropping the result still clears its own pending status"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn dropped_entry_resolution_clears_the_pending_check_status(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+
+    let link_path = RemotePath::new("/home/tester/latest");
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        workspace.begin_link_check(TabId(1), EntryPath::Remote(link_path.clone()), Some(1), cx);
+    });
+
+    // The pane left while the actor was still resolving.
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.active_tab_mut().expect("active tab").remote.path =
+            Some(RemotePath::new("/home/tester/archive"));
+        workspace.handle_app_event(
+            AppEvent::RemoteEntryResolved(RemoteScoped::new(
+                RemoteEventScope::new(TabId(1), SessionId(1), 1),
+                RemoteEntryResolution {
+                    path: link_path,
+                    kind: FileKind::Directory,
+                    target: None,
+                    size: None,
+                    modified_at: None,
+                    error: None,
+                },
+            )),
+            window,
+            cx,
+        );
+    });
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.status_message_for_test(),
+            None,
+            "a dropped resolution must not leave “Checking the link…” behind"
+        );
+    });
+}
+
+/// An older request's result must not clear the status of a newer request for
+/// a different entry. (Whether the older result also navigates is unchanged
+/// `applies` semantics: the pane's current path still matches its parent.)
+#[gpui_kit::test]
+fn older_link_result_does_not_clear_a_newer_check_status(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+
+    let first = RemotePath::new("/home/tester/first");
+    let second = RemotePath::new("/home/tester/second");
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.begin_link_check(TabId(1), EntryPath::Remote(first.clone()), Some(1), cx);
+        // A second request supersedes the first one's status.
+        workspace.begin_link_check(TabId(1), EntryPath::Remote(second), Some(1), cx);
+        workspace.handle_app_event(
+            AppEvent::RemoteEntryResolved(RemoteScoped::new(
+                RemoteEventScope::new(TabId(1), SessionId(1), 1),
+                RemoteEntryResolution {
+                    path: first,
+                    kind: FileKind::Directory,
+                    target: None,
+                    size: None,
+                    modified_at: None,
+                    error: None,
+                },
+            )),
+            window,
+            cx,
+        );
+    });
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some("Checking the link…"),
+            "the newer request's status must survive the older result"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn cancelled_local_link_check_clears_its_status(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    let (fixture, base) = temp_local_fixture("symlink-stale");
+    let target = fixture.join("releases").join("2");
+    std::fs::create_dir_all(&target).expect("target dir");
+    let link = fixture.join("latest");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, &link).expect("create directory symlink");
+    #[cfg(not(unix))]
+    return;
+
+    set_local_path_and_wait(&workspace, &mut cx, base.clone());
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        let tab = workspace.active_tab().expect("active tab");
+        let index = tab
+            .local
+            .entries
+            .iter()
+            .position(|entry| entry.path.as_str() == link.to_string_lossy())
+            .expect("link is listed");
+        workspace.open_entry_at(PaneSide::Local, index, window, cx);
+        // Leave the link's directory before the background stat completes.
+        workspace.set_local_path(
+            LocalPath::new(target.to_string_lossy().into_owned()),
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.status_message_for_test(),
+            None,
+            "a discarded local link result must clear its pending status"
+        );
+        let tab = workspace.state.tabs.active_tab().expect("tab must exist");
+        assert_eq!(
+            tab.local.path.as_ref().map(LocalPath::as_str),
+            Some(target.to_string_lossy().as_ref()),
+            "the pane stays where the user navigated, not the late link result"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn stale_epoch_entry_resolution_is_dropped_by_the_state_guard(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+
+    let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        // Reconnect: the tab's epoch moves past the event's scope.
+        workspace
+            .active_tab_mut()
+            .expect("active tab")
+            .session_epoch = 2;
+        workspace.handle_app_event(
+            AppEvent::RemoteEntryResolved(RemoteScoped::new(
+                scope,
+                RemoteEntryResolution {
+                    path: RemotePath::new("/home/tester/latest"),
+                    kind: FileKind::Directory,
+                    target: None,
+                    size: None,
+                    modified_at: None,
+                    error: None,
+                },
+            )),
+            window,
+            cx,
+        );
+    });
+    assert!(
+        channels.command_rx.try_recv().is_err(),
+        "a resolution from the superseded session must not navigate"
+    );
+}
+
+#[gpui_kit::test]
+fn opening_a_link_then_its_target_reuses_one_edit_session(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+
+    let link_path = RemotePath::new("/home/tester/latest.txt");
+    let target_path = RemotePath::new("/home/tester/releases/2.txt");
+
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        workspace.begin_edit_resolved(
+            link_path.clone(),
+            target_path.clone(),
+            Some(2_048),
+            Some(Timestamp::from_secs_since_epoch(100)),
+            cx,
+        );
+    });
+    let first = channels
+        .command_rx
+        .try_recv()
+        .expect("opening the link starts a download");
+    let AppCommand::StartTransfer(first) = first else {
+        panic!("expected StartTransfer, got {first:?}");
+    };
+    assert_eq!(
+        first.sources,
+        vec![TransferEndpoint::Remote(target_path.clone())]
+    );
+
+    // Opening the real target afterwards must hit the same write-through
+    // session, not create a second editor for one file.
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        workspace.begin_edit_resolved(
+            target_path.clone(),
+            target_path.clone(),
+            Some(2_048),
+            Some(Timestamp::from_secs_since_epoch(100)),
+            cx,
+        );
+    });
+    assert!(
+        channels.command_rx.try_recv().is_err(),
+        "the target must not start a second edit download"
+    );
+    workspace.read_with(&cx, |_workspace, cx| {
+        let matching = cx
+            .resources()
+            .edit_sessions
+            .sessions()
+            .filter(|session| session.io_path == target_path)
+            .count();
+        assert_eq!(matching, 1, "one write-through session per target");
+    });
+}
+
+#[gpui_kit::test]
+fn repointed_link_does_not_create_a_second_session_on_the_same_path(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+
+    let link_path = RemotePath::new("/home/tester/latest.txt");
+    let old_target = RemotePath::new("/home/tester/releases/1.txt");
+    let new_target = RemotePath::new("/home/tester/releases/2.txt");
+
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        workspace.begin_edit_resolved(link_path.clone(), old_target.clone(), Some(1_024), None, cx);
+    });
+    let _ = channels.command_rx.try_recv().expect("first edit download");
+
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        workspace.begin_edit_resolved(link_path.clone(), new_target.clone(), Some(2_048), None, cx);
+    });
+    assert!(
+        channels.command_rx.try_recv().is_err(),
+        "an open session bound to the old target must block a silent rebind"
+    );
+    workspace.read_with(&cx, |workspace, _cx| {
+        assert!(
+            workspace
+                .status_message_for_test()
+                .is_some_and(|message| message.contains("points somewhere else")),
+            "the ambiguity must be explained, not silently resolved"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn link_edit_conflict_compare_downloads_the_write_through_target(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+
+    let link_path = RemotePath::new("/home/tester/latest.txt");
+    let target_path = RemotePath::new("/home/tester/releases/2.txt");
+    let temp_dir = unique_temp_dir("link-compare");
+    std::fs::create_dir_all(&temp_dir).expect("create compare dir");
+    let temp_path = LocalPath::new(temp_dir.join("2.txt").to_string_lossy().to_string());
+    std::fs::write(temp_path.as_str(), b"local").expect("write temp copy");
+
+    let session_id = workspace.update_in(&mut cx, |_workspace, _window, cx| {
+        let id = cx.resources_mut().edit_sessions.next_id();
+        cx.resources_mut().edit_sessions.register(EditSession {
+            id,
+            remote_path: link_path.clone(),
+            io_path: target_path.clone(),
+            tab_id: TabId(1),
+            session_epoch: 1,
+            profile_id: ProfileId(0),
+            connection_key: manual_connection_key(),
+            local_temp_path: temp_path.clone(),
+            phase: EditPhase::RemoteConflict,
+            remote_snapshot: RemoteSnapshot {
+                size: Some(5),
+                modified_at: None,
+            },
+            pending_check_id: None,
+            checking_local_mtime: None,
+            local_modified: true,
+            local_baseline: None,
+        });
+        id
+    });
+
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        workspace.compare_edit_conflict(session_id, cx);
+    });
+    let command = channels
+        .command_rx
+        .try_recv()
+        .expect("compare dispatches a download");
+    let AppCommand::StartTransfer(command) = command else {
+        panic!("expected StartTransfer, got {command:?}");
+    };
+    assert_eq!(
+        command.sources,
+        vec![TransferEndpoint::Remote(target_path)],
+        "the comparison must fetch the file the link points at"
+    );
+}
+
+#[gpui_kit::test]
+fn refresh_does_not_resync_a_write_through_session_baseline(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+
+    let link_path = RemotePath::new("/home/tester/latest.txt");
+    let target_path = RemotePath::new("/home/tester/releases/2.txt");
+    let temp_dir = unique_temp_dir("link-resync");
+    std::fs::create_dir_all(&temp_dir).expect("create resync dir");
+    let temp_path = LocalPath::new(temp_dir.join("2.txt").to_string_lossy().to_string());
+    std::fs::write(temp_path.as_str(), b"local").expect("write temp copy");
+
+    workspace.update_in(&mut cx, |_workspace, _window, cx| {
+        let id = cx.resources_mut().edit_sessions.next_id();
+        cx.resources_mut().edit_sessions.register(EditSession {
+            id,
+            remote_path: link_path.clone(),
+            io_path: target_path.clone(),
+            tab_id: TabId(1),
+            session_epoch: 1,
+            profile_id: ProfileId(0),
+            connection_key: manual_connection_key(),
+            local_temp_path: temp_path.clone(),
+            phase: EditPhase::Editing,
+            remote_snapshot: RemoteSnapshot {
+                size: Some(100),
+                modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+            },
+            pending_check_id: None,
+            checking_local_mtime: None,
+            local_modified: false,
+            local_baseline: None,
+        });
+    });
+
+    let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        // The listing reports the link's own lstat values (small, different
+        // mtime). They must not overwrite the target's baseline.
+        workspace.active_tab_mut().expect("active tab").remote.path =
+            Some(RemotePath::new(TEST_REMOTE_ROOT));
+        workspace.handle_app_event(
+            AppEvent::RemoteDirLoaded(RemoteScoped::new(
+                scope,
+                RemoteDirSnapshot {
+                    path: RemotePath::new(TEST_REMOTE_ROOT),
+                    entries: vec![RemoteEntry {
+                        name: "latest.txt".to_string(),
+                        path: link_path.clone(),
+                        kind: FileKind::Symlink,
+                        size: Some(12),
+                        permissions: Some(0o777),
+                        modified_at: Some(Timestamp::from_secs_since_epoch(999)),
+                        link_target: None,
+                    }],
+                },
+            )),
+            window,
+            cx,
+        );
+    });
+
+    workspace.read_with(&cx, |_workspace, cx| {
+        let session = cx
+            .resources()
+            .edit_sessions
+            .find_active(&manual_connection_key(), &target_path)
+            .expect("session survives the refresh");
+        assert_eq!(
+            session.remote_snapshot,
+            RemoteSnapshot {
+                size: Some(100),
+                modified_at: Some(Timestamp::from_secs_since_epoch(100)),
+            },
+            "a link's own lstat values must not replace the target baseline"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn entry_resolve_routing_failure_clears_its_pending_check(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+
+    let link_path = RemotePath::new("/home/tester/latest");
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.begin_link_check(TabId(1), EntryPath::Remote(link_path.clone()), Some(1), cx);
+        workspace.handle_app_event(
+            AppEvent::RemoteEntryResolveFailed(macsftp_core::RemoteEntryResolveFailure {
+                tab_id: TabId(1),
+                session_epoch: 1,
+                path: link_path.clone(),
+                error: UserFacingError::new(
+                    ErrorCode::ChannelClosed,
+                    "Open Item Failed",
+                    "The remote session is busy. Try again.",
+                ),
+            }),
+            window,
+            cx,
+        );
+    });
+    workspace.read_with(&cx, |workspace, _| {
+        assert!(
+            workspace
+                .status_message_for_test()
+                .is_some_and(|message| message.contains("Open Item Failed")),
+            "a routing failure must replace the pending “Checking the link…” state"
+        );
+        assert!(
+            !workspace.link_check_is_current(
+                TabId(1),
+                &EntryPath::Remote(link_path.clone()),
+                Some(1)
+            ),
+            "the pending check must be cleared by its own failure"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn same_path_failure_from_a_superseded_epoch_keeps_the_newer_check(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+
+    let link_path = RemotePath::new("/home/tester/latest");
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        // The user reopened the same path after a reconnect; the pending check
+        // belongs to the new epoch.
+        workspace.begin_link_check(TabId(1), EntryPath::Remote(link_path.clone()), Some(2), cx);
+        workspace.handle_app_event(
+            AppEvent::RemoteEntryResolveFailed(macsftp_core::RemoteEntryResolveFailure {
+                tab_id: TabId(1),
+                session_epoch: 2,
+                path: link_path.clone(),
+                error: UserFacingError::new(ErrorCode::ChannelClosed, "Open Item Failed", "new"),
+            }),
+            window,
+            cx,
+        );
+    });
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.begin_link_check(TabId(1), EntryPath::Remote(link_path.clone()), Some(3), cx);
+        // A late failure from the superseded epoch names the same path.
+        workspace.handle_app_event(
+            AppEvent::RemoteEntryResolveFailed(macsftp_core::RemoteEntryResolveFailure {
+                tab_id: TabId(1),
+                session_epoch: 2,
+                path: link_path.clone(),
+                error: UserFacingError::new(
+                    ErrorCode::ChannelClosed,
+                    "Open Item Failed",
+                    "stale same-path failure",
+                ),
+            }),
+            window,
+            cx,
+        );
+    });
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some("Checking the link…"),
+            "a same-path failure from another epoch must not clear the newer check"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn unresolved_remote_link_reports_an_error_without_moving_the_pane(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+
+    let link_path = RemotePath::new("/home/tester/broken");
+    let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.handle_app_event(
+            AppEvent::RemoteEntryResolved(RemoteScoped::new(
+                scope,
+                RemoteEntryResolution {
+                    path: link_path.clone(),
+                    kind: FileKind::Symlink,
+                    target: None,
+                    size: None,
+                    modified_at: None,
+                    error: Some(UserFacingError::new(
+                        ErrorCode::NotFound,
+                        "Server Link Unavailable",
+                        "The link target does not exist.",
+                    )),
+                },
+            )),
+            window,
+            cx,
+        );
+    });
+
+    workspace.read_with(&cx, |workspace, _| {
+        assert!(
+            workspace
+                .status_message
+                .as_ref()
+                .is_some_and(|message| message.contains("Server Link Unavailable")),
+            "the failure must be visible in the status bar"
+        );
+        let tab = workspace.state.tabs.active_tab().expect("tab must exist");
+        assert_eq!(
+            tab.remote.path.as_ref(),
+            Some(&RemotePath::new(TEST_REMOTE_ROOT)),
+            "a broken link must not navigate the pane"
+        );
+    });
+    assert!(channels.command_rx.try_recv().is_err());
 }
 
 #[gpui_kit::test]
@@ -6970,6 +7802,76 @@ fn temp_local_fixture(label: &str) -> (std::path::PathBuf, LocalPath) {
 }
 
 #[gpui_kit::test]
+fn local_directory_symlink_navigates_into_its_target(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    let (fixture, base) = temp_local_fixture("symlink-dir");
+    let target = fixture.join("releases").join("2");
+    std::fs::create_dir_all(&target).expect("target dir");
+    std::fs::write(target.join("note.txt"), b"hi").expect("target file");
+    let link = fixture.join("latest");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target, &link).expect("create directory symlink");
+    #[cfg(not(unix))]
+    return;
+
+    set_local_path_and_wait(&workspace, &mut cx, base);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        let tab = workspace.active_tab().expect("active tab");
+        let index = tab
+            .local
+            .entries
+            .iter()
+            .position(|entry| entry.kind == FileKind::Symlink)
+            .expect("the listing keeps the link typed as a symlink");
+        workspace.open_entry_at(PaneSide::Local, index, window, cx);
+    });
+    cx.run_until_parked();
+
+    workspace.read_with(&cx, |workspace, _| {
+        let tab = workspace.state.tabs.active_tab().expect("tab must exist");
+        assert_eq!(
+            tab.local.path.as_ref().map(LocalPath::as_str),
+            Some(link.to_string_lossy().as_ref()),
+            "the pane enters the link by its own path, not the target's"
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn local_file_symlink_is_not_opened_as_a_folder(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    let (fixture, base) = temp_local_fixture("symlink-file");
+    std::fs::write(fixture.join("note.txt"), b"hi").expect("target file");
+    let link = fixture.join("latest.txt");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(fixture.join("note.txt"), &link).expect("create file symlink");
+    #[cfg(not(unix))]
+    return;
+
+    set_local_path_and_wait(&workspace, &mut cx, base.clone());
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        let tab = workspace.active_tab().expect("active tab");
+        let index = tab
+            .local
+            .entries
+            .iter()
+            .position(|entry| entry.path.as_str() == link.to_string_lossy())
+            .expect("link is listed");
+        workspace.open_entry_at(PaneSide::Local, index, window, cx);
+    });
+    cx.run_until_parked();
+
+    workspace.read_with(&cx, |workspace, _| {
+        let tab = workspace.state.tabs.active_tab().expect("tab must exist");
+        assert_eq!(
+            tab.local.path.as_ref(),
+            Some(&base),
+            "a file link must not navigate"
+        );
+    });
+}
+
+#[gpui_kit::test]
 fn hidden_files_filtered_by_default(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     let (fixture, base) = temp_local_fixture("hidden-files");
@@ -7757,6 +8659,7 @@ fn close_tab_tears_down_its_edit_sessions_and_temp_dir(cx: &mut TestAppContext) 
         cx.resources_mut().edit_sessions.register(EditSession {
             id,
             remote_path: RemotePath::new("/srv/doc.txt"),
+            io_path: RemotePath::new("/srv/doc.txt"),
             tab_id: TabId(2),
             session_epoch: 1,
             profile_id: ProfileId(1),
@@ -7811,6 +8714,7 @@ fn window_closed_callback_reaps_orphaned_edit_session(cx: &mut TestAppContext) {
         cx.resources_mut().edit_sessions.register(EditSession {
             id,
             remote_path: RemotePath::new("/srv/doc.txt"),
+            io_path: RemotePath::new("/srv/doc.txt"),
             tab_id: TabId(1),
             session_epoch: 1,
             profile_id: ProfileId(1),
@@ -8830,6 +9734,7 @@ fn remote_row_shows_dirty_indicator_when_locally_modified(cx: &mut TestAppContex
         cx.resources_mut().edit_sessions.register(EditSession {
             id,
             remote_path: remote_path.clone(),
+            io_path: remote_path.clone(),
             tab_id: TabId(1),
             session_epoch: 1,
             profile_id: ProfileId(0),
@@ -8901,6 +9806,7 @@ fn upload_edited_file_action_dispatches_check(cx: &mut TestAppContext) {
         cx.resources_mut().edit_sessions.register(EditSession {
             id,
             remote_path: remote_path.clone(),
+            io_path: remote_path.clone(),
             tab_id: TabId(1),
             session_epoch: 1,
             profile_id: ProfileId(0),
@@ -8982,6 +9888,7 @@ fn compare_edit_conflict_dispatches_download_transfer(cx: &mut TestAppContext) {
         cx.resources_mut().edit_sessions.register(EditSession {
             id,
             remote_path: remote_path.clone(),
+            io_path: remote_path.clone(),
             tab_id: TabId(1),
             session_epoch: 1,
             profile_id: ProfileId(0),

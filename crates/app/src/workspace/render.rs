@@ -1094,7 +1094,8 @@ impl crate::workspace::Workspace {
                                     let is_dirty =
                                         cx.resources().edit_sessions.sessions().any(|session| {
                                             session.tab_id == tab.id
-                                                && session.remote_path == entry.path
+                                                && (session.remote_path == entry.path
+                                                    || session.io_path == entry.path)
                                                 && session.local_modified
                                         });
                                     let display_name = if is_dirty {

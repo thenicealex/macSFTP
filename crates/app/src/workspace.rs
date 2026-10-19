@@ -54,6 +54,23 @@ pub(crate) enum WorkspaceSurface {
     Settings,
 }
 
+/// Status line shown while an entry is being resolved (a local symlink stat or
+/// a remote entry resolution). Shared so the completion path can tell whether
+/// the message still belongs to it.
+pub(crate) const LINK_CHECK_STATUS: &str = "Checking the link…";
+
+/// The link check whose status line is currently showing. A late result for a
+/// tab or path other than this one must not clear a newer message, and a
+/// dropped result must still clear this one. `session_epoch` is set for remote
+/// checks so a failure from a superseded session cannot clear a re-issued check
+/// for the same path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingLinkCheck {
+    tab_id: TabId,
+    entry: EntryPath,
+    session_epoch: Option<u64>,
+}
+
 pub struct Workspace {
     window_session_id: WindowSessionId,
     state: AppState,
@@ -72,6 +89,10 @@ pub struct Workspace {
 
     default_local_path: LocalPath,
     status_message: Option<SharedString>,
+    /// The link resolution whose “Checking the link…” line is still showing.
+    /// Held here so a dropped result (tab switched, directory changed) can clear
+    /// its own status without clobbering a newer message.
+    pending_link_check: Option<PendingLinkCheck>,
     config_error: Option<SharedString>,
     log_file: LocalPath,
     connect_form_ui: view_state::ConnectFormUi,
@@ -182,6 +203,7 @@ impl Workspace {
 
             default_local_path,
             status_message: None,
+            pending_link_check: None,
             config_error,
             log_file,
             connect_form_ui: view_state::ConnectFormUi::new(cx.focus_handle()),
@@ -455,6 +477,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if self.state.tabs.find_tab(tab_id).is_some() {
+            let previous_tab = self.state.tabs.active_tab_id;
             self.state.tabs.active_tab_id = Some(tab_id);
             self.touch_mru(tab_id);
             if self.tab_switcher.open {
@@ -463,6 +486,12 @@ impl Workspace {
             }
             self.clear_filters();
             self.selection_anchor = None;
+            // A link check started in the previous tab can no longer show a
+            // result here; drop its status line with it. Re-activating the tab
+            // that is already active must not cancel a check in flight.
+            if let Some(previous_tab) = previous_tab.filter(|previous| *previous != tab_id) {
+                self.clear_pending_link_check_for_tab(previous_tab, cx);
+            }
             self.reset_scroll_positions();
             cx.notify();
         }
@@ -717,6 +746,94 @@ impl Workspace {
     #[cfg(test)]
     pub(crate) fn status_message_for_test(&self) -> Option<String> {
         self.status_message.as_ref().map(|s| s.to_string())
+    }
+
+    /// Show the shared “Checking the link…” line and remember which entry owns
+    /// it, so a completion (or a dropped completion) can clear exactly this
+    /// message. `session_epoch` is `Some` for remote checks and `None` for local
+    /// ones.
+    pub(crate) fn begin_link_check(
+        &mut self,
+        tab_id: TabId,
+        entry: EntryPath,
+        session_epoch: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_link_check = Some(PendingLinkCheck {
+            tab_id,
+            entry,
+            session_epoch,
+        });
+        self.status_message = Some(LINK_CHECK_STATUS.into());
+        cx.notify();
+    }
+
+    /// Whether the link check owned by `tab_id`/`entry`/`session_epoch` is still
+    /// the one whose status line is showing.
+    pub(crate) fn link_check_is_current(
+        &self,
+        tab_id: TabId,
+        entry: &EntryPath,
+        session_epoch: Option<u64>,
+    ) -> bool {
+        self.pending_link_check.as_ref().is_some_and(|check| {
+            check.tab_id == tab_id && &check.entry == entry && check.session_epoch == session_epoch
+        })
+    }
+
+    /// Clear the pending check and its status line, but only when it still
+    /// belongs to `tab_id`/`entry`/`session_epoch`. A completed or dropped
+    /// result calls this so a stale “Checking the link…” can never outlive its
+    /// request, while a newer message is left untouched.
+    pub(crate) fn finish_link_check(
+        &mut self,
+        tab_id: TabId,
+        entry: &EntryPath,
+        session_epoch: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.link_check_is_current(tab_id, entry, session_epoch) {
+            return;
+        }
+        self.pending_link_check = None;
+        if self
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message == LINK_CHECK_STATUS)
+        {
+            self.status_message = None;
+        }
+        cx.notify();
+    }
+
+    /// Drop any pending link check (e.g. the tab it belonged to is gone).
+    pub(crate) fn clear_pending_link_check_status(&mut self, cx: &mut Context<Self>) {
+        if self.pending_link_check.take().is_some()
+            && self
+                .status_message
+                .as_deref()
+                .is_some_and(|message| message == LINK_CHECK_STATUS)
+        {
+            self.status_message = None;
+        }
+        cx.notify();
+    }
+    /// Drop a pending link check only when it belongs to `tab_id`. Used when the
+    /// user switches away from a tab: the request can never show its result in
+    /// the newly active tab, but a check started in the tab being activated must
+    /// be left alone.
+    pub(crate) fn clear_pending_link_check_for_tab(
+        &mut self,
+        tab_id: TabId,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .pending_link_check
+            .as_ref()
+            .is_some_and(|check| check.tab_id == tab_id)
+        {
+            self.clear_pending_link_check_status(cx);
+        }
     }
     pub(crate) fn request_connect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(tab) = self.active_tab() else {

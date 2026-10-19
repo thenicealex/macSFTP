@@ -216,7 +216,8 @@ fn advance_edit_sessions(event: &AppEvent, cx: &mut App) {
                     session.id,
                     session.phase.clone(),
                     session.tab_id,
-                    session.remote_path.clone(),
+                    // Edit transfers always target the write-through path.
+                    session.io_path.clone(),
                 )
             }
             _ => return,
@@ -474,7 +475,7 @@ fn apply_remote_edit_check_event(event: &AppEvent, cx: &mut App) {
             let applicable = session.phase == EditPhase::CheckingRemote
                 && session.pending_check_id == Some(check_id)
                 && session.checking_local_mtime.is_some()
-                && session.remote_path == path
+                && session.io_path == path
                 && event_tab_id == session.tab_id
                 && event_epoch == session.session_epoch;
             if !applicable {
@@ -485,7 +486,7 @@ fn apply_remote_edit_check_event(event: &AppEvent, cx: &mut App) {
                 session_epoch: session.session_epoch,
                 profile_id: session.profile_id,
                 temp_path: session.local_temp_path.clone(),
-                remote_path: session.remote_path.clone(),
+                remote_path: session.io_path.clone(),
                 baseline: session.remote_snapshot,
                 checking_local_mtime: session.checking_local_mtime,
             }
@@ -1015,6 +1016,7 @@ mod tests {
             let session = EditSession {
                 id,
                 remote_path: RemotePath::new("/srv/a.txt"),
+                io_path: RemotePath::new("/srv/a.txt"),
                 tab_id: TabId(1),
                 session_epoch: 1,
                 profile_id: ProfileId(1),
@@ -1075,6 +1077,7 @@ mod tests {
             let session = EditSession {
                 id,
                 remote_path: RemotePath::new("/srv/a.txt"),
+                io_path: RemotePath::new("/srv/a.txt"),
                 tab_id: TabId(1),
                 session_epoch: 1,
                 profile_id: ProfileId(1),
@@ -1618,6 +1621,7 @@ mod tests {
             let session = EditSession {
                 id,
                 remote_path: RemotePath::new("/srv/a.txt"),
+                io_path: RemotePath::new("/srv/a.txt"),
                 tab_id: TabId(1),
                 session_epoch: 1,
                 profile_id: ProfileId(1),
@@ -2179,6 +2183,7 @@ mod tests {
             let session = EditSession {
                 id,
                 remote_path: RemotePath::new("/srv/file.txt"),
+                io_path: RemotePath::new("/srv/file.txt"),
                 tab_id: TabId(1),
                 session_epoch: 1,
                 profile_id: ProfileId(1),
@@ -2272,6 +2277,7 @@ mod tests {
             let session = EditSession {
                 id,
                 remote_path: RemotePath::new("/srv/conflict.txt"),
+                io_path: RemotePath::new("/srv/conflict.txt"),
                 tab_id: TabId(1),
                 session_epoch: 1,
                 profile_id: ProfileId(1),

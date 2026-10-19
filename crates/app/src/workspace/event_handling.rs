@@ -1,7 +1,7 @@
 use gpui_kit::{Context, UniformListScrollHandle, Window};
 use macsftp_core::{
-    AppEvent, EditSessionId, ErrorCode, ModalRequest, RemotePath, RemoteSnapshot,
-    RestoredTabTarget, TabId, UserFacingError, sort_entries,
+    AppEvent, EditSessionId, EntryPath, ErrorCode, FileKind, ModalRequest, RemotePath,
+    RemoteSnapshot, RestoredTabTarget, TabId, UserFacingError, sort_entries,
 };
 
 use tracing::debug;
@@ -219,6 +219,79 @@ impl crate::workspace::Workspace {
                     Self::resync_edit_baselines_on_refresh(tab_id, &listing, cx);
                 }
             }
+            AppEvent::RemoteEntryResolved(scoped) => {
+                // Navigation and editing act on this window's active tab; an
+                // event for a tab owned by another window must not steer it.
+                let tab_id = scoped.scope.tab_id;
+                let session_epoch = scoped.scope.session_epoch;
+                let resolution = scoped.payload;
+                let entry = EntryPath::Remote(resolution.path.clone());
+                let applies = self.state.tabs.active_tab_id == Some(tab_id)
+                    && self
+                        .state
+                        .tabs
+                        .find_tab(tab_id)
+                        .and_then(|tab| tab.remote.path.clone())
+                        == resolution.path.parent();
+                // Clear the pending status even when the answer is dropped, so
+                // a late result cannot leave "Checking the link…" behind. The
+                // epoch keeps a result from a superseded session from clearing
+                // a re-issued check for the same path.
+                self.finish_link_check(tab_id, &entry, Some(session_epoch), cx);
+                if applies {
+                    if let Some(error) = &resolution.error {
+                        self.status_message =
+                            Some(format!("{}: {}", error.title, error.message).into());
+                    } else {
+                        match resolution.kind {
+                            FileKind::Directory => {
+                                // Navigate by the listed path: the server resolves
+                                // the link itself for every later operation.
+                                self.navigate_pane_remote(
+                                    resolution.path,
+                                    macsftp_core::HistoryOp::Push,
+                                    cx,
+                                );
+                            }
+                            FileKind::File => {
+                                let io_path =
+                                    resolution.target.unwrap_or_else(|| resolution.path.clone());
+                                self.begin_edit_resolved(
+                                    resolution.path,
+                                    io_path,
+                                    resolution.size,
+                                    resolution.modified_at,
+                                    cx,
+                                );
+                            }
+                            FileKind::Symlink | FileKind::Other | FileKind::Unknown => {
+                                self.status_message =
+                                    Some("This item cannot be opened in the editor.".into());
+                            }
+                        }
+                    }
+                }
+            }
+            AppEvent::RemoteEntryResolveFailed(failure) => {
+                // Epoch-correlated: accept only while this tab is still the
+                // same session. Otherwise the tab reconnected and the pending
+                // state belongs to the old one.
+                let applies = self
+                    .state
+                    .tabs
+                    .find_tab(failure.tab_id)
+                    .is_some_and(|tab| tab.session_epoch == failure.session_epoch);
+                self.finish_link_check(
+                    failure.tab_id,
+                    &EntryPath::Remote(failure.path.clone()),
+                    Some(failure.session_epoch),
+                    cx,
+                );
+                if applies {
+                    self.status_message =
+                        Some(format!("{}: {}", failure.error.title, failure.error.message).into());
+                }
+            }
             AppEvent::RemoteOperationFailed(scoped) => {
                 if let Some(tab) = self.state.tabs.find_tab_mut(scoped.scope.tab_id)
                     && scoped
@@ -318,6 +391,13 @@ impl crate::workspace::Workspace {
             .edit_sessions
             .editing_sessions_for_tab(tab_id)
             .filter_map(|session| {
+                // A write-through session's baseline is the resolved target,
+                // while the listing entry for the link reports the link itself
+                // (lstat size/mtime). Adopting it would compare unlike values,
+                // so those sessions rely on the next explicit upload check.
+                if session.io_path != session.remote_path {
+                    return None;
+                }
                 let (_, listed) = listing
                     .iter()
                     .find(|(path, _)| path == &session.remote_path)?;

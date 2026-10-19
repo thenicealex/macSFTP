@@ -1045,6 +1045,251 @@ async fn single_file_symlinks_are_copied_without_dereferencing() {
     fixture.cancel.cancel();
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn resolve_entry_follows_the_server_through_a_symlinked_parent_directory() {
+    use std::os::unix::fs::symlink;
+
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    let fixture = spawn_actor(
+        &server,
+        client_key_auth(&server),
+        Some(&server.host_public_key),
+    );
+    let _ = next_event(&fixture, "TabConnected").await;
+
+    // `/base/app/current -> ../releases/v2` makes the user's logical parent
+    // `/base/app`, while the server resolves the link's parent as
+    // `/base/releases/v2`.
+    let base = &server.fixture_dir;
+    let releases = base.join("symlink-parent-releases").join("v2");
+    std::fs::create_dir_all(releases.join("../shared")).expect("create real shared dir");
+    let real_conf = base
+        .join("symlink-parent-releases")
+        .join("shared")
+        .join("app.conf");
+    std::fs::write(&real_conf, b"real config").expect("write real config");
+    // A decoy at the path a lexical join would choose. Resolving here would
+    // download and later overwrite the wrong file.
+    let decoy_dir = base.join("symlink-parent-app").join("shared");
+    std::fs::create_dir_all(&decoy_dir).expect("create decoy dir");
+    let decoy_conf = decoy_dir.join("app.conf");
+    std::fs::write(&decoy_conf, b"decoy config").expect("write decoy config");
+
+    let app_dir = base.join("symlink-parent-app");
+    let dir_link = app_dir.join("current");
+    symlink("../symlink-parent-releases/v2", &dir_link).expect("create directory link");
+    let file_link = dir_link.join("app.conf");
+    symlink("../shared/app.conf", &file_link).expect("create file link inside linked dir");
+
+    fixture
+        .requests
+        .send_async(RemoteSessionRequest::ResolveEntry {
+            path: RemotePath::new(file_link.display().to_string()),
+        })
+        .await
+        .expect("resolve request should reach actor");
+    let resolved = match next_event(&fixture, "RemoteEntryResolved").await {
+        AppEvent::RemoteEntryResolved(scoped) => scoped.payload,
+        other => panic!("expected RemoteEntryResolved, got {other:?}"),
+    };
+    assert_eq!(resolved.error, None);
+    assert_eq!(resolved.kind, FileKind::File);
+    let canonical_real = real_conf.canonicalize().expect("canonical real target");
+    assert_eq!(
+        resolved.target,
+        Some(RemotePath::new(canonical_real.display().to_string())),
+        "the write-through path must be the server-resolved target, not a lexical join"
+    );
+    assert_ne!(
+        resolved.target,
+        Some(RemotePath::new(decoy_conf.display().to_string())),
+        "resolving under the logical parent would overwrite an unrelated file"
+    );
+
+    fixture.cancel.cancel();
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn resolve_entry_reports_symlink_targets_without_dereferencing_during_listing() {
+    use std::os::unix::fs::symlink;
+
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    let fixture = spawn_actor(
+        &server,
+        client_key_auth(&server),
+        Some(&server.host_public_key),
+    );
+    let _ = next_event(&fixture, "TabConnected").await;
+
+    let base = &server.fixture_dir;
+    let target_dir = base.join("symlink-resolve-target-dir");
+    std::fs::create_dir_all(&target_dir).expect("create target directory");
+    std::fs::write(target_dir.join("inner.txt"), b"inner").expect("write inner file");
+    std::fs::write(base.join("symlink-resolve-file.txt"), b"payload").expect("write target file");
+
+    let dir_link = base.join("symlink-resolve-dir-link");
+    symlink("symlink-resolve-target-dir", &dir_link).expect("create directory link");
+    let file_link = base.join("symlink-resolve-file-link");
+    symlink("symlink-resolve-file.txt", &file_link).expect("create file link");
+    let broken_link = base.join("symlink-resolve-broken-link");
+    symlink("symlink-resolve-missing.txt", &broken_link).expect("create broken link");
+
+    // Listing keeps the links typed as links (no dereference, no per-entry stat).
+    fixture
+        .requests
+        .send_async(RemoteSessionRequest::ReadDir {
+            path: RemotePath::new(base.display().to_string()),
+        })
+        .await
+        .expect("directory request should reach actor");
+    let _ = next_event(&fixture, "RemoteDirLoading").await;
+    let listing = match next_event(&fixture, "RemoteDirLoaded").await {
+        AppEvent::RemoteDirLoaded(scoped) => scoped.payload,
+        other => panic!("expected RemoteDirLoaded, got {other:?}"),
+    };
+    for name in [
+        "symlink-resolve-dir-link",
+        "symlink-resolve-file-link",
+        "symlink-resolve-broken-link",
+    ] {
+        let entry = listing
+            .entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .unwrap_or_else(|| panic!("{name} must be listed"));
+        assert_eq!(entry.kind, FileKind::Symlink);
+        assert_eq!(entry.link_target, None, "listing never resolves targets");
+    }
+
+    // Opening the directory link navigates by its own logical path.
+    fixture
+        .requests
+        .send_async(RemoteSessionRequest::ResolveEntry {
+            path: RemotePath::new(dir_link.display().to_string()),
+        })
+        .await
+        .expect("resolve request should reach actor");
+    let resolved = match next_event(&fixture, "RemoteEntryResolved").await {
+        AppEvent::RemoteEntryResolved(scoped) => scoped.payload,
+        other => panic!("expected RemoteEntryResolved, got {other:?}"),
+    };
+    assert_eq!(resolved.kind, FileKind::Directory);
+    assert_eq!(resolved.error, None);
+    assert_eq!(resolved.target, None);
+
+    // Opening the file link reports the write-through target.
+    fixture
+        .requests
+        .send_async(RemoteSessionRequest::ResolveEntry {
+            path: RemotePath::new(file_link.display().to_string()),
+        })
+        .await
+        .expect("resolve request should reach actor");
+    let resolved = match next_event(&fixture, "RemoteEntryResolved").await {
+        AppEvent::RemoteEntryResolved(scoped) => scoped.payload,
+        other => panic!("expected RemoteEntryResolved, got {other:?}"),
+    };
+    assert_eq!(resolved.kind, FileKind::File);
+    assert_eq!(resolved.error, None);
+    // `realpath` also resolves the macOS `/var -> /private/var` prefix, so
+    // compare against the canonical target rather than the fixture spelling.
+    let canonical_file_target = base
+        .join("symlink-resolve-file.txt")
+        .canonicalize()
+        .expect("canonical file target");
+    assert_eq!(
+        resolved.target,
+        Some(RemotePath::new(canonical_file_target.display().to_string()))
+    );
+    assert_eq!(resolved.size, Some(7));
+
+    // A chained link (`chain -> file_link -> file`) must resolve to the last
+    // link-free path; replacing an intermediate link would break the chain.
+    let chained_link = base.join("symlink-resolve-chained-link");
+    symlink("symlink-resolve-file-link", &chained_link).expect("create chained link");
+    fixture
+        .requests
+        .send_async(RemoteSessionRequest::ResolveEntry {
+            path: RemotePath::new(chained_link.display().to_string()),
+        })
+        .await
+        .expect("resolve request should reach actor");
+    let resolved = match next_event(&fixture, "RemoteEntryResolved").await {
+        AppEvent::RemoteEntryResolved(scoped) => scoped.payload,
+        other => panic!("expected RemoteEntryResolved, got {other:?}"),
+    };
+    assert_eq!(resolved.kind, FileKind::File);
+    assert_eq!(
+        resolved.target,
+        Some(RemotePath::new(canonical_file_target.display().to_string())),
+        "a link chain resolves past every link, not just the first hop"
+    );
+
+    // Write-through: uploading to the resolved target must leave the link
+    // intact and update the file it points at (the app never uploads to the
+    // link path itself).
+    let edit_source = base.join("symlink-resolve-edit-source.txt");
+    std::fs::write(&edit_source, b"edited payload").expect("write edit source");
+    let write_through_target = resolved
+        .target
+        .clone()
+        .expect("file link resolves to a write-through target");
+    let mut job = transfer_job(
+        201,
+        TransferDirection::Upload,
+        TransferEndpoint::Local(macsftp_core::LocalPath::new(
+            edit_source.display().to_string(),
+        )),
+        TransferEndpoint::Remote(write_through_target),
+    );
+    // The write-through upload targets an existing file by design; the edit
+    // flow decides overwrite before it reaches here.
+    job.conflict_policy = macsftp_core::ConflictPolicy::OverwriteAll;
+    fixture
+        .requests
+        .send_async(RemoteSessionRequest::RunTransferJobs {
+            plan_id: macsftp_core::TransferPlanId(20),
+            jobs: vec![job],
+        })
+        .await
+        .expect("write-through upload should reach actor");
+    wait_for_transfer_completion(&fixture, TransferId(201)).await;
+    assert_eq!(
+        std::fs::read(base.join("symlink-resolve-file.txt")).expect("read target after upload"),
+        b"edited payload"
+    );
+    assert_eq!(
+        std::fs::read_link(&file_link).expect("link must survive the upload"),
+        std::path::PathBuf::from("symlink-resolve-file.txt")
+    );
+
+    // A dangling link resolves to an error instead of a misleading kind.
+    fixture
+        .requests
+        .send_async(RemoteSessionRequest::ResolveEntry {
+            path: RemotePath::new(broken_link.display().to_string()),
+        })
+        .await
+        .expect("resolve request should reach actor");
+    let resolved = match next_event(&fixture, "RemoteEntryResolved").await {
+        AppEvent::RemoteEntryResolved(scoped) => scoped.payload,
+        other => panic!("expected RemoteEntryResolved, got {other:?}"),
+    };
+    assert!(
+        resolved.error.is_some(),
+        "a dangling link must not be reported as openable"
+    );
+    assert_eq!(resolved.target, None);
+
+    fixture.cancel.cancel();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_plans_and_executes_single_file_upload_and_download() {
     let Some(server) = SshTestServer::spawn() else {

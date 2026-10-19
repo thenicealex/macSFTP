@@ -125,7 +125,8 @@ route 支持 Direct、单跳 saved-profile JumpHost（jump profile 自身必须 
 - temp cleanup 失败写入 `ResidualTempStore`，后续只清理由 macSFTP 记录的路径；
 - residual cleanup command 无法路由到 live actor 时保留记录并写结构化 WARN，等待下一次连接重试，不能静默当作成功；
 - 权限或 mtime 保留失败通常产生 warning，不推翻已成功的数据传输；
-- symlink 默认复制 link 本身，不解引用。
+- symlink 默认复制 link 本身，不解引用；
+- 浏览时 link 仍显示为 symlink，列表不做 per-entry stat；用户打开时由 actor 解析一次类型：目录 link 按逻辑路径进入（服务端自行解析），文件 link 进入编辑且后续下载、上传、远端快照检查都使用解析后的目标路径（写穿透），链接本身保持不变。文件 link 的写穿透起点按三条路径确定：(1) 服务端 `REALPATH` 返回绝对路径时直接使用；(2) 返回相对路径（不符合 SFTP v3）时拒绝；(3) 服务端不支持 `REALPATH` 时退回 `readlink`，但 link target 含 `..`（无论相对还是绝对）一律拒绝。安全依据是「客户端不做 `..` 折叠，父路径由服务端解析」，不是「已经 canonicalize」。若 link 指向的目标又落在目录上，按目录打开；断链、环、无权限只报状态，不移动 pane。
 
 ## 9. 远程编辑
 
@@ -144,6 +145,8 @@ Editing
 ```
 
 结果应用前必须完整匹配 edit session、tab、session epoch、check ID、remote path 和发起检查时的本地 mtime。检查完成后还要再次 stat 本地文件；若用户在检查期间再次保存，本次结果不能授权上传，必须回到 Editing 等待用户再次点击。
+
+文件软链的编辑是写穿透：session 的 `remote_path` 保留用户看到的链接路径（选择、dirty 标记、状态文案），`io_path` 保存服务端解析后的目标路径，下载、`CheckRemoteEditSnapshot`、冲突比较下载和上传全部使用 `io_path`。目标路径的来源按服务端能力分三种：`REALPATH` 返回绝对路径时直接使用；返回相对路径（不符合 SFTP v3）时拒绝；不支持 `REALPATH` 时退回 `readlink` + 词法拼接，但 target 含 `..` 时拒绝。去重键是 `(connection_key, io_path)`，因此先后打开链接和它的目标只会得到一个编辑 session；若同一链接在会话存活期间被重新指向不同目标，再次打开会被拒绝并提示先结束已有编辑，而不是静默产生两个共享 `remote_path` 的会话。目录刷新不会用链接自身的 lstat `(size, mtime)` 覆盖写穿透 session 的 baseline。
 
 已知限制：远端快照只比较 size 和整秒 mtime。同一秒内发生、且 size 不变的并发远端修改无法识别。没有内容哈希或服务端版本号前，不得声称已解决这一限制。
 

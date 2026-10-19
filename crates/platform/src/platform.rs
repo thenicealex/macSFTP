@@ -102,10 +102,13 @@ impl LocalEntryDraft {
 /// Read the real local filesystem directory at `path` and return its
 /// entries as `LocalEntry`s. Directories, regular files, and symlinks are
 /// classified via `DirEntry::file_type` (which does not follow symlinks, so
-/// a symlink's own kind is preserved); size, permissions, and mtime come
-/// from `metadata` (which does follow symlinks to report the target's
-/// attributes when the link resolves). Broken symlinks still appear with
-/// kind `Symlink` and `None` for the attributes that could not be read.
+/// a symlink's own kind is preserved). `DirEntry::metadata` also does not
+/// follow the link, so a link reports its own size/permissions; broken
+/// symlinks still appear with kind `Symlink` and their own attributes.
+///
+/// A link pointing at a directory is only followed when the user opens it
+/// (see `Workspace::open_local_symlink`), so a listing never pays for a
+/// per-entry stat.
 ///
 /// On a directory that cannot be opened (missing, not a directory, or
 /// permission denied) the `std::io::Error` from `read_dir` is returned so
@@ -156,8 +159,10 @@ pub fn read_local_directory(path: &LocalPath) -> std::io::Result<Vec<LocalEntry>
             FileKind::Other
         };
 
-        // `metadata` follows symlinks; for a live link this yields the
-        // target's attributes, which is what a transfer cares about.
+        // `DirEntry::metadata` does not follow the link either, so a symlink
+        // reports its own target-string size instead of the target's size.
+        // The explicit `is_file` guard keeps the size column silent for a
+        // link, since the link itself is not a transferable regular file.
         let (size, permissions, modified_at) = match entry.metadata() {
             Ok(metadata) => (
                 if metadata.is_file() {
