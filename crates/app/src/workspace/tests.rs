@@ -22,8 +22,8 @@ use macsftp_core::{EditSession, EditSessionId, RemoteSnapshot};
 use macsftp_platform::AppPaths;
 use macsftp_sftp::{BridgeChannels, RuntimeClient};
 use macsftp_storage::{
-    AppearancePreference, PrivateKeyPassphraseUpdate, ProfileAuthUpdate, ProfileSaveRequest,
-    SessionFile, SessionStore, SessionTabSnapshot, SessionWindowSnapshot,
+    AppearancePreference, ConfigError, PrivateKeyPassphraseUpdate, ProfileAuthUpdate,
+    ProfileSaveRequest, SessionFile, SessionStore, SessionTabSnapshot, SessionWindowSnapshot,
 };
 use macsftp_ui::{ActiveTheme as _, Appearance, Theme};
 
@@ -1630,6 +1630,31 @@ fn settings_sections_render_and_toggles_persist(cx: &mut TestAppContext) {
     cx.update(|window, cx| {
         window.render_frame(cx);
         window.find("settings-external-editor-input");
+    });
+}
+
+#[gpui_kit::test]
+fn config_write_results_share_error_state(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        assert!(!workspace.finish_config_change(
+            Err(ConfigError::Parse {
+                message: "bad config".into(),
+            }),
+            "test setting",
+            cx,
+        ));
+        assert_eq!(
+            workspace.config_error.as_deref(),
+            Some("Settings couldn’t be saved. Check file permissions."),
+            "every config write failure must publish the same settings error"
+        );
+
+        assert!(workspace.finish_config_change(Ok(()), "test setting", cx));
+        assert!(
+            workspace.config_error.is_none(),
+            "a later successful write must clear the settings error"
+        );
     });
 }
 

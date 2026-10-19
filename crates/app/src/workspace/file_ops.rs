@@ -12,7 +12,6 @@ use macsftp_core::{
 };
 use macsftp_platform::{create_directory, delete_entry, local_fs_error, rename_entry};
 use macsftp_ui::{ActiveTheme, IconName, InputState, icon, text_button};
-use tracing::warn;
 
 use crate::resources::ActiveResources;
 use crate::workspace::overlay::OverlayFade;
@@ -178,14 +177,8 @@ impl crate::workspace::Workspace {
             return;
         };
         if state.dont_ask_again {
-            match cx.resources_mut().config.set_confirm_delete(false) {
-                Ok(()) => self.config_error = None,
-                Err(error) => {
-                    warn!(error = %error, "could not save confirm_delete");
-                    self.config_error =
-                        Some("Settings couldn’t be saved. Check file permissions.".into());
-                }
-            }
+            let result = cx.resources_mut().config.set_confirm_delete(false);
+            self.finish_config_change(result, "confirm_delete", cx);
         }
         self.dispatch_fs(
             FsCommand {

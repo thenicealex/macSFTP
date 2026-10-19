@@ -1,22 +1,20 @@
+use crate::resources::ActiveResources;
 use crate::workspace::TextInputTarget;
+use crate::workspace::Workspace;
+use crate::workspace::profiles::{
+    PassphrasePolicy, ProfileEditorField, ProfileRouteKind, SettingsSection, profile_list_label,
+};
 use gpui_kit::base::{Button, Toggle};
 use gpui_kit::{
     App, ClickEvent, Context, FontWeight, IntoElement, ParentElement, Styled, Window,
     WindowControlArea, div, prelude::*, px,
 };
 use macsftp_core::{AuthMethodKind, ConnectionRoute};
+use macsftp_storage::AppearancePreference;
 use macsftp_ui::{
     ActiveTheme, IconName, InputState, TextFieldModel, ThemeColors, empty_state, icon,
     ordinary_text_field, plain_text_field, text_button, text_field, text_tooltip,
 };
-use tracing::warn;
-
-use crate::resources::ActiveResources;
-use crate::workspace::Workspace;
-use crate::workspace::profiles::{
-    PassphrasePolicy, ProfileEditorField, ProfileRouteKind, SettingsSection, profile_list_label,
-};
-use macsftp_storage::AppearancePreference;
 
 impl crate::workspace::Workspace {
     pub(crate) fn render_settings(
@@ -460,17 +458,8 @@ impl crate::workspace::Workspace {
         confirm_delete: bool,
         cx: &mut Context<Self>,
     ) {
-        match cx.resources_mut().config.set_confirm_delete(confirm_delete) {
-            Ok(()) => {
-                self.config_error = None;
-                cx.refresh_windows();
-            }
-            Err(error) => {
-                warn!(error = %error, "could not save confirm_delete");
-                self.config_error =
-                    Some("Settings couldn’t be saved. Check file permissions.".into());
-            }
-        }
+        let result = cx.resources_mut().config.set_confirm_delete(confirm_delete);
+        self.finish_config_change(result, "confirm_delete", cx);
         cx.notify();
     }
 
@@ -479,21 +468,11 @@ impl crate::workspace::Workspace {
         show_hidden_files: bool,
         cx: &mut Context<Self>,
     ) {
-        match cx
+        let result = cx
             .resources_mut()
             .config
-            .set_show_hidden_files(show_hidden_files)
-        {
-            Ok(()) => {
-                self.config_error = None;
-                cx.refresh_windows();
-            }
-            Err(error) => {
-                warn!(error = %error, "could not save show_hidden_files");
-                self.config_error =
-                    Some("Settings couldn’t be saved. Check file permissions.".into());
-            }
-        }
+            .set_show_hidden_files(show_hidden_files);
+        self.finish_config_change(result, "show_hidden_files", cx);
         cx.notify();
     }
 
@@ -502,21 +481,11 @@ impl crate::workspace::Workspace {
         preserve_mtime: bool,
         cx: &mut Context<Self>,
     ) {
-        match cx
+        let result = cx
             .resources_mut()
             .config
-            .set_metadata_preserve_mtime(preserve_mtime)
-        {
-            Ok(()) => {
-                self.config_error = None;
-                cx.refresh_windows();
-            }
-            Err(error) => {
-                warn!(error = %error, "could not save metadata preserve_mtime");
-                self.config_error =
-                    Some("Settings couldn’t be saved. Check file permissions.".into());
-            }
-        }
+            .set_metadata_preserve_mtime(preserve_mtime);
+        self.finish_config_change(result, "metadata preserve_mtime", cx);
         cx.notify();
     }
 
@@ -525,21 +494,11 @@ impl crate::workspace::Workspace {
         preserve_permissions: bool,
         cx: &mut Context<Self>,
     ) {
-        match cx
+        let result = cx
             .resources_mut()
             .config
-            .set_metadata_preserve_permissions(preserve_permissions)
-        {
-            Ok(()) => {
-                self.config_error = None;
-                cx.refresh_windows();
-            }
-            Err(error) => {
-                warn!(error = %error, "could not save metadata preserve_permissions");
-                self.config_error =
-                    Some("Settings couldn’t be saved. Check file permissions.".into());
-            }
-        }
+            .set_metadata_preserve_permissions(preserve_permissions);
+        self.finish_config_change(result, "metadata preserve_permissions", cx);
         cx.notify();
     }
 
@@ -567,14 +526,8 @@ impl crate::workspace::Workspace {
         } else {
             Some(trimmed)
         };
-        match cx.resources_mut().config.set_external_editor(editor) {
-            Ok(()) => self.config_error = None,
-            Err(error) => {
-                warn!(error = %error, "could not save external_editor");
-                self.config_error =
-                    Some("Settings couldn’t be saved. Check file permissions.".into());
-            }
-        }
+        let result = cx.resources_mut().config.set_external_editor(editor);
+        self.record_config_result(result, "external_editor");
     }
 
     pub(crate) fn render_editor_rules(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
@@ -694,21 +647,14 @@ impl crate::workspace::Workspace {
         rules.push(macsftp_core::EditorRule { pattern, app_name });
         macsftp_core::sort_editor_rules(&mut rules);
 
-        match cx.resources_mut().config.set_editor_rules(rules) {
-            Ok(()) => {
-                self.config_error = None;
-                self.settings
-                    .new_rule_pattern
-                    .update(cx, |input, cx| input.set_value("", window, cx));
-                self.settings
-                    .new_rule_app
-                    .update(cx, |input, cx| input.set_value("", window, cx));
-            }
-            Err(error) => {
-                warn!(error = %error, "could not save editor rules");
-                self.config_error =
-                    Some("Settings couldn’t be saved. Check file permissions.".into());
-            }
+        let result = cx.resources_mut().config.set_editor_rules(rules);
+        if self.finish_config_change(result, "editor rules", cx) {
+            self.settings
+                .new_rule_pattern
+                .update(cx, |input, cx| input.set_value("", window, cx));
+            self.settings
+                .new_rule_app
+                .update(cx, |input, cx| input.set_value("", window, cx));
         }
         cx.notify();
     }
@@ -718,14 +664,8 @@ impl crate::workspace::Workspace {
         if index < rules.len() {
             rules.remove(index);
             macsftp_core::sort_editor_rules(&mut rules);
-            match cx.resources_mut().config.set_editor_rules(rules) {
-                Ok(()) => self.config_error = None,
-                Err(error) => {
-                    warn!(error = %error, "could not save editor rules after removal");
-                    self.config_error =
-                        Some("Settings couldn’t be saved. Check file permissions.".into());
-                }
-            }
+            let result = cx.resources_mut().config.set_editor_rules(rules);
+            self.finish_config_change(result, "editor rules after removal", cx);
             cx.notify();
         }
     }

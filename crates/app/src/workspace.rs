@@ -12,7 +12,7 @@ use macsftp_core::{
 };
 use macsftp_sftp::RuntimeClient;
 use macsftp_storage::{
-    AppearancePreference, RecentEntryInput, SessionTabSnapshot, SessionWindowSnapshot,
+    AppearancePreference, ConfigError, RecentEntryInput, SessionTabSnapshot, SessionWindowSnapshot,
 };
 use macsftp_ui::{ActiveTheme, ScrollbarState, Theme, empty_state, text_button};
 use tracing::warn;
@@ -805,20 +805,54 @@ impl Workspace {
         self.drain_expired_modals();
         cx.notify();
     }
+    /// Record one config write result and keep the Settings banner in sync.
+    ///
+    /// Returns whether the write reached disk. Discrete preferences use
+    /// `finish_config_change`, which also repaints other windows; the
+    /// external-editor field calls this directly because its Change handler
+    /// already notifies on every keystroke.
+    fn record_config_result(
+        &mut self,
+        result: Result<(), ConfigError>,
+        operation: &'static str,
+    ) -> bool {
+        match result {
+            Ok(()) => {
+                self.config_error = None;
+                true
+            }
+            Err(error) => {
+                warn!(error = %error, "could not save {}", operation);
+                self.config_error =
+                    Some("Settings couldn’t be saved. Check file permissions.".into());
+                false
+            }
+        }
+    }
+
+    /// Apply a discrete preference write, then refresh every window so controls
+    /// in other windows cannot keep a stale config snapshot.
+    pub(crate) fn finish_config_change(
+        &mut self,
+        result: Result<(), ConfigError>,
+        operation: &'static str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let applied = self.record_config_result(result, operation);
+        if applied {
+            cx.refresh_windows();
+        }
+        applied
+    }
+
     pub(crate) fn set_appearance(
         &mut self,
         appearance: AppearancePreference,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        match cx.resources_mut().config.set_appearance(appearance) {
-            Ok(()) => self.config_error = None,
-            Err(error) => {
-                warn!(error = %error, "could not save app config");
-                self.config_error =
-                    Some("Settings couldn’t be saved. Check file permissions.".into());
-            }
-        }
+        let result = cx.resources_mut().config.set_appearance(appearance);
+        self.finish_config_change(result, "app config", cx);
 
         let theme = match appearance {
             AppearancePreference::System => Theme::for_appearance(window.appearance()),
