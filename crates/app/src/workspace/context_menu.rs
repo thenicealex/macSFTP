@@ -48,7 +48,9 @@ pub(crate) fn file_context_menu(
         }
         (PaneSide::Local, ContextMenuTarget::Entry(kind)) => {
             let mut menu = NativeMenu::new();
-            if kind == FileKind::Directory {
+            // A link may point at a folder, so it gets the same open affordance
+            // as a folder; the click resolves the target before navigating.
+            if matches!(kind, FileKind::Directory | FileKind::Symlink) {
                 menu = menu.menu("Open", Box::new(OpenSelectedEntry)).separator();
             }
             menu.menu_with_disabled("Upload", !remote_ready, Box::new(UploadSelection))
@@ -62,10 +64,9 @@ pub(crate) fn file_context_menu(
                 .menu("Show in Finder", Box::new(ShowInFinder))
         }
         (PaneSide::Remote, ContextMenuTarget::Entry(kind)) => {
-            let open_label = if kind == FileKind::Directory {
-                "Open"
-            } else {
-                "Open for Editing"
+            let open_label = match kind {
+                FileKind::Directory | FileKind::Symlink => "Open",
+                _ => "Open for Editing",
             };
             NativeMenu::new()
                 .menu_with_disabled(open_label, !remote_ready, Box::new(OpenSelectedEntry))

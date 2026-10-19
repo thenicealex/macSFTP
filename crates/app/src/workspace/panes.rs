@@ -13,6 +13,7 @@ use macsftp_platform::read_local_directory;
 use tracing::warn;
 
 use crate::resources::ActiveResources;
+use crate::workspace::helpers::connected_transfer_session;
 use crate::workspace::visible_entries::{
     first_prefix_match, visible_local_indices, visible_remote_indices,
 };
@@ -334,25 +335,126 @@ impl crate::workspace::Workspace {
                 let Some(entry) = tab.local.entries.get(real_index) else {
                     return;
                 };
-                if entry.kind == FileKind::Directory {
-                    let path = entry.path.clone();
-                    self.navigate_pane_local(path, HistoryOp::Push, window, cx);
+                match entry.kind {
+                    FileKind::Directory => {
+                        let path = entry.path.clone();
+                        self.navigate_pane_local(path, HistoryOp::Push, window, cx);
+                    }
+                    FileKind::Symlink => {
+                        let path = entry.path.clone();
+                        self.open_local_symlink(path, window, cx);
+                    }
+                    _ => {}
                 }
             }
             PaneSide::Remote => {
                 let Some(entry) = tab.remote.entries.get(real_index) else {
                     return;
                 };
-                if entry.kind == FileKind::Directory {
-                    let path = entry.path.clone();
-                    self.navigate_pane_remote(path, HistoryOp::Push, cx);
-                } else {
-                    let (path, size, modified_at) =
-                        (entry.path.clone(), entry.size, entry.modified_at);
-                    self.begin_edit(path, size, modified_at, cx);
+                match entry.kind {
+                    FileKind::Directory => {
+                        let path = entry.path.clone();
+                        self.navigate_pane_remote(path, HistoryOp::Push, cx);
+                    }
+                    // The listing never stats links, so the actor decides at
+                    // open time whether this navigates or edits the target.
+                    FileKind::Symlink => {
+                        let path = entry.path.clone();
+                        self.resolve_remote_entry(path, cx);
+                    }
+                    _ => {
+                        let (path, size, modified_at) =
+                            (entry.path.clone(), entry.size, entry.modified_at);
+                        self.begin_edit(path, size, modified_at, cx);
+                    }
                 }
             }
         }
+    }
+
+    /// Open a local symlink by following it. `read_dir`/`DirEntry::file_type`
+    /// deliberately do not follow links, so the target kind is resolved here on
+    /// the background executor; a dangling link or a non-directory target is
+    /// reported in the status bar without moving the pane.
+    ///
+    /// The stat can take seconds on a network volume, so the result is bound to
+    /// the tab and directory that requested it: a user who switched tabs or
+    /// navigated elsewhere in the meantime must not have another listing
+    /// replaced by this late answer.
+    fn open_local_symlink(&mut self, path: LocalPath, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        let tab_id = tab.id;
+        let parent = path.parent();
+        let entry = EntryPath::Local(path.clone());
+        self.begin_link_check(tab_id, entry.clone(), None, cx);
+        let probe = path.clone();
+        let stat_task = cx
+            .background_executor()
+            .spawn(async move { std::fs::metadata(probe.as_str()) });
+        cx.spawn_in(window, async move |workspace, cx| {
+            let result = stat_task.await;
+            let _ = workspace.update_in(cx, |workspace, window, cx| {
+                let still_applicable = workspace.state.tabs.active_tab_id == Some(tab_id)
+                    && workspace
+                        .state
+                        .tabs
+                        .find_tab(tab_id)
+                        .and_then(|tab| tab.local.path.clone())
+                        == parent;
+                // Clear the pending status even when the answer is dropped, so
+                // switching tabs or directories cannot leave "Checking the
+                // link…" behind. A newer message is left alone.
+                workspace.finish_link_check(tab_id, &entry, None, cx);
+                if !still_applicable {
+                    return;
+                }
+                match result {
+                    Ok(metadata) if metadata.is_dir() => {
+                        workspace.navigate_pane_local(path, HistoryOp::Push, window, cx);
+                    }
+                    Ok(_) => {
+                        workspace.status_message =
+                            Some("This link points to a file, not a folder.".into());
+                        cx.notify();
+                    }
+                    Err(error) => {
+                        workspace.status_message =
+                            Some(format!("The link could not be followed: {error}").into());
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Ask the live actor what a remote listing entry resolves to. The answer
+    /// arrives as `RemoteEntryResolved`, scoped to the tab's session so a
+    /// reconnect supersedes it.
+    fn resolve_remote_entry(&mut self, path: RemotePath, cx: &mut Context<Self>) -> bool {
+        let Some(tab) = self.active_tab() else {
+            return false;
+        };
+        let tab_id = tab.id;
+        let Some((session_epoch, _)) = connected_transfer_session(tab) else {
+            self.status_message = Some("Connect to the server before opening this item.".into());
+            cx.notify();
+            return false;
+        };
+        if !self.send_command(
+            AppCommand::ResolveRemoteEntry {
+                tab_id,
+                session_epoch,
+                path: path.clone(),
+            },
+            cx,
+        ) {
+            return false;
+        }
+        self.begin_link_check(tab_id, EntryPath::Remote(path), Some(session_epoch), cx);
+        true
     }
 
     pub(crate) fn open_selected_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -8,8 +8,8 @@ use macsftp_core::TrustRequestId;
 use macsftp_core::{
     AppCommand, AppEvent, CheckRemoteEditSnapshotCommand, CommandDispatchError, ErrorCode,
     FsCommand, FsScope, RemoteEditSnapshotDispatchFailed, RemoteEventScope, RemoteOperationFailure,
-    RemoteScoped, RuntimeBridgeConfig, SessionId, TabId, Timestamp, TransferDirection, TransferId,
-    TransferJob, TransferPlanId, TransferPlanSnapshot, TrustDecision, UserFacingError,
+    RemotePath, RemoteScoped, RuntimeBridgeConfig, SessionId, TabId, Timestamp, TransferDirection,
+    TransferId, TransferJob, TransferPlanId, TransferPlanSnapshot, TrustDecision, UserFacingError,
 };
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
@@ -790,6 +790,13 @@ async fn command_dispatch_loop(
                     ),
                 }
             }
+            Ok(AppCommand::ResolveRemoteEntry {
+                tab_id,
+                session_epoch,
+                path,
+            }) => {
+                route_resolve_remote_entry(tab_id, session_epoch, path, &sessions, &event_tx).await;
+            }
             Ok(AppCommand::ReadRemoteDir { tab_id, path }) => {
                 let Some(session) = sessions.get(&tab_id) else {
                     continue;
@@ -1183,6 +1190,113 @@ async fn fail_planned_jobs(
             warn!(error = %send_error, "transfer handoff failure event dropped");
             return;
         }
+    }
+}
+
+/// Route `AppCommand::ResolveRemoteEntry` to the live browsing actor.
+///
+/// The UI sets a "Checking the link…" status before dispatching, so every path
+/// that cannot reach an actor must answer with an event — otherwise the status
+/// would never clear. A missing session or a superseded epoch is reported as
+/// `RemoteEntryResolveFailed` (epoch-correlated: no live `SessionId` exists);
+/// a reachable actor's own queue failures are reported through the normal
+/// scoped resolution event.
+async fn route_resolve_remote_entry(
+    tab_id: TabId,
+    session_epoch: u64,
+    path: RemotePath,
+    sessions: &HashMap<TabId, RemoteSessionHandle>,
+    event_tx: &flume::Sender<AppEvent>,
+) {
+    let Some(session) = sessions.get(&tab_id) else {
+        emit_remote_entry_resolve_failure(
+            event_tx,
+            tab_id,
+            session_epoch,
+            path,
+            "Connect to the server before opening this item.",
+        )
+        .await;
+        return;
+    };
+    if session.session_epoch != session_epoch {
+        // Stale command after a reconnect: the tab's pending state belongs to
+        // a different session, so this failure is correlated by epoch only.
+        emit_remote_entry_resolve_failure(
+            event_tx,
+            tab_id,
+            session_epoch,
+            path,
+            "This tab reconnected. Open the item again.",
+        )
+        .await;
+        return;
+    }
+    let Some(request_tx) = &session.request_tx else {
+        emit_remote_entry_resolve_failure(
+            event_tx,
+            tab_id,
+            session_epoch,
+            path,
+            "This session does not support file operations.",
+        )
+        .await;
+        return;
+    };
+    let request_failure =
+        match request_tx.try_send(RemoteSessionRequest::ResolveEntry { path: path.clone() }) {
+            Ok(()) => None,
+            Err(flume::TrySendError::Full(_)) => Some("The remote session is busy. Try again."),
+            Err(flume::TrySendError::Disconnected(_)) => {
+                Some("The remote session is no longer available. Reconnect and try again.")
+            }
+        };
+    let Some(message) = request_failure else {
+        return;
+    };
+    let scope = RemoteEventScope::new(tab_id, session.session_id, session.session_epoch);
+    let _ = event_tx
+        .send_async(AppEvent::RemoteEntryResolved(RemoteScoped::new(
+            scope,
+            macsftp_core::RemoteEntryResolution {
+                path,
+                kind: macsftp_core::FileKind::Unknown,
+                target: None,
+                size: None,
+                modified_at: None,
+                error: Some(UserFacingError::new(
+                    ErrorCode::ChannelClosed,
+                    "Open Item Failed",
+                    message,
+                )),
+            },
+        )))
+        .await;
+}
+
+/// Report that an entry resolution never reached a live browsing actor. The
+/// event carries no `SessionId` (there is none), so the UI clears its pending
+/// state by matching tab + epoch instead.
+async fn emit_remote_entry_resolve_failure(
+    event_tx: &flume::Sender<AppEvent>,
+    tab_id: TabId,
+    session_epoch: u64,
+    path: RemotePath,
+    message: &str,
+) {
+    let error = UserFacingError::new(ErrorCode::ChannelClosed, "Open Item Failed", message);
+    if let Err(send_error) = event_tx
+        .send_async(AppEvent::RemoteEntryResolveFailed(
+            macsftp_core::RemoteEntryResolveFailure {
+                tab_id,
+                session_epoch,
+                path,
+                error,
+            },
+        ))
+        .await
+    {
+        warn!(error = %send_error, "remote entry resolve failure event dropped");
     }
 }
 
@@ -2477,6 +2591,94 @@ mod tests {
             event.remote_scope(),
             None,
             "dispatch failure is epoch-correlated, not remote-session-scoped"
+        );
+    }
+
+    fn assert_entry_resolve_failure(
+        event: AppEvent,
+        tab_id: TabId,
+        session_epoch: u64,
+        path: &RemotePath,
+    ) {
+        match event {
+            AppEvent::RemoteEntryResolveFailed(failure) => {
+                assert_eq!(failure.tab_id, tab_id);
+                assert_eq!(failure.session_epoch, session_epoch);
+                assert_eq!(&failure.path, path);
+            }
+            other => panic!("expected RemoteEntryResolveFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_entry_without_a_live_session_reports_a_failure() {
+        let (event_tx, event_rx) = flume::bounded(8);
+        let sessions: HashMap<TabId, RemoteSessionHandle> = HashMap::new();
+        let path = RemotePath::new("/srv/latest");
+
+        route_resolve_remote_entry(TabId(1), 3, path.clone(), &sessions, &event_tx).await;
+
+        let event = event_rx
+            .recv_async()
+            .await
+            .expect("the UI must be told the resolution never started");
+        assert_entry_resolve_failure(event, TabId(1), 3, &path);
+    }
+
+    #[tokio::test]
+    async fn resolve_entry_after_reconnect_reports_a_failure_for_the_old_epoch() {
+        let (event_tx, event_rx) = flume::bounded(8);
+        let (request_tx, request_rx) = flume::bounded(16);
+        let mut sessions: HashMap<TabId, RemoteSessionHandle> = HashMap::new();
+        sessions.insert(TabId(1), make_handle(5, Some(request_tx)));
+        let _rx = request_rx;
+        let path = RemotePath::new("/srv/latest");
+
+        route_resolve_remote_entry(TabId(1), 4, path.clone(), &sessions, &event_tx).await;
+
+        let event = event_rx
+            .recv_async()
+            .await
+            .expect("a superseded epoch must still clear the pending UI state");
+        assert_entry_resolve_failure(event, TabId(1), 4, &path);
+    }
+
+    #[tokio::test]
+    async fn resolve_entry_without_browsing_actor_reports_a_failure() {
+        let (event_tx, event_rx) = flume::bounded(8);
+        let mut sessions: HashMap<TabId, RemoteSessionHandle> = HashMap::new();
+        sessions.insert(TabId(1), make_handle(5, None));
+        let path = RemotePath::new("/srv/latest");
+
+        route_resolve_remote_entry(TabId(1), 5, path.clone(), &sessions, &event_tx).await;
+
+        let event = event_rx
+            .recv_async()
+            .await
+            .expect("a mock session without browsing must not leave the status hanging");
+        assert_entry_resolve_failure(event, TabId(1), 5, &path);
+    }
+
+    #[tokio::test]
+    async fn resolve_entry_reaches_the_actor_mailbox_when_live() {
+        let (event_tx, event_rx) = flume::bounded(8);
+        let (request_tx, request_rx) = flume::bounded(16);
+        let mut sessions: HashMap<TabId, RemoteSessionHandle> = HashMap::new();
+        sessions.insert(TabId(1), make_handle(5, Some(request_tx)));
+        let path = RemotePath::new("/srv/latest");
+
+        route_resolve_remote_entry(TabId(1), 5, path.clone(), &sessions, &event_tx).await;
+
+        match request_rx
+            .try_recv()
+            .expect("the actor receives the request")
+        {
+            RemoteSessionRequest::ResolveEntry { path: received } => assert_eq!(received, path),
+            other => panic!("expected ResolveEntry, got {other:?}"),
+        }
+        assert!(
+            event_rx.try_recv().is_err(),
+            "a successfully routed request reports nothing yet"
         );
     }
 

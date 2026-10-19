@@ -144,6 +144,45 @@ impl RemotePath {
     pub fn join(&self, name: &str) -> Self {
         Self(join_path_component(&self.0, name))
     }
+
+    /// Resolve a symlink target read from this path against its own directory.
+    ///
+    /// `readlink` returns the target exactly as stored: absolute, or relative
+    /// to the link's directory. This is a purely lexical join, so it is only
+    /// trustworthy when the target has no `..`: a `..` must be resolved against
+    /// the server's real parent directory, which may differ from the logical
+    /// path when that path itself passes through a symlink. The sftp actor
+    /// therefore uses this only as a fallback when the server has no
+    /// `REALPATH`, and only after rejecting targets that contain `..`. It is
+    /// not a substitute for a server-side canonicalization.
+    pub fn resolve_link_target(&self, target: &str) -> Self {
+        if target.starts_with('/') {
+            Self(normalize_remote_path(target))
+        } else {
+            let parent = self.parent().unwrap_or_else(|| Self::new("/"));
+            Self(normalize_remote_path(&format!(
+                "{}/{}",
+                parent.0.trim_end_matches('/'),
+                target
+            )))
+        }
+    }
+}
+
+/// Lexically normalize an absolute POSIX-style path: collapse duplicate
+/// slashes and resolve `.` / `..` without touching the filesystem.
+fn normalize_remote_path(path: &str) -> String {
+    let mut components: Vec<&str> = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop();
+            }
+            other => components.push(other),
+        }
+    }
+    format!("/{}", components.join("/"))
 }
 
 /// Shared parent logic for slash-separated absolute paths.
@@ -1743,6 +1782,19 @@ pub enum AppCommand {
         tab_id: TabId,
         path: RemotePath,
     },
+    /// Resolve a remote listing entry at the moment the user opens it. A
+    /// listing keeps symlinks typed as symlinks (no per-entry stat), so the
+    /// actor decides here whether the link resolves to a folder, a file, or
+    /// nothing, and reports the target path for write-through editing.
+    ///
+    /// Carries the tab's epoch so the runtime can report "no live session"
+    /// without inventing a session identity; the app accepts that failure only
+    /// for the same epoch.
+    ResolveRemoteEntry {
+        tab_id: TabId,
+        session_epoch: u64,
+        path: RemotePath,
+    },
     /// Best-effort delete of a residual remote temp file left by a
     /// previous run, routed to the connected session for `tab_id`.
     RemoveRemoteTempFile {
@@ -1876,6 +1928,14 @@ pub enum AppEvent {
     RemoteDirLoading(RemoteScoped<RemoteDirLoading>),
     RemoteDirLoaded(RemoteScoped<RemoteDirSnapshot>),
     RemoteOperationFailed(RemoteScoped<RemoteOperationFailure>),
+    /// Result of opening one remote entry. Carries the actor's live scope so a
+    /// resolution that completes after a reconnect or tab close is dropped.
+    RemoteEntryResolved(RemoteScoped<RemoteEntryResolution>),
+    /// The runtime could not route an entry resolution to a live actor (session
+    /// already gone, or its mailbox has no browsing actor). No legitimate
+    /// `SessionId` exists here, so this is epoch-correlated: the UI clears its
+    /// pending state only when the tab still matches `tab_id`/`session_epoch`.
+    RemoteEntryResolveFailed(RemoteEntryResolveFailure),
     /// Create / rename / delete failure shared by local and remote.
     FsOperationFailed {
         scope: FsScope,
@@ -1973,6 +2033,10 @@ impl AppEvent {
             Self::RemoteDirLoading(scoped) => Some(scoped.scope.clone()),
             Self::RemoteDirLoaded(scoped) => Some(scoped.scope.clone()),
             Self::RemoteOperationFailed(scoped) => Some(scoped.scope.clone()),
+            Self::RemoteEntryResolved(scoped) => Some(scoped.scope.clone()),
+            // Epoch-correlated routing failure: filtered by tab + epoch in the
+            // UI, because routing never reached a live actor.
+            Self::RemoteEntryResolveFailed(_) => None,
             Self::HostKeyUnknown(prompt) => Some(RemoteEventScope::new(
                 prompt.tab_id,
                 prompt.session_id,
@@ -2118,6 +2182,41 @@ pub struct RemoteDirLoading {
 pub struct RemoteDirSnapshot {
     pub path: RemotePath,
     pub entries: Vec<RemoteEntry>,
+}
+
+/// What a remote listing entry resolves to when the user opens it.
+///
+/// The listing itself never stats symlinks (one round trip per entry), so this
+/// is the single place that decides whether a link points at a folder, a file,
+/// or nothing. `target` is the write-through path used for editing: for a file
+/// it is the last link-free path in the chain, so uploads replace the real file
+/// rather than one of the links.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteEntryResolution {
+    /// The path the user opened, exactly as it appeared in the listing.
+    pub path: RemotePath,
+    pub kind: FileKind,
+    /// Server-resolved destination for a file symlink (write-through target);
+    /// `None` for a directory, a plain entry, or a broken link.
+    pub target: Option<RemotePath>,
+    /// Size/mtime of the resolved object (target for links), used as the edit
+    /// baseline and for the large-file warning.
+    pub size: Option<u64>,
+    pub modified_at: Option<Timestamp>,
+    /// Set when the link did not resolve (dangling, loop, permission, or a
+    /// protocol error); the UI reports it without moving the pane.
+    pub error: Option<UserFacingError>,
+}
+
+/// The runtime could not route an entry resolution to a live browsing actor.
+/// Epoch-correlated rather than session-scoped, because no live session exists
+/// to supply a `SessionId`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteEntryResolveFailure {
+    pub tab_id: TabId,
+    pub session_epoch: u64,
+    pub path: RemotePath,
+    pub error: UserFacingError,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2329,13 +2428,20 @@ pub struct LocalBaseline {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditSession {
     pub id: EditSessionId,
+    /// The path the user opened, exactly as the listing showed it. Kept as the
+    /// UI identity (dirty marker, selection, status copy).
     pub remote_path: RemotePath,
+    /// The path every transfer and authoritative check acts on. For a plain
+    /// file this equals `remote_path`; for a symlink it is the server-resolved
+    /// target, so editing writes through the link instead of replacing the
+    /// link itself.
+    pub io_path: RemotePath,
     pub tab_id: TabId,
     pub session_epoch: u64,
     pub profile_id: ProfileId,
     /// Non-secret identity of the physical connection this edit was opened
     /// through, captured on the tab at connect time. Dedup keys on
-    /// `(connection_key, remote_path)` rather than `profile_id`: two manual
+    /// `(connection_key, io_path)` rather than `profile_id`: two manual
     /// connections to different servers (or a saved profile re-pointed at a
     /// new host) must never share one temp file for the same remote path.
     pub connection_key: ConnectionKey,
@@ -2415,26 +2521,54 @@ impl EditSessionStore {
         tab_id: TabId,
         remote_path: &RemotePath,
     ) -> Option<&EditSession> {
+        // Prefer a session whose write-through path is exactly this path; a
+        // re-pointed link can otherwise match an older session by name alone.
+        // Newest wins among equals so a reopened entry selects what the user
+        // just opened instead of an arbitrary insertion order.
         self.sessions
             .iter()
-            .find(|session| session.tab_id == tab_id && &session.remote_path == remote_path)
+            .rev()
+            .filter(|session| session.tab_id == tab_id)
+            .find(|session| &session.io_path == remote_path)
+            .or_else(|| {
+                self.sessions
+                    .iter()
+                    .rev()
+                    .filter(|session| session.tab_id == tab_id)
+                    .find(|session| &session.remote_path == remote_path)
+            })
     }
 
-    /// Find an active edit session for `(connection_key, remote_path)`, used
-    /// to dedup a re-edit of the same file on the same physical connection.
-    /// Every stored session is in a live (non-terminal) [`EditPhase`] —
-    /// `Downloading`, `Editing`, `UploadingBack`, or `RemoteConflict` —
-    /// because failed downloads are removed rather than parked in a terminal
-    /// phase. So matching on `(connection_key, remote_path)` alone never
-    /// wrongly blocks a re-edit against a dead session.
-    pub fn find_active(
+    /// Find a live session created by opening `remote_path`, regardless of the
+    /// target it was bound to. Dedup keys on `io_path`; this lookup exists only
+    /// to detect a symlink that was re-pointed after its session was created.
+    pub fn find_active_for_remote_path(
         &self,
         connection_key: &ConnectionKey,
         remote_path: &RemotePath,
     ) -> Option<&EditSession> {
+        self.sessions.iter().rev().find(|session| {
+            session.connection_key == *connection_key && &session.remote_path == remote_path
+        })
+    }
+
+    /// Find an active edit session for `(connection_key, io_path)`, used to
+    /// dedup a re-edit of the same file on the same physical connection. Keyed
+    /// on the write-through path, so opening a symlink and its target map to
+    /// the same editor session instead of two writers racing on one file.
+    /// Every stored session is in a live (non-terminal) [`EditPhase`] —
+    /// `Downloading`, `Editing`, `UploadingBack`, or `RemoteConflict` —
+    /// because failed downloads are removed rather than parked in a terminal
+    /// phase. So matching on `(connection_key, io_path)` alone never
+    /// wrongly blocks a re-edit against a dead session.
+    pub fn find_active(
+        &self,
+        connection_key: &ConnectionKey,
+        io_path: &RemotePath,
+    ) -> Option<&EditSession> {
         self.sessions
             .iter()
-            .find(|s| s.connection_key == *connection_key && &s.remote_path == remote_path)
+            .find(|s| s.connection_key == *connection_key && &s.io_path == io_path)
     }
 
     pub fn remove(&mut self, id: EditSessionId) -> Option<EditSession> {
@@ -4002,6 +4136,115 @@ mod tests {
     }
 
     #[test]
+    fn symlink_target_resolves_against_the_link_directory() {
+        assert_eq!(
+            RemotePath::new("/srv/links/latest").resolve_link_target("releases/1.2/app"),
+            RemotePath::new("/srv/links/releases/1.2/app")
+        );
+        assert_eq!(
+            RemotePath::new("/srv/links/latest").resolve_link_target("/opt/app"),
+            RemotePath::new("/opt/app")
+        );
+        // Lexical normalization is only trustworthy without `..`: the actor
+        // uses it only as a REALPATH-less fallback and rejects any target that
+        // contains `..`, because a symlinked parent changes what `..` means.
+        assert_eq!(
+            RemotePath::new("/srv/a/link").resolve_link_target("../b//./c"),
+            RemotePath::new("/srv/b/c")
+        );
+        assert_eq!(
+            RemotePath::new("/link").resolve_link_target("../../escape"),
+            RemotePath::new("/escape")
+        );
+    }
+
+    #[test]
+    fn entry_resolution_lookup_prefers_the_write_through_path() {
+        let mut store = EditSessionStore::new();
+        // Older session: the link was opened when it still pointed at
+        // releases/1.txt.
+        let old_id = store.next_id();
+        let mut old = sample_edit_session(EditPhase::Editing);
+        old.id = old_id;
+        old.remote_path = RemotePath::new("/srv/latest.txt");
+        old.io_path = RemotePath::new("/srv/releases/1.txt");
+        store.register(old);
+
+        // Newer session: the same link now points at releases/2.txt, so a
+        // second session exists whose `remote_path` matches the old one.
+        let new_id = store.next_id();
+        let mut new = sample_edit_session(EditPhase::Editing);
+        new.id = new_id;
+        new.remote_path = RemotePath::new("/srv/latest.txt");
+        new.io_path = RemotePath::new("/srv/releases/2.txt");
+        store.register(new);
+
+        // Looking up the real target must select the session bound to it, not
+        // the older link session that happens to share the path name.
+        assert_eq!(
+            store
+                .find_for_tab_path(crate::TabId(1), &RemotePath::new("/srv/releases/2.txt"))
+                .map(|session| session.id),
+            Some(new_id)
+        );
+        // A bare link path with two candidates resolves to the newest session,
+        // never an arbitrary insertion order.
+        assert_eq!(
+            store
+                .find_for_tab_path(crate::TabId(1), &RemotePath::new("/srv/latest.txt"))
+                .map(|session| session.id),
+            Some(new_id)
+        );
+        assert_eq!(
+            store
+                .find_active_for_remote_path(
+                    &sample_connection_key(),
+                    &RemotePath::new("/srv/latest.txt")
+                )
+                .map(|session| session.io_path.clone()),
+            Some(RemotePath::new("/srv/releases/2.txt")),
+            "the opened-link lookup reports the target it is bound to"
+        );
+    }
+
+    #[test]
+    fn edit_dedup_follows_the_write_through_target() {
+        let mut store = EditSessionStore::new();
+        let id = store.next_id();
+        let mut session = sample_edit_session(EditPhase::Editing);
+        session.id = id;
+        session.remote_path = RemotePath::new("/srv/latest.txt");
+        session.io_path = RemotePath::new("/srv/releases/2.txt");
+        store.register(session);
+
+        // Opening the link or its target must find the same session, or two
+        // editors would race on one file with independent baselines.
+        assert!(
+            store
+                .find_active(
+                    &sample_connection_key(),
+                    &RemotePath::new("/srv/releases/2.txt")
+                )
+                .is_some()
+        );
+        assert!(
+            store
+                .find_active(
+                    &sample_connection_key(),
+                    &RemotePath::new("/srv/latest.txt")
+                )
+                .is_none(),
+            "dedup keys on the write-through path, not the link"
+        );
+        assert!(
+            store
+                .find_for_tab_path(crate::TabId(1), &RemotePath::new("/srv/latest.txt"))
+                .is_some(),
+            "selection still matches the path the user sees"
+        );
+    }
+
+    #[test]
     fn local_entries_sort_with_same_rules() {
         use super::FileKind;
 
@@ -4056,6 +4299,7 @@ mod tests {
         crate::EditSession {
             id: crate::EditSessionId(1),
             remote_path: crate::RemotePath::new("/srv/a.txt"),
+            io_path: crate::RemotePath::new("/srv/a.txt"),
             tab_id: crate::TabId(1),
             session_epoch: 1,
             profile_id: crate::ProfileId(1),

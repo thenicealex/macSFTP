@@ -54,7 +54,11 @@ pub(crate) fn cleanup_edit_temp_dir(temp_path: &LocalPath) {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PendingEdit {
+    /// The path the user opened, as the listing showed it (UI identity).
     pub remote_path: RemotePath,
+    /// The write-through path every transfer and check must use: the resolved
+    /// target for a file symlink, otherwise `remote_path`.
+    pub io_path: RemotePath,
     pub size: Option<u64>,
     pub modified_at: Option<Timestamp>,
     pub session_epoch: u64,
@@ -165,7 +169,7 @@ impl Workspace {
             session_epoch,
             edit_session_id: session_id,
             check_id,
-            path: session.remote_path,
+            path: session.io_path,
         });
         if self.send_command(command, cx) {
             self.status_message = Some("Checking the server file before uploading…".into());
@@ -184,6 +188,22 @@ impl Workspace {
         modified_at: Option<Timestamp>,
         cx: &mut Context<Self>,
     ) {
+        // Plain entries (and local files) write straight to the listed path;
+        // a remote symlink overrides this with its resolved target.
+        self.begin_edit_resolved(remote_path.clone(), remote_path, size, modified_at, cx);
+    }
+
+    /// Start (or reopen) an edit session for `remote_path`, writing through to
+    /// `io_path`. `io_path` differs from `remote_path` only for a file symlink:
+    /// keeping the link intact while editing the file it points at.
+    pub(crate) fn begin_edit_resolved(
+        &mut self,
+        remote_path: RemotePath,
+        io_path: RemotePath,
+        size: Option<u64>,
+        modified_at: Option<Timestamp>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(tab) = self.active_tab() else {
             return;
         };
@@ -193,6 +213,47 @@ impl Workspace {
             return;
         };
         let tab_id = tab.id;
+        // A link that was re-pointed after its session was created would
+        // otherwise produce two live sessions sharing one `remote_path`, and
+        // the pane lookup could select either. Bind edit sessions to the target
+        // they were opened against and refuse the ambiguous case instead.
+        if let Some((existing_tab_id, existing_io_path, existing_phase)) = cx
+            .resources()
+            .edit_sessions
+            .find_active_for_remote_path(&connection_key, &remote_path)
+            .map(|session| {
+                (
+                    session.tab_id,
+                    session.io_path.clone(),
+                    session.phase.clone(),
+                )
+            })
+            && existing_io_path != io_path
+        {
+            let owner_is_live = self.owns_tab(existing_tab_id)
+                || workspace_windows(cx).into_iter().any(|window| {
+                    window
+                        .read(cx)
+                        .is_ok_and(|workspace| workspace.owns_tab(existing_tab_id))
+                });
+            if owner_is_live {
+                self.status_message = Some(match existing_phase {
+                    EditPhase::RemoteConflict => {
+                        "The link now points somewhere else. Resolve the open edit before reopening it."
+                            .into()
+                    }
+                    _ => {
+                        "The link now points somewhere else. Finish the open edit before reopening it."
+                            .into()
+                    }
+                });
+                cx.notify();
+                return;
+            }
+            // The old session's tab is gone, so it cannot make progress; reap
+            // it before binding this link to its new target.
+            cleanup_edit_sessions_for_tab(cx, existing_tab_id);
+        }
         // Deduplicate a genuinely live edit, but do not let a session whose
         // owning tab disappeared with a closed window block this path forever.
         // Window-close cleanup is the primary lifecycle boundary; this check is
@@ -201,7 +262,7 @@ impl Workspace {
         if let Some((existing_tab_id, existing_phase, existing_temp_path)) = cx
             .resources()
             .edit_sessions
-            .find_active(&connection_key, &remote_path)
+            .find_active(&connection_key, &io_path)
             .map(|session| {
                 (
                     session.tab_id,
@@ -252,6 +313,7 @@ impl Workspace {
         }
         let pending = PendingEdit {
             remote_path,
+            io_path,
             size,
             modified_at,
             session_epoch,
@@ -297,6 +359,7 @@ impl Workspace {
         let session = EditSession {
             id,
             remote_path: pending.remote_path.clone(),
+            io_path: pending.io_path.clone(),
             tab_id: pending.tab_id,
             session_epoch: pending.session_epoch,
             profile_id: transfer_profile_id.unwrap_or_default(),
@@ -318,7 +381,7 @@ impl Workspace {
             session_epoch: pending.session_epoch,
             profile_id: transfer_profile_id.unwrap_or(ProfileId(0)),
             direction: TransferDirection::Download,
-            sources: vec![TransferEndpoint::Remote(pending.remote_path)],
+            sources: vec![TransferEndpoint::Remote(pending.io_path)],
             destination: TransferEndpoint::Local(local_temp_path),
             metadata_policy: MetadataPolicy::default(),
             // An edit temp is always ours to overwrite; a download must never
@@ -402,7 +465,7 @@ impl Workspace {
             ConflictChoice::Overwrite => {
                 let command = build_edit_upload_command(
                     &session.local_temp_path,
-                    &session.remote_path,
+                    &session.io_path,
                     session.session_epoch,
                     session.profile_id,
                     session.tab_id,
@@ -426,6 +489,7 @@ impl Workspace {
                 // session starts back at Downloading.
                 let pending = PendingEdit {
                     remote_path: session.remote_path.clone(),
+                    io_path: session.io_path.clone(),
                     size: session.remote_snapshot.size,
                     modified_at: session.remote_snapshot.modified_at,
                     session_epoch: session.session_epoch,
@@ -482,7 +546,7 @@ impl Workspace {
             session_epoch: session.session_epoch,
             profile_id: transfer_profile_id,
             direction: TransferDirection::Download,
-            sources: vec![TransferEndpoint::Remote(session.remote_path)],
+            sources: vec![TransferEndpoint::Remote(session.io_path)],
             destination: TransferEndpoint::Local(compare_path),
             metadata_policy: MetadataPolicy::default(),
             conflict_policy: ConflictPolicy::OverwriteAll,
@@ -738,7 +802,7 @@ impl Workspace {
 /// on-disk temp directory. Called when a tab or its window closes (and on
 /// disconnect): the session can no longer make progress once its owning tab is
 /// gone, and leaving it registered would strand its temp files and — because
-/// [`find_active`] keys on `(connection_key, remote_path)` regardless of tab —
+/// [`find_active`] keys on `(connection_key, io_path)` regardless of tab —
 /// permanently block re-editing the same file. Best-effort on the filesystem;
 /// a temp dir that was never created is ignored.
 ///
@@ -785,6 +849,10 @@ pub(crate) fn cleanup_orphaned_edit_sessions(cx: &mut gpui_kit::App) {
 /// file's mtime, which is only valid when the upload preserved mtime.
 /// Letting the preference disable mtime here would make the next refresh
 /// report a spurious conflict.
+///
+/// `remote_path` must be the session's `io_path` (the resolved target for a
+/// symlink), never the listed link path: uploading to the link would replace
+/// it with a regular file and break every other reference to the target.
 pub(crate) fn build_edit_upload_command(
     temp: &LocalPath,
     remote_path: &RemotePath,

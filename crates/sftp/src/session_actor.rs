@@ -7,12 +7,12 @@ use std::time::Duration;
 use macsftp_core::{
     AppEvent, ConflictDecision, ConflictPolicy, ConflictRequestId, EditCheckId, EditSessionId,
     ErrorCode, FileKind, FsOp, FsPath, FsScope, LocalPath, RemoteDirLoading, RemoteDirSnapshot,
-    RemoteEditSnapshotCheckFailed, RemoteEditSnapshotChecked, RemoteEntry, RemoteEventScope,
-    RemoteOperationFailure, RemotePath, RemoteScoped, RemoteSnapshot, RenameStrategy,
-    ResidualTempRecord, SessionId, StartTransferCommand, TabId, Timestamp, TransferConflictPrompt,
-    TransferDirection, TransferEndpoint, TransferFailure, TransferId, TransferJob, TransferPlanId,
-    TransferPlanProgress, TransferProgress, TransferSnapshot, TransferState, TransferWarning,
-    UserFacingError,
+    RemoteEditSnapshotCheckFailed, RemoteEditSnapshotChecked, RemoteEntry, RemoteEntryResolution,
+    RemoteEventScope, RemoteOperationFailure, RemotePath, RemoteScoped, RemoteSnapshot,
+    RenameStrategy, ResidualTempRecord, SessionId, StartTransferCommand, TabId, Timestamp,
+    TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferFailure, TransferId,
+    TransferJob, TransferPlanId, TransferPlanProgress, TransferProgress, TransferSnapshot,
+    TransferState, TransferWarning, UserFacingError,
 };
 use russh::client;
 use russh_sftp::client::error::Error as SftpError;
@@ -76,6 +76,12 @@ pub enum RemoteSessionRequest {
     ReadDir {
         path: RemotePath,
     },
+    /// Resolve one listing entry that the user opened. Symlinks are followed
+    /// here (never during a listing) so the app can decide between navigating
+    /// into a link and editing the file it points at.
+    ResolveEntry {
+        path: RemotePath,
+    },
     AcquireTransferConnection {
         responder: oneshot::Sender<Arc<crate::pool::SharedConnection>>,
     },
@@ -127,6 +133,10 @@ pub enum RemoteSessionRequest {
 }
 
 const MAX_CONCURRENT_TRANSFERS: usize = 4;
+
+/// Upper bound when chasing a remote symlink chain at open time. Servers cap
+/// `ELOOP` themselves; this only stops a misbehaving one from looping forever.
+const MAX_LINK_HOPS: usize = 16;
 
 struct TransferQueue {
     pending: VecDeque<QueuedTransfer>,
@@ -424,6 +434,20 @@ impl RemoteSessionActor {
         match request {
             RemoteSessionRequest::ReadDir { path } => {
                 self.read_remote_dir(&self.sftp, scope, path).await
+            }
+            RemoteSessionRequest::ResolveEntry { path } => {
+                let resolution = resolve_remote_entry(&self.sftp, path).await;
+                if self
+                    .event_tx
+                    .send_async(AppEvent::RemoteEntryResolved(RemoteScoped::new(
+                        scope.clone(),
+                        resolution,
+                    )))
+                    .await
+                    .is_err()
+                {
+                    warn!("remote entry resolution event dropped");
+                }
             }
             RemoteSessionRequest::AcquireTransferConnection { responder } => {
                 if responder.send(self.shared_connection.clone()).is_err() {
@@ -2820,6 +2844,212 @@ fn remote_entry_from_dir_entry(entry: DirEntry) -> RemoteEntry {
     }
 }
 
+/// Resolve one listing entry at open time.
+///
+/// A listing keeps symlinks typed as symlinks (no per-entry round trip), so the
+/// type is only discovered here. The kind comes from a server-side `stat` of the
+/// link path (which follows it), and a file link's write-through path comes from
+/// a server-side `realpath`: only the server knows how a relative target with
+/// `..` interacts with a symlinked parent directory. The final `lstat` supplies
+/// kind/size/mtime, so a target that changes between two requests cannot yield a
+/// mismatched kind/target pair.
+pub(crate) async fn resolve_remote_entry(
+    sftp: &SftpSession,
+    path: RemotePath,
+) -> RemoteEntryResolution {
+    let unresolved = |error: UserFacingError| RemoteEntryResolution {
+        path: path.clone(),
+        kind: FileKind::Symlink,
+        target: None,
+        size: None,
+        modified_at: None,
+        error: Some(error),
+    };
+
+    let metadata = match sftp.symlink_metadata(path.as_str()).await {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            let failure = remote_planning_error("Server Item Unavailable", &error);
+            return RemoteEntryResolution {
+                path: path.clone(),
+                kind: FileKind::Unknown,
+                target: None,
+                size: None,
+                modified_at: None,
+                error: Some(failure),
+            };
+        }
+    };
+
+    let link_kind = metadata.file_type();
+    if link_kind != SftpFileType::Symlink {
+        return RemoteEntryResolution {
+            path: path.clone(),
+            kind: match link_kind {
+                SftpFileType::Dir => FileKind::Directory,
+                SftpFileType::File => FileKind::File,
+                SftpFileType::Symlink => FileKind::Symlink,
+                SftpFileType::Other => FileKind::Other,
+            },
+            target: None,
+            size: metadata.size,
+            modified_at: metadata
+                .mtime
+                .map(|seconds| Timestamp::from_secs_since_epoch(seconds.into())),
+            error: None,
+        };
+    }
+
+    // Follow the link server-side: this decides whether opening it means
+    // "enter this folder" or "edit the file it points at".
+    let followed = match sftp.metadata(path.as_str()).await {
+        Ok(metadata) => metadata,
+        Err(error) => {
+            return unresolved(remote_planning_error("Server Link Unavailable", &error));
+        }
+    };
+    if followed.file_type() == SftpFileType::Dir {
+        return RemoteEntryResolution {
+            path,
+            kind: FileKind::Directory,
+            target: None,
+            size: followed.size,
+            modified_at: followed
+                .mtime
+                .map(|seconds| Timestamp::from_secs_since_epoch(seconds.into())),
+            error: None,
+        };
+    }
+
+    // The write-through path must be what the server resolves, never a lexical
+    // join of `readlink`: with `/srv/app/current -> releases/v2`, a link target
+    // `../shared/app.conf` resolves under `releases/v2` on the server, not under
+    // `/srv/app`. Guessing here would download one file and later overwrite
+    // another.
+    //
+    // Three server behaviors are possible:
+    //   * absolute REALPATH -> use it as-is;
+    //   * relative REALPATH (non-conforming; SFTP v3 requires absolute) -> we can
+    //     neither trust it as an absolute path nor lexically join it against the
+    //     link's logical parent, so refuse;
+    //   * no REALPATH -> readlink + lexical join is safe only when the target
+    //     has no `..`, i.e. nothing that depends on the server's real parent.
+    let mut current = match sftp.canonicalize(path.as_str()).await {
+        Ok(canonical) => match write_through_start(&path, Some(&canonical), None) {
+            Some(current) => current,
+            None => return unresolved(unresolvable_link_error()),
+        },
+        // A server that cannot run `realpath` may only be edited when the
+        // fallback cannot silently pick the wrong file. A target with `..`
+        // depends on the server's real parent path, so refuse it instead of
+        // guessing.
+        Err(_) => {
+            let target_text = match sftp.read_link(path.as_str()).await {
+                Ok(target) => target,
+                Err(error) => {
+                    return unresolved(remote_planning_error("Server Link Unavailable", &error));
+                }
+            };
+            match write_through_start(&path, None, Some(&target_text)) {
+                Some(current) => current,
+                None => return unresolved(unresolvable_link_error()),
+            }
+        }
+    };
+
+    // Even a successful `realpath` is treated as a starting point: some servers
+    // only absolutize the path without dereferencing. Walk until a non-link
+    // remains; refuse any `..` hop we would have to resolve ourselves.
+    let mut hops = 0;
+    loop {
+        if hops >= MAX_LINK_HOPS {
+            return unresolved(UserFacingError::new(
+                ErrorCode::UnsupportedSymlink,
+                "Link Loop Detected",
+                "The link points back to itself and cannot be followed.",
+            ));
+        }
+        hops += 1;
+        let metadata = match sftp.symlink_metadata(current.as_str()).await {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                return unresolved(remote_planning_error("Server Link Unavailable", &error));
+            }
+        };
+        if metadata.file_type() != SftpFileType::Symlink {
+            let kind = match metadata.file_type() {
+                SftpFileType::Dir => FileKind::Directory,
+                SftpFileType::File => FileKind::File,
+                SftpFileType::Other => FileKind::Other,
+                SftpFileType::Symlink => unreachable!("checked above"),
+            };
+            return RemoteEntryResolution {
+                path,
+                target: (kind == FileKind::File).then_some(current),
+                kind,
+                size: metadata.size,
+                modified_at: metadata
+                    .mtime
+                    .map(|seconds| Timestamp::from_secs_since_epoch(seconds.into())),
+                error: None,
+            };
+        }
+        let target_text = match sftp.read_link(current.as_str()).await {
+            Ok(target) => target,
+            Err(error) => {
+                return unresolved(remote_planning_error("Server Link Unavailable", &error));
+            }
+        };
+        if target_escapes_through_parent(&target_text) {
+            return unresolved(unresolvable_link_error());
+        }
+        current = current.resolve_link_target(&target_text);
+    }
+}
+
+/// Decide the starting point for the write-through walk.
+///
+/// `canonical` is the server's REALPATH result; `target` is a `readlink` result
+/// used only when the server has no REALPATH. Returns `None` when the client
+/// cannot derive a trustworthy path, in which case the caller refuses the
+/// write-through instead of risking a different file.
+///
+/// A relative REALPATH is rejected even without `..`: SFTP v3 requires an
+/// absolute result, and joining it against the link's *logical* parent would
+/// point inside the link itself whenever that parent is a symlink.
+fn write_through_start(
+    path: &RemotePath,
+    canonical: Option<&str>,
+    target: Option<&str>,
+) -> Option<RemotePath> {
+    match (canonical, target) {
+        (Some(canonical), _) => canonical
+            .starts_with('/')
+            .then(|| RemotePath::new(canonical)),
+        (None, Some(target)) => {
+            (!target_escapes_through_parent(target)).then(|| path.resolve_link_target(target))
+        }
+        (None, None) => None,
+    }
+}
+
+/// Whether a link target contains a `..` component. Its meaning depends on the
+/// server's real parent directory, so the client cannot lexically collapse it
+/// without risking a different file — including for an absolute target whose
+/// prefix may itself pass through a symlink.
+fn target_escapes_through_parent(target: &str) -> bool {
+    target.split('/').any(|component| component == "..")
+}
+
+fn unresolvable_link_error() -> UserFacingError {
+    UserFacingError::new(
+        ErrorCode::UnsupportedSymlink,
+        "Link Cannot Be Resolved",
+        "The link target cannot be resolved safely on this server. Open the file from its real location instead.",
+    )
+    .with_retryable(false)
+}
+
 /// Convert a live SFTP `Metadata` into a core `RemoteSnapshot` for the
 /// authoritative edit-check comparison. `symlink_metadata` (not `metadata`)
 /// is used by the caller so a symlink is reported as a link rather than
@@ -2847,8 +3077,67 @@ mod tests {
 
     use super::{
         TransferQueue, local_download_destination, local_temporary_path, read_directory_error,
-        remote_temporary_path, rename_destination,
+        remote_temporary_path, rename_destination, target_escapes_through_parent,
+        write_through_start,
     };
+
+    #[test]
+    fn write_through_start_accepts_absolute_realpath() {
+        let path = RemotePath::new("/srv/app/current/latest.conf");
+        assert_eq!(
+            write_through_start(&path, Some("/srv/releases/v2/app.conf"), None),
+            Some(RemotePath::new("/srv/releases/v2/app.conf"))
+        );
+    }
+
+    #[test]
+    fn write_through_start_rejects_relative_realpath() {
+        // SFTP v3 requires REALPATH to be absolute. Joining a relative answer
+        // against the logical parent would reintroduce the symlinked-parent bug.
+        let path = RemotePath::new("/srv/app/current/latest.conf");
+        assert_eq!(
+            write_through_start(&path, Some("releases/v2/app.conf"), None),
+            None
+        );
+        assert_eq!(
+            write_through_start(&path, Some("../shared/app.conf"), None),
+            None
+        );
+    }
+
+    #[test]
+    fn write_through_start_falls_back_only_without_parent_traversal() {
+        let path = RemotePath::new("/srv/app/latest.conf");
+        assert_eq!(
+            write_through_start(&path, None, Some("app.conf")),
+            Some(RemotePath::new("/srv/app/app.conf"))
+        );
+        assert_eq!(
+            write_through_start(&path, None, Some("../shared/app.conf")),
+            None,
+            "a relative target with .. depends on the server's real parent"
+        );
+        assert_eq!(
+            write_through_start(&path, None, Some("/opt/shared//app.conf")),
+            Some(RemotePath::new("/opt/shared/app.conf")),
+            "an absolute target without .. is safe to normalize"
+        );
+        assert_eq!(
+            write_through_start(&path, None, Some("/opt/../etc/app.conf")),
+            None,
+            "an absolute .. still depends on how the server resolves its prefix"
+        );
+    }
+
+    #[test]
+    fn target_traversal_detection_covers_absolute_and_relative_targets() {
+        assert!(target_escapes_through_parent("../shared/app.conf"));
+        assert!(target_escapes_through_parent("/opt/../etc/app.conf"));
+        assert!(!target_escapes_through_parent("shared/app.conf"));
+        assert!(!target_escapes_through_parent("/opt/shared/app.conf"));
+        // A component that merely starts with dots is not traversal.
+        assert!(!target_escapes_through_parent("..notes/app.conf"));
+    }
 
     fn queue_job(id: u64, direction: TransferDirection) -> TransferJob {
         TransferJob {
