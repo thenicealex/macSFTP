@@ -285,6 +285,7 @@ remote pane 必须覆盖：`Disconnected`（提供连接或重新连接）、`Co
 - General 中的 `Confirm before delete` 是删除 modal 里 “Don’t ask again” 的唯一恢复入口；`Show hidden files` 与路径栏、菜单和快捷键读写同一份配置。
 - 传输元数据偏好（保留 mtime / permissions）适用于用户发起的上传和下载；remote-edit 回传固定保留 mtime，因为其冲突基线由本地临时文件的 mtime 推导。
 - 配置保存失败必须在 Settings 内行内展示，且每个分类都要能看到该错误，不能使用 toast，也不能静默丢弃错误。
+- 离散配置写入统一经过 `Workspace::finish_config_change`：成功后清除错误并 `refresh_windows()`，让其他窗口的开关和菜单不保留旧快照；失败时写入同一行内错误。调用点不得各自复制 `match` 和错误文案；高频的编辑器输入通过同一错误收口，但不强制跨窗口重绘。
 - 文件表头的排序列使用嵌入的 `arrow_up.svg` / `arrow_down.svg` 图标，不用文本箭头；排序按钮的无障碍 label 必须保留方向和列名。
 - Settings → Saved Connections 是创建、编辑和删除保存 Profile 的唯一入口；Connect modal 只能选择已有 Profile 或填写临时连接，`Manage Connections…` 关闭 Connect 并进入 Settings。
 - Profile 列表使用紧凑双行条目：名称是主层级，`username@host` 是可截断的次层级，port 独立显示；选中、hover 和焦点不能改变条目高度或挤压地址文本。
