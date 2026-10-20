@@ -84,10 +84,13 @@ impl crate::workspace::Workspace {
             cx.notify();
             return;
         }
-        let Some(destination) = append_local_name(&local_directory, &sources[0]) else {
-            self.status_message = Some("The selected download item has no usable name.".into());
-            cx.notify();
-            return;
+        let destination = match append_local_name(&local_directory, &sources[0]) {
+            Ok(destination) => destination,
+            Err(message) => {
+                self.status_message = Some(message.into());
+                cx.notify();
+                return;
+            }
         };
         let tab_id = tab.id;
         let metadata_policy = cx.resources().config.config().metadata_policy.clone();
@@ -144,7 +147,14 @@ impl crate::workspace::Workspace {
         transfer_id: macsftp_core::TransferId,
         cx: &mut Context<Self>,
     ) {
-        if self.send_command(AppCommand::CancelTransfer { transfer_id }, cx) {
+        let plan_id = cx.transfers().plan_id_for_job(transfer_id);
+        if self.send_command(
+            AppCommand::CancelTransfer {
+                transfer_id,
+                plan_id,
+            },
+            cx,
+        ) {
             cx.mark_transfer_cancelling(transfer_id);
             cx.notify();
         }

@@ -207,15 +207,20 @@ impl ConnectForm {
     }
 
     pub(crate) fn set_auth_method(&mut self, method: AuthMethodKind) {
-        self.auth_method = method;
-        if !self.field_order().contains(&self.focused_field) {
-            self.focused_field = match method {
-                AuthMethodKind::Password => ConnectField::Password,
-                AuthMethodKind::PrivateKey => ConnectField::KeyPath,
-                AuthMethodKind::KeyboardInteractive | AuthMethodKind::SshAgent => {
-                    ConnectField::Username
-                }
-            };
+        if self.auth_method != method {
+            if self.source_profile_id.is_some() {
+                self.detach_from_profile();
+            }
+            self.auth_method = method;
+            if !self.field_order().contains(&self.focused_field) {
+                self.focused_field = match method {
+                    AuthMethodKind::Password => ConnectField::Password,
+                    AuthMethodKind::PrivateKey => ConnectField::KeyPath,
+                    AuthMethodKind::KeyboardInteractive | AuthMethodKind::SshAgent => {
+                        ConnectField::Username
+                    }
+                };
+            }
         }
     }
 
@@ -292,13 +297,21 @@ impl ConnectForm {
         }
     }
 
+    /// Detach the form from its source profile when an edit changes the
+    /// connection destination or credentials. The Keychain secret restored
+    /// for the profile must never travel to a different host or username,
+    /// and the tab must not claim the saved profile's identity.
+    pub(crate) fn detach_from_profile(&mut self) {
+        self.source_profile_id = None;
+        self.password.clear();
+        self.passphrase.clear();
+    }
+
     /// Detach from the selected profile and clear secret fields for manual
     /// editing. Host/port/username/key_path and auth method stay so the user
     /// can tweak without retyping connection metadata.
     pub(crate) fn switch_to_manual_entry(&mut self) {
-        self.source_profile_id = None;
-        self.password.clear();
-        self.passphrase.clear();
+        self.detach_from_profile();
         self.route = ResolvedConnectionRoute::Direct;
         self.profile_picker_open = false;
         self.profile_picker_filter = InputState::new();
@@ -350,6 +363,40 @@ impl crate::workspace::Workspace {
                                 form.error = None;
                                 if field != ConnectField::ProfileFilter {
                                     form.focused_field = field;
+                                }
+
+                                if let Some(profile_id) = form.source_profile_id {
+                                    let target_diverged = if let Some(profile) =
+                                        cx.resources().profiles.find_profile(profile_id)
+                                    {
+                                        match field {
+                                            ConnectField::Host => {
+                                                form.host.value().trim() != profile.host
+                                            }
+                                            ConnectField::Port => {
+                                                form.port.value().trim() != profile.port.to_string()
+                                            }
+                                            ConnectField::Username => {
+                                                form.username.value().trim() != profile.username
+                                            }
+                                            ConnectField::KeyPath => match &profile.auth {
+                                                AuthMethod::PrivateKey { key_path, .. } => {
+                                                    form.key_path.value().trim() != key_path.as_str()
+                                                }
+                                                _ => true,
+                                            },
+                                            _ => false,
+                                        }
+                                    } else {
+                                        true
+                                    };
+                                    if target_diverged {
+                                        form.detach_from_profile();
+                                        workspace.status_message = Some(
+                                            "Saved credentials cleared because connection details were changed."
+                                                .into(),
+                                        );
+                                    }
                                 }
                             }
                             InputEvent::Focus
@@ -474,7 +521,15 @@ impl crate::workspace::Workspace {
         };
         match form.build_settings() {
             Ok(settings) => {
-                let profile_id = form.source_profile_id;
+                let profile_id = form.source_profile_id.filter(|&id| {
+                    if let Some(profile) = cx.resources().profiles.find_profile(id) {
+                        profile.host == settings.host
+                            && profile.port == settings.port
+                            && profile.username == settings.username
+                    } else {
+                        false
+                    }
+                });
                 self.connect_form_ui.form = None;
                 self.focus_pane(self.focused_side, window, cx);
                 self.connect_with(settings, profile_id, window, cx);
@@ -625,6 +680,7 @@ impl crate::workspace::Workspace {
             if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
                 let focused_field = form.focused_field;
                 form.field_state_mut(focused_field).insert(&text);
+                form.source_profile_id = None;
                 cx.stop_propagation();
                 cx.notify();
             }
@@ -632,11 +688,15 @@ impl crate::workspace::Workspace {
         }
 
         let focused_field = form.focused_field;
+        let old_val = form.field_state_mut(focused_field).value().to_string();
         if form
             .field_state_mut(focused_field)
             .handle_keystroke(keystroke)
             == InputKeyResult::Handled
         {
+            if form.field_state_mut(focused_field).value() != old_val {
+                form.source_profile_id = None;
+            }
             form.error = None;
             cx.stop_propagation();
             cx.notify();

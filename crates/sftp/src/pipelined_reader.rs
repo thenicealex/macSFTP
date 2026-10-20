@@ -4,6 +4,7 @@ use macsftp_core::{AppEvent, ErrorCode, TransferId, TransferProgress, UserFacing
 use russh_sftp::client::RawSftpSession;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
+use tracing::warn;
 
 use crate::runtime::ProgressThrottle;
 
@@ -81,12 +82,16 @@ pub(crate) async fn open_raw_sftp_session(
         request_timeout_secs: 30,
     };
     let mut raw = RawSftpSession::new_with_config(channel.into_stream(), sftp_config);
-    let version = raw.init().await.map_err(|error| {
+    let version = raw.init().await.map_err(|_| {
+        warn!(
+            target: "macsftp_sftp::transfer",
+            "failed to initialize raw SFTP session"
+        );
         transfer_error(
             ErrorCode::ChannelClosed,
             "Transfer Couldn’t Start",
             "The file transfer connection couldn’t start.",
-            error.to_string(),
+            "The file transfer session could not be initialized.",
         )
     })?;
     let mut chunk_size = DEFAULT_CHUNK_SIZE;
@@ -95,12 +100,16 @@ pub(crate) async fn open_raw_sftp_session(
         .get("limits@openssh.com")
         .is_some_and(|v| v == "1")
     {
-        let extension = raw.limits().await.map_err(|error| {
+        let extension = raw.limits().await.map_err(|_| {
+            warn!(
+                target: "macsftp_sftp::transfer",
+                "failed to negotiate SFTP limits"
+            );
             transfer_error(
                 ErrorCode::ChannelClosed,
                 "Transfer Couldn’t Start",
                 "Failed to negotiate SFTP limits.",
-                error.to_string(),
+                "The server limits could not be read.",
             )
         })?;
         if extension.max_read_len > 0 {
@@ -115,22 +124,32 @@ pub(crate) async fn open_transfer_raw_sftp(
     handle: &russh::client::Handle<crate::physical_connection::ClientHandler>,
 ) -> Result<(Arc<RawSftpSession>, u32), UserFacingError> {
     let channel = handle.channel_open_session().await.map_err(|error| {
+        warn!(
+            target: "macsftp_sftp::transfer",
+            failure = crate::physical_connection::TransportFailureKind::from_russh_error(&error).as_str(),
+            "failed to open SSH session channel for raw transfer; technical detail redacted"
+        );
         transfer_error(
             ErrorCode::ChannelClosed,
             "Transfer Couldn’t Start",
             "The transfer connection couldn’t open. Reconnect and try again.",
-            error.to_string(),
+            "The SSH session channel could not be opened.",
         )
     })?;
     channel
         .request_subsystem(true, "sftp")
         .await
         .map_err(|error| {
+            warn!(
+                target: "macsftp_sftp::transfer",
+                failure = crate::physical_connection::TransportFailureKind::from_russh_error(&error).as_str(),
+                "server rejected SFTP subsystem request for raw transfer; technical detail redacted"
+            );
             transfer_error(
                 ErrorCode::ChannelClosed,
                 "Transfer Couldn’t Start",
                 "The server rejected the SFTP subsystem for this transfer.",
-                error.to_string(),
+                "The server rejected the SFTP subsystem.",
             )
         })?;
     open_raw_sftp_session(channel).await
@@ -262,7 +281,7 @@ impl PipelinedDownloadReader {
                                 ErrorCode::Unknown,
                                 "Transfer Read Failed",
                                 "The remote file could not be read.",
-                                error.to_string(),
+                                crate::session_actor::sftp_status_guidance(&error),
                             )),
                         },
                     }
@@ -287,12 +306,16 @@ impl PipelinedDownloadReader {
 
             let chunk = match join_result {
                 Ok(chunk) => chunk,
-                Err(join_err) => {
+                Err(_join_err) => {
                     in_flight.abort_all();
+                    warn!(
+                        target: "macsftp_sftp::transfer",
+                        "in-flight pipelined read task failed"
+                    );
                     return Err(UserFacingError::new(
                         ErrorCode::Unknown,
                         "Transfer Read Failed",
-                        format!("In-flight read task failed: {join_err}"),
+                        "The transfer read worker failed unexpectedly.",
                     ));
                 }
             };
@@ -712,6 +735,10 @@ mod tests {
                 assert_eq!(
                     error.title, "Transfer Read Failed",
                     "server read failure must be mapped to Transfer Read Failed"
+                );
+                assert_eq!(
+                    error.detail.as_deref(),
+                    Some("The server reported an error processing this request.")
                 );
             }
             Ok(_) => panic!("server error must return an error"),

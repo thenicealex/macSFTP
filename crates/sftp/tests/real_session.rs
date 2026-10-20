@@ -162,6 +162,29 @@ async fn wait_for_transfer_completion(fixture: &ActorFixture, transfer_id: Trans
     }
 }
 
+#[cfg(unix)]
+async fn wait_for_transfer_failure(
+    fixture: &ActorFixture,
+    transfer_id: TransferId,
+) -> macsftp_core::TransferFailure {
+    loop {
+        match next_event(fixture, "transfer event").await {
+            AppEvent::TransferRunning(snapshot) if snapshot.job.id == transfer_id => {}
+            AppEvent::TransferProgress(progress) if progress.transfer_id == transfer_id => {}
+            AppEvent::TransferCompleted {
+                transfer_id: completed_id,
+            } if completed_id == transfer_id => {
+                panic!("transfer should have failed");
+            }
+            AppEvent::TransferFailed(failure) if failure.transfer_id == transfer_id => {
+                return failure;
+            }
+            AppEvent::ResidualTempCreated(_) | AppEvent::ResidualTempCleared { .. } => {}
+            other => panic!("unexpected transfer event: {other:?}"),
+        }
+    }
+}
+
 async fn wait_for_runtime_transfer_completion(events: &mut EventReceiver) -> TransferId {
     let mut transfer_id = None;
     loop {
@@ -389,6 +412,84 @@ async fn unknown_host_key_accept_connects_and_persists_trust() {
     assert_eq!(store.entry_count(), 1, "trusted key must be persisted");
 
     fixture.cancel.cancel();
+}
+
+/// A human answering the host-key prompt slowly must not be cut off by the
+/// peer-facing handshake bound.
+///
+/// Repro (before the fix): `connect_stream` ran under a single
+/// `handshake_timeout`, so answering the prompt later than that reported
+/// `NetworkTimeout` even though `trust_prompt_timeout` allows minutes.
+#[tokio::test(flavor = "multi_thread")]
+async fn slow_trust_prompt_outlives_handshake_timeout() {
+    let Some(server) = SshTestServer::spawn() else {
+        return; // skip message already printed
+    };
+
+    let (event_tx, event_rx) = flume::bounded(64);
+    let app_known_hosts_path = server.fixture_dir.join("slow_prompt_known_hosts");
+    let known_hosts = Arc::new(Mutex::new(KnownHostsStore::load(
+        &app_known_hosts_path,
+        None,
+    )));
+    let trust_registry = Arc::new(TrustRegistry::new());
+
+    let mut trust_config = HostTrustConfig::new(app_known_hosts_path.clone(), None);
+    // Kept short so the test proves the prompt window extends the bound, but
+    // not so short that a busy CI host can miss the window before the host
+    // key even arrives.
+    trust_config.handshake_timeout = Duration::from_secs(2);
+    trust_config.trust_prompt_timeout = Duration::from_secs(10);
+
+    let settings = ConnectionSettings {
+        host: "127.0.0.1".to_string(),
+        port: server.port,
+        username: server.username.clone(),
+        auth: client_key_auth(&server),
+        route: macsftp_core::ResolvedConnectionRoute::Direct,
+    };
+
+    let connection_manager = Arc::new(ConnectionManager::new());
+    let scope = RemoteEventScope::new(TAB, SESSION, EPOCH);
+    let mut connect_rx = connection_manager.get_or_connect(
+        &settings,
+        &ConnectionPoolIdentity::Ephemeral(SESSION),
+        &scope,
+        known_hosts,
+        Arc::new(trust_config),
+        trust_registry.clone(),
+        event_tx,
+    );
+
+    let responder = tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            match tokio::time::timeout_at(deadline, event_rx.recv_async()).await {
+                Ok(Ok(AppEvent::HostKeyUnknown(prompt))) => {
+                    // Well past `handshake_timeout`, still inside the prompt bound.
+                    tokio::time::sleep(Duration::from_secs(4)).await;
+                    assert!(
+                        trust_registry.resolve(prompt.request_id, TrustDecision::TrustAndSave),
+                        "trust request must still be pending"
+                    );
+                    return;
+                }
+                Ok(Ok(_)) => continue,
+                Ok(Err(_)) | Err(_) => panic!("trust prompt never arrived"),
+            }
+        }
+    });
+
+    let outcome = tokio::time::timeout(Duration::from_secs(20), connect_rx.recv())
+        .await
+        .expect("connect attempt must finish")
+        .expect("connect response receiver must stay open");
+    match outcome {
+        Ok(shared) => assert!(!shared.connection_lost.is_cancelled()),
+        Err(error) => panic!("slow trust prompt must not time out the handshake: {error:?}"),
+    }
+
+    responder.await.expect("responder task must finish");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1040,6 +1141,37 @@ async fn single_file_symlinks_are_copied_without_dereferencing() {
     assert_eq!(
         std::fs::read_link(&local_destination).expect("read downloaded symlink"),
         std::path::PathBuf::from("symlink-download-target.txt")
+    );
+
+    let remote_unsafe_source = server.fixture_dir.join("symlink-unsafe-source");
+    let local_unsafe_destination = server.fixture_dir.join("symlink-unsafe-destination");
+    symlink("/etc/passwd", &remote_unsafe_source).expect("create remote unsafe symlink");
+    fixture
+        .requests
+        .send_async(RemoteSessionRequest::RunTransferJobs {
+            plan_id: macsftp_core::TransferPlanId(12),
+            jobs: vec![transfer_job(
+                103,
+                TransferDirection::Download,
+                TransferEndpoint::Remote(RemotePath::new(
+                    remote_unsafe_source.display().to_string(),
+                )),
+                TransferEndpoint::Local(macsftp_core::LocalPath::new(
+                    local_unsafe_destination.display().to_string(),
+                )),
+            )],
+        })
+        .await
+        .expect("unsafe symlink download should reach actor");
+    let failure = wait_for_transfer_failure(&fixture, TransferId(103)).await;
+    assert_eq!(
+        failure.error.code,
+        macsftp_core::ErrorCode::UnsupportedSymlink
+    );
+    assert_eq!(failure.error.title, "Unsafe Link Target");
+    assert!(
+        !local_unsafe_destination.exists(),
+        "local link must not be created"
     );
 
     fixture.cancel.cancel();

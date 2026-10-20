@@ -116,15 +116,17 @@ impl KnownHostsStore {
         // Parse back to verify the line is valid.
         let entry: Entry = line.parse().map_err(|_| KnownHostsError::EntryFormat)?;
 
-        // Append to file (create if missing).
-        let existing = std::fs::read_to_string(app_path).unwrap_or_default();
-        let mut content = existing;
-        if !content.is_empty() && !content.ends_with('\n') {
-            content.push('\n');
-        }
-        content.push_str(&line);
-        content.push('\n');
-        macsftp_storage::write_private_file_atomically(app_path, content.as_bytes())
+        // Append under the storage advisory lock, never discarding existing
+        // content.
+        //
+        // The file is read as BYTES, never as a UTF-8 string: one non-ASCII
+        // comment byte used to make `read_to_string` fail, and the old
+        // `unwrap_or_default()` then rewrote the file with only the new entry
+        // — silently erasing every pinned host key. Any read error other than
+        // "missing" now aborts instead of overwriting unreadable content, and
+        // two windows trusting different hosts can no longer lose an entry to
+        // a read-modify-write race.
+        macsftp_storage::append_private_line_atomically(app_path, &line)
             .map_err(KnownHostsError::Io)?;
 
         self.app_entries.push(entry);
@@ -192,14 +194,19 @@ fn entry_matches_host(entry: &Entry, pattern: &str) -> bool {
 /// Load a known_hosts file, skipping unparseable content with a WARN.
 /// A missing file is the normal first-launch state — no warning.
 fn load_file(path: &Path) -> Vec<Entry> {
-    let input = match std::fs::read_to_string(path) {
-        Ok(input) => input,
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
         Err(error) => {
             warn!(path = %path.display(), error = %error, "known_hosts: failed to read file");
             return Vec::new();
         }
     };
+    // Decode lossily so one non-UTF-8 comment cannot hide every other pinned
+    // entry: unreadable bytes only affect the line that contains them, and the
+    // parser below skips that line with a WARN. Entry lines themselves are
+    // ASCII in practice, so a pinned key is never mangled by this conversion.
+    let input = String::from_utf8_lossy(&bytes);
 
     input
         .lines()
@@ -579,6 +586,49 @@ mod tests {
         assert_eq!(
             store.expected_fingerprint("example.com", 22),
             Some(fingerprint_sha256(&key))
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A trust store that cannot be read must never be replaced by a file
+    /// containing only the new entry. Doing so silently erases every pinned
+    /// host key and turns the next connections into "unknown host" prompts,
+    /// which is exactly the state a user is most likely to click through.
+    #[test]
+    fn add_trusted_preserves_non_utf8_comments_and_pinned_entries() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "macsftp_test_known_hosts_nonutf8_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        // A valid pinned entry plus a comment byte sequence that is not UTF-8.
+        let mut original = format!("pinned.example ssh-ed25519 {}\n", test_key(11).to_string());
+        original.push_str("# hostname: caf");
+        let mut bytes = original.into_bytes();
+        bytes.push(0xE9); // invalid UTF-8 on its own, like a Latin-1 comment
+        bytes.push(b'\n');
+        std::fs::write(&path, &bytes).expect("fixture must be written");
+
+        let mut store = KnownHostsStore::empty();
+        let result = store.add_trusted("new.example", 22, &test_key(12), &path);
+
+        assert!(
+            result.is_ok(),
+            "a non-UTF-8 comment must not block trusting a new host"
+        );
+        let after = std::fs::read(&path).expect("file must still exist");
+        assert!(
+            after.starts_with(&bytes),
+            "existing pinned entries and comments must survive verbatim"
+        );
+        assert!(
+            after
+                .windows(b"new.example".len())
+                .any(|window| window == b"new.example"),
+            "the new entry must be appended"
         );
 
         let _ = std::fs::remove_file(&path);

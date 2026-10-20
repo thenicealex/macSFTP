@@ -3,7 +3,9 @@ pub mod config;
 pub use config::{AppConfig, AppearancePreference, ConfigError, ConfigStore};
 
 mod atomic_file;
-pub use atomic_file::{AtomicWriteError, write_private_file_atomically};
+pub use atomic_file::{
+    AtomicWriteError, append_private_line_atomically, write_private_file_atomically,
+};
 
 /// Cross-instance advisory locking for store write transactions.
 mod file_lock;

@@ -819,8 +819,9 @@ fn advance_conflict_compare(event: &AppEvent, cx: &mut App) {
                 Err("Comparison download was cancelled.".to_string()),
             )
         }
-        // Cancelling a queued transfer emits only `TransferSkipped`; the plan
-        // itself is finalized without a `TransferPlanCancelled` event.
+        // A child cancel emits only `TransferSkipped`; cancelling a plan root
+        // is reported as `TransferPlanCancelled`. Both mean this comparison
+        // download stopped before producing its copy.
         AppEvent::TransferSkipped { transfer_id } => {
             let Some(dest_path) = compare_destination_for_transfer(*transfer_id, cx) else {
                 return;

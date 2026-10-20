@@ -2512,6 +2512,65 @@ fn keyboard_interactive_prompt_submits_redacted_responses(cx: &mut TestAppContex
 }
 
 #[gpui_kit::test]
+fn keyboard_interactive_prompt_supports_clipboard_paste(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.connect_with(test_settings(), None, window, cx);
+    });
+    let _ = channels.command_rx.try_recv();
+    let request_id = KeyboardInteractiveRequestId(8);
+    let prompt = KeyboardInteractivePrompt {
+        request_id,
+        scope: RemoteEventScope::new(TabId(1), SessionId(1), 1),
+        name: "Verification".into(),
+        instruction: "Enter the code".into(),
+        prompts: vec![KeyboardInteractivePromptField {
+            prompt: "Code:".into(),
+            echo: false,
+        }],
+    };
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.handle_app_event(
+            AppEvent::KeyboardInteractivePrompt(prompt.clone()),
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+
+    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("987654".into()));
+
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        let key_event = gpui_kit::KeyDownEvent {
+            keystroke: gpui_kit::Keystroke {
+                modifiers: gpui_kit::Modifiers {
+                    platform: true,
+                    ..Default::default()
+                },
+                key: "v".into(),
+                key_char: None,
+            },
+            is_held: false,
+            prefer_character_input: false,
+        };
+        workspace.handle_keyboard_interactive_key(&key_event, window, cx);
+    });
+
+    workspace.read_with(&cx, |workspace, _| {
+        let inputs = workspace
+            .modal_inputs
+            .keyboard_interactive
+            .get(&request_id)
+            .expect("modal inputs exist");
+        assert_eq!(
+            inputs.inputs[0].state().value(),
+            "987654",
+            "Cmd+V must paste clipboard contents into keyboard-interactive input"
+        );
+    });
+}
+
+#[gpui_kit::test]
 fn stale_keyboard_interactive_prompt_is_dropped(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     workspace.update_in(&mut cx, |workspace, window, cx| {
@@ -7259,6 +7318,101 @@ fn connect_picker_enter_selects_first_filtered_profile(cx: &mut TestAppContext) 
         channels.command_rx.try_recv().is_err(),
         "profile select must not auto-connect"
     );
+}
+
+#[gpui_kit::test]
+fn editing_target_on_profile_form_clears_saved_password_and_detaches_profile(
+    cx: &mut TestAppContext,
+) {
+    use gpui_kit::EntityInputHandler as _;
+    let (workspace, mut cx, channels) = init_workspace(cx);
+
+    let host_input = workspace.update_in(&mut cx, |workspace, window, cx| {
+        let work = macsftp_core::ConnectionProfile::new(
+            ProfileId(1),
+            "Work",
+            "work.example.com",
+            "alex",
+            AuthMethod::Password {
+                secret_ref: macsftp_core::SecretRef::keychain_ref(ProfileId(1), "password"),
+            },
+        );
+        save_profile_fixture(cx, work);
+        let settings = ConnectionSettings {
+            host: "work.example.com".into(),
+            port: 22,
+            username: "alex".into(),
+            auth: AuthCredential::Password {
+                password: "work-super-secret".into(),
+            },
+            route: macsftp_core::ResolvedConnectionRoute::Direct,
+        };
+        save_settings_fixture(cx, ProfileId(1), "Work", &settings);
+
+        workspace.open_connect_form(window, cx);
+        workspace.select_connect_profile(ProfileId(1), cx);
+        workspace.prepare_connect_inputs(window, cx);
+
+        let form = workspace.connect_form_ui.form.as_ref().expect("form");
+        assert_eq!(form.source_profile_id, Some(ProfileId(1)));
+        assert_eq!(form.password.value(), "work-super-secret");
+
+        form.inputs
+            .get(&crate::workspace::connect_form::ConnectField::Host)
+            .expect("host input")
+            .state()
+            .clone()
+    });
+
+    // Edit the Host field to a different server
+    host_input.update_in(&mut cx, |input, window, cx| {
+        let len = input.text().len();
+        input.replace_text_in_range(Some(0..len), "evil.example.com", window, cx);
+    });
+
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        // The form must have cleared the password and detached from the profile
+        let form = workspace.connect_form_ui.form.as_ref().expect("form");
+        assert_eq!(
+            form.source_profile_id, None,
+            "editing host must detach from profile"
+        );
+        assert!(
+            form.password.value().is_empty(),
+            "editing host must clear the saved password so it never travels to a different server"
+        );
+
+        workspace.submit_connect_form(window, cx);
+    });
+
+    let command = channels
+        .command_rx
+        .try_recv()
+        .expect("submit must send ConnectTab");
+    match command {
+        macsftp_core::AppCommand::ConnectTab(cmd) => {
+            assert_eq!(cmd.settings.host, "evil.example.com");
+            assert_eq!(cmd.profile_id, ProfileId(0), "must not link to profile 1");
+            assert!(
+                matches!(
+                    cmd.pool_identity,
+                    macsftp_core::ConnectionPoolIdentity::Ephemeral(_)
+                ),
+                "must use ephemeral pool identity"
+            );
+            match &cmd.settings.auth {
+                AuthCredential::Password { password } => {
+                    assert_ne!(
+                        password.as_str(),
+                        "work-super-secret",
+                        "must never send saved password to changed host"
+                    );
+                }
+                _ => panic!("expected password auth"),
+            }
+        }
+        _ => panic!("expected ConnectTab"),
+    }
 }
 
 #[gpui_kit::test]

@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use macsftp_core::{ConnectionKey, ConnectionState, LocalPath, ProfileId, RemotePath, TabState};
+use macsftp_core::{
+    ConnectionKey, ConnectionState, LocalPath, ProfileId, RemotePath, TabState, is_bidi_or_control,
+};
 use macsftp_storage::RecentEntry;
 
 /// Row label for a recent connection: `Name · user@host:port` or `user@host:port`.
@@ -63,11 +65,54 @@ pub(crate) fn append_remote_name(directory: &RemotePath, source: &LocalPath) -> 
     )))
 }
 
-pub(crate) fn append_local_name(directory: &LocalPath, source: &RemotePath) -> Option<LocalPath> {
-    let name = Path::new(source.as_str()).file_name()?.to_string_lossy();
-    Some(LocalPath::new(format!(
+/// Local destination for a single download: the chosen folder plus the
+/// remote file name.
+///
+/// The name comes from the server, so it is checked before it reaches the
+/// local filesystem: control or bidirectional formatting characters would let
+/// a downloaded file disguise itself in Finder. Directory downloads get the
+/// same check while their tree is planned.
+pub(crate) fn append_local_name(
+    directory: &LocalPath,
+    source: &RemotePath,
+) -> Result<LocalPath, &'static str> {
+    let Some(name) = Path::new(source.as_str()).file_name() else {
+        return Err("The selected download item has no usable name.");
+    };
+    let name = name.to_string_lossy();
+    if name.chars().any(is_bidi_or_control) {
+        return Err("The selected download item has a name that cannot be saved safely.");
+    }
+    Ok(LocalPath::new(format!(
         "{}/{}",
         directory.as_str().trim_end_matches('/'),
         name
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::append_local_name;
+    use macsftp_core::{LocalPath, RemotePath};
+
+    #[test]
+    fn download_name_rejects_control_and_bidi_characters() {
+        let directory = LocalPath::new("/Users/me/Downloads");
+        for unsafe_name in ["/srv/evil\u{202E}txt.exe", "/srv/bell\u{0007}.txt"] {
+            assert!(
+                append_local_name(&directory, &RemotePath::new(unsafe_name)).is_err(),
+                "{unsafe_name:?} must not become a local file name"
+            );
+        }
+    }
+
+    #[test]
+    fn download_name_joins_plain_names() {
+        let destination = append_local_name(
+            &LocalPath::new("/Users/me/Downloads/"),
+            &RemotePath::new("/srv/report.txt"),
+        )
+        .expect("a plain name must be accepted");
+        assert_eq!(destination.as_str(), "/Users/me/Downloads/report.txt");
+    }
 }

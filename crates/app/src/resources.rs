@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui_kit::{App, Global};
 use macsftp_core::{
-    AppEvent, EditSessionStore, LocalPath, TabId, Timestamp, TransferId, TransferState,
+    AppEvent, EditSessionStore, LocalPath, SessionId, TabId, Timestamp, TransferId, TransferState,
     TransferStore,
 };
 use macsftp_platform::AppPaths;
@@ -46,6 +46,11 @@ pub struct AppResources {
     /// injected `Arc<AtomicU64>` rather than a `static`, so each test gets
     /// a fresh counter starting at 1 and stays isolated from other tests.
     next_tab_id: Arc<AtomicU64>,
+    /// Process-wide source of `SessionId`s. Every window shares it because a
+    /// `SessionId` also forms the pool identity of a manual connection; a
+    /// per-window counter would let two windows mint the same id and silently
+    /// share one authenticated physical SSH connection.
+    next_session_id: Arc<AtomicU64>,
 }
 
 impl Global for AppResources {}
@@ -95,12 +100,23 @@ impl AppResources {
             edit_sessions: EditSessionStore::new(),
             edit_run_id: next_edit_run_id(),
             next_tab_id: Arc::new(AtomicU64::new(1)),
+            next_session_id: Arc::new(AtomicU64::new(0)),
         }
     }
 
     /// Allocate the next process-unique tab id.
     pub fn next_tab_id(&self) -> TabId {
         TabId(self.next_tab_id.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Allocate the next process-unique session id for a connection attempt.
+    ///
+    /// Authority lives here, not in a per-window `AppState`: manual
+    /// connections use `ConnectionPoolIdentity::Ephemeral(session_id)`, so two
+    /// windows reusing the same number would derive the same pool key and
+    /// reuse one authenticated connection across independent credentials.
+    pub fn next_session_id(&self) -> SessionId {
+        SessionId(self.next_session_id.fetch_add(1, Ordering::Relaxed) + 1)
     }
 }
 
@@ -328,5 +344,27 @@ mod edit_tests {
         );
 
         assert_ne!(first.edit_run_id, second.edit_run_id);
+    }
+
+    /// Manual connections derive their connection-pool key from this id. If
+    /// two windows could mint the same number they would reuse one
+    /// authenticated physical SSH connection across different credentials.
+    #[test]
+    fn session_ids_are_unique_across_windows() {
+        let home =
+            std::env::temp_dir().join(format!("macsftp-res-session-id-{}", std::process::id()));
+        let app_paths = AppPaths::from_home_dir(home.to_string_lossy().as_ref());
+        let resources = AppResources::load_for_test(
+            app_paths.clone(),
+            ConfigStore::with_defaults(app_paths.config_file.clone()),
+        );
+
+        // Both windows share this one process-level allocator.
+        let first = resources.next_session_id();
+        let second = resources.next_session_id();
+        let third = resources.next_session_id();
+        assert_ne!(first, second);
+        assert_ne!(second, third);
+        assert_ne!(first, third);
     }
 }

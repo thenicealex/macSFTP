@@ -131,8 +131,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let default_local_path =
-            LocalPath::new(std::env::var("HOME").unwrap_or_else(|_| "/Users/alex".to_string()));
+        let default_local_path = LocalPath::new(
+            std::env::var("HOME")
+                .ok()
+                .filter(|home| !home.trim().is_empty())
+                .unwrap_or_else(|| "/".to_string()),
+        );
 
         let state = AppState::new();
         let config_error = cx.resources().config.initial_error().map(|_| {
@@ -865,7 +869,9 @@ impl Workspace {
         let next_epoch = tab.session_epoch + 1;
         let is_reconnect = matches!(tab.connection, ConnectionState::Connected { .. });
 
-        let session_id = self.state.allocate_session_id();
+        // Session identity authority is process-wide (see `AppResources`);
+        // two windows must never mint the same id for a manual connection.
+        let session_id = cx.resources().next_session_id();
         let pool_identity = profile_id
             .and_then(|profile_id| cx.resources().profiles.auth_fingerprint(profile_id))
             .map(ConnectionPoolIdentity::Saved)
