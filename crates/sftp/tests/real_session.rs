@@ -162,6 +162,29 @@ async fn wait_for_transfer_completion(fixture: &ActorFixture, transfer_id: Trans
     }
 }
 
+#[cfg(unix)]
+async fn wait_for_transfer_failure(
+    fixture: &ActorFixture,
+    transfer_id: TransferId,
+) -> macsftp_core::TransferFailure {
+    loop {
+        match next_event(fixture, "transfer event").await {
+            AppEvent::TransferRunning(snapshot) if snapshot.job.id == transfer_id => {}
+            AppEvent::TransferProgress(progress) if progress.transfer_id == transfer_id => {}
+            AppEvent::TransferCompleted {
+                transfer_id: completed_id,
+            } if completed_id == transfer_id => {
+                panic!("transfer should have failed");
+            }
+            AppEvent::TransferFailed(failure) if failure.transfer_id == transfer_id => {
+                return failure;
+            }
+            AppEvent::ResidualTempCreated(_) | AppEvent::ResidualTempCleared { .. } => {}
+            other => panic!("unexpected transfer event: {other:?}"),
+        }
+    }
+}
+
 async fn wait_for_runtime_transfer_completion(events: &mut EventReceiver) -> TransferId {
     let mut transfer_id = None;
     loop {
@@ -1040,6 +1063,37 @@ async fn single_file_symlinks_are_copied_without_dereferencing() {
     assert_eq!(
         std::fs::read_link(&local_destination).expect("read downloaded symlink"),
         std::path::PathBuf::from("symlink-download-target.txt")
+    );
+
+    let remote_unsafe_source = server.fixture_dir.join("symlink-unsafe-source");
+    let local_unsafe_destination = server.fixture_dir.join("symlink-unsafe-destination");
+    symlink("/etc/passwd", &remote_unsafe_source).expect("create remote unsafe symlink");
+    fixture
+        .requests
+        .send_async(RemoteSessionRequest::RunTransferJobs {
+            plan_id: macsftp_core::TransferPlanId(12),
+            jobs: vec![transfer_job(
+                103,
+                TransferDirection::Download,
+                TransferEndpoint::Remote(RemotePath::new(
+                    remote_unsafe_source.display().to_string(),
+                )),
+                TransferEndpoint::Local(macsftp_core::LocalPath::new(
+                    local_unsafe_destination.display().to_string(),
+                )),
+            )],
+        })
+        .await
+        .expect("unsafe symlink download should reach actor");
+    let failure = wait_for_transfer_failure(&fixture, TransferId(103)).await;
+    assert_eq!(
+        failure.error.code,
+        macsftp_core::ErrorCode::UnsupportedSymlink
+    );
+    assert_eq!(failure.error.title, "Unsafe Link Target");
+    assert!(
+        !local_unsafe_destination.exists(),
+        "local link must not be created"
     );
 
     fixture.cancel.cancel();

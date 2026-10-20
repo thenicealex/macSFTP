@@ -100,6 +100,21 @@ impl<'de> Deserialize<'de> for Timestamp {
     }
 }
 
+/// Characters that must never reach a user-visible name: C0/C1 controls and
+/// the Unicode bidirectional formatting characters that can make a name
+/// render differently from what is on disk (the "Trojan Source" class of
+/// spoofing). Used to filter text typed into the UI as well as to reject
+/// server-supplied names that would otherwise land on the local filesystem.
+pub fn is_bidi_or_control(ch: char) -> bool {
+    ch.is_control()
+        || matches!(
+            ch,
+            '\u{200E}' | '\u{200F}' | '\u{061C}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+        )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct LocalPath(String);
 

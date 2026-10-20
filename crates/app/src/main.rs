@@ -169,7 +169,15 @@ fn main() {
 
         // Host trust files (architecture §10): read the user's known_hosts if
         // present, write only to the app-owned file.
-        let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let home_dir = match std::env::var("HOME").ok().filter(|home| !home.trim().is_empty()) {
+            Some(home) => home,
+            None => {
+                eprintln!(
+                    "macSFTP requires the HOME environment variable to locate its secure application data."
+                );
+                std::process::exit(1);
+            }
+        };
         let app_paths = AppPaths::from_home_dir(&home_dir);
         if let Err(error) = app_paths.ensure_directories() {
             eprintln!("macSFTP could not create its application directories: {error}");

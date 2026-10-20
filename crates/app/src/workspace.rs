@@ -131,8 +131,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let default_local_path =
-            LocalPath::new(std::env::var("HOME").unwrap_or_else(|_| "/Users/alex".to_string()));
+        let default_local_path = LocalPath::new(
+            std::env::var("HOME")
+                .ok()
+                .filter(|home| !home.trim().is_empty())
+                .unwrap_or_else(|| "/".to_string()),
+        );
 
         let state = AppState::new();
         let config_error = cx.resources().config.initial_error().map(|_| {

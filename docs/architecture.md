@@ -125,7 +125,7 @@ route 支持 Direct、单跳 saved-profile JumpHost（jump profile 自身必须 
 - temp cleanup 失败写入 `ResidualTempStore`，后续只清理由 macSFTP 记录的路径；
 - residual cleanup command 无法路由到 live actor 时保留记录并写结构化 WARN，等待下一次连接重试，不能静默当作成功；
 - 权限或 mtime 保留失败通常产生 warning，不推翻已成功的数据传输；
-- symlink 默认复制 link 本身，不解引用；
+- symlink 默认复制 link 本身，不解引用；下载时 target 为空、绝对路径、含 `\` 或含 `..` 路径分量的一律拒绝（`UnsupportedSymlink`），因为本地写入无法依赖服务端解析来保证 target 仍留在下载树内；
 - 浏览时 link 仍显示为 symlink，列表不做 per-entry stat；用户打开时由 actor 解析一次类型：目录 link 按逻辑路径进入（服务端自行解析），文件 link 进入编辑且后续下载、上传、远端快照检查都使用解析后的目标路径（写穿透），链接本身保持不变。文件 link 的写穿透起点按三条路径确定：(1) 服务端 `REALPATH` 返回绝对路径时直接使用；(2) 返回相对路径（不符合 SFTP v3）时拒绝；(3) 服务端不支持 `REALPATH` 时退回 `readlink`，但 link target 含 `..`（无论相对还是绝对）一律拒绝。安全依据是「客户端不做 `..` 折叠，父路径由服务端解析」，不是「已经 canonicalize」。若 link 指向的目标又落在目录上，按目录打开；断链、环、无权限只报状态，不移动 pane。
 
 ## 9. 远程编辑

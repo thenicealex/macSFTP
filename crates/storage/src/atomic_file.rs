@@ -127,6 +127,28 @@ fn discard_temp_file(temp_path: &Path, failure: std::io::Error) -> AtomicWriteEr
     }
 }
 
+/// Append one line to an application-owned file without ever discarding what
+/// is already there.
+///
+/// The read, append, and atomic replace happen while holding the store's
+/// cross-process advisory lock, so two windows confirming an unknown host
+/// cannot each read the old file and overwrite the other's entry. The file is
+/// handled as bytes: a non-UTF-8 comment must not make the append unreadable.
+pub fn append_private_line_atomically(path: &Path, line: &str) -> std::io::Result<()> {
+    let _lock = crate::file_lock::FileLock::acquire(path)?;
+    let mut content = match std::fs::read(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error),
+    };
+    if content.last().is_some_and(|byte| *byte != b'\n') {
+        content.push(b'\n');
+    }
+    content.extend_from_slice(line.as_bytes());
+    content.push(b'\n');
+    write_private_file_atomically(path, &content)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,5 +236,39 @@ mod tests {
             "destination must keep its previous contents when the commit never happened"
         );
         std::fs::remove_dir_all(directory).expect("remove not-committed fixture directory");
+    }
+    #[test]
+    fn append_private_line_preserves_non_utf8_bytes_and_is_idempotent_per_call() {
+        let directory = temp_dir("append-line");
+        std::fs::create_dir_all(&directory).expect("create append fixture directory");
+        let path = directory.join("known_hosts");
+        let mut original = b"pinned.example ssh-ed25519 AAAA\n# caf".to_vec();
+        original.push(0xE9);
+        original.push(b'\n');
+        std::fs::write(&path, &original).expect("write fixture");
+
+        append_private_line_atomically(&path, "new.example ssh-ed25519 BBBB")
+            .expect("first append");
+        append_private_line_atomically(&path, "other.example ssh-ed25519 CCCC")
+            .expect("second append");
+
+        let written = std::fs::read(&path).expect("read appended file");
+        assert!(
+            written.starts_with(&original),
+            "existing bytes must survive verbatim"
+        );
+        assert!(
+            written.ends_with(b"new.example ssh-ed25519 BBBB\nother.example ssh-ed25519 CCCC\n")
+        );
+
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "appended trust data stays private");
+
+        std::fs::remove_dir_all(&directory).ok();
     }
 }

@@ -12,7 +12,7 @@ use macsftp_core::{
     RenameStrategy, ResidualTempRecord, SessionId, StartTransferCommand, TabId, Timestamp,
     TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferFailure, TransferId,
     TransferJob, TransferPlanId, TransferPlanProgress, TransferProgress, TransferSnapshot,
-    TransferState, TransferWarning, UserFacingError,
+    TransferState, TransferWarning, UserFacingError, is_bidi_or_control,
 };
 use russh::client;
 use russh_sftp::client::error::Error as SftpError;
@@ -779,28 +779,52 @@ impl RemoteSessionActor {
     }
 }
 
+pub(crate) fn sftp_status_guidance(error: &SftpError) -> &'static str {
+    match error {
+        SftpError::Status(status) => match status.status_code {
+            StatusCode::NoSuchFile => "The remote file or folder does not exist.",
+            StatusCode::PermissionDenied => "The server denied permission for this path.",
+            StatusCode::Failure => "The server reported an error processing this request.",
+            StatusCode::BadMessage => "The server received or sent an invalid SFTP message.",
+            StatusCode::NoConnection | StatusCode::ConnectionLost => {
+                "The SFTP connection was closed or lost."
+            }
+            StatusCode::OpUnsupported => "The server does not support this SFTP operation.",
+            _ => "Check the remote server status and permissions.",
+        },
+        _ => "The SFTP connection encountered a protocol or communication error.",
+    }
+}
+
 pub(crate) async fn open_transfer_sftp(
     handle: &client::Handle<crate::physical_connection::ClientHandler>,
 ) -> Result<SftpSession, UserFacingError> {
     let channel = handle.channel_open_session().await.map_err(|error| {
+        warn!(
+            target: "macsftp_sftp::transfer",
+            failure = crate::physical_connection::TransportFailureKind::from_russh_error(&error).as_str(),
+            "failed to open SSH session channel for transfer; technical detail redacted"
+        );
         transfer_error(
             ErrorCode::ChannelClosed,
             "Transfer Couldn’t Start",
             "The transfer connection couldn’t open. Reconnect and try again.",
-            error.to_string(),
+            "The SSH session channel could not be opened.",
         )
     })?;
-    channel
-        .request_subsystem(true, "sftp")
-        .await
-        .map_err(|error| {
-            transfer_error(
-                ErrorCode::ChannelClosed,
-                "Transfer Couldn’t Start",
-                "The server rejected the SFTP subsystem for this transfer.",
-                error.to_string(),
-            )
-        })?;
+    channel.request_subsystem(true, "sftp").await.map_err(|error| {
+        warn!(
+            target: "macsftp_sftp::transfer",
+            failure = crate::physical_connection::TransportFailureKind::from_russh_error(&error).as_str(),
+            "server rejected SFTP subsystem request for transfer; technical detail redacted"
+        );
+        transfer_error(
+            ErrorCode::ChannelClosed,
+            "Transfer Couldn’t Start",
+            "The server rejected the SFTP subsystem for this transfer.",
+            "The server rejected the SFTP subsystem.",
+        )
+    })?;
     let sftp_config = russh_sftp::client::Config {
         max_packet_len: 262144,
         max_concurrent_writes: 16,
@@ -808,12 +832,16 @@ pub(crate) async fn open_transfer_sftp(
     };
     SftpSession::new_with_config(channel.into_stream(), sftp_config)
         .await
-        .map_err(|error| {
+        .map_err(|_| {
+            warn!(
+                target: "macsftp_sftp::transfer",
+                "failed to initialize SFTP session for transfer"
+            );
             transfer_error(
                 ErrorCode::ChannelClosed,
                 "Transfer Couldn’t Start",
                 "The file transfer connection couldn’t start.",
-                error.to_string(),
+                "The file transfer session could not be initialized.",
             )
         })
 }
@@ -1143,7 +1171,7 @@ fn remote_planning_error(title: &str, error: &SftpError) -> UserFacingError {
         code,
         title,
         "Check the remote source and permissions, then try again.",
-        error.to_string(),
+        sftp_status_guidance(error),
     )
 }
 
@@ -1151,9 +1179,10 @@ fn local_download_destination(
     destination_root: &LocalPath,
     relative: &str,
 ) -> Result<LocalPath, UserFacingError> {
-    if Path::new(relative)
-        .components()
-        .any(|component| !matches!(component, Component::Normal(_)))
+    if relative.chars().any(is_bidi_or_control)
+        || Path::new(relative)
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
     {
         return Err(UserFacingError::new(
             ErrorCode::Unknown,
@@ -1429,7 +1458,7 @@ async fn directories_can_merge(
                     ErrorCode::Unknown,
                     "Server Folder Unavailable",
                     "The remote destination could not be checked. Try again.",
-                    error.to_string(),
+                    sftp_status_guidance(&error),
                 )),
             }
         }
@@ -1443,7 +1472,7 @@ async fn directories_can_merge(
                             ErrorCode::Unknown,
                             "Server Item Unavailable",
                             "The remote source could not be checked. Try again.",
-                            error.to_string(),
+                            sftp_status_guidance(&error),
                         )
                     })?;
             if source_metadata.file_type() != SftpFileType::Dir {
@@ -1505,7 +1534,7 @@ async fn destination_exists(
                 ErrorCode::Unknown,
                 "Server Destination Unavailable",
                 "The remote destination could not be checked. Try again.",
-                error.to_string(),
+                sftp_status_guidance(&error),
             )),
         },
         TransferEndpoint::Local(destination) => {
@@ -1732,7 +1761,7 @@ async fn verify_remote_hardlink(
             ErrorCode::Unknown,
             "Atomic upload is not supported",
             "The server could not verify the required atomic upload commit. Try again.",
-            error.to_string(),
+            sftp_status_guidance(&error),
         )),
     }
 }
@@ -1903,7 +1932,7 @@ async fn create_remote_directory(
                                 ErrorCode::Unknown,
                                 "Server Folder Creation Failed",
                                 "The remote directory could not be created. Check permissions and try again.",
-                                error.to_string(),
+                                sftp_status_guidance(&error),
                             )
                         })?;
                     }
@@ -1912,7 +1941,7 @@ async fn create_remote_directory(
                             ErrorCode::Unknown,
                             "Server Folder Creation Failed",
                             "The remote directory could not be created. Check permissions and try again.",
-                            error.to_string(),
+                            sftp_status_guidance(&error),
                         ));
                     }
                 }
@@ -1922,7 +1951,7 @@ async fn create_remote_directory(
                     ErrorCode::Unknown,
                     "Server Folder Unavailable",
                     "The remote destination could not be checked. Try again.",
-                    error.to_string(),
+                    sftp_status_guidance(&error),
                 ));
             }
         }
@@ -1935,7 +1964,6 @@ async fn download_symlink_raw(
     job: &TransferJob,
     event_tx: &flume::Sender<AppEvent>,
     cancel: &CancellationToken,
-    may_clear_destination: bool,
 ) -> Result<(), UserFacingError> {
     let (TransferEndpoint::Remote(source), TransferEndpoint::Local(destination)) =
         (&job.source, &job.destination)
@@ -1959,11 +1987,12 @@ async fn download_symlink_raw(
             ErrorCode::UnsupportedSymlink,
             "Server Link Unavailable",
             "The remote symlink target could not be read. Check server support and try again.",
-            error.to_string(),
+            sftp_status_guidance(&error),
         )
     })?;
+    validate_download_symlink_target(&target)?;
     if matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
-        remove_downloaded_file_destination(destination.as_str(), may_clear_destination).await?;
+        remove_downloaded_file_destination(destination.as_str()).await?;
     }
     ensure_local_parent_directory(destination, cancel).await?;
     tokio::fs::symlink(target, destination.as_str())
@@ -1998,11 +2027,11 @@ async fn download_single_file_pipelined(
                 ErrorCode::Unknown,
                 "Server File Unavailable",
                 "The remote file could not be read. Check permissions and try again.",
-                error.to_string(),
+                sftp_status_guidance(&error),
             )
         })?;
     if source_metadata.file_type() == SftpFileType::Symlink {
-        return download_symlink_raw(raw, job, event_tx, cancel, may_clear_destination).await;
+        return download_symlink_raw(raw, job, event_tx, cancel).await;
     }
     if source_metadata.file_type() == SftpFileType::Dir {
         return download_directory(
@@ -2047,7 +2076,7 @@ async fn download_single_file_pipelined(
                     ErrorCode::Unknown,
                     "Server File Unavailable",
                     "The remote file could not be opened. Check permissions and try again.",
-                    error.to_string(),
+                    sftp_status_guidance(&error),
                 )
             })?;
         let handle = handle_packet.handle;
@@ -2077,10 +2106,7 @@ async fn download_single_file_pipelined(
         cleanup_local_temp(&temporary_destination, event_tx, job.id, Some(job.id)).await;
         return Err(error);
     }
-    if matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
-        verify_local_hardlink(&temporary_destination, event_tx, job.id).await?;
-        remove_downloaded_file_destination(destination.as_str(), may_clear_destination).await?;
-    }
+    prepare_download_destination(job, destination, &temporary_destination, event_tx).await?;
     if let Err(error) = commit_local_temp(&temporary_destination, destination).await {
         cleanup_local_temp(&temporary_destination, event_tx, job.id, Some(job.id)).await;
         return Err(error);
@@ -2115,11 +2141,11 @@ async fn download_single_file(
                 ErrorCode::Unknown,
                 "Server File Unavailable",
                 "The remote file could not be read. Check permissions and try again.",
-                error.to_string(),
+                sftp_status_guidance(&error),
             )
         })?;
     if source_metadata.file_type() == SftpFileType::Symlink {
-        return download_symlink(sftp, job, event_tx, cancel, may_clear_destination).await;
+        return download_symlink(sftp, job, event_tx, cancel).await;
     }
     if source_metadata.file_type() == SftpFileType::Dir {
         return download_directory(
@@ -2161,7 +2187,7 @@ async fn download_single_file(
                 ErrorCode::Unknown,
                 "Server File Unavailable",
                 "The remote file could not be opened. Check permissions and try again.",
-                error.to_string(),
+                sftp_status_guidance(&error),
             )
         })?;
         let mut destination_file = tokio::fs::OpenOptions::new()
@@ -2185,16 +2211,41 @@ async fn download_single_file(
         cleanup_local_temp(&temporary_destination, event_tx, job.id, Some(job.id)).await;
         return Err(error);
     }
-    if matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
-        verify_local_hardlink(&temporary_destination, event_tx, job.id).await?;
-        remove_downloaded_file_destination(destination.as_str(), may_clear_destination).await?;
-    }
+    prepare_download_destination(job, destination, &temporary_destination, event_tx).await?;
     if let Err(error) = commit_local_temp(&temporary_destination, destination).await {
         cleanup_local_temp(&temporary_destination, event_tx, job.id, Some(job.id)).await;
         return Err(error);
     }
     cleanup_local_temp(&temporary_destination, event_tx, job.id, Some(job.id)).await;
     preserve_download_metadata(job, &source_metadata, event_tx).await;
+    Ok(())
+}
+
+/// Validate and clear the destination right before a downloaded temporary
+/// file is committed.
+///
+/// Both checks can fail after the temporary file has been written, so the
+/// temporary file is removed first: a leftover `.macsftp-part` would otherwise
+/// only be reclaimed by a later transfer to the same destination. Removing it
+/// also updates the residual-temp record, so the failed job leaves nothing
+/// behind.
+async fn prepare_download_destination(
+    job: &TransferJob,
+    destination: &LocalPath,
+    temporary_destination: &LocalPath,
+    event_tx: &flume::Sender<AppEvent>,
+) -> Result<(), UserFacingError> {
+    if !matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
+        return Ok(());
+    }
+    if let Err(error) = verify_local_hardlink(temporary_destination, event_tx, job.id).await {
+        cleanup_local_temp(temporary_destination, event_tx, job.id, Some(job.id)).await;
+        return Err(error);
+    }
+    if let Err(error) = remove_downloaded_file_destination(destination.as_str()).await {
+        cleanup_local_temp(temporary_destination, event_tx, job.id, Some(job.id)).await;
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -2272,7 +2323,7 @@ async fn upload_symlink(
                 ErrorCode::UnsupportedSymlink,
                 "Server Link Creation Failed",
                 "The remote symlink could not be created. Check server support and try again.",
-                error.to_string(),
+                sftp_status_guidance(&error),
             )
         })
 }
@@ -2282,7 +2333,6 @@ async fn download_symlink(
     job: &TransferJob,
     event_tx: &flume::Sender<AppEvent>,
     cancel: &CancellationToken,
-    may_clear_destination: bool,
 ) -> Result<(), UserFacingError> {
     let (TransferEndpoint::Remote(source), TransferEndpoint::Local(destination)) =
         (&job.source, &job.destination)
@@ -2302,11 +2352,12 @@ async fn download_symlink(
             ErrorCode::UnsupportedSymlink,
             "Server Link Unavailable",
             "The remote symlink target could not be read. Check server support and try again.",
-            error.to_string(),
+            sftp_status_guidance(&error),
         )
     })?;
+    validate_download_symlink_target(&target)?;
     if matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
-        remove_downloaded_file_destination(destination.as_str(), may_clear_destination).await?;
+        remove_downloaded_file_destination(destination.as_str()).await?;
     }
     ensure_local_parent_directory(destination, cancel).await?;
     tokio::fs::symlink(target, destination.as_str())
@@ -2358,7 +2409,7 @@ async fn remove_remote_destination(
             ErrorCode::Unknown,
             "Server File Replacement Failed",
             "The existing remote file could not be removed. Check permissions and try again.",
-            error.to_string(),
+            sftp_status_guidance(&error),
         )),
     }
 }
@@ -2377,20 +2428,20 @@ fn remote_destination_create_error(error: SftpError) -> UserFacingError {
         code,
         "Server File Creation Failed",
         "The remote destination already exists or could not be created. Refresh and try again.",
-        error.to_string(),
+        sftp_status_guidance(&error),
     )
 }
 
-/// Replace an existing file or symlink at `destination`. When this job does not
-/// own the destination tree, a directory at that path is refused instead of
-/// recursively deleted: it may hold output from children of a plan whose
-/// server item changed type between attempts (dir → file/symlink).
-async fn remove_downloaded_file_destination(
-    destination: &str,
-    may_clear_destination: bool,
-) -> Result<(), UserFacingError> {
-    if !may_clear_destination
-        && let Ok(metadata) = tokio::fs::symlink_metadata(destination).await
+/// Replace an existing file or symlink at `destination`.
+///
+/// A directory at that path is always refused, never recursively deleted. The
+/// plan-root clear permission (`may_clear_destination`) exists so a *folder*
+/// download can own its destination tree; it must not authorize a *file* or
+/// *link* job to delete an unrelated local directory that merely shares the
+/// name. The conflict modal only reports "A file with this name already
+/// exists", so proceeding would delete data the user never agreed to lose.
+async fn remove_downloaded_file_destination(destination: &str) -> Result<(), UserFacingError> {
+    if let Ok(metadata) = tokio::fs::symlink_metadata(destination).await
         && metadata.is_dir()
     {
         return Err(UserFacingError::new(
@@ -2464,9 +2515,26 @@ async fn preserve_download_metadata(
             {
                 use std::os::unix::fs::PermissionsExt;
 
+                let is_dir = source_metadata.file_type() == SftpFileType::Dir
+                    || tokio::fs::metadata(destination.as_str())
+                        .await
+                        .map(|m| m.is_dir())
+                        .unwrap_or(false);
+                // Strip special bits (SUID 0o4000, SGID 0o2000, sticky 0o1000)
+                // to prevent privilege escalation or security risks.
+                let safe_permissions = permissions & 0o777;
+                let mode = if is_dir {
+                    // OpenSSH/POSIX sftp semantics: directories must retain
+                    // owner read/write/execute (0o700) so files inside them
+                    // can be written during download and manipulated locally.
+                    safe_permissions | 0o700
+                } else {
+                    safe_permissions
+                };
+
                 tokio::fs::set_permissions(
                     destination.as_str(),
-                    std::fs::Permissions::from_mode(permissions),
+                    std::fs::Permissions::from_mode(mode),
                 )
                 .await?;
             }
@@ -2719,7 +2787,7 @@ fn read_directory_error(error: &SftpError) -> UserFacingError {
         ),
     };
     let mut user_error = UserFacingError::new(code, title, message).with_retryable(true);
-    user_error.detail = Some(error.to_string());
+    user_error.detail = Some(sftp_status_guidance(error).to_string());
     user_error
 }
 
@@ -2816,7 +2884,7 @@ fn remote_fs_error(title: &str, error: &SftpError) -> UserFacingError {
         "Check the server path and permissions, then try again.",
     )
     .with_retryable(true);
-    user_error.detail = Some(error.to_string());
+    user_error.detail = Some(sftp_status_guidance(error).to_string());
     user_error
 }
 
@@ -3041,6 +3109,22 @@ fn target_escapes_through_parent(target: &str) -> bool {
     target.split('/').any(|component| component == "..")
 }
 
+fn validate_download_symlink_target(target: &str) -> Result<(), UserFacingError> {
+    if target.is_empty()
+        || target.starts_with('/')
+        || target.starts_with('\\')
+        || target.contains('\\')
+        || target_escapes_through_parent(target)
+    {
+        return Err(UserFacingError::new(
+            ErrorCode::UnsupportedSymlink,
+            "Unsafe Link Target",
+            "The remote symlink target cannot be recreated safely inside the download folder.",
+        ));
+    }
+    Ok(())
+}
+
 fn unresolvable_link_error() -> UserFacingError {
     UserFacingError::new(
         ErrorCode::UnsupportedSymlink,
@@ -3076,9 +3160,10 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        TransferQueue, local_download_destination, local_temporary_path, read_directory_error,
+        TransferQueue, local_download_destination, local_temporary_path,
+        prepare_download_destination, read_directory_error, remote_fs_error, remote_planning_error,
         remote_temporary_path, rename_destination, target_escapes_through_parent,
-        write_through_start,
+        validate_download_symlink_target, write_through_start,
     };
 
     #[test]
@@ -3137,6 +3222,26 @@ mod tests {
         assert!(!target_escapes_through_parent("/opt/shared/app.conf"));
         // A component that merely starts with dots is not traversal.
         assert!(!target_escapes_through_parent("..notes/app.conf"));
+    }
+
+    #[test]
+    fn download_symlink_rejects_unsafe_targets() {
+        assert!(validate_download_symlink_target("").is_err());
+        assert!(validate_download_symlink_target("/etc/passwd").is_err());
+        assert!(validate_download_symlink_target("/Users/alex").is_err());
+        assert!(validate_download_symlink_target("../outside").is_err());
+        assert!(validate_download_symlink_target("sub/../../secret").is_err());
+        assert!(validate_download_symlink_target(r"C:\Windows\System32").is_err());
+        assert!(validate_download_symlink_target(r"sub\..\secret").is_err());
+
+        let err = validate_download_symlink_target("/etc/passwd")
+            .expect_err("absolute target must be rejected");
+        assert_eq!(err.code, ErrorCode::UnsupportedSymlink);
+        assert_eq!(err.title, "Unsafe Link Target");
+
+        assert!(validate_download_symlink_target("sibling.txt").is_ok());
+        assert!(validate_download_symlink_target("sub/file.txt").is_ok());
+        assert!(validate_download_symlink_target("version.1.0").is_ok());
     }
 
     fn queue_job(id: u64, direction: TransferDirection) -> TransferJob {
@@ -3264,39 +3369,40 @@ mod tests {
         path
     }
 
+    /// A file or link download must never recursively delete a local directory,
+    /// not even as the plan root. The destination-clear permission exists for
+    /// folder-over-folder plans; a root *file* job that finds a directory at
+    /// its destination used to `remove_dir_all` an unrelated local tree while
+    /// the conflict modal only said "A file with this name already exists".
     #[tokio::test]
-    async fn file_download_refuses_to_delete_a_directory_without_clear_permission() {
+    async fn file_download_refuses_to_delete_a_directory_even_as_plan_root() {
         let dir = unique_test_dir("file-over-directory");
         let nested = dir.join("nested");
         std::fs::create_dir_all(&nested).expect("nested directory must be created");
         std::fs::write(nested.join("keep.txt"), b"keep").expect("child output must be written");
         let destination = dir.to_string_lossy().to_string();
 
-        let error = super::remove_downloaded_file_destination(&destination, false)
+        let error = super::remove_downloaded_file_destination(&destination)
             .await
-            .expect_err("a job without clear permission must not delete a directory");
+            .expect_err("a file download must not delete a directory tree");
         assert_eq!(error.title, "Destination Changed Type");
         assert!(
             nested.join("keep.txt").exists(),
-            "completed child output must survive the refused replacement"
+            "unrelated local files must survive the refused replacement"
         );
-
-        super::remove_downloaded_file_destination(&destination, true)
-            .await
-            .expect("the plan root may clear the tree");
-        assert!(!dir.exists(), "the root clears the destination tree");
+        assert!(dir.exists(), "the directory itself must survive");
     }
 
     #[tokio::test]
-    async fn file_download_replaces_a_file_without_clear_permission() {
+    async fn file_download_replaces_an_existing_file() {
         let dir = unique_test_dir("file-over-file");
         let destination = dir.join("item.txt");
         std::fs::write(&destination, b"old").expect("existing file must be written");
         let destination = destination.to_string_lossy().to_string();
 
-        super::remove_downloaded_file_destination(&destination, false)
+        super::remove_downloaded_file_destination(&destination)
             .await
-            .expect("an existing file may be replaced by a nested job");
+            .expect("an existing file is replaced");
         assert!(!std::path::Path::new(&destination).exists());
     }
 
@@ -3325,6 +3431,56 @@ mod tests {
         assert_eq!(error.code, ErrorCode::PermissionDenied);
         assert_eq!(error.title, "Permission denied");
         assert!(error.retryable);
+    }
+
+    #[test]
+    fn read_directory_error_redacts_untrusted_server_error_messages() {
+        let malicious_error = SftpError::Status(Status {
+            id: 1,
+            status_code: StatusCode::PermissionDenied,
+            error_message: "MALICIOUS SERVER PAYLOAD: run sudo rm -rf /".to_string(),
+            language_tag: "en".to_string(),
+        });
+        let error = read_directory_error(&malicious_error);
+        let detail = error.detail.unwrap_or_default();
+        assert!(!detail.contains("MALICIOUS SERVER PAYLOAD"));
+        assert!(!detail.contains("sudo rm -rf"));
+        assert!(!detail.contains("Status {"));
+        assert_eq!(detail, "The server denied permission for this path.");
+    }
+
+    #[test]
+    fn remote_fs_error_redacts_untrusted_server_error_messages() {
+        let malicious_error = SftpError::Status(Status {
+            id: 1,
+            status_code: StatusCode::Failure,
+            error_message: "MALICIOUS SERVER PAYLOAD: visit http://phishing.example".to_string(),
+            language_tag: "en".to_string(),
+        });
+        let error = remote_fs_error("Item Couldn’t Be Deleted", &malicious_error);
+        let detail = error.detail.unwrap_or_default();
+        assert!(!detail.contains("MALICIOUS SERVER PAYLOAD"));
+        assert!(!detail.contains("phishing.example"));
+        assert!(!detail.contains("Status {"));
+        assert_eq!(
+            detail,
+            "The server reported an error processing this request."
+        );
+    }
+
+    #[test]
+    fn remote_planning_error_redacts_untrusted_server_error_messages() {
+        let malicious_error = SftpError::Status(Status {
+            id: 1,
+            status_code: StatusCode::NoSuchFile,
+            error_message: "MALICIOUS SERVER PAYLOAD".to_string(),
+            language_tag: "en".to_string(),
+        });
+        let error = remote_planning_error("Download Planning Failed", &malicious_error);
+        let detail = error.detail.unwrap_or_default();
+        assert!(!detail.contains("MALICIOUS SERVER PAYLOAD"));
+        assert!(!detail.contains("Status {"));
+        assert_eq!(detail, "The remote file or folder does not exist.");
     }
 
     #[test]
@@ -3360,6 +3516,21 @@ mod tests {
     }
 
     #[test]
+    fn directory_download_rejects_bidi_and_control_characters() {
+        let error =
+            local_download_destination(&LocalPath::new("/tmp/downloads"), "evil\u{202E}txt.exe")
+                .expect_err("bidi override must be rejected");
+
+        assert_eq!(error.title, "Download Preparation Failed");
+
+        let error_ctrl =
+            local_download_destination(&LocalPath::new("/tmp/downloads"), "evil\x00file")
+                .expect_err("control characters must be rejected");
+
+        assert_eq!(error_ctrl.title, "Download Preparation Failed");
+    }
+
+    #[test]
     fn temporary_paths_are_hidden_and_unique_per_transfer() {
         assert_eq!(
             remote_temporary_path(&RemotePath::new("/srv/report.txt"), TransferId(4)).as_str(),
@@ -3369,5 +3540,197 @@ mod tests {
             local_temporary_path(&LocalPath::new("/tmp/report.txt"), TransferId(5)).as_str(),
             "/tmp/.report.txt.macsftp-part-5"
         );
+    }
+
+    /// A destination that turned out to be a directory is refused after the
+    /// temporary file exists. The failed job must not leave that file behind
+    /// for a later transfer to find.
+    #[tokio::test]
+    async fn refused_destination_removes_the_downloaded_temporary_file() {
+        let dir = unique_test_dir("refused-destination-temp");
+        let destination = dir.join("target");
+        std::fs::create_dir_all(&destination).expect("destination directory created");
+        let temporary = dir.join(".target.macsftp-part-9");
+        std::fs::write(&temporary, b"downloaded bytes").expect("temporary file written");
+
+        let job = TransferJob {
+            id: TransferId(9),
+            direction: TransferDirection::Download,
+            source: TransferEndpoint::Remote(RemotePath::new("/remote/target")),
+            destination: TransferEndpoint::Local(LocalPath::new(
+                destination.to_string_lossy().to_string(),
+            )),
+            state: TransferState::Queued,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: ConflictPolicy::OverwriteAll,
+            warnings: Vec::new(),
+            created_at: Timestamp::from_secs_since_epoch(0),
+        };
+        let (event_tx, _event_rx) = flume::bounded(8);
+
+        let error = prepare_download_destination(
+            &job,
+            &LocalPath::new(destination.to_string_lossy().to_string()),
+            &LocalPath::new(temporary.to_string_lossy().to_string()),
+            &event_tx,
+        )
+        .await
+        .expect_err("a directory destination must be refused");
+
+        assert!(error.message.contains("directory") || error.title.contains("Changed Type"));
+        assert!(
+            !temporary.exists(),
+            "the temporary file must not outlive the refused job"
+        );
+        assert!(
+            destination.is_dir(),
+            "the existing directory must be untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn directory_download_metadata_preserves_owner_permissions_for_read_only_remote_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = unique_test_dir("read-only-dir-download");
+        let dest = dir.join("readonly_folder");
+        std::fs::create_dir_all(&dest).expect("folder created");
+
+        let job = TransferJob {
+            id: TransferId(1),
+            direction: TransferDirection::Download,
+            source: TransferEndpoint::Remote(RemotePath::new("/remote/readonly_folder")),
+            destination: TransferEndpoint::Local(LocalPath::new(
+                dest.to_string_lossy().to_string(),
+            )),
+            state: TransferState::Queued,
+            metadata_policy: MetadataPolicy {
+                preserve_permissions: true,
+                preserve_mtime: false,
+                ..MetadataPolicy::default()
+            },
+            conflict_policy: ConflictPolicy::Ask,
+            warnings: Vec::new(),
+            created_at: Timestamp::from_secs_since_epoch(1),
+        };
+
+        let mut source_metadata = russh_sftp::protocol::FileAttributes::empty();
+        source_metadata.permissions = Some(0o555);
+
+        let (event_tx, _event_rx) = flume::bounded(10);
+        super::preserve_download_metadata(&job, &source_metadata, &event_tx).await;
+
+        let meta = std::fs::metadata(&dest).expect("metadata");
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(
+            mode & 0o700,
+            0o700,
+            "downloaded directory must retain owner rwx permissions (got {mode:o})"
+        );
+
+        let child = dest.join("child.txt");
+        std::fs::write(&child, b"hello")
+            .expect("must be able to write child in downloaded directory");
+    }
+
+    #[tokio::test]
+    async fn file_download_metadata_strips_setuid_setgid_sticky_bits() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("macsftp-download-mode-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let file_path = temp_dir.join("test_file.bin");
+        std::fs::write(&file_path, b"data").expect("write file");
+
+        let job = TransferJob {
+            id: TransferId(2),
+            direction: TransferDirection::Download,
+            source: TransferEndpoint::Remote(RemotePath::new("/remote/test_file.bin")),
+            destination: TransferEndpoint::Local(LocalPath::new(
+                file_path.to_string_lossy().to_string(),
+            )),
+            state: TransferState::Queued,
+            metadata_policy: MetadataPolicy {
+                preserve_permissions: true,
+                preserve_mtime: false,
+                ..MetadataPolicy::default()
+            },
+            conflict_policy: ConflictPolicy::Ask,
+            warnings: Vec::new(),
+            created_at: Timestamp::from_secs_since_epoch(1),
+        };
+
+        let mut source_metadata = russh_sftp::protocol::FileAttributes::empty();
+        // Server sends SUID + SGID + sticky bits (0o7755)
+        source_metadata.permissions = Some(0o7755);
+
+        let (event_tx, _event_rx) = flume::bounded(10);
+        super::preserve_download_metadata(&job, &source_metadata, &event_tx).await;
+
+        let meta = std::fs::metadata(&file_path).expect("metadata");
+        let full_mode = meta.permissions().mode();
+        assert_eq!(
+            full_mode & 0o7000,
+            0,
+            "downloaded file must have special bits (SUID/SGID/sticky) stripped (got mode {full_mode:o})"
+        );
+        assert_eq!(full_mode & 0o777, 0o755);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn directory_download_metadata_strips_setuid_setgid_sticky_bits() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "macsftp-download-dir-mode-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let dir_path = temp_dir.join("test_dir");
+        std::fs::create_dir(&dir_path).expect("create test dir");
+
+        let job = TransferJob {
+            id: TransferId(3),
+            direction: TransferDirection::Download,
+            source: TransferEndpoint::Remote(RemotePath::new("/remote/test_dir")),
+            destination: TransferEndpoint::Local(LocalPath::new(
+                dir_path.to_string_lossy().to_string(),
+            )),
+            state: TransferState::Queued,
+            metadata_policy: MetadataPolicy {
+                preserve_permissions: true,
+                preserve_mtime: false,
+                ..MetadataPolicy::default()
+            },
+            conflict_policy: ConflictPolicy::Ask,
+            warnings: Vec::new(),
+            created_at: Timestamp::from_secs_since_epoch(1),
+        };
+
+        let mut source_metadata = russh_sftp::protocol::FileAttributes::empty();
+        source_metadata.permissions = Some(0o7555);
+
+        let (event_tx, _event_rx) = flume::bounded(10);
+        super::preserve_download_metadata(&job, &source_metadata, &event_tx).await;
+
+        let meta = std::fs::metadata(&dir_path).expect("metadata");
+        let full_mode = meta.permissions().mode();
+        assert_eq!(
+            full_mode & 0o7000,
+            0,
+            "downloaded dir must have special bits (SUID/SGID/sticky) stripped (got mode {full_mode:o})"
+        );
+        assert_eq!(
+            full_mode & 0o777,
+            0o755,
+            "directory retains safe permissions with owner rwx (got mode {full_mode:o})"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

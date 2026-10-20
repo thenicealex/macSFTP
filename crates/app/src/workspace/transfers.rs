@@ -84,10 +84,13 @@ impl crate::workspace::Workspace {
             cx.notify();
             return;
         }
-        let Some(destination) = append_local_name(&local_directory, &sources[0]) else {
-            self.status_message = Some("The selected download item has no usable name.".into());
-            cx.notify();
-            return;
+        let destination = match append_local_name(&local_directory, &sources[0]) {
+            Ok(destination) => destination,
+            Err(message) => {
+                self.status_message = Some(message.into());
+                cx.notify();
+                return;
+            }
         };
         let tab_id = tab.id;
         let metadata_policy = cx.resources().config.config().metadata_policy.clone();

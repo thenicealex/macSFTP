@@ -293,7 +293,7 @@ impl client::Handler for ClientHandler {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TransportFailureKind {
+pub(crate) enum TransportFailureKind {
     LocalNetworkPermissionDenied,
     ConnectionRefused,
     TimedOut,
@@ -303,7 +303,7 @@ enum TransportFailureKind {
 }
 
 impl TransportFailureKind {
-    fn from_russh_error(error: &russh::Error) -> Self {
+    pub(crate) fn from_russh_error(error: &russh::Error) -> Self {
         match error {
             russh::Error::IO(error) => match error.kind() {
                 std::io::ErrorKind::PermissionDenied => Self::LocalNetworkPermissionDenied,
@@ -330,7 +330,7 @@ impl TransportFailureKind {
         }
     }
 
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::LocalNetworkPermissionDenied => "local_network_permission_denied",
             Self::ConnectionRefused => "connection_refused",

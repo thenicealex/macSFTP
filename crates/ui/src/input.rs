@@ -14,6 +14,11 @@ use zeroize::Zeroize;
 
 use crate::theme::ActiveTheme;
 
+/// Check whether a character is an ASCII/Unicode control character or a
+/// Unicode bidirectional formatting control (e.g. RTL/LTR overrides, isolates).
+/// These characters can visually spoof filenames or mask extensions.
+pub use macsftp_core::is_bidi_or_control;
+
 /// Retains Base editing state while the caller owns the authoritative draft.
 /// Programmatic draft changes synchronize only when text differs, preserving
 /// selection, undo history, and IME composition through unrelated redraws.
@@ -344,8 +349,8 @@ impl InputState {
     }
 
     pub fn insert(&mut self, text: &str) {
-        // Single-line field: strip newlines from pasted text.
-        let mut sanitized: String = text.chars().filter(|ch| !ch.is_control()).collect();
+        // Single-line field: strip control and bidi formatting characters.
+        let mut sanitized: String = text.chars().filter(|ch| !is_bidi_or_control(*ch)).collect();
         self.replace_range(self.cursor..self.cursor, &sanitized);
         self.cursor += sanitized.len();
         sanitized.zeroize();
@@ -394,7 +399,7 @@ impl InputState {
                 InputKeyResult::Handled
             }
             _ => match &keystroke.key_char {
-                Some(key_char) if !key_char.chars().any(char::is_control) => {
+                Some(key_char) if !key_char.chars().any(is_bidi_or_control) => {
                     self.insert(key_char.clone().as_str());
                     InputKeyResult::Handled
                 }
@@ -666,6 +671,17 @@ mod tests {
         let mut input = InputState::new();
         input.insert("host\n.example\t.com");
         assert_eq!(input.value(), "host.example.com");
+    }
+
+    #[test]
+    fn paste_strips_bidi_override_characters() {
+        let mut input = InputState::new();
+        input.insert("evil\u{202E}txt.exe");
+        assert_eq!(input.value(), "eviltxt.exe");
+
+        let mut input2 = InputState::new();
+        input2.insert("report\u{2067}final\u{2069}.pdf");
+        assert_eq!(input2.value(), "reportfinal.pdf");
     }
 
     #[test]
