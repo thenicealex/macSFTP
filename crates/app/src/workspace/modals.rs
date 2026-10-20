@@ -1032,7 +1032,7 @@ impl crate::workspace::Workspace {
         )
     }
 
-    fn handle_keyboard_interactive_key(
+    pub(crate) fn handle_keyboard_interactive_key(
         &mut self,
         event: &KeyDownEvent,
         window: &mut Window,
@@ -1063,6 +1063,16 @@ impl crate::workspace::Workspace {
                 as usize;
             cx.stop_propagation();
             cx.notify();
+            return;
+        }
+        if keystroke.modifiers.platform && keystroke.key == "v" {
+            if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text())
+                && let Some(input) = inputs.inputs.get_mut(inputs.focused_index)
+            {
+                input.state_mut().insert(&text);
+                cx.stop_propagation();
+                cx.notify();
+            }
             return;
         }
         if let Some(input) = inputs.inputs.get_mut(inputs.focused_index)

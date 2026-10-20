@@ -737,21 +737,16 @@ impl RemoteEventScope {
 pub struct AppState {
     pub tabs: TabStore,
     pub modals: ModalStore,
-    /// Monotonic source for `SessionId`s. Session identity is allocated
-    /// here (UI side) at connect time and carried in `ConnectCommand`,
-    /// so remote events can be correlated against the tab's epoch.
-    next_session_id: u64,
+    // Deliberately no `SessionId` counter: `AppState` is per window, and a
+    // `SessionId` also forms a manual connection's pool identity. A
+    // per-window counter would hand two windows the same id and silently
+    // reuse one authenticated physical SSH connection across independent
+    // credentials. The process-wide allocator lives in the app resources.
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Allocate the next unique session id for a connection attempt.
-    pub fn allocate_session_id(&mut self) -> SessionId {
-        self.next_session_id += 1;
-        SessionId(self.next_session_id)
     }
 
     /// Single entry point for the GPUI event drain task to check
@@ -4301,14 +4296,6 @@ mod tests {
 
         assert_eq!(entries[0].path.as_str(), "/srv/a/same.txt");
         assert_eq!(entries[1].path.as_str(), "/srv/b/same.txt");
-    }
-
-    #[test]
-    fn session_ids_allocate_monotonically() {
-        let mut state = AppState::new();
-        assert_eq!(state.allocate_session_id(), SessionId(1));
-        assert_eq!(state.allocate_session_id(), SessionId(2));
-        assert_eq!(state.allocate_session_id(), SessionId(3));
     }
 
     #[test]
