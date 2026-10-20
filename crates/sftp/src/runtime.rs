@@ -985,21 +985,53 @@ async fn command_dispatch_loop(
                 };
                 std::mem::drop(tokio::spawn(async move {
                     let planning_result = planning_task.await;
-                    if let Ok(mut cancellations) = cancellations.lock() {
-                        cancellations.remove(&root_job_id);
-                    }
                     let Ok(Some(jobs)) = planning_result else {
+                        // The planner normally reports its own failure or
+                        // cancellation. Emitting here as well is safe (the
+                        // store ignores a second terminal event) and covers the
+                        // case where planning returned without an event while
+                        // the user had already cancelled.
+                        if take_planning_guard(
+                            &cancellations,
+                            root_job_id,
+                            &planning_cancel_after_task,
+                        ) {
+                            emit_plan_cancelled(&terminal_event_tx, plan_id).await;
+                        }
                         if planning_cancel_after_task.is_cancelled()
                             && let Ok(mut retries) = retries.lock()
                         {
                             retries.remove(&root_job_id);
                         }
+                        forget_plan_cancellations(&manager_tx, plan_id).await;
                         return;
                     };
                     if let Ok(mut retries) = retries.lock() {
                         retries.remove(&root_job_id);
                     }
+                    // Fast path for a cancel that arrived while planning was
+                    // still finishing: it must win before any handoff work,
+                    // including the handoff failure paths below.
+                    if planning_cancel_after_task.is_cancelled() {
+                        take_planning_guard(
+                            &cancellations,
+                            root_job_id,
+                            &planning_cancel_after_task,
+                        );
+                        emit_plan_cancelled(&terminal_event_tx, plan_id).await;
+                        forget_plan_cancellations(&manager_tx, plan_id).await;
+                        return;
+                    }
                     let Some(connection_rx) = transfer_connection_rx else {
+                        if take_planning_guard(
+                            &cancellations,
+                            root_job_id,
+                            &planning_cancel_after_task,
+                        ) {
+                            emit_plan_cancelled(&terminal_event_tx, plan_id).await;
+                            forget_plan_cancellations(&manager_tx, plan_id).await;
+                            return;
+                        }
                         fail_planned_jobs(
                             &terminal_event_tx,
                             jobs,
@@ -1008,27 +1040,92 @@ async fn command_dispatch_loop(
                             ),
                         )
                         .await;
+                        forget_plan_cancellations(&manager_tx, plan_id).await;
                         return;
                     };
-                    let Ok(connection) = connection_rx.await else {
-                        fail_planned_jobs(
-                            &terminal_event_tx,
-                            jobs,
-                            transfer_handoff_error(
-                                "The connection closed. Reconnect and try again.",
-                            ),
-                        )
-                        .await;
-                        return;
+                    let connection = tokio::select! {
+                        _ = planning_cancel_after_task.cancelled() => {
+                            take_planning_guard(
+                                &cancellations,
+                                root_job_id,
+                                &planning_cancel_after_task,
+                            );
+                            emit_plan_cancelled(&terminal_event_tx, plan_id).await;
+                            forget_plan_cancellations(&manager_tx, plan_id).await;
+                            return;
+                        }
+                        res = connection_rx => match res {
+                            Ok(connection) => connection,
+                            Err(_) => {
+                                if take_planning_guard(
+                                    &cancellations,
+                                    root_job_id,
+                                    &planning_cancel_after_task,
+                                ) {
+                                    emit_plan_cancelled(&terminal_event_tx, plan_id).await;
+                                    forget_plan_cancellations(&manager_tx, plan_id).await;
+                                    return;
+                                }
+                                fail_planned_jobs(
+                                    &terminal_event_tx,
+                                    jobs,
+                                    transfer_handoff_error(
+                                        "The connection closed. Reconnect and try again.",
+                                    ),
+                                )
+                                .await;
+                                forget_plan_cancellations(&manager_tx, plan_id).await;
+                                return;
+                            }
+                        }
                     };
-                    if let Err(error) = manager_tx
+                    // The guard stays in `planning_cancellations` until the
+                    // manager has accepted the enqueue. A cancel that arrives
+                    // during the handoff therefore cannot fall through to the
+                    // "unknown transfer" branch while the jobs are still on
+                    // their way; it cancels the token, and the check below
+                    // turns that into a plan-level cancellation.
+                    let enqueue = manager_tx
                         .send_async(TransferManagerRequest::Enqueue {
                             connection,
                             plan_id,
                             jobs,
                         })
-                        .await
-                    {
+                        .await;
+                    let cancelled = take_planning_guard(
+                        &cancellations,
+                        root_job_id,
+                        &planning_cancel_after_task,
+                    );
+                    if cancelled {
+                        match enqueue {
+                            // The manager owns the plan now. It decides
+                            // whether anything is still cancellable, so a
+                            // cancel that lost the race with completion does
+                            // not rewrite a finished plan.
+                            Ok(()) => {
+                                if let Err(error) = manager_tx
+                                    .send_async(TransferManagerRequest::CancelPlan { plan_id })
+                                    .await
+                                {
+                                    warn!(
+                                        error = %error,
+                                        plan_id = plan_id.0,
+                                        "plan cancellation could not reach transfer manager"
+                                    );
+                                }
+                            }
+                            // Nothing reached the manager, so no job can have
+                            // run: report the cancellation directly. Records
+                            // from earlier child cancels still need reclaiming.
+                            Err(_) => {
+                                emit_plan_cancelled(&terminal_event_tx, plan_id).await;
+                                forget_plan_cancellations(&manager_tx, plan_id).await;
+                            }
+                        }
+                        return;
+                    }
+                    if let Err(error) = enqueue {
                         warn!(error = %error, "planned transfer could not reach transfer manager");
                         if let TransferManagerRequest::Enqueue { jobs, .. } = error.0 {
                             fail_planned_jobs(
@@ -1040,21 +1137,38 @@ async fn command_dispatch_loop(
                             )
                             .await;
                         }
+                        forget_plan_cancellations(&manager_tx, plan_id).await;
                     }
                 }));
             }
 
-            Ok(AppCommand::CancelTransfer { transfer_id }) => {
-                let planning_cancel = planning_cancellations
-                    .lock()
-                    .ok()
-                    .and_then(|cancellations| cancellations.get(&transfer_id).cloned());
-                if let Some(cancel) = planning_cancel {
-                    cancel.cancel();
+            Ok(AppCommand::CancelTransfer {
+                transfer_id,
+                plan_id,
+            }) => {
+                // Cancel the planning token while still holding the map lock.
+                // The planner re-checks the token under the same lock right
+                // before it releases its guard, so either it observes this
+                // cancel and cancels the whole plan, or it has already
+                // released the guard and the manager (which by then has the
+                // enqueue) treats a cancel of the plan root as a plan cancel.
+                let planning_cancel =
+                    planning_cancellations
+                        .lock()
+                        .ok()
+                        .and_then(|cancellations| {
+                            let cancel = cancellations.get(&transfer_id)?;
+                            cancel.cancel();
+                            Some(())
+                        });
+                if planning_cancel.is_some() {
                     continue;
                 }
                 if let Err(error) = transfer_manager_tx
-                    .send_async(TransferManagerRequest::Cancel { transfer_id })
+                    .send_async(TransferManagerRequest::Cancel {
+                        transfer_id,
+                        plan_id,
+                    })
                     .await
                 {
                     warn!(
@@ -1165,6 +1279,71 @@ impl ProgressThrottle {
 /// retryable would present a dead Retry control in the UI.
 fn transfer_handoff_error(detail: &'static str) -> UserFacingError {
     UserFacingError::new(ErrorCode::ChannelClosed, "Transfer Couldn’t Start", detail)
+}
+
+/// Release the planning guard for `root_job_id` and report whether a cancel
+/// arrived before the handoff completed.
+///
+/// The token is read under the same lock that owns the guard, so a cancel
+/// either finds the guard and sets the token (observed here), or runs after
+/// the guard is gone and reaches the manager instead. Without that pairing a
+/// cancel could slip between the check and the removal and be lost entirely.
+fn take_planning_guard(
+    cancellations: &Mutex<HashMap<TransferId, CancellationToken>>,
+    root_job_id: TransferId,
+    cancel: &CancellationToken,
+) -> bool {
+    let mut cancellations = match cancellations.lock() {
+        Ok(cancellations) => cancellations,
+        Err(poisoned) => {
+            warn!(
+                transfer_id = root_job_id.0,
+                "planning cancellation guard lock was poisoned"
+            );
+            poisoned.into_inner()
+        }
+    };
+    cancellations.remove(&root_job_id);
+    cancel.is_cancelled()
+}
+
+/// Tell the transfer manager to drop pre-enqueue cancellation records for a
+/// plan that will never be enqueued.
+///
+/// A child row is published while planning is still running, so cancelling it
+/// records a tombstone in the manager before the plan exists there. If planning
+/// then fails or the plan is cancelled during the handoff, no enqueue ever
+/// arrives and nothing would consume that record.
+async fn forget_plan_cancellations(
+    manager_tx: &flume::Sender<TransferManagerRequest>,
+    plan_id: TransferPlanId,
+) {
+    if let Err(error) = manager_tx
+        .send_async(TransferManagerRequest::ForgetPlan { plan_id })
+        .await
+    {
+        warn!(
+            error = %error,
+            plan_id = plan_id.0,
+            "plan cancellation cleanup could not reach transfer manager"
+        );
+    }
+}
+
+/// Report a cancelled plan exactly once. A send failure means the GPUI event
+/// channel is gone, so nothing can be displayed anymore; log it instead of
+/// hiding the failure behind `let _ =`.
+async fn emit_plan_cancelled(event_tx: &flume::Sender<AppEvent>, plan_id: TransferPlanId) {
+    if let Err(error) = event_tx
+        .send_async(AppEvent::TransferPlanCancelled { plan_id })
+        .await
+    {
+        warn!(
+            error = %error,
+            plan_id = plan_id.0,
+            "plan cancellation event dropped"
+        );
+    }
 }
 
 /// Emit one `TransferFailed` per planned job after a post-planning handoff
@@ -1862,6 +2041,77 @@ mod tests {
                 AppEvent::TransferPlanCompleted { plan_id: completed_plan_id }
                     if completed_plan_id == plan_id
             ));
+        });
+
+        controller.shutdown();
+        std::fs::remove_file(&fixture_path).expect("remove planning fixture");
+    }
+
+    #[test]
+    fn cancelling_transfer_plan_stops_handoff_and_emits_plan_cancelled() {
+        let fixture_path = std::env::temp_dir().join(format!(
+            "macsftp-runtime-cancel-handoff-{}",
+            std::process::id()
+        ));
+        std::fs::write(&fixture_path, b"cancel me").expect("write planning fixture");
+
+        let mut controller = RuntimeController::start_mock(RuntimeBridgeConfig::default());
+        let client = controller.client();
+        let mut events = controller
+            .take_event_receiver()
+            .expect("event receiver should be available once");
+
+        controller.runtime().block_on(async {
+            client
+                .try_send(AppCommand::StartTransfer(StartTransferCommand {
+                    tab_id: TabId(1),
+                    session_epoch: 1,
+                    profile_id: ProfileId(1),
+                    direction: TransferDirection::Upload,
+                    sources: vec![TransferEndpoint::Local(LocalPath::new(
+                        fixture_path.display().to_string(),
+                    ))],
+                    destination: TransferEndpoint::Remote(RemotePath::new("/uploads/cancel.txt")),
+                    metadata_policy: MetadataPolicy::default(),
+                    conflict_policy: ConflictPolicy::default(),
+                }))
+                .expect("start transfer should send");
+
+            let started = recv_timeout(&mut events, "TransferPlanStarted").await;
+            let (plan_id, root_job_id) = match started {
+                AppEvent::TransferPlanStarted(snapshot) => (snapshot.plan.id, snapshot.root_job.id),
+                other => panic!("expected TransferPlanStarted, got {other:?}"),
+            };
+
+            // Cancel the plan by its root job id
+            client
+                .try_send(AppCommand::CancelTransfer {
+                    transfer_id: root_job_id,
+                    plan_id: Some(plan_id),
+                })
+                .expect("cancel should send");
+
+            let mut seen_cancelled = false;
+            while let Ok(Some(event)) =
+                tokio::time::timeout(Duration::from_millis(500), events.recv()).await
+            {
+                match event {
+                    AppEvent::TransferPlanProgress(_) => {}
+                    AppEvent::TransferPlanCompleted { .. } => {}
+                    AppEvent::TransferPlanCancelled {
+                        plan_id: cancelled_id,
+                    } => {
+                        assert_eq!(cancelled_id, plan_id);
+                        seen_cancelled = true;
+                        break;
+                    }
+                    AppEvent::TransferFailed(failure) => {
+                        panic!("cancelled plan must not fail jobs: {failure:?}");
+                    }
+                    other => panic!("unexpected event: {other:?}"),
+                }
+            }
+            assert!(seen_cancelled, "must emit TransferPlanCancelled");
         });
 
         controller.shutdown();

@@ -879,6 +879,16 @@ impl TransferStore {
         self.jobs.iter().find(|job| job.id == transfer_id)
     }
 
+    /// The plan a job belongs to: either its root or one of its published
+    /// children. Used to scope a cancellation, so the runtime can reclaim the
+    /// records of a plan that never reaches the transfer manager.
+    pub fn plan_id_for_job(&self, transfer_id: TransferId) -> Option<TransferPlanId> {
+        self.plans
+            .iter()
+            .find(|plan| plan.root_job_id == transfer_id || plan.child_jobs.contains(&transfer_id))
+            .map(|plan| plan.id)
+    }
+
     pub fn find_conflict(&self, request_id: ConflictRequestId) -> Option<&ConflictRequest> {
         self.pending_conflicts
             .iter()
@@ -967,11 +977,7 @@ impl TransferStore {
                 }
                 changed
             }
-            AppEvent::TransferPlanCancelled { plan_id } => self.set_plan_terminal_state(
-                *plan_id,
-                TransferPlanState::Cancelled,
-                TransferState::Skipped,
-            ),
+            AppEvent::TransferPlanCancelled { plan_id } => self.set_plan_cancelled(*plan_id),
             AppEvent::TransferPlanFailed { plan_id, error } => self.set_plan_terminal_state(
                 *plan_id,
                 TransferPlanState::Failed {
@@ -1174,6 +1180,57 @@ impl TransferStore {
             changed |= self.set_job_state(child_job_id, job_state.clone());
         }
         changed
+    }
+
+    /// Cancel a plan that is being planned, handed off, or transferred.
+    ///
+    /// Only jobs that have not reached a terminal state are marked `Skipped`;
+    /// a cancel that loses the race with completion must not rewrite finished
+    /// output. The plan becomes `Cancelled` only if at least one job was still
+    /// cancellable, so a fully finished plan keeps its state.
+    ///
+    /// A plan with no children is marked `Completed` when planning ends even
+    /// though its root is still queued, so the plan state alone cannot be used
+    /// to decide whether work is outstanding.
+    fn set_plan_cancelled(&mut self, plan_id: TransferPlanId) -> bool {
+        let Some(plan_index) = self.plans.iter().position(|plan| plan.id == plan_id) else {
+            return false;
+        };
+        if matches!(
+            self.plans[plan_index].state,
+            TransferPlanState::Cancelled | TransferPlanState::Failed { .. }
+        ) {
+            return false;
+        }
+        let root_job_id = self.plans[plan_index].root_job_id;
+        let child_job_ids = self.plans[plan_index].child_jobs.clone();
+        let mut changed = false;
+        changed |= self.cancel_job_if_unfinished(root_job_id);
+        for child_job_id in child_job_ids {
+            changed |= self.cancel_job_if_unfinished(child_job_id);
+        }
+        if !changed {
+            return false;
+        }
+        if self.plans[plan_index].state != TransferPlanState::Cancelled {
+            self.plans[plan_index].state = TransferPlanState::Cancelled;
+            changed = true;
+        }
+        changed
+    }
+
+    fn cancel_job_if_unfinished(&mut self, transfer_id: TransferId) -> bool {
+        let Some(job) = self.jobs.iter_mut().find(|job| job.id == transfer_id) else {
+            return false;
+        };
+        if matches!(
+            job.state,
+            TransferState::Completed | TransferState::Skipped | TransferState::Failed { .. }
+        ) {
+            return false;
+        }
+        job.state = TransferState::Skipped;
+        true
     }
 
     fn set_transfer_terminal(&mut self, transfer_id: TransferId, state: TransferState) -> bool {
@@ -1827,6 +1884,10 @@ pub enum AppCommand {
     CheckRemoteEditSnapshot(CheckRemoteEditSnapshotCommand),
     CancelTransfer {
         transfer_id: TransferId,
+        /// The plan the job belongs to, when the UI already knows it. The
+        /// runtime uses it to reclaim pre-enqueue cancellation records if the
+        /// plan never reaches the transfer manager.
+        plan_id: Option<TransferPlanId>,
     },
     RetryTransfer {
         transfer_id: TransferId,
@@ -3703,6 +3764,123 @@ mod tests {
             !store.apply_event(&AppEvent::TransferPlanCancelled { plan_id }, now),
             "replaying a terminal event must be a no-op"
         );
+    }
+
+    #[test]
+    fn plan_cancel_keeps_finished_jobs_and_their_plan_state() {
+        let now = Timestamp::from_secs_since_epoch(10);
+        let plan_id = TransferPlanId(1);
+        let root_job = super::TransferJob {
+            id: TransferId(1),
+            direction: TransferDirection::Upload,
+            source: TransferEndpoint::Local(LocalPath::new("/tmp/source")),
+            destination: TransferEndpoint::Remote(RemotePath::new("/srv/source")),
+            state: super::TransferState::Queued,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        let plan = super::TransferPlan {
+            id: plan_id,
+            root_job_id: root_job.id,
+            source_root: root_job.source.clone(),
+            destination_root: root_job.destination.clone(),
+            state: super::TransferPlanState::Queued,
+            planned_count: 0,
+            total_bytes: Some(0),
+            child_jobs: Vec::new(),
+            conflict_policy: super::ConflictPolicy::default(),
+        };
+        let mut store = TransferStore::default();
+        store.apply_event(
+            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
+                plan,
+                root_job,
+            })),
+            now,
+        );
+
+        // A childless plan becomes `Completed` when planning ends, then its
+        // root finishes. A late cancel must not rewrite either of them.
+        store.apply_event(&AppEvent::TransferPlanCompleted { plan_id }, now);
+        store.apply_event(
+            &AppEvent::TransferCompleted {
+                transfer_id: TransferId(1),
+            },
+            now,
+        );
+        assert!(!store.apply_event(&AppEvent::TransferPlanCancelled { plan_id }, now));
+
+        assert_eq!(store.jobs[0].state, super::TransferState::Completed);
+        assert_eq!(store.plans[0].state, super::TransferPlanState::Completed);
+    }
+
+    #[test]
+    fn plan_cancel_skips_only_unfinished_jobs() {
+        let now = Timestamp::from_secs_since_epoch(10);
+        let plan_id = TransferPlanId(1);
+        let root_job = super::TransferJob {
+            id: TransferId(1),
+            direction: TransferDirection::Upload,
+            source: TransferEndpoint::Local(LocalPath::new("/tmp/source")),
+            destination: TransferEndpoint::Remote(RemotePath::new("/srv/source")),
+            state: super::TransferState::Queued,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        let plan = super::TransferPlan {
+            id: plan_id,
+            root_job_id: root_job.id,
+            source_root: root_job.source.clone(),
+            destination_root: root_job.destination.clone(),
+            state: super::TransferPlanState::Queued,
+            planned_count: 0,
+            total_bytes: Some(0),
+            child_jobs: Vec::new(),
+            conflict_policy: super::ConflictPolicy::default(),
+        };
+        let child = super::TransferJob {
+            id: TransferId(2),
+            state: super::TransferState::Queued,
+            ..root_job.clone()
+        };
+        let mut store = TransferStore::default();
+        store.apply_event(
+            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
+                plan,
+                root_job,
+            })),
+            now,
+        );
+        store.apply_event(
+            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+                plan_id,
+                child_jobs: vec![child],
+                planned_count: 1,
+                total_bytes: Some(1),
+            }),
+            now,
+        );
+
+        store.apply_event(
+            &AppEvent::TransferCompleted {
+                transfer_id: TransferId(1),
+            },
+            now,
+        );
+        let applied = store.apply_event(&AppEvent::TransferPlanCancelled { plan_id }, now);
+        assert!(applied, "the still-queued child must be cancelled");
+
+        assert_eq!(
+            store.jobs[0].state,
+            super::TransferState::Completed,
+            "finished work must stay completed"
+        );
+        assert_eq!(store.jobs[1].state, super::TransferState::Skipped);
+        assert_eq!(store.plans[0].state, super::TransferPlanState::Cancelled);
     }
 
     #[test]

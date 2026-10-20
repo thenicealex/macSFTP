@@ -37,6 +37,19 @@ pub struct HostTrustConfig {
     /// How long an unanswered trust prompt blocks the handshake before
     /// it is rejected (ADR-004: default 5 minutes).
     pub trust_prompt_timeout: Duration,
+    /// Upper bound on one peer-facing setup phase: TCP connect, SSH
+    /// banner/key exchange, a single authentication request (password,
+    /// public key, certificate, or SSH agent socket/listing), and each SFTP
+    /// subsystem setup step (channel open, subsystem request, protocol init,
+    /// remote home resolution).
+    ///
+    /// Time spent waiting for the user to answer a trust or keyboard-
+    /// interactive prompt is excluded, so a slow human never trips it. These
+    /// are per-step bounds, not one budget for the whole connection: a very
+    /// slow but progressing server stays connected, while a peer that accepts
+    /// the socket and then stops talking fails in roughly one bound instead of
+    /// pinning a pooled `Connecting` entry forever.
+    pub handshake_timeout: Duration,
 }
 
 impl HostTrustConfig {
@@ -45,6 +58,7 @@ impl HostTrustConfig {
             app_known_hosts_path,
             user_known_hosts_path,
             trust_prompt_timeout: Duration::from_secs(300),
+            handshake_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -1111,6 +1125,10 @@ impl RemoteDownloadPlanner {
         }
         if let Err(error) = self.flush_progress().await {
             self.finish_error(error).await;
+            return false;
+        }
+        if self.cancel.is_cancelled() {
+            self.cancelled().await;
             return false;
         }
         self.event_tx

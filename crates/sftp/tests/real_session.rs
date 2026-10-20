@@ -414,6 +414,84 @@ async fn unknown_host_key_accept_connects_and_persists_trust() {
     fixture.cancel.cancel();
 }
 
+/// A human answering the host-key prompt slowly must not be cut off by the
+/// peer-facing handshake bound.
+///
+/// Repro (before the fix): `connect_stream` ran under a single
+/// `handshake_timeout`, so answering the prompt later than that reported
+/// `NetworkTimeout` even though `trust_prompt_timeout` allows minutes.
+#[tokio::test(flavor = "multi_thread")]
+async fn slow_trust_prompt_outlives_handshake_timeout() {
+    let Some(server) = SshTestServer::spawn() else {
+        return; // skip message already printed
+    };
+
+    let (event_tx, event_rx) = flume::bounded(64);
+    let app_known_hosts_path = server.fixture_dir.join("slow_prompt_known_hosts");
+    let known_hosts = Arc::new(Mutex::new(KnownHostsStore::load(
+        &app_known_hosts_path,
+        None,
+    )));
+    let trust_registry = Arc::new(TrustRegistry::new());
+
+    let mut trust_config = HostTrustConfig::new(app_known_hosts_path.clone(), None);
+    // Kept short so the test proves the prompt window extends the bound, but
+    // not so short that a busy CI host can miss the window before the host
+    // key even arrives.
+    trust_config.handshake_timeout = Duration::from_secs(2);
+    trust_config.trust_prompt_timeout = Duration::from_secs(10);
+
+    let settings = ConnectionSettings {
+        host: "127.0.0.1".to_string(),
+        port: server.port,
+        username: server.username.clone(),
+        auth: client_key_auth(&server),
+        route: macsftp_core::ResolvedConnectionRoute::Direct,
+    };
+
+    let connection_manager = Arc::new(ConnectionManager::new());
+    let scope = RemoteEventScope::new(TAB, SESSION, EPOCH);
+    let mut connect_rx = connection_manager.get_or_connect(
+        &settings,
+        &ConnectionPoolIdentity::Ephemeral(SESSION),
+        &scope,
+        known_hosts,
+        Arc::new(trust_config),
+        trust_registry.clone(),
+        event_tx,
+    );
+
+    let responder = tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            match tokio::time::timeout_at(deadline, event_rx.recv_async()).await {
+                Ok(Ok(AppEvent::HostKeyUnknown(prompt))) => {
+                    // Well past `handshake_timeout`, still inside the prompt bound.
+                    tokio::time::sleep(Duration::from_secs(4)).await;
+                    assert!(
+                        trust_registry.resolve(prompt.request_id, TrustDecision::TrustAndSave),
+                        "trust request must still be pending"
+                    );
+                    return;
+                }
+                Ok(Ok(_)) => continue,
+                Ok(Err(_)) | Err(_) => panic!("trust prompt never arrived"),
+            }
+        }
+    });
+
+    let outcome = tokio::time::timeout(Duration::from_secs(20), connect_rx.recv())
+        .await
+        .expect("connect attempt must finish")
+        .expect("connect response receiver must stay open");
+    match outcome {
+        Ok(shared) => assert!(!shared.connection_lost.is_cancelled()),
+        Err(error) => panic!("slow trust prompt must not time out the handshake: {error:?}"),
+    }
+
+    responder.await.expect("responder task must finish");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn known_host_connects_without_prompt() {
     let Some(server) = SshTestServer::spawn() else {

@@ -147,7 +147,14 @@ impl crate::workspace::Workspace {
         transfer_id: macsftp_core::TransferId,
         cx: &mut Context<Self>,
     ) {
-        if self.send_command(AppCommand::CancelTransfer { transfer_id }, cx) {
+        let plan_id = cx.transfers().plan_id_for_job(transfer_id);
+        if self.send_command(
+            AppCommand::CancelTransfer {
+                transfer_id,
+                plan_id,
+            },
+            cx,
+        ) {
             cx.mark_transfer_cancelling(transfer_id);
             cx.notify();
         }

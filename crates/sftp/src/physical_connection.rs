@@ -25,7 +25,7 @@ use russh::keys::{PrivateKeyWithHashAlg, load_secret_key};
 use ssh_key::{Algorithm, EcdsaCurve, HashAlg};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
@@ -79,6 +79,10 @@ pub struct ClientHandler {
     /// Written before `connection_lost` is cancelled, so actors waking up on
     /// the token can always read the classified cause of the drop.
     pub disconnect_cause: Arc<Mutex<Option<PhysicalDisconnectCause>>>,
+    /// Notified when the handler starts waiting for the user to answer the
+    /// host-key trust prompt, so the caller can stop counting that wait
+    /// against `handshake_timeout`.
+    pub trust_prompt_started: Arc<Notify>,
 }
 
 impl ClientHandler {
@@ -88,6 +92,81 @@ impl ClientHandler {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(rejection);
     }
+}
+
+/// One handshake phase either finished, failed, or exceeded its bound.
+///
+/// `TimedOut` is the security-relevant case: a peer that completes the TCP
+/// handshake and then stops sending would otherwise leave the client waiting
+/// forever, pinning a pooled `Connecting` entry and its Tokio task for the
+/// life of the process.
+enum HandshakePhaseError<E> {
+    TimedOut(&'static str),
+    Failed(E),
+}
+
+/// Run one handshake phase under `timeout`.
+///
+/// Only phases that talk to the peer go through this: password/public-key
+/// requests, banner and key exchange, SFTP subsystem setup, and SSH agent
+/// round trips. Waits for a human (host-key trust, keyboard-interactive
+/// answers) keep their own, much longer bounds, so a slow user never trips it.
+async fn bounded_handshake<T, E>(
+    timeout: Duration,
+    phase: &'static str,
+    future: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, HandshakePhaseError<E>> {
+    match tokio::time::timeout(timeout, future).await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => Err(HandshakePhaseError::Failed(error)),
+        Err(_) => Err(HandshakePhaseError::TimedOut(phase)),
+    }
+}
+
+/// Run the SSH handshake under a bound that excludes a host-key trust prompt.
+///
+/// The peer-facing part of the handshake is bounded by `timeout`. Once the
+/// handler reports that it is waiting for the user to answer the trust
+/// prompt, the deadline moves to `timeout + prompt_timeout`: the human is
+/// already in the loop and their wait is covered by the prompt's own bound,
+/// so a silent peer still fails fast while a slow user never trips the
+/// handshake bound.
+async fn bounded_handshake_with_trust_prompt<T>(
+    timeout: Duration,
+    prompt_timeout: Duration,
+    prompt_started: Arc<Notify>,
+    phase: &'static str,
+    future: impl std::future::Future<Output = Result<T, russh::Error>>,
+) -> Result<T, HandshakePhaseError<russh::Error>> {
+    let mut future = std::pin::pin!(future);
+    let mut prompt_started = std::pin::pin!(prompt_started.notified());
+    let mut prompt_seen = false;
+    let mut deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        tokio::select! {
+            result = future.as_mut() => return result.map_err(HandshakePhaseError::Failed),
+            _ = prompt_started.as_mut(), if !prompt_seen => {
+                prompt_seen = true;
+                deadline = tokio::time::Instant::now() + timeout + prompt_timeout;
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                return Err(HandshakePhaseError::TimedOut(phase));
+            }
+        }
+    }
+}
+
+/// Retryable user-facing failure for a peer that stopped responding.
+pub(crate) fn handshake_timeout_error(phase: &'static str) -> UserFacingError {
+    let mut error = UserFacingError::new(
+        ErrorCode::NetworkTimeout,
+        "Connection Timed Out",
+        "The server stopped responding while the connection was being set up. Check the network and try again.",
+    )
+    .with_retryable(true);
+    error.detail = Some(format!("No response during {phase}."));
+    error
 }
 
 fn legacy_rsa_host_key_bits(server_key: &russh::keys::PublicKey) -> Option<u32> {
@@ -187,6 +266,11 @@ impl client::Handler for ClientHandler {
                         fingerprint_sha256: fingerprint_sha256(server_key),
                     }))
                     .await;
+
+                // The peer has delivered its host key, so the remaining wait
+                // belongs to the user, not the network. Let the outer bound
+                // stop counting it against the handshake timeout.
+                self.trust_prompt_started.notify_one();
 
                 let decision =
                     tokio::time::timeout(self.trust_config.trust_prompt_timeout, decision_rx).await;
@@ -651,9 +735,21 @@ async fn authenticate_rsa_private_key(
     handle: &mut client::Handle<ClientHandler>,
     settings: &ConnectionSettings,
     key: &ssh_key::PrivateKey,
+    handshake_timeout: Duration,
 ) -> Result<client::AuthResult, ConnectFailure> {
-    let server_support = handle.best_supported_rsa_hash().await.map_err(|error| {
-        ConnectFailure::Connection(connection_error(&settings.host, settings.port, &error))
+    let server_support = bounded_handshake(
+        handshake_timeout,
+        "RSA host-key negotiation",
+        handle.best_supported_rsa_hash(),
+    )
+    .await
+    .map_err(|error| match error {
+        HandshakePhaseError::Failed(error) => {
+            ConnectFailure::Connection(connection_error(&settings.host, settings.port, &error))
+        }
+        HandshakePhaseError::TimedOut(phase) => {
+            ConnectFailure::Connection(handshake_timeout_error(phase))
+        }
     })?;
     let hash = match server_support {
         Some(Some(hash @ (HashAlg::Sha256 | HashAlg::Sha512))) => hash,
@@ -686,23 +782,29 @@ async fn authenticate_rsa_private_key(
             ),
         })
     })?;
-    handle
-        .authenticate_publickey_with(
+    bounded_handshake(
+        handshake_timeout,
+        "RSA public-key authentication",
+        handle.authenticate_publickey_with(
             settings.username.clone(),
             key.public_key().clone(),
             Some(hash),
             &mut signer,
-        )
-        .await
-        .map_err(|_| {
-            ConnectFailure::AuthFailed(AuthFailure {
-                reason: UserFacingError::new(
-                    ErrorCode::AuthFailed,
-                    "Key Sign-In Failed",
-                    "The RSA key couldn’t complete the sign-in request.",
-                ),
-            })
-        })
+        ),
+    )
+    .await
+    .map_err(|error| match error {
+        HandshakePhaseError::TimedOut(phase) => {
+            ConnectFailure::Connection(handshake_timeout_error(phase))
+        }
+        HandshakePhaseError::Failed(_) => ConnectFailure::AuthFailed(AuthFailure {
+            reason: UserFacingError::new(
+                ErrorCode::AuthFailed,
+                "Key Sign-In Failed",
+                "The RSA key couldn’t complete the sign-in request.",
+            ),
+        }),
+    })
 }
 
 async fn emit_auth_failure(
@@ -839,12 +941,21 @@ async fn authenticate_ssh_agent(
     handle: &mut client::Handle<ClientHandler>,
     settings: &ConnectionSettings,
     socket_path: Option<&str>,
+    handshake_timeout: Duration,
 ) -> Result<client::AuthResult, ConnectFailure> {
-    let agent_result = match socket_path {
-        Some(path) => AgentClient::connect_uds(path).await,
-        None => AgentClient::connect_env().await,
+    let agent = match socket_path {
+        Some(path) => tokio::time::timeout(handshake_timeout, AgentClient::connect_uds(path))
+            .await
+            .map_err(|_| {
+                ConnectFailure::Connection(handshake_timeout_error("the SSH agent socket"))
+            })?,
+        None => tokio::time::timeout(handshake_timeout, AgentClient::connect_env())
+            .await
+            .map_err(|_| {
+                ConnectFailure::Connection(handshake_timeout_error("the SSH agent socket"))
+            })?,
     };
-    let mut agent = agent_result.map_err(|_| {
+    let mut agent = agent.map_err(|_| {
         ConnectFailure::AuthFailed(AuthFailure {
             reason: UserFacingError::new(
                 ErrorCode::AuthFailed,
@@ -853,14 +964,25 @@ async fn authenticate_ssh_agent(
             ),
         })
     })?;
-    let identities = agent.request_identities().await.map_err(|_| {
-        ConnectFailure::AuthFailed(AuthFailure {
+    let identities = bounded_handshake(
+        handshake_timeout,
+        "the SSH agent key listing",
+        agent.request_identities(),
+    )
+    .await
+    .map_err(|error| match error {
+        // A timeout is a connection problem, not a rejected credential: keep
+        // it on the retryable NetworkTimeout path instead of the auth path.
+        HandshakePhaseError::TimedOut(phase) => {
+            ConnectFailure::Connection(handshake_timeout_error(phase))
+        }
+        HandshakePhaseError::Failed(_) => ConnectFailure::AuthFailed(AuthFailure {
             reason: UserFacingError::new(
                 ErrorCode::AuthFailed,
                 "Keys Unavailable",
                 "The SSH agent couldn’t provide its keys.",
             ),
-        })
+        }),
     })?;
     if identities.is_empty() {
         return Err(ConnectFailure::AuthFailed(AuthFailure {
@@ -872,8 +994,19 @@ async fn authenticate_ssh_agent(
         }));
     }
 
-    let rsa_hash_support = handle.best_supported_rsa_hash().await.map_err(|error| {
-        ConnectFailure::Connection(connection_error(&settings.host, settings.port, &error))
+    let rsa_hash_support = bounded_handshake(
+        handshake_timeout,
+        "RSA host-key negotiation",
+        handle.best_supported_rsa_hash(),
+    )
+    .await
+    .map_err(|error| match error {
+        HandshakePhaseError::Failed(error) => {
+            ConnectFailure::Connection(connection_error(&settings.host, settings.port, &error))
+        }
+        HandshakePhaseError::TimedOut(phase) => {
+            ConnectFailure::Connection(handshake_timeout_error(phase))
+        }
     })?;
     let mut last_failure = None;
     for identity in identities {
@@ -889,29 +1022,43 @@ async fn authenticate_ssh_agent(
         };
         let result = match identity.clone() {
             AgentIdentity::PublicKey { key, .. } => {
-                handle
-                    .authenticate_publickey_with(settings.username.clone(), key, hash, &mut agent)
-                    .await
+                bounded_handshake(
+                    handshake_timeout,
+                    "SSH agent public-key authentication",
+                    handle.authenticate_publickey_with(
+                        settings.username.clone(),
+                        key,
+                        hash,
+                        &mut agent,
+                    ),
+                )
+                .await
             }
             AgentIdentity::Certificate { certificate, .. } => {
-                handle
-                    .authenticate_certificate_with(
+                bounded_handshake(
+                    handshake_timeout,
+                    "SSH agent certificate authentication",
+                    handle.authenticate_certificate_with(
                         settings.username.clone(),
                         certificate,
                         hash,
                         &mut agent,
-                    )
-                    .await
+                    ),
+                )
+                .await
             }
         }
-        .map_err(|_| {
-            ConnectFailure::AuthFailed(AuthFailure {
+        .map_err(|error| match error {
+            HandshakePhaseError::TimedOut(phase) => {
+                ConnectFailure::Connection(handshake_timeout_error(phase))
+            }
+            HandshakePhaseError::Failed(_) => ConnectFailure::AuthFailed(AuthFailure {
                 reason: UserFacingError::new(
                     ErrorCode::AuthFailed,
                     "Sign-In Failed",
                     "Your SSH agent couldn’t complete the sign-in request.",
                 ),
-            })
+            }),
         })?;
         if result.success() {
             return Ok(result);
@@ -938,6 +1085,7 @@ async fn authenticate(
     event_tx: &flume::Sender<AppEvent>,
     keyboard_interactive_registry: &KeyboardInteractiveRegistry,
     next_keyboard_interactive_id: &AtomicU64,
+    handshake_timeout: Duration,
 ) -> Result<(), ConnectFailure> {
     let method = match &settings.auth {
         AuthCredential::Password { .. } => "password",
@@ -958,12 +1106,20 @@ async fn authenticate(
     );
 
     let auth_result = match &settings.auth {
-        AuthCredential::Password { password } => handle
-            .authenticate_password(settings.username.clone(), password.clone())
-            .await
-            .map_err(|error| {
+        AuthCredential::Password { password } => bounded_handshake(
+            handshake_timeout,
+            "password authentication",
+            handle.authenticate_password(settings.username.clone(), password.clone()),
+        )
+        .await
+        .map_err(|error| match error {
+            HandshakePhaseError::Failed(error) => {
                 ConnectFailure::Connection(connection_error(&settings.host, settings.port, &error))
-            })?,
+            }
+            HandshakePhaseError::TimedOut(phase) => {
+                ConnectFailure::Connection(handshake_timeout_error(phase))
+            }
+        })?,
         AuthCredential::PrivateKey {
             key_path,
             passphrase,
@@ -997,7 +1153,8 @@ async fn authenticate(
                 }
             };
             if matches!(key.algorithm(), Algorithm::Rsa { .. }) {
-                match authenticate_rsa_private_key(handle, settings, &key).await {
+                match authenticate_rsa_private_key(handle, settings, &key, handshake_timeout).await
+                {
                     Ok(result) => result,
                     Err(ConnectFailure::AuthFailed(failure)) => {
                         return Err(emit_auth_failure(scope, event_tx, failure.reason).await);
@@ -1005,19 +1162,23 @@ async fn authenticate(
                     Err(other) => return Err(other),
                 }
             } else {
-                handle
-                    .authenticate_publickey(
+                bounded_handshake(
+                    handshake_timeout,
+                    "public-key authentication",
+                    handle.authenticate_publickey(
                         settings.username.clone(),
                         PrivateKeyWithHashAlg::new(Arc::new(key), None),
-                    )
-                    .await
-                    .map_err(|error| {
-                        ConnectFailure::Connection(connection_error(
-                            &settings.host,
-                            settings.port,
-                            &error,
-                        ))
-                    })?
+                    ),
+                )
+                .await
+                .map_err(|error| match error {
+                    HandshakePhaseError::Failed(error) => ConnectFailure::Connection(
+                        connection_error(&settings.host, settings.port, &error),
+                    ),
+                    HandshakePhaseError::TimedOut(phase) => {
+                        ConnectFailure::Connection(handshake_timeout_error(phase))
+                    }
+                })?
             }
         }
         AuthCredential::KeyboardInteractive => {
@@ -1032,7 +1193,14 @@ async fn authenticate(
             .await?
         }
         AuthCredential::SshAgent { socket_path } => {
-            match authenticate_ssh_agent(handle, settings, socket_path.as_deref()).await {
+            match authenticate_ssh_agent(
+                handle,
+                settings,
+                socket_path.as_deref(),
+                handshake_timeout,
+            )
+            .await
+            {
                 Ok(result) => result,
                 Err(ConnectFailure::AuthFailed(failure)) => {
                     return Err(emit_auth_failure(scope, event_tx, failure.reason).await);
@@ -1277,6 +1445,8 @@ where
     let config = Arc::new(client_config());
 
     let rejection: Arc<Mutex<Option<HostKeyRejection>>> = Arc::new(Mutex::new(None));
+    let handshake_timeout = trust_config.handshake_timeout;
+    let trust_prompt_timeout = trust_config.trust_prompt_timeout;
     let handler = ClientHandler {
         host: settings.host.clone(),
         port: settings.port,
@@ -1289,7 +1459,9 @@ where
         rejection: rejection.clone(),
         connection_lost,
         disconnect_cause,
+        trust_prompt_started: Arc::new(Notify::new()),
     };
+    let trust_prompt_started = Arc::clone(&handler.trust_prompt_started);
 
     info!(
         target: "macsftp_sftp::connection",
@@ -1301,9 +1473,17 @@ where
         "SSH transport and handshake started"
     );
 
-    let mut handle = match client::connect_stream(config, stream, handler).await {
+    let handshake = bounded_handshake_with_trust_prompt(
+        handshake_timeout,
+        trust_prompt_timeout,
+        trust_prompt_started,
+        "the SSH handshake",
+        client::connect_stream(config, stream, handler),
+    )
+    .await;
+    let mut handle = match handshake {
         Ok(handle) => handle,
-        Err(error) => {
+        Err(HandshakePhaseError::Failed(error)) => {
             let failure = TransportFailureKind::from_russh_error(&error).as_str();
             warn!(
                 target: "macsftp_sftp::connection",
@@ -1332,6 +1512,20 @@ where
                 )),
             });
         }
+        Err(HandshakePhaseError::TimedOut(phase)) => {
+            warn!(
+                target: "macsftp_sftp::connection",
+                host = settings.host.as_str(),
+                port = settings.port,
+                tab_id = scope.tab_id.0,
+                session_id = scope.session_id.0,
+                session_epoch = scope.session_epoch,
+                failure = "timed_out",
+                phase,
+                "ssh handshake timed out; no pooled connection will be kept"
+            );
+            return Err(ConnectFailure::Connection(handshake_timeout_error(phase)));
+        }
     };
 
     authenticate(
@@ -1341,6 +1535,7 @@ where
         &event_tx,
         &keyboard_interactive_registry,
         &next_keyboard_interactive_id,
+        handshake_timeout,
     )
     .await?;
 
@@ -1349,16 +1544,30 @@ where
 
 async fn connect_tcp_stream(
     settings: &ConnectionSettings,
+    handshake_timeout: Duration,
 ) -> Result<tokio::net::TcpStream, ConnectFailure> {
-    tokio::net::TcpStream::connect((settings.host.as_str(), settings.port))
-        .await
-        .map_err(|error| {
-            ConnectFailure::Connection(connection_error(
-                &settings.host,
-                settings.port,
-                &russh::Error::IO(error),
-            ))
-        })
+    match bounded_handshake(
+        handshake_timeout,
+        "the TCP connection",
+        tokio::net::TcpStream::connect((settings.host.as_str(), settings.port)),
+    )
+    .await
+    {
+        Ok(stream) => Ok(stream),
+        Err(HandshakePhaseError::Failed(error)) => Err(ConnectFailure::Connection(
+            connection_error(&settings.host, settings.port, &russh::Error::IO(error)),
+        )),
+        Err(HandshakePhaseError::TimedOut(phase)) => {
+            warn!(
+                target: "macsftp_sftp::connection",
+                host = settings.host.as_str(),
+                port = settings.port,
+                phase,
+                "tcp connect timed out; no pooled connection will be kept"
+            );
+            Err(ConnectFailure::Connection(handshake_timeout_error(phase)))
+        }
+    }
 }
 
 /// Trust registry, known_hosts, and event_tx are co-required for host-key flow.
@@ -1379,7 +1588,7 @@ pub async fn establish_physical_connection(
 ) -> Result<client::Handle<ClientHandler>, ConnectFailure> {
     match &settings.route {
         ResolvedConnectionRoute::Direct => {
-            let stream = connect_tcp_stream(settings).await?;
+            let stream = connect_tcp_stream(settings, trust_config.handshake_timeout).await?;
             establish_on_stream(
                 stream,
                 settings,
@@ -1424,7 +1633,8 @@ pub async fn establish_physical_connection(
                     "The intermediate server’s saved connection must use Direct.",
                 )));
             }
-            let jump_stream = connect_tcp_stream(jump_settings).await?;
+            let jump_stream =
+                connect_tcp_stream(jump_settings, trust_config.handshake_timeout).await?;
             let jump_handle = establish_on_stream(
                 jump_stream,
                 jump_settings,
@@ -1584,14 +1794,16 @@ fn private_key_file_name(path: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use std::io;
+    use std::time::Duration;
 
     use ssh_key::{Algorithm, HashAlg};
 
     use super::{
-        AppEvent, ClientHandler, HostKeyMismatchDetails, MidSessionDisconnect,
-        PhysicalDisconnectCause, TransportFailureKind, classify_mid_session_disconnect,
-        client_config, connection_error, expand_proxy_command, host_key_mismatch_event,
-        legacy_rsa_host_key_bits, private_key_file_name, sftp_connection_error,
+        AppEvent, ClientHandler, HandshakePhaseError, HostKeyMismatchDetails, MidSessionDisconnect,
+        PhysicalDisconnectCause, TransportFailureKind, bounded_handshake_with_trust_prompt,
+        classify_mid_session_disconnect, client_config, connection_error, expand_proxy_command,
+        host_key_mismatch_event, legacy_rsa_host_key_bits, private_key_file_name,
+        sftp_connection_error,
     };
     use crate::session_actor::HostTrustConfig;
     use crate::trust::TrustRegistry;
@@ -1601,6 +1813,7 @@ mod tests {
     use russh::client::Handler as _;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
+    use tokio::sync::Notify;
     use tokio_util::sync::CancellationToken;
 
     #[test]
@@ -1870,6 +2083,7 @@ mod tests {
             rejection: Arc::new(Mutex::new(None)),
             connection_lost: CancellationToken::new(),
             disconnect_cause: Arc::new(Mutex::new(None)),
+            trust_prompt_started: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -1931,5 +2145,86 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(*recorded, None);
+    }
+    /// A peer that never answers must still fail at the initial bound: the
+    /// prompt extension is only allowed after the handler reports that it is
+    /// waiting for the user.
+    #[tokio::test]
+    async fn handshake_bound_times_out_a_silent_peer() {
+        let prompt_started = Arc::new(Notify::new());
+        let started = std::time::Instant::now();
+
+        let error = bounded_handshake_with_trust_prompt::<u8>(
+            Duration::from_millis(50),
+            Duration::from_secs(30),
+            prompt_started,
+            "the SSH handshake",
+            std::future::pending(),
+        )
+        .await
+        .expect_err("a silent future must hit the phase bound");
+
+        assert!(matches!(
+            error,
+            HandshakePhaseError::TimedOut("the SSH handshake")
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the test must not wait for the prompt bound"
+        );
+    }
+
+    /// The trust prompt may outlive the peer-facing bound: once the handler
+    /// reports the prompt, the deadline moves to `timeout + prompt_timeout`.
+    #[tokio::test]
+    async fn handshake_bound_excludes_a_slow_trust_prompt() {
+        let prompt_started = Arc::new(Notify::new());
+        let notify = Arc::clone(&prompt_started);
+
+        // Open the prompt window well inside the initial bound, then answer
+        // long after it: without the extension this would already have timed
+        // out, and with it the future must still succeed.
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            notify.notify_one();
+        });
+
+        let result = bounded_handshake_with_trust_prompt::<u8>(
+            Duration::from_millis(50),
+            Duration::from_secs(5),
+            prompt_started,
+            "the SSH handshake",
+            async {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                Ok(7)
+            },
+        )
+        .await;
+
+        assert_eq!(result.ok(), Some(7));
+    }
+
+    /// After the prompt window opens, a peer that goes silent again is still
+    /// bounded by `timeout + prompt_timeout`; the extension must not make the
+    /// handshake unbounded.
+    #[tokio::test]
+    async fn handshake_bound_after_prompt_still_expires() {
+        let prompt_started = Arc::new(Notify::new());
+        prompt_started.notify_one();
+
+        let error = bounded_handshake_with_trust_prompt::<u8>(
+            Duration::from_millis(50),
+            Duration::from_millis(100),
+            prompt_started,
+            "the SSH handshake",
+            std::future::pending(),
+        )
+        .await
+        .expect_err("a silent peer must still time out after the prompt window");
+
+        assert!(matches!(
+            error,
+            HandshakePhaseError::TimedOut("the SSH handshake")
+        ));
     }
 }
