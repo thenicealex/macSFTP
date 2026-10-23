@@ -603,13 +603,17 @@ impl crate::workspace::Workspace {
         let form = self.connect_form_ui.form.as_ref()?;
         let theme = cx.theme().clone();
 
+        // `secret` is Some for secret fields: the value renders as characters
+        // while the toggle is on, and a trailing Show/Hide button flips it.
         let field_row = |label: &'static str,
                          field: ConnectField,
                          state: &InputState,
                          placeholder: &'static str,
-                         masked: bool,
+                         secret: Option<bool>,
                          cx: &mut Context<Self>| {
-            div()
+            let revealed = secret.unwrap_or(false);
+            let masked = secret.is_some() && !revealed;
+            let mut row = div()
                 .id(("connect-field", field as usize))
                 .flex()
                 .items_center()
@@ -633,7 +637,7 @@ impl crate::workspace::Workspace {
                         .text_color(theme.colors.text_muted)
                         .child(label),
                 )
-                .child(div().flex_1().min_w_0().child(if masked {
+                .child(div().flex_1().min_w_0().child(if secret.is_some() {
                     text_field(
                         ("connect-input", field as usize),
                         TextFieldModel {
@@ -654,7 +658,37 @@ impl crate::workspace::Workspace {
                         cx,
                     )
                     .into_any_element()
-                }))
+                }));
+            if secret.is_some() {
+                row = row.child(
+                    text_button(
+                        ("connect-reveal", field as usize),
+                        if revealed { "Hide" } else { "Show" },
+                    )
+                    .on_click(cx.listener(
+                        move |workspace, _event, window, cx| {
+                            if let Some(form) = &mut workspace.connect_form_ui.form {
+                                match field {
+                                    ConnectField::Password => {
+                                        form.show_password = !form.show_password
+                                    }
+                                    ConnectField::Passphrase => {
+                                        form.show_passphrase = !form.show_passphrase;
+                                    }
+                                    _ => {}
+                                }
+                                if form.focused_field == field
+                                    && let Some(input) = form.inputs.get(&field)
+                                {
+                                    input.focus(window, cx);
+                                }
+                                cx.notify();
+                            }
+                        },
+                    )),
+                );
+            }
+            row
         };
 
         let auth_toggle = |label: &'static str,
@@ -908,7 +942,7 @@ impl crate::workspace::Workspace {
                 ConnectField::Host,
                 &form.host,
                 ConnectField::Host.placeholder(),
-                false,
+                None,
                 cx,
             ))
             .child(field_row(
@@ -916,7 +950,7 @@ impl crate::workspace::Workspace {
                 ConnectField::Port,
                 &form.port,
                 ConnectField::Port.placeholder(),
-                false,
+                None,
                 cx,
             ))
             .child(field_row(
@@ -924,7 +958,7 @@ impl crate::workspace::Workspace {
                 ConnectField::Username,
                 &form.username,
                 ConnectField::Username.placeholder(),
-                false,
+                None,
                 cx,
             ))
             .child(
@@ -978,7 +1012,7 @@ impl crate::workspace::Workspace {
                 ConnectField::Password,
                 form.password.as_input_state(),
                 ConnectField::Password.placeholder(),
-                true,
+                Some(form.show_password),
                 cx,
             )),
             AuthMethodKind::PrivateKey => card
@@ -987,7 +1021,7 @@ impl crate::workspace::Workspace {
                     ConnectField::KeyPath,
                     &form.key_path,
                     ConnectField::KeyPath.placeholder(),
-                    false,
+                    None,
                     cx,
                 ))
                 .child(field_row(
@@ -995,7 +1029,7 @@ impl crate::workspace::Workspace {
                     ConnectField::Passphrase,
                     form.passphrase.as_input_state(),
                     ConnectField::Passphrase.placeholder(),
-                    true,
+                    Some(form.show_passphrase),
                     cx,
                 )),
             AuthMethodKind::KeyboardInteractive => card.child(
@@ -1010,7 +1044,7 @@ impl crate::workspace::Workspace {
                     ConnectField::AgentSocket,
                     &form.agent_socket,
                     ConnectField::AgentSocket.placeholder(),
-                    false,
+                    None,
                     cx,
                 ))
                 .child(

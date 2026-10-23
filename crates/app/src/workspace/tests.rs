@@ -10831,3 +10831,74 @@ fn go_to_path_prefill_is_editable(cx: &mut TestAppContext) {
     let _ = std::fs::remove_dir_all(&fixture);
     let _ = std::fs::remove_dir_all(&sibling);
 }
+
+/// The password field starts masked and its Show/Hide toggle flips the mask
+/// without touching the stored value. A fresh form always starts masked.
+#[gpui_kit::test]
+fn password_reveal_toggles_the_mask(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.open_connect_form(window, cx);
+    });
+    cx.run_until_parked();
+
+    workspace.update(&mut cx, |workspace, _cx| {
+        let form = workspace
+            .connect_form_ui
+            .form
+            .as_mut()
+            .expect("the connect form opened");
+        form.password.set_value("s3cret-password");
+        assert!(!form.show_password, "a fresh form starts masked");
+    });
+    cx.run_until_parked();
+
+    // Masked by default: the toggle reads "Show".
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            window.find(("connect-reveal", 3usize)).label(),
+            Some("Show"),
+            "a fresh form offers Show, not Hide"
+        );
+    });
+
+    // Show: the flag flips, the value stays, the toggle reads "Hide".
+    workspace.update(&mut cx, |workspace, _cx| {
+        let form = workspace.connect_form_ui.form.as_mut().expect("form");
+        form.show_password = true;
+    });
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            window.find(("connect-reveal", 3usize)).label(),
+            Some("Hide"),
+            "the revealed field offers Hide"
+        );
+    });
+
+    // Hide again: the value survives, the mask returns.
+    workspace.update(&mut cx, |workspace, _cx| {
+        let form = workspace.connect_form_ui.form.as_mut().expect("form");
+        form.show_password = false;
+        assert_eq!(form.password.value(), "s3cret-password");
+    });
+
+    // A form opened from a saved profile starts masked too, even when the
+    // previous form was left revealed.
+    workspace.update(&mut cx, |workspace, _cx| {
+        let form = workspace.connect_form_ui.form.as_mut().expect("form");
+        form.show_password = true;
+    });
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.open_connect_form(window, cx);
+    });
+    cx.run_until_parked();
+    workspace.read_with(&cx, |workspace, _| {
+        let form = workspace.connect_form_ui.form.as_ref().expect("form");
+        assert!(
+            !form.show_password,
+            "a reopened form starts masked, never inheriting the reveal"
+        );
+    });
+}

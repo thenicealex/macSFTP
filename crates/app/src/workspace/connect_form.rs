@@ -63,6 +63,11 @@ pub(crate) struct ConnectForm {
     pub(crate) profile_picker_open: bool,
     /// Filter text for the inline profile picker list.
     pub(crate) profile_picker_filter: InputState,
+    /// Whether the password field currently shows characters instead of
+    /// bullets. Deliberately per-form: a fresh form always starts masked.
+    pub(crate) show_password: bool,
+    /// Same toggle for the key passphrase field.
+    pub(crate) show_passphrase: bool,
 }
 
 impl ConnectForm {
@@ -83,6 +88,8 @@ impl ConnectForm {
             source_profile_id: None,
             profile_picker_open: false,
             profile_picker_filter: InputState::new(),
+            show_password: false,
+            show_passphrase: false,
         }
     }
 
