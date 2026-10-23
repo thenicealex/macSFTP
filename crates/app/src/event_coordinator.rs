@@ -114,6 +114,7 @@ fn dispatch_event(event: AppEvent, cx: &mut App) {
         advance_conflict_compare(&event, cx);
         cx.refresh_windows();
         reload_panes_for_finished_plan(&event, cx);
+        quarantine_completed_download(&event, cx);
         return;
     }
 
@@ -165,6 +166,42 @@ fn dispatch_event(event: AppEvent, cx: &mut App) {
             }
         }
     }
+}
+
+/// Mark a just-downloaded executable so macOS asks before running it.
+///
+/// An SFTP download keeps the remote permission bits, so a file the server
+/// marked executable lands on disk executable. Opening such a file hands it to
+/// LaunchServices, which runs `.command`-shaped content outright — and a
+/// download carries no quarantine flag of its own, because it did not come
+/// through a browser. Setting the attribute makes the first launch go through a
+/// confirmation instead of executing silently.
+///
+/// Only executables are marked (see `quarantine_executable_download`), and the
+/// work runs on the background executor: it is a `stat` plus at most two small
+/// process spawns, none of which belongs on the UI thread.
+fn quarantine_completed_download(event: &AppEvent, cx: &mut App) {
+    let AppEvent::TransferCompleted { transfer_id } = event else {
+        return;
+    };
+    let Some(job) = cx.transfers().find_job(*transfer_id) else {
+        return;
+    };
+    if job.direction != TransferDirection::Download {
+        return;
+    }
+    let TransferEndpoint::Local(path) = job.destination.clone() else {
+        return;
+    };
+    cx.background_executor()
+        .spawn(async move {
+            if let Err(error) = macsftp_platform::quarantine_executable_download(&path) {
+                // The xattr failure never mentions the path, so this stays
+                // inside the "no paths in diagnostics" rule.
+                warn!(error = %error, "could not mark a downloaded executable as quarantined");
+            }
+        })
+        .detach();
 }
 
 /// Reload the panes a finished transfer wrote into.
@@ -2825,6 +2862,67 @@ mod reload_tests {
             vec![RemotePath::new("/srv")],
             "the upload's destination folder is re-read exactly once"
         );
+    }
+
+    /// A finished download of an executable marks the file so macOS asks
+    /// before running it. The download preserved the remote execute bit, and
+    /// nothing else would put a quarantine flag on an SFTP download.
+    #[gpui_kit::test]
+    fn a_downloaded_executable_is_marked_for_launch_services(cx: &mut TestAppContext) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        install_globals(cx, "quarantine-download");
+        let dir =
+            std::env::temp_dir().join(format!("macsftp-quarantine-app-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let script = dir.join("run.command");
+        std::fs::write(&script, b"#!/bin/sh\necho hi\n").expect("write script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+        let destination = LocalPath::new(script.to_string_lossy().into_owned());
+
+        let plan_id = TransferPlanId(21);
+        start_plan(
+            cx,
+            TransferJob {
+                id: TransferId(21),
+                direction: TransferDirection::Download,
+                source: TransferEndpoint::Remote(RemotePath::new("/srv/run.command")),
+                destination: TransferEndpoint::Local(destination.clone()),
+                state: TransferState::Queued,
+                metadata_policy: MetadataPolicy::default(),
+                conflict_policy: ConflictPolicy::default(),
+                warnings: Vec::new(),
+                created_at: Timestamp::from_secs_since_epoch(1),
+            },
+        );
+        let _ = plan_id;
+
+        cx.update(|cx| {
+            dispatch_event(
+                AppEvent::TransferCompleted {
+                    transfer_id: TransferId(21),
+                },
+                cx,
+            );
+        });
+        // The marking runs on the background executor.
+        cx.run_until_parked();
+        cx.run_until_parked();
+
+        let status = std::process::Command::new("/usr/bin/xattr")
+            .arg("-p")
+            .arg("com.apple.quarantine")
+            .arg(destination.as_str())
+            .output()
+            .expect("query the attribute");
+        assert!(
+            status.status.success(),
+            "the downloaded executable is quarantined: {:?}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A plan's own state cannot say whether it is finished: a single-file plan

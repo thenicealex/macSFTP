@@ -25,6 +25,14 @@ based on Keep a Changelog, and releases use semantic versioning.
   downloaded file; an upload's destination lives on the server and says so
   instead.
 
+### Security
+
+- A downloaded executable (`.command`, `.app`-shaped, or anything the server
+  marked `+x`) is now flagged with the macOS quarantine attribute, so the first
+  launch asks for confirmation instead of running silently. The download keeps
+  the server's permission bits, and nothing else would have marked an SFTP
+  download as untrusted. Documents are not quarantined.
+
 ### Fixed
 
 - A finished transfer re-reads the pane that received its files exactly once
