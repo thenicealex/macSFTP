@@ -17,6 +17,9 @@
 | 文档 | 用途 |
 | --- | --- |
 | [`../README.md`](../README.md) | 当前产品能力、用户流程、构建和 crate 总览 |
+| [`../README.zh-CN.md`](../README.zh-CN.md) | README 的简体中文版本 |
+| [`../README.ja.md`](../README.ja.md) | README 的日文版本 |
+| [`../README.ko.md`](../README.ko.md) | README 的韩文版本 |
 | [`../CHANGELOG.md`](../CHANGELOG.md) | 已发布及未发布的用户可见、安全和兼容性变化 |
 | [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | 开发、验证、架构边界和文档同步要求 |
 | [`../SECURITY.md`](../SECURITY.md) | 漏洞报告方式和必须保持的安全边界 |
@@ -26,5 +29,5 @@
 - 代码是行为事实来源；文档只记录代码无法强制的约束和取舍。
 - 中等以上架构或 UI/UX 变化更新 `architecture.md`；功能交付后把仍有效的约束并回当前文档，并删除已完成的逐步实施计划。
 - 发布证据按版本保留，不把旧版本的结果改写成当前状态。
-- 用户流程改变时同步 `README.md` 和 `CHANGELOG.md`；持久 UI 规则改变时同步 `architecture.md` 第 12 节。
+- 用户流程改变时同步 `README.md`、其三种语言版本和 `CHANGELOG.md`；持久 UI 规则改变时同步 `architecture.md` 第 12 节。
 - 历史材料需要追溯时使用 `git log -- docs`、`git show <commit>:<path>` 或 GitHub commit history。

@@ -23,9 +23,10 @@ gates passed; it does not make the bundle suitable for public distribution.
 2. Move the relevant `CHANGELOG.md` entries from `Unreleased` into
    `## [X.Y.Z] - YYYY-MM-DD` for a final release. Release candidates may keep
    the entries under `Unreleased`.
-3. Confirm that `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, and the current
-   documents indexed by `docs/README.md` describe the release candidate. Do
-   not rewrite evidence files for already published versions.
+3. Confirm that `README.md` (and its `README.zh-CN.md`, `README.ja.md`,
+   `README.ko.md` translations), `CONTRIBUTING.md`, `SECURITY.md`, and the
+   current documents indexed by `docs/README.md` describe the release
+   candidate. Do not rewrite evidence files for already published versions.
 4. Copy `docs/release-evidence/template.md` to
    `docs/release-evidence/vX.Y.Z.md`, complete every check, and set
    `Status: PASS`.

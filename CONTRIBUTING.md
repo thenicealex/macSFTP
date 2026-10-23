@@ -81,7 +81,9 @@ Report vulnerabilities according to `SECURITY.md`, not through a public issue.
 Update documentation in the same change when behavior or an architectural
 boundary changes:
 
-- `README.md` for supported user workflows and build prerequisites;
+- `README.md` for supported user workflows and build prerequisites; the
+  localized versions (`README.zh-CN.md`, `README.ja.md`, `README.ko.md`) must
+  change in the same commit so the four files describe the same product;
 - `CHANGELOG.md` for unreleased user-visible, security, or compatibility
   changes;
 - `docs/architecture.md` for ownership, runtime contracts, and durable
