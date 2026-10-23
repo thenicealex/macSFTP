@@ -5,6 +5,74 @@ based on Keep a Changelog, and releases use semantic versioning.
 
 ## [Unreleased]
 
+### Added
+
+- The local and remote panes can be resized by dragging the divider between
+  them, so a wide listing or a long local path can get the room it needs.
+  The split and the drawer height are remembered per window across restarts.
+  A pane never shrinks below the width its path bar needs, and a window too
+  narrow for both falls back to an even split.
+- **⌘C / ⌘V** work on files: copy a selection in one pane and paste it in the
+  other, and the paste is the upload or download that moves it. The paths also
+  go on the system clipboard. Pasting into the same pane says why nothing moved
+  instead of silently doing nothing.
+- **Go to Folder** (⌘⇧G) opens pre-filled with the folder the pane is showing,
+  selected, so reaching a sibling directory means editing one segment instead
+  of retyping the whole path.
+- The connect form's password and key-passphrase fields have a **Show** toggle
+  for checking a long or jump-host secret without retyping it.
+- Recent connections have a context menu: reconnect, copy the
+  `user@host:port` endpoint, or remove that entry.
+- Double-clicking (or pressing Enter on, or right-click Open for) a local file
+  now hands it to its default application, matching Finder. Remote files keep
+  the existing edit-in-temp-copy flow.
+- Dragging a row that is part of a multi-selection moves every selected file;
+  dropping it on the other pane transfers the whole group in one plan.
+- Completed transfer rows gain a **Show in Finder** button that reveals the
+  downloaded file; an upload's destination lives on the server and says so
+  instead.
+
+### Security
+
+- A downloaded executable (`.command`, `.app`-shaped, or anything the server
+  marked `+x`) is now flagged with the macOS quarantine attribute, so the first
+  launch asks for confirmation instead of running silently. The download keeps
+  the server's permission bits, and nothing else would have marked an SFTP
+  download as untrusted. Documents are not quarantined, and neither are
+  remote-edit temp copies, which the editor flow opens.
+
+### Fixed
+
+- Opening a socket, FIFO, device or an entry whose metadata could not be read
+  reports that it cannot be opened instead of handing it to LaunchServices.
+- A finished transfer re-reads the pane that received its files exactly once
+  per plan. A plan with many files used to trigger one directory read per
+  transferred file.
+- A download whose source cannot be named no longer cancels the sources that
+  were already queued, and says how many could not be started.
+- Removing a recent connection now updates every window's list, not just the
+  one the command came from.
+- The pane divider follows the pointer from where it was grabbed instead of
+  jumping to the pointer's side, keeps tracking after the pointer leaves the
+  divider, and draws a single rule instead of doubling the pane border.
+- A completed upload no longer offers a **Show in Finder** button that could
+  only report that its destination is on the server.
+
+### Changed
+
+- Status-bar messages now expire after six seconds instead of lingering until
+  the next action happens to overwrite them.
+- Finishing an upload or download now re-reads the pane that received the
+  files, so new names appear without pressing ⌘R. The reload keeps the pane's
+  selection and scroll position, leaves panes showing other folders alone, and
+  covers background tabs so switching back does not show a stale listing.
+- Downloading several server files (or a folder) no longer stops at a
+  single-file check: multiple sources land side by side in the local folder.
+- **Copy Path** now copies the selected entries' own paths, one per line,
+  matching Finder; an empty selection still copies the pane's folder. Right
+  clicking a file and choosing Copy Path therefore yields
+  `/a/b/file.txt` instead of `/a/b`.
+
 ## [0.6.0] - 2026-10-19
 
 ### Added

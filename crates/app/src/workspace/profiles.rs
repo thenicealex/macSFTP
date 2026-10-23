@@ -726,7 +726,7 @@ impl crate::workspace::Workspace {
                     &outcome.profile,
                     secret_present,
                 ));
-                self.status_message = Some(format!("Connection saved: '{}'.", name).into());
+                self.show_status(format!("Connection saved: '{}'.", name).into(), cx);
             }
             Err(error) => {
                 let message = match error {
@@ -738,7 +738,7 @@ impl crate::workspace::Workspace {
                 if let Some(editor) = self.settings.profile_editor.as_mut() {
                     editor.error = Some(message.clone().into());
                 }
-                self.status_message = Some(message.into());
+                self.show_status(message.into(), cx);
             }
         }
         cx.notify();
@@ -788,7 +788,7 @@ impl crate::workspace::Workspace {
                             target.profile_id = None;
                         }
                     }
-                    self.status_message = Some("Saved connection deleted.".into());
+                    self.show_status("Saved connection deleted.".into(), cx);
                 }
             }
             Err(error) => {

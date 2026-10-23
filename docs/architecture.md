@@ -117,6 +117,10 @@ route 支持 Direct、单跳 saved-profile JumpHost（jump profile 自身必须 
 
 目录传输必须使用 `TransferPlan`，不能伪装成单文件 job。planning 流式发布 child jobs；首个 child 立即可见，后续批量发布。`TransferManager` 是进程级 owner，传输状态至少区分 planning、queued、running、waiting-for-conflict、completed、skipped、cancelled 和 failed。
 
+传输状态归约必须与 job 数量线性：`finalize_plan_for_job` 和「plan 是否结束」都用 id 集合 + 单次遍历，禁止按 child id 逐个线性查找 job——目录传输的完成事件数等于文件数，按次扫描会让 UI 线程在整个传输期间冻结（2000 个 child 时实测超过两分钟）。plan 的终态转换由 reducer 记录在 `TransferStore::just_finished_plan`（每个 event 开头清空），UI 直接读这一位，不要自己再推导一次。
+
+传输完成后必须让文件列表跟上磁盘事实：一个 plan 进入终态（completed / failed / cancelled，单文件 plan 由 `TransferCompleted` 触发）时，`AppEventCoordinator::reload_panes_for_finished_plan` 取该 plan 根 job 与全部 child job 的目标路径的父目录，重读**所有 tab**（不只是活动 tab）中仍显示在那些目录的 pane——后台 tab 保留旧列表会让用户切回来时看到过期内容；不匹配的 tab 只付出一次路径比较。重读走 `reload_local_directory` / `reload_remote_directory`，与用户主动导航的区别是保留 selection、scroll 与状态文案，且不推送导航历史。禁止用 `request_local_directory` / `request_remote_directory` 直接做这件事——它们会清空 selection 并重置滚动位置，用户刚看到结果就丢了上下文。pane 显示其它目录时不得被拉回文件落地的目录。
+
 - conflict 是等待用户决定的状态，不是普通失败；
 - `apply_to_all` 只绑定当前 `TransferPlanId`；
 - running transfer 使用显式 cancellation token；
@@ -170,7 +174,8 @@ Profile 更新由 `ProfileStore` 协调：校验请求和 route → 写入或读
 - `ProfileStore::save_request` 是唯一公开保存入口；更底层的 profile-file 写入只允许 storage 内部调用，测试夹具只能使用 `#[cfg(test)]` helper。Connect 中手工输入的 credential 只用于当前连接，不得因曾选择 Profile 而回写持久化状态。
 - `profiles.json` v5 删除了从未有生产消费者的 `group_id` 预留字段；读取 v4 时忽略该字段，并在下一次成功写入时升级为 v5。未来真正实现 Profile group/folder 时必须重新设计模型和 migration，不能复用历史占位语义。
 - 损坏或未来版本文件不能被空默认值静默覆盖。session 文件恢复失败时必须先保存原始 corrupt backup，成功后才重新开放 checkpoint。
-- 跨启动只恢复窗口、tab 和非敏感连接元数据；不恢复 transfer catalog 或 secret。
+- 跨启动只恢复窗口、tab、非敏感连接元数据和窗口布局（分栏比例、transfer drawer 高度）；不恢复 transfer catalog 或 secret。布局字段一律 `serde(default)` 可缺省，旧 session 文件不得因此失效；恢复时按当前窗口尺寸重新 clamp，不能把上次的大高度套到小窗口上。
+- Connect 表单的 password / passphrase 字段默认掩码，但提供 Show/Hide 切换供用户核对长口令与跳板机口令。切换只影响渲染（`TextFieldModel::masked`），secret 值的存储、zeroize 与 Keychain 路径不变；每次打开表单一律回到掩码态，不继承上一次的显示状态。
 
 ## 12. UI 与 UX 约束
 
@@ -196,12 +201,15 @@ Profile 更新由 `ProfileStore` 协调：校验请求和 route → 写入或读
 
 - 第一屏必须是可操作的文件工作区，优先显示连接 tab、local pane、remote pane、transfer drawer；不得出现欢迎页、hero 区、说明卡片或大面积品牌展示。
 - local pane 默认在左、remote pane 默认在右，两者视觉结构对称但可以处于不同状态；当前聚焦 pane 有清晰而克制的 active indicator。
+- 两个 pane 之间有可拖动的分隔条：分栏以比例存储（不是像素），窗口改变尺寸后两侧保持同样的相对平衡；拖动 1:1 跟随指针，任一侧不得小于内容区的 20%，**并且不得窄于 300pt**——20% 在 720pt 窗口下只有 142pt，装不下路径栏的四组控件。窗口窄到两个 pane 都达不到 300pt 时退回 50/50，而不是把一侧压扁。pane 的 flex 三属性必须与 `flex_1()` 同义（grow 带比例、shrink 1、basis 0），否则长路径会挤动另一个 pane。
+- 拖拽的锚点是分隔条**自身**在窗口中的位置，不是指针位置：指针可能落在分隔条盒内的任何一点，用指针当锚点会让分隔条在第一次移动时跳到指针一侧。位移量按指针自抓取点起的行程计算。
 - transfer drawer 默认位于底部，可以折叠，不能遮挡主文件列表；折叠后 status bar 仍须简要提示 active 或 failed transfer。
 - 空文件夹、加载和无匹配状态填满列表 viewport 后居中；首次未连接的远端 pane 居中显示连接入口及说明，最近连接列表保持靠上以便扫描，并用统一的 scrollbar 保证短窗口中仍可访问全部入口。
 - 调整 pane 或窗口尺寸时，路径栏、表头、滚动区域和空状态布局必须保持完整。
 - 路径栏按功能成组：导航（后退、前进、上级、刷新）、面包屑、文件操作（复制路径、隐藏文件、新建文件夹、删除）、传输（上传或下载）；组间用 1px 竖线分隔，图标命中区保持冻结的 26×22，窄 pane 下优先保证面包屑的末段（当前目录）可见。
 - 空状态只提供下一步操作（如 `Open Connection`、`Choose Local Folder`、`Retry`），不含长篇功能说明。
 - 文件列表、传输列表、tab、路径栏和状态栏保持紧凑；组件高度稳定，hover、loading、progress 不引发布局变化。
+- 状态栏消息是单次动作的瞬时结果，必须过期（`StatusLine::LIFETIME`，6s）：`show_status` 在写入时启动一次性 timer，到点用 generation guard 清除自己的那条，更晚的消息不能被更早的 timer 清掉。后台目录读取只允许退役自己设置的 "Loading files on your Mac…" 行，不得清除用户在加载期间得到的其它消息。
 
 ### 12.2 交互入口
 
@@ -212,17 +220,20 @@ Profile 更新由 `ProfileStore` 协调：校验请求和 route → 写入或读
 - Edit 菜单使用 `MenuItem::os_action` 走 AppKit 标准 selector（`cut:`/`copy:`/`paste:`/`selectAll:`/`undo:`/`redo:`），dispatch 的仍是 `gpui-base` input action，不得自造文本编辑 action（§12.14）。
 - 平台支持 `MenuItem::checked`，但菜单栏是应用级的一份，在启动时构建一次（`main.rs` 的 `set_menus(menu_bar())`），而排序状态属于每个 tab（两个 pane 共用），单个 checkmark 无法表达多 tab 下的当前状态——要显示它就必须在排序、tab 或窗口焦点变化时重建整个菜单栏，目前不做。有状态的命令因此写成显式取值（例如 Sort By ▸ Name (A→Z)/(Z→A)）；当前排序状态的显示位置只有文件列表表头（§12.3）。
 - command palette 不得暴露 runtime、channel、actor、crate 等内部实现细节；用户忘记快捷键时必须能用 command palette 完成同一操作。
-- path bar 必须支持复制当前路径，local 和 remote 都保留 back、up、refresh；路径过长从中间省略，loading 时不得消失，只增加局部 spinner 或 progress indicator。
+- path bar 必须支持复制当前路径，local 和 remote 都保留 back、up、refresh；路径过长从中间省略，loading 时不得消失，只增加局部 spinner 或 progress indicator。Copy Path 复制的是选中条目自身的完整路径（多选时每行一条），只有没有选中任何条目时才回落到当前目录路径——右键菜单会先选中指针下的行，因此右键某个文件再 Copy Path 得到的必须是该文件的路径，而不是它所在目录。
+- Go to Folder（⌘⇧G）必须预填当前 pane 正在显示的路径并全选：改写一段即可到达兄弟目录，不必重打整条路径。全选只作用于新创建的输入框（`select_on_first_render`），输入即替换、方向键则保留可编辑。
 
 ### 12.3 文件列表与滚动
 
 - 文件列表必须虚拟化，10k entries 不创建长期 row entity；表头显示排序状态；selection 绑定稳定 id/path，禁止绑定 row index。
 - 键盘导航覆盖上/下、page up/down、home/end、shift 多选和 enter 默认动作；directory、file、symlink 和 hidden row 有可区分但克制的 icon 或 marker；hover action 易于发现但不改变列宽或 row 高度。
 - 聚焦的 pane 里键入字母是 Finder 式 type-select：前缀累积约 1 秒（连续按键继续同一前缀；超时、导航、切 tab、Escape 后重置），跳到第一个匹配项并滚动到它，从当前 selection 之后扫描并在末尾回绕，所以重复按同一字母会依次跳过匹配项；前缀匹配不到时退回最后键入的字符、不改变 selection。列表不缩小、不出现筛选栏。筛选只保留显式入口：⌘F（Filter Files）、菜单/palette 命令或筛选字段本身，筛选栏出现后键入才进入筛选。
+- ⌘C / ⌘V 作用于文件，采用 Finder 语义：⌘C 记住当前 pane 的选区（同时把路径写入系统剪贴板，方便粘到终端），⌘V 在**另一侧** pane 粘贴即触发对应的上传或下载。同一个 pane 内粘贴不做任何搬动，只给出说明——同侧复制需要服务端 copy 能力，当前不提供，不能假装成功。
 - Enter 打开选中项、F2 重命名，不采用 Finder 的 Return=重命名：行内编辑需要 macOS 完整键盘访问的路径，且会让 Enter 的语义随 selection 状态漂移；重命名另有 File 菜单项与 palette 命令，F2 不是唯一入口。
 - 可滚动 surface 使用统一的 theme-aware scrollbar：虚拟列表和普通 scroll container 各自绑定 handle，但共享 overflow、drag、track paging 和 resize 语义。
 - 只在内容溢出时显示 track/thumb，thumb 必须可拖动、track 点击按 viewport 翻页、滚轮与键盘滚动后位置同步；隐藏原生滚动条避免双滚动条。
 - 窄 pane、短窗口和动态内容变化后，thumb 大小与位置必须重新反映真实 viewport，不能遮挡主要操作或造成列表宽度跳变。
+- 跨 pane 拖拽携带的是整个选区，而不是被抓住的那一行：拖拽 payload 在抓取行属于当前选区时展开为分区的全部选中路径，否则只携带该行。拖到对侧 pane 时必须搬走全部路径，不能只传第一个文件；资源管理器里拖一个已选项就是搬整组选中项。上传把整组交给同一个 plan（本地遍历不需要连接）；下载因为远端 planner 只解析一棵远端树，必须**每个源各发一个单源 plan**，目标为「本地目录/源名」。
 
 ### 12.4 安全决策显式
 

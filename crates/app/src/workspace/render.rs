@@ -13,8 +13,8 @@ use macsftp_ui::{
 
 use crate::palette_commands::labeled_shortcut;
 use crate::resources::ActiveResources;
-use crate::workspace::PaneSide;
 use crate::workspace::overlay::OverlayFade;
+use crate::workspace::{PaneSide, pane_split, view_state};
 
 /// Left inset of the transparent titlebar reserved for the native macOS
 /// traffic lights (`TitlebarOptions::traffic_light_position`).
@@ -22,6 +22,67 @@ pub(crate) const TRAFFIC_LIGHT_RESERVE: f32 = 80.0;
 use crate::workspace::helpers::*;
 use crate::workspace::nav::{breadcrumb_display_indices, breadcrumb_segments};
 use macsftp_core::HistoryOp;
+
+/// Payload for a row drag inside a file pane.
+///
+/// A drag carries the whole pane selection, not just the row under the pointer:
+/// dragging one file out of a multi-selection is supposed to move all of them,
+/// and the opposite pane already accepts several sources. `path` is the row the
+/// gesture started on, kept so a single-row drag can name itself in the drag
+/// preview.
+#[derive(Clone, Debug)]
+pub(crate) struct DragPayload {
+    pub(crate) path: EntryPath,
+    pub(crate) paths: Vec<EntryPath>,
+}
+
+impl DragPayload {
+    /// Build the payload for dragging `path` out of `side`.
+    ///
+    /// The selection expands only when the grabbed row is part of it. Dragging
+    /// an unselected row while something else is selected moves just that row,
+    /// which is what a user aiming at one file expects.
+    pub(crate) fn new(path: EntryPath, side: PaneSide, selection: &[EntryPath]) -> Self {
+        let paths = if selection.contains(&path) && !selection.is_empty() {
+            selection
+                .iter()
+                .filter(|candidate| {
+                    matches!(
+                        (side, candidate),
+                        (PaneSide::Local, EntryPath::Local(_))
+                            | (PaneSide::Remote, EntryPath::Remote(_))
+                    )
+                })
+                .cloned()
+                .collect()
+        } else {
+            vec![path.clone()]
+        };
+        Self { path, paths }
+    }
+
+    /// The local paths a drop on the remote pane uploads.
+    pub(crate) fn local_sources(&self) -> Vec<LocalPath> {
+        self.paths
+            .iter()
+            .filter_map(|path| match path {
+                EntryPath::Local(local) => Some(local.clone()),
+                EntryPath::Remote(_) => None,
+            })
+            .collect()
+    }
+
+    /// The remote paths a drop on the local pane downloads.
+    pub(crate) fn remote_sources(&self) -> Vec<RemotePath> {
+        self.paths
+            .iter()
+            .filter_map(|path| match path {
+                EntryPath::Remote(remote) => Some(remote.clone()),
+                EntryPath::Local(_) => None,
+            })
+            .collect()
+    }
+}
 
 impl crate::workspace::Workspace {
     /// Native window title (§12.7): the active tab's title — the connection's
@@ -254,6 +315,75 @@ impl crate::workspace::Workspace {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// The divider between the two panes, with its drag behavior.
+    pub(crate) fn render_pane_divider(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let divider = crate::workspace::panes::render_pane_divider(&theme);
+        divider.on_mouse_down(
+            gpui_kit::MouseButton::Left,
+            cx.listener(
+                move |workspace, event: &gpui_kit::MouseDownEvent, window, cx| {
+                    // The divider's own position at grab time, not the
+                    // pointer's: the pointer can sit anywhere inside the
+                    // divider's box, and anchoring on the pointer would
+                    // make the divider jump sideways on the first move.
+                    let divider_x = workspace
+                        .divider_position(window, cx)
+                        .unwrap_or(event.position.x);
+                    workspace.pane_split_drag = Some(view_state::PaneSplitDrag {
+                        start_x: divider_x,
+                        pointer_x: event.position.x,
+                    });
+                    // No `set_active_drag_cursor_style`: this is not a GPUI drag
+                    // (the divider tracks plain mouse moves, see
+                    // `apply_pane_divider_drag`), so that call would be a no-op.
+                    // The content row carries the resize cursor while a drag is
+                    // in flight instead.
+                    let _ = window;
+                    cx.notify();
+                },
+            ),
+        )
+    }
+
+    /// Apply the in-flight pane divider drag to the split.
+    ///
+    /// This lives on the whole content row rather than on the divider itself:
+    /// drag events are dispatched by hitbox, so a listener on a five-point-wide
+    /// divider stops firing the moment the pointer leaves it sideways — which
+    /// is the first thing a horizontal drag does.
+    pub(crate) fn apply_pane_divider_drag(
+        &mut self,
+        pointer_x: gpui_kit::Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self.pane_split_drag else {
+            return;
+        };
+        let content_width = window.viewport_size().width;
+        // The divider travels with the pointer: its position at grab time plus
+        // the pointer's travel since then.
+        let divider_x = drag.start_x + (pointer_x - drag.pointer_x);
+        self.pane_split_ratio = pane_split::split_ratio_for_pointer(
+            divider_x,
+            content_width,
+            pane_split::DIVIDER_WIDTH,
+        );
+        cx.notify();
+    }
+
+    /// End an in-flight pane divider drag, if any.
+    pub(crate) fn finish_pane_divider_drag(&mut self, cx: &mut Context<Self>) {
+        if self.pane_split_drag.take().is_some() {
+            cx.notify();
+        }
     }
 
     pub(crate) fn render_pane(
@@ -853,6 +983,22 @@ impl crate::workspace::Workspace {
                                                             .open_recent_connection(id, window, cx);
                                                     },
                                                 ))
+                                                .on_mouse_up(
+                                                    gpui_kit::MouseButton::Right,
+                                                    cx.listener(
+                                                        move |workspace,
+                                                              event: &gpui_kit::MouseUpEvent,
+                                                              window,
+                                                              cx| {
+                                                            workspace.show_recent_context_menu(
+                                                                id,
+                                                                event.position,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    ),
+                                                )
                                         },
                                     )),
                             )
@@ -861,9 +1007,19 @@ impl crate::workspace::Workspace {
                 if recent_rows.is_empty() {
                     surface.flex_1().justify_center().into_any_element()
                 } else {
+                    // The scroll content takes at least the viewport height so
+                    // the card centers while it fits, and grows instead of
+                    // overflowing negatively once the rows are taller than the
+                    // pane (a negative offset would hide the top row from
+                    // scrolling entirely).
                     macsftp_ui::scroll_area(
                         "remote-connection-empty",
-                        surface.flex_none(),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .justify_center()
+                            .min_h_full()
+                            .child(surface.flex_none()),
                         &self.remote_empty_scroll,
                         &self.remote_empty_scrollbar,
                         window,
@@ -935,8 +1091,8 @@ impl crate::workspace::Workspace {
                         }))
                         .into_any_element();
                     Some(remote_empty_with_recents(
-                        Some("Connect to a server".into()),
-                        Some("Choose a saved connection or enter server details.".into()),
+                        None,
+                        None,
                         vec![connect_action],
                         window,
                         cx,
@@ -1151,21 +1307,29 @@ impl crate::workspace::Workspace {
                                         },
                                     )
                                     .on_drag(
-                                        drag_item,
-                                        |value: &EntryPath, _position, _window, cx| {
-                                            let label = match value {
-                                                EntryPath::Local(p) => {
-                                                    std::path::Path::new(p.as_str())
-                                                        .file_name()
-                                                        .map(|n| n.to_string_lossy().to_string())
+                                        DragPayload::new(drag_item.clone(), side, selected_paths),
+                                        |value: &DragPayload, _position, _window, cx| {
+                                            let label = if value.paths.len() > 1 {
+                                                format!("{} items", value.paths.len())
+                                            } else {
+                                                match &value.path {
+                                                    EntryPath::Local(p) => {
+                                                        std::path::Path::new(p.as_str())
+                                                            .file_name()
+                                                            .map(|n| {
+                                                                n.to_string_lossy().to_string()
+                                                            })
+                                                    }
+                                                    EntryPath::Remote(p) => {
+                                                        std::path::Path::new(p.as_str())
+                                                            .file_name()
+                                                            .map(|n| {
+                                                                n.to_string_lossy().to_string()
+                                                            })
+                                                    }
                                                 }
-                                                EntryPath::Remote(p) => {
-                                                    std::path::Path::new(p.as_str())
-                                                        .file_name()
-                                                        .map(|n| n.to_string_lossy().to_string())
-                                                }
-                                            }
-                                            .unwrap_or_else(|| "file".to_string());
+                                                .unwrap_or_else(|| "file".to_string())
+                                            };
                                             cx.new(|_| DragPreview {
                                                 label: label.into(),
                                             })
@@ -1184,10 +1348,17 @@ impl crate::workspace::Workspace {
             list.into_any_element()
         };
 
+        // The panes share the content area by flex weight, so the divider's
+        // ratio decides how much each side gets (see `pane_split`). The three
+        // flex properties together are what `flex_1()` does: the grow factor
+        // carries the ratio, and shrink 1 with a zero basis keeps both panes
+        // collapsible instead of letting a long path push the other one out.
         div()
             .flex()
             .flex_col()
-            .flex_1()
+            .flex_grow(self.pane_split_weight(side, window.viewport_size().width))
+            .flex_shrink_1()
+            .flex_basis(gpui_kit::relative(0.0))
             .min_w_0()
             .key_context("FilePane")
             .track_focus(self.pane_focus(side))
@@ -1205,13 +1376,19 @@ impl crate::workspace::Workspace {
                     workspace.handle_type_select_key(side, event, window, cx);
                 }
             }))
-            .when(side == PaneSide::Local, |pane| {
-                pane.border_r_1().border_color(theme.colors.border)
-            })
+            // No right border on the local pane: the divider between the panes
+            // draws the separator now, and both would read as a double rule.
             .id(if side == PaneSide::Local {
                 "local-file-pane"
             } else {
                 "remote-file-pane"
+            })
+            .debug_selector(move || {
+                if side == PaneSide::Local {
+                    "local-file-pane".into()
+                } else {
+                    "remote-file-pane".into()
+                }
             })
             .on_mouse_up(
                 gpui_kit::MouseButton::Right,
@@ -1223,19 +1400,22 @@ impl crate::workspace::Workspace {
                     },
                 ),
             )
-            .on_drop(
-                cx.listener(
-                    move |workspace, path: &EntryPath, _window, cx| match (side, path) {
-                        (PaneSide::Remote, EntryPath::Local(local)) => {
-                            workspace.begin_upload(vec![local.clone()], cx)
+            .on_drop(cx.listener(
+                move |workspace, payload: &DragPayload, _window, cx| match side {
+                    PaneSide::Remote => {
+                        let sources = payload.local_sources();
+                        if !sources.is_empty() {
+                            workspace.begin_upload(sources, cx);
                         }
-                        (PaneSide::Local, EntryPath::Remote(remote)) => {
-                            workspace.begin_download(vec![remote.clone()], cx)
+                    }
+                    PaneSide::Local => {
+                        let sources = payload.remote_sources();
+                        if !sources.is_empty() {
+                            workspace.begin_download(sources, cx);
                         }
-                        _ => {}
-                    },
-                ),
-            )
+                    }
+                },
+            ))
             .child(path_bar)
             .child(file_table_header(&sort, cx, {
                 let entity = cx.entity();

@@ -280,13 +280,17 @@ impl crate::workspace::Workspace {
                 .when(active_jobs.len() + queued_jobs.len() > 0, |header| {
                     let workspace = workspace_entity.clone();
                     header.child(
-                        icon_button("cancel-all-transfers", IconName::Close, "Cancel All")
-                            .icon_color(theme.colors.warning)
-                            .on_click(move |_event, _window, cx| {
-                                workspace.update(cx, |workspace, cx| {
-                                    workspace.cancel_all_transfers(cx);
-                                });
-                            }),
+                        icon_button(
+                            "cancel-all-transfers",
+                            IconName::Close,
+                            labeled_shortcut("Cancel All Transfers", "CancelAllTransfers"),
+                        )
+                        .icon_color(theme.colors.warning)
+                        .on_click(move |_event, _window, cx| {
+                            workspace.update(cx, |workspace, cx| {
+                                workspace.cancel_all_transfers(cx);
+                            });
+                        }),
                     )
                 })
                 .when(completed_jobs.len() + failed_jobs.len() > 0, |header| {
@@ -355,73 +359,97 @@ impl crate::workspace::Workspace {
             );
         }
 
-        for (label, section_jobs) in [("In Progress", active_jobs), ("Waiting", queued_jobs)] {
-            if !section_jobs.is_empty() {
-                content = content
-                    .child(section_header_static(label, section_jobs.len(), &theme))
-                    .children(
-                        section_jobs
-                            .into_iter()
-                            .map(|job| self.render_transfer_job(job, window, cx)),
-                    );
-            }
-        }
-
-        for (label, section_jobs, expanded, toggle_id) in [
-            (
-                "Complete",
-                completed_jobs,
-                self.transfer_drawer.completed_section_expanded,
-                "toggle-completed",
-            ),
-            (
-                "Failed",
-                failed_jobs,
-                self.transfer_drawer.failed_section_expanded,
-                "toggle-failed",
-            ),
-        ] {
+        // One row per transfer, and a mass download or upload has one per file.
+        // The drawer is not virtualized, so each row is laid out on every
+        // frame: a section therefore renders a bounded page of rows and offers
+        // the rest behind a control rather than building hundreds of rows that
+        // are mostly scrolled out of sight.
+        for section in crate::workspace::view_state::TransferSection::ALL {
+            let (label, section_jobs, collapsible, toggle_id) = match section {
+                crate::workspace::view_state::TransferSection::InProgress => {
+                    ("In Progress", &active_jobs, false, "toggle-in-progress")
+                }
+                crate::workspace::view_state::TransferSection::Waiting => {
+                    ("Waiting", &queued_jobs, false, "toggle-waiting")
+                }
+                crate::workspace::view_state::TransferSection::Completed => {
+                    ("Complete", &completed_jobs, true, "toggle-completed")
+                }
+                crate::workspace::view_state::TransferSection::Failed => {
+                    ("Failed", &failed_jobs, true, "toggle-failed")
+                }
+            };
             if section_jobs.is_empty() {
                 continue;
             }
-            let is_completed_section = label == "Complete";
-            content = content.child(
+            let expanded = self.transfer_drawer.is_expanded(section);
+            if collapsible {
+                content = content.child(
+                    div()
+                        .id(toggle_id)
+                        .debug_selector(move || toggle_id.into())
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap_1()
+                        .h(px(24.0))
+                        .px_2()
+                        .text_size(px(11.0))
+                        .text_color(theme.colors.text_muted)
+                        .hover(|style| style.bg(theme.colors.element_hover))
+                        .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                            let next = !workspace.transfer_drawer.is_expanded(section);
+                            workspace.transfer_drawer.set_expanded(section, next);
+                            cx.notify();
+                        }))
+                        .child(icon(
+                            if expanded {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            },
+                            theme.colors.text_muted,
+                        ))
+                        .child(format!("{label} ({})", section_jobs.len())),
+                );
+                if !expanded {
+                    continue;
+                }
+            } else {
+                content = content.child(section_header_static(label, section_jobs.len(), &theme));
+            }
+
+            let (visible, hidden) = self
+                .transfer_drawer
+                .visible_rows(section, section_jobs.len());
+            content = content.children(section_jobs.iter().take(visible).map(|job| {
+                // An id per row lets a test see what the section actually
+                // built, which is the point of the page size.
                 div()
-                    .id(toggle_id)
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap_1()
-                    .h(px(24.0))
-                    .px_2()
-                    .text_size(px(11.0))
-                    .text_color(theme.colors.text_muted)
-                    .hover(|style| style.bg(theme.colors.element_hover))
-                    .on_click(cx.listener(move |workspace, _event, _window, cx| {
-                        if is_completed_section {
-                            workspace.transfer_drawer.completed_section_expanded =
-                                !workspace.transfer_drawer.completed_section_expanded;
-                        } else {
-                            workspace.transfer_drawer.failed_section_expanded =
-                                !workspace.transfer_drawer.failed_section_expanded;
-                        }
-                        cx.notify();
-                    }))
-                    .child(icon(
-                        if expanded {
-                            IconName::ChevronDown
-                        } else {
-                            IconName::ChevronRight
-                        },
-                        theme.colors.text_muted,
-                    ))
-                    .child(format!("{label} ({})", section_jobs.len())),
-            );
-            if expanded {
-                content = content.children(
-                    section_jobs
-                        .into_iter()
-                        .map(|job| self.render_transfer_job(job, window, cx)),
+                    .id(("transfer-row", job.id.0))
+                    .test_support()
+                    .child(self.render_transfer_job(job, window, cx))
+            }));
+            if hidden > 0 {
+                content = content.child(
+                    div()
+                        .id(toggle_id)
+                        .debug_selector(move || format!("{toggle_id}-more"))
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap_1()
+                        .h(px(24.0))
+                        .px_2()
+                        .text_size(px(11.0))
+                        .text_color(theme.colors.accent)
+                        .cursor_pointer()
+                        .hover(|style| style.bg(theme.colors.element_hover))
+                        .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                            workspace.transfer_drawer.set_showing_all(section, true);
+                            cx.notify();
+                        }))
+                        .child(format!("Show {hidden} more")),
                 );
             }
         }
@@ -563,14 +591,55 @@ impl crate::workspace::Workspace {
             });
         }
         if can_retry_transfer(job) {
+            let workspace = workspace.clone();
             row = row.on_retry(move |_event, _window, cx| {
                 workspace.update(cx, |workspace, cx| {
                     workspace.retry_transfer(job_id, cx);
                 });
             });
         }
+        // Reveal needs a local destination to point at. A completed upload's
+        // destination lives on the server, where Finder cannot go, so the
+        // control is absent instead of reporting that it cannot help; a failed
+        // or cancelled row may have no file at all.
+        let revealable = matches!(job.state, TransferState::Completed)
+            && matches!(job.destination, macsftp_core::TransferEndpoint::Local(_));
+        if revealable {
+            row = row.on_reveal(move |_event, _window, cx| {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.reveal_transfer_destination(job_id, cx);
+                });
+            });
+        }
 
         row
+    }
+
+    /// Reveal a finished download's destination in Finder.
+    ///
+    /// Only local destinations are revealable, and the row only offers the
+    /// control for those (see `render_transfer_job`); a remote path is reported
+    /// rather than opened, so a caller that gets here with one is told why
+    /// nothing happened.
+    pub(crate) fn reveal_transfer_destination(
+        &mut self,
+        transfer_id: macsftp_core::TransferId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(job) = cx.transfers().find_job(transfer_id) else {
+            return;
+        };
+        match &job.destination {
+            macsftp_core::TransferEndpoint::Local(path) => {
+                crate::workspace::reveal_local_path(cx, std::path::Path::new(path.as_str()));
+            }
+            macsftp_core::TransferEndpoint::Remote(_) => {
+                self.show_status(
+                    crate::workspace::view_state::StatusLine::from("This file is on the server."),
+                    cx,
+                );
+            }
+        }
     }
     /// Count of selected paths on the focused pane (local or remote).
     pub(crate) fn focused_selection_count(&self) -> usize {
@@ -628,8 +697,8 @@ impl crate::workspace::Workspace {
         if selected_count > 0 {
             spoken.push_str(&format!(", {selected_count} selected"));
         }
-        if let Some(message) = &self.status_message {
-            spoken.push_str(&format!(", {message}"));
+        if let Some(line) = &self.status_message {
+            spoken.push_str(&format!(", {}", line.message));
         }
 
         div()
@@ -670,11 +739,12 @@ impl crate::workspace::Workspace {
                                 .child(format!("{selected_count} selected")),
                         )
                     })
-                    .children(
-                        self.status_message.clone().map(|message| {
-                            div().min_w_0().truncate().child(format!("— {message}"))
-                        }),
-                    ),
+                    .children(self.status_message.clone().map(|line| {
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .child(format!("— {}", line.message))
+                    })),
             )
             .child(
                 div()
@@ -811,6 +881,7 @@ mod tests {
         child_state: TransferState,
     ) -> TransferStore {
         TransferStore {
+            just_finished_plan: None,
             plans: vec![TransferPlan {
                 id: TransferPlanId(1),
                 root_job_id: TransferId(1),

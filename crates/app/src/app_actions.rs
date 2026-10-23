@@ -17,6 +17,9 @@ actions!(
         UploadSelection,
         UploadEditedFile,
         DownloadSelection,
+        CancelAllTransfers,
+        CopyFiles,
+        PasteFiles,
         OpenCommandPalette,
         ShowTransferDrawer,
         ActivateNextTab,
@@ -133,6 +136,10 @@ pub(crate) fn keybindings() -> Vec<KeyBinding> {
         // bindings on the same chord leave the second one unreachable.
         KeyBinding::new("cmd-shift-u", UploadEditedFile, Some("Workspace")),
         KeyBinding::new("cmd-d", DownloadSelection, Some("Workspace")),
+        // macOS's standard "cancel", so the chord users already reach for while
+        // something is running stops every transfer rather than only the
+        // focused one.
+        KeyBinding::new("cmd-period", CancelAllTransfers, Some("Workspace")),
         KeyBinding::new("down", SelectNextEntry, Some("FilePane")),
         KeyBinding::new("up", SelectPrevEntry, Some("FilePane")),
         KeyBinding::new("shift-down", SelectNextEntryExtend, Some("FilePane")),
@@ -153,6 +160,11 @@ pub(crate) fn keybindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-]", NavigateForward, Some("Workspace")),
         KeyBinding::new("cmd-shift-g", GoToPath, Some("Workspace")),
         KeyBinding::new("cmd-f", FilterPane, Some("FilePane")),
+        // Finder's chords for files. An input inside a pane keeps its own
+        // bindings: GPUI matches the deepest focused context first, and GPUI
+        // Base binds cmd-c/cmd-v in "Input".
+        KeyBinding::new("cmd-c", CopyFiles, Some("FilePane")),
+        KeyBinding::new("cmd-v", PasteFiles, Some("FilePane")),
         KeyBinding::new("cmd-shift-c", CopyPath, Some("FilePane")),
         KeyBinding::new("cmd-backspace", DeleteSelection, Some("FilePane")),
         KeyBinding::new("f2", RenameEntry, Some("FilePane")),
@@ -182,4 +194,26 @@ pub(crate) fn keybindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-shift-w", CloseWindow, None),
         KeyBinding::new("cmd-q", Quit, None),
     ]
+}
+
+/// Recent-connection context-menu commands. Unlike the unit actions above,
+/// these carry the recent entry's id, because the menu targets one specific
+/// row rather than the focused pane. They have no keystrokes and stay out of
+/// the command palette: they exist so the native menu can dispatch a row.
+#[derive(Clone, PartialEq, Eq, Debug, gpui_kit::Action)]
+#[action(namespace = macsftp, no_json)]
+pub(crate) struct ConnectRecent {
+    pub(crate) id: u64,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, gpui_kit::Action)]
+#[action(namespace = macsftp, no_json)]
+pub(crate) struct CopyRecentEndpoint {
+    pub(crate) id: u64,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, gpui_kit::Action)]
+#[action(namespace = macsftp, no_json)]
+pub(crate) struct ForgetRecent {
+    pub(crate) id: u64,
 }

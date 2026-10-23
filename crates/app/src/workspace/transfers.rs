@@ -13,17 +13,17 @@ impl crate::workspace::Workspace {
             return;
         };
         let Some((session_epoch, profile_id)) = connected_transfer_session(tab) else {
-            self.status_message = Some("Connect to the server before uploading.".into());
+            self.show_status("Connect to the server before uploading.".into(), cx);
             cx.notify();
             return;
         };
         let Some(remote_directory) = tab.remote.path.clone() else {
-            self.status_message = Some("Choose a destination folder on the server.".into());
+            self.show_status("Choose a destination folder on the server.".into(), cx);
             cx.notify();
             return;
         };
         if sources.is_empty() {
-            self.status_message = Some("Select files or folders on your Mac to upload.".into());
+            self.show_status("Select files or folders on your Mac to upload.".into(), cx);
             cx.notify();
             return;
         }
@@ -61,7 +61,7 @@ impl crate::workspace::Workspace {
         });
         if self.send_command(command, cx) {
             self.transfer_drawer.open = true;
-            self.status_message = Some("Preparing upload…".into());
+            self.show_status("Preparing upload…".into(), cx);
             cx.notify();
         }
     }
@@ -70,45 +70,84 @@ impl crate::workspace::Workspace {
             return;
         };
         let Some((session_epoch, profile_id)) = connected_transfer_session(tab) else {
-            self.status_message = Some("Connect to the server before downloading.".into());
+            self.show_status("Connect to the server before downloading.".into(), cx);
             cx.notify();
             return;
         };
         let Some(local_directory) = tab.local.path.clone() else {
-            self.status_message = Some("Choose a destination folder on your Mac.".into());
+            self.show_status("Choose a destination folder on your Mac.".into(), cx);
             cx.notify();
             return;
         };
-        if sources.len() != 1 {
-            self.status_message = Some("Select one server file or folder to download.".into());
+        if sources.is_empty() {
+            self.show_status(
+                "Select files or folders on the server to download.".into(),
+                cx,
+            );
             cx.notify();
             return;
         }
-        let destination = match append_local_name(&local_directory, &sources[0]) {
-            Ok(destination) => destination,
-            Err(message) => {
-                self.status_message = Some(message.into());
-                cx.notify();
-                return;
-            }
+
+        // Every source becomes its own single-source plan, so each plan's
+        // destination is the exact local path for that item: one file keeps its
+        // own name, and a folder recreates its tree under a matching name.
+        let destination_for = |source: &RemotePath| -> Result<LocalPath, &'static str> {
+            append_local_name(&local_directory, source)
         };
         let tab_id = tab.id;
         let metadata_policy = cx.resources().config.config().metadata_policy.clone();
-        let command = AppCommand::StartTransfer(macsftp_core::StartTransferCommand {
-            tab_id,
-            session_epoch,
-            profile_id,
-            direction: macsftp_core::TransferDirection::Download,
-            sources: sources.into_iter().map(TransferEndpoint::Remote).collect(),
-            destination: TransferEndpoint::Local(destination),
-            metadata_policy,
-            conflict_policy: Default::default(),
-        });
-        if self.send_command(command, cx) {
-            self.transfer_drawer.open = true;
-            self.status_message = Some("Preparing download…".into());
-            cx.notify();
+
+        // Download planning is per-source: the remote planner resolves a single
+        // remote tree against one local destination. Several selected items
+        // therefore become several plans, queued in selection order, where an
+        // upload hands the whole list to one plan (local traversal needs no
+        // connection). Both shapes reach the drawer as ordinary rows.
+        let total = sources.len();
+        let mut queued = 0;
+        let mut skipped = 0;
+        for (index, source) in sources.into_iter().enumerate() {
+            let destination = match destination_for(&source) {
+                Ok(destination) => destination,
+                Err(message) => {
+                    // Keep going: one unusable name must not cancel the items
+                    // that were already queued, and the count below tells the
+                    // user what actually started.
+                    skipped += 1;
+                    self.show_status(message.into(), cx);
+                    continue;
+                }
+            };
+            let command = AppCommand::StartTransfer(macsftp_core::StartTransferCommand {
+                tab_id,
+                session_epoch,
+                profile_id,
+                direction: macsftp_core::TransferDirection::Download,
+                sources: vec![TransferEndpoint::Remote(source)],
+                destination: TransferEndpoint::Local(destination),
+                metadata_policy: metadata_policy.clone(),
+                conflict_policy: Default::default(),
+            });
+            if !self.send_command(command, cx) {
+                // The command channel is full: this source and every one after
+                // it cannot be queued now. Count them all, not just this one.
+                skipped += total - index;
+                break;
+            }
+            queued += 1;
         }
+        if queued > 0 {
+            self.transfer_drawer.open = true;
+        }
+        let message = match (queued, skipped) {
+            (0, _) => "Could not start the download. Try again.".to_string(),
+            (1, 0) => "Preparing download…".to_string(),
+            (queued, 0) => format!("Preparing {queued} downloads…"),
+            (queued, skipped) => {
+                format!("Preparing {queued} downloads… {skipped} could not be started.")
+            }
+        };
+        self.show_status(message.into(), cx);
+        cx.notify();
     }
     pub(crate) fn upload_selection(&mut self, cx: &mut Context<Self>) {
         let sources: Vec<LocalPath> = self
@@ -220,8 +259,7 @@ impl crate::workspace::Workspace {
     }
     pub(crate) fn clear_transfer_records(&mut self, cx: &mut Context<Self>) {
         if cx.clear_terminal_transfers() {
-            self.transfer_drawer.completed_section_expanded = false;
-            self.transfer_drawer.failed_section_expanded = false;
+            self.transfer_drawer.collapse_all_sections();
             cx.notify();
         }
     }

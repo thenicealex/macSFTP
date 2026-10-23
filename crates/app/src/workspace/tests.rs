@@ -37,10 +37,10 @@ use super::{
     WorkspaceSurface,
 };
 use crate::app_actions::{
-    self, ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, FilterPane, GoToPath,
-    NavigateBack, NewTab, OpenProfiles, OpenSettings, PageDown, SelectAllEntries, SelectNextEntry,
-    SelectNextEntryExtend, SelectPrevEntry, ShowAbout, ShowTransferDrawer, SortByNameAscending,
-    SortBySizeAscending, SortBySizeDescending, ToggleHiddenFiles,
+    self, ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, CopyPath, FilterPane,
+    GoToPath, NavigateBack, NewTab, OpenProfiles, OpenSettings, PageDown, SelectAllEntries,
+    SelectNextEntry, SelectNextEntryExtend, SelectPrevEntry, ShowAbout, ShowTransferDrawer,
+    SortByNameAscending, SortBySizeAscending, SortBySizeDescending, ToggleHiddenFiles,
 };
 use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::session_coordinator::SessionCoordinator;
@@ -51,6 +51,7 @@ use crate::workspace::helpers::format_recent_label;
 use crate::workspace::overlay::{OVERLAY_FADE, OverlayFade};
 use crate::workspace::profiles::{PassphrasePolicy, ProfileEditorState, ProfileRouteKind};
 use crate::workspace::profiles::{SettingsSection, profile_matches_filter};
+use crate::workspace::render::DragPayload;
 use crate::workspace::transfer_render::{PROGRESS_SMOOTHING, painted_progress};
 use macsftp_core::HistoryOp;
 use macsftp_ui::InputState;
@@ -153,11 +154,30 @@ fn unique_temp_dir(label: &str) -> std::path::PathBuf {
 
 thread_local! {
     static REOPENED_EDIT_PATHS: RefCell<Vec<LocalPath>> = const { RefCell::new(Vec::new()) };
+    /// Paths the workspace asked macOS to open, in call order.
+    static OPENED_SYSTEM_PATHS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// Paths the workspace asked Finder to reveal, in call order.
+    static REVEALED_PATHS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 fn record_edit_reopen(temp: &LocalPath, _editor: Option<&str>) -> std::io::Result<()> {
     REOPENED_EDIT_PATHS.with(|paths| paths.borrow_mut().push(temp.clone()));
     Ok(())
+}
+
+fn record_system_open(_cx: &App, path: &std::path::Path) {
+    OPENED_SYSTEM_PATHS.with(|paths| paths.borrow_mut().push(path.display().to_string()));
+}
+
+fn record_system_reveal(_cx: &App, path: &std::path::Path) {
+    REVEALED_PATHS.with(|paths| paths.borrow_mut().push(path.display().to_string()));
+}
+
+/// Record every system open/reveal instead of reaching LaunchServices, which the
+/// test platform implements as `unimplemented!()`.
+fn install_system_path_seams() {
+    crate::workspace::set_system_path_opener(record_system_open);
+    crate::workspace::set_system_path_revealer(record_system_reveal);
 }
 
 fn init_workspace(
@@ -1058,10 +1078,20 @@ fn compact_workspace_scrolls_recent_connections(cx: &mut TestAppContext) {
             .is_some(),
         "short windows expose a scrollbar for all recent connections"
     );
-    let position = cx
+    let viewport = cx
         .debug_bounds("remote-list-container-viewport")
-        .expect("remote viewport exists")
-        .center();
+        .expect("remote viewport exists");
+    let card = cx
+        .debug_bounds("remote-empty-card")
+        .expect("recent connection card is visible");
+    // Overflowing content starts at the top edge (inside the card's own
+    // vertical padding): centering it would push the first row above the
+    // viewport, where neither scrolling nor clipping could bring it back.
+    assert!(
+        card.top() >= viewport.top() && card.top() <= viewport.top() + px(12.0),
+        "overflowing recent connections start at the viewport top: {card:?} in {viewport:?}"
+    );
+    let position = viewport.center();
     cx.simulate_event(ScrollWheelEvent {
         position,
         delta: ScrollDelta::Pixels(point(px(0.0), px(-120.0))),
@@ -1070,6 +1100,46 @@ fn compact_workspace_scrolls_recent_connections(cx: &mut TestAppContext) {
     workspace.read_with(&cx, |workspace, _| {
         assert!(workspace.remote_empty_scroll.offset().y < px(0.0))
     });
+}
+
+#[gpui_kit::test]
+fn compact_workspace_centers_recent_connections_that_fit(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    workspace.update(&mut cx, |_workspace, cx| {
+        for index in 0..3 {
+            cx.resources_mut()
+                .recents
+                .upsert(macsftp_storage::RecentEntryInput {
+                    host: format!("recent-{index}.example.com"),
+                    port: 22,
+                    username: "operator".into(),
+                    profile_id: None,
+                    display_name: None,
+                    last_remote_path: None,
+                    last_connected_at: index,
+                })
+                .expect("seed recent connection fixture");
+        }
+        cx.notify();
+    });
+    for dimensions in [size(px(720.0), px(480.0)), size(px(1200.0), px(800.0))] {
+        cx.simulate_resize(dimensions);
+        cx.run_until_parked();
+        let viewport = cx
+            .debug_bounds("remote-list-container-viewport")
+            .expect("remote viewport exists");
+        let card = cx
+            .debug_bounds("remote-empty-card")
+            .expect("recent connection card is visible");
+        assert!(
+            card.size.height < viewport.size.height,
+            "fixture card must fit the viewport: {card:?} in {viewport:?}"
+        );
+        assert!(
+            (card.center().y - viewport.center().y).abs() < px(2.0),
+            "a card that fits is vertically centered: {card:?} in {viewport:?}"
+        );
+    }
 }
 
 #[gpui_kit::test]
@@ -8002,6 +8072,9 @@ fn local_file_symlink_is_not_opened_as_a_folder(cx: &mut TestAppContext) {
     #[cfg(not(unix))]
     return;
 
+    install_system_path_seams();
+    OPENED_SYSTEM_PATHS.with(|paths| paths.borrow_mut().clear());
+
     set_local_path_and_wait(&workspace, &mut cx, base.clone());
     workspace.update_in(&mut cx, |workspace, window, cx| {
         let tab = workspace.active_tab().expect("active tab");
@@ -8021,6 +8094,13 @@ fn local_file_symlink_is_not_opened_as_a_folder(cx: &mut TestAppContext) {
             tab.local.path.as_ref(),
             Some(&base),
             "a file link must not navigate"
+        );
+    });
+    OPENED_SYSTEM_PATHS.with(|paths| {
+        assert_eq!(
+            *paths.borrow(),
+            vec![link.to_string_lossy().to_string()],
+            "a link to a file opens the file itself, following the link"
         );
     });
 }
@@ -9069,6 +9149,8 @@ fn restore_session_rebuilds_tabs_without_connect(cx: &mut TestAppContext) {
         version: SessionFile::CURRENT_VERSION,
         active_window_index: 0,
         windows: vec![SessionWindowSnapshot {
+            pane_split_ratio: None,
+            transfer_drawer_height: None,
             id: WindowSessionId(9),
             active_tab_index: 1,
             tabs: vec![
@@ -9855,6 +9937,149 @@ fn right_click_on_blank_space_keeps_the_selection(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn copy_path_copies_the_right_clicked_entry(cx: &mut TestAppContext) {
+    let (fixture, workspace, mut cx) =
+        workspace_with_local_files(cx, "copy-path-entry", &["a.txt", "b.txt", "c.txt"]);
+    let row_height = workspace.read_with(&cx, |_workspace, cx| cx.theme().sizes.file_row_height);
+    let expected = local_visible_entry(&workspace, &cx, 1);
+    let expected_text = match expected {
+        EntryPath::Local(path) => path.as_str().to_string(),
+        EntryPath::Remote(_) => panic!("local fixture must select a local path"),
+    };
+    let viewport = cx
+        .debug_bounds("local-list-container-viewport")
+        .expect("local list viewport is laid out");
+
+    right_click_local_pane(
+        &mut cx,
+        point(viewport.center().x, viewport.top() + row_height * 1.5),
+    );
+    cx.dispatch_action(CopyPath);
+    cx.run_until_parked();
+
+    cx.update(|_window, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(expected_text.clone()),
+            "Copy Path copies the entry's own path, not its folder"
+        );
+    });
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some(format!("Path copied: {expected_text}").as_str())
+        );
+    });
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+#[gpui_kit::test]
+fn copy_path_copies_a_multi_selection_one_path_per_line(cx: &mut TestAppContext) {
+    let (fixture, workspace, mut cx) =
+        workspace_with_local_files(cx, "copy-path-multi", &["a.txt", "b.txt", "c.txt"]);
+    cx.dispatch_action(SelectAllEntries);
+    cx.run_until_parked();
+    let expected: Vec<String> = (0..3)
+        .map(|index| match local_visible_entry(&workspace, &cx, index) {
+            EntryPath::Local(path) => path.as_str().to_string(),
+            EntryPath::Remote(_) => panic!("local fixture must list local paths"),
+        })
+        .collect();
+
+    cx.dispatch_action(CopyPath);
+    cx.run_until_parked();
+
+    cx.update(|_window, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(expected.join("\n")),
+            "every selected entry contributes one clipboard line"
+        );
+    });
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some("3 paths copied")
+        );
+    });
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+/// With nothing selected the toolbar button and shortcut still have a useful
+/// meaning: the path of the folder the pane is showing.
+#[gpui_kit::test]
+fn copy_path_falls_back_to_the_pane_folder_when_nothing_is_selected(cx: &mut TestAppContext) {
+    let (fixture, workspace, mut cx) =
+        workspace_with_local_files(cx, "copy-path-empty", &["a.txt"]);
+    workspace.read_with(&cx, |workspace, _| {
+        assert!(
+            workspace
+                .active_tab()
+                .expect("active tab")
+                .selection
+                .selected_paths
+                .is_empty(),
+            "a freshly listed folder has no selection"
+        );
+    });
+
+    cx.dispatch_action(CopyPath);
+    cx.run_until_parked();
+
+    let folder = LocalPath::new(fixture.to_string_lossy().into_owned());
+    cx.update(|_window, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(folder.as_str().to_string()),
+            "an empty selection copies the current folder"
+        );
+    });
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+#[gpui_kit::test]
+fn copy_path_copies_a_remote_entry_even_while_disconnected(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    let scope = connect_and_land_on_root(&workspace, &mut cx, &channels);
+    let remote_path = RemotePath::new(format!("{TEST_REMOTE_ROOT}/doc.txt"));
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.handle_app_event(
+            AppEvent::RemoteDirLoaded(RemoteScoped::new(
+                scope,
+                RemoteDirSnapshot {
+                    path: RemotePath::new(TEST_REMOTE_ROOT),
+                    entries: vec![RemoteEntry {
+                        name: "doc.txt".to_string(),
+                        path: remote_path.clone(),
+                        kind: FileKind::File,
+                        size: Some(10),
+                        permissions: Some(0o644),
+                        modified_at: None,
+                        link_target: None,
+                    }],
+                },
+            )),
+            window,
+            cx,
+        );
+        workspace.focused_side = PaneSide::Remote;
+        workspace.select_index(PaneSide::Remote, 0, cx);
+    });
+    cx.run_until_parked();
+
+    cx.dispatch_action(CopyPath);
+    cx.run_until_parked();
+
+    cx.update(|_window, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(remote_path.as_str().to_string()),
+            "Copy Path needs no live session to read a listed remote path"
+        );
+    });
+}
+
+#[gpui_kit::test]
 fn remote_row_shows_dirty_indicator_when_locally_modified(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     connect_and_drain(&workspace, &mut cx, &channels);
@@ -10082,4 +10307,1431 @@ fn compare_edit_conflict_dispatches_download_transfer(cx: &mut TestAppContext) {
     assert_eq!(cmd.destination, TransferEndpoint::Local(expected_dest));
 
     std::fs::remove_dir_all(&session_dir).ok();
+}
+
+/// A drag carries the whole pane selection, so dragging one row out of a
+/// multi-selection moves every selected file instead of silently dropping all
+/// but the row under the pointer.
+#[gpui_kit::test]
+fn drag_payload_expands_to_the_selection_when_the_row_is_selected(cx: &mut TestAppContext) {
+    let (fixture, workspace, mut cx) =
+        workspace_with_local_files(cx, "drag-payload", &["a.txt", "b.txt", "c.txt"]);
+    cx.dispatch_action(SelectAllEntries);
+    cx.run_until_parked();
+
+    let selected: Vec<EntryPath> = (0..3)
+        .map(|index| local_visible_entry(&workspace, &cx, index))
+        .collect();
+    let dragged = selected[1].clone();
+    let payload = DragPayload::new(dragged.clone(), PaneSide::Local, &selected);
+    assert_eq!(
+        payload.paths, selected,
+        "dragging a selected row carries the whole selection"
+    );
+    assert_eq!(payload.path, dragged, "the payload keeps the grabbed row");
+
+    // A row outside the selection drags alone.
+    let unselected = EntryPath::Local(LocalPath::new("/tmp/elsewhere.txt"));
+    let lone = DragPayload::new(unselected.clone(), PaneSide::Local, &selected);
+    assert_eq!(lone.paths, vec![unselected]);
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+#[gpui_kit::test]
+fn drag_payload_with_an_empty_selection_carries_just_the_row(cx: &mut TestAppContext) {
+    let (fixture, workspace, cx) = workspace_with_local_files(cx, "drag-payload-empty", &["a.txt"]);
+    let row = local_visible_entry(&workspace, &cx, 0);
+    let payload = DragPayload::new(row.clone(), PaneSide::Local, &[]);
+    assert_eq!(payload.paths, vec![row]);
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+/// Dropping several local files on the remote pane uploads all of them.
+#[gpui_kit::test]
+fn dropping_a_multi_selection_uploads_every_selected_file(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+    let (fixture, base) = temp_local_fixture("drop-multi-upload");
+    for name in ["one.txt", "two.txt"] {
+        std::fs::write(fixture.join(name), b"x").expect("fixture file");
+    }
+    set_local_path_and_wait(&workspace, &mut cx, base.clone());
+    cx.dispatch_action(SelectAllEntries);
+    cx.run_until_parked();
+    let selected = workspace.update(&mut cx, |workspace, _| {
+        workspace
+            .active_tab()
+            .expect("active tab")
+            .selection
+            .selected_paths
+            .clone()
+    });
+    assert_eq!(selected.len(), 2, "both files are selected");
+
+    // The drop handler is a thin adapter over `begin_upload`; driving the same
+    // expansion it performs keeps the assertion on the command that reaches the
+    // runtime.
+    let payload = DragPayload::new(selected[0].clone(), PaneSide::Local, &selected);
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.begin_upload(payload.local_sources(), cx);
+    });
+
+    let command = channels
+        .command_rx
+        .try_recv()
+        .expect("dropping the selection must enqueue a StartTransfer");
+    match command {
+        AppCommand::StartTransfer(command) => {
+            assert_eq!(
+                command.sources.len(),
+                2,
+                "both dragged files reach the transfer command"
+            );
+            assert!(matches!(command.destination, TransferEndpoint::Remote(_)));
+        }
+        other => panic!("expected StartTransfer, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+/// Downloading several server files queues one plan per source: the remote
+/// planner resolves a single remote tree against one local destination, so a
+/// multi-source command would be rejected at planning time.
+#[gpui_kit::test]
+fn multi_file_download_queues_one_plan_per_source(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        let tab = workspace.active_tab_mut().expect("active tab");
+        tab.local.path = Some(LocalPath::new("/tmp/downloads"));
+        tab.remote.entries = ["one.txt", "two.txt", "three.txt"]
+            .iter()
+            .map(|name| RemoteEntry {
+                name: (*name).to_string(),
+                path: RemotePath::new(format!("{TEST_REMOTE_ROOT}/{name}")),
+                kind: FileKind::File,
+                size: Some(1),
+                permissions: Some(0o644),
+                modified_at: None,
+                link_target: None,
+            })
+            .collect();
+        tab.selection.selected_paths = tab
+            .remote
+            .entries
+            .iter()
+            .map(|entry| EntryPath::Remote(entry.path.clone()))
+            .collect();
+        workspace.download_selection(cx);
+    });
+
+    let mut destinations = Vec::new();
+    while let Ok(command) = channels.command_rx.try_recv() {
+        if let AppCommand::StartTransfer(command) = command {
+            assert_eq!(command.direction, TransferDirection::Download);
+            assert_eq!(
+                command.sources.len(),
+                1,
+                "each download plan carries exactly one remote source"
+            );
+            assert!(
+                matches!(command.destination, TransferEndpoint::Local(_)),
+                "the destination is the local folder"
+            );
+            match command.destination {
+                TransferEndpoint::Local(path) => destinations.push(path.as_str().to_string()),
+                TransferEndpoint::Remote(_) => {
+                    panic!("a download destination is local")
+                }
+            }
+        }
+    }
+    assert_eq!(
+        destinations,
+        vec![
+            "/tmp/downloads/one.txt".to_string(),
+            "/tmp/downloads/two.txt".to_string(),
+            "/tmp/downloads/three.txt".to_string()
+        ],
+        "every selected file gets its own download, named after the source"
+    );
+}
+
+/// A folder download still targets `<local folder>/<folder name>`: the remote
+/// planner recreates the tree from that root.
+#[gpui_kit::test]
+fn folder_download_keeps_the_selected_folder_name(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+    let source = RemotePath::new("/home/tester/project");
+
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        let tab = workspace.active_tab_mut().expect("active tab");
+        tab.local.path = Some(LocalPath::new("/tmp/downloads"));
+        tab.remote.entries = vec![RemoteEntry {
+            name: "project".to_string(),
+            path: source.clone(),
+            kind: FileKind::Directory,
+            size: None,
+            permissions: Some(0o755),
+            modified_at: None,
+            link_target: None,
+        }];
+        tab.selection.selected_paths = vec![EntryPath::Remote(source.clone())];
+        workspace.download_selection(cx);
+    });
+
+    let command = channels
+        .command_rx
+        .try_recv()
+        .expect("a folder download is enqueued");
+    let AppCommand::StartTransfer(command) = command else {
+        panic!("expected StartTransfer");
+    };
+    assert_eq!(
+        command.destination,
+        TransferEndpoint::Local(LocalPath::new("/tmp/downloads/project"))
+    );
+}
+
+/// Double-clicking (or pressing Enter on) a local file hands it to its default
+/// application — the Finder convention. Before this, the row did nothing at all.
+#[gpui_kit::test]
+fn opening_a_local_file_hands_it_to_the_system(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    install_system_path_seams();
+    OPENED_SYSTEM_PATHS.with(|paths| paths.borrow_mut().clear());
+    let (fixture, base) = temp_local_fixture("open-local-file");
+    std::fs::write(fixture.join("note.txt"), b"hi").expect("fixture file");
+    set_local_path_and_wait(&workspace, &mut cx, base);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.focus_pane(PaneSide::Local, window, cx);
+    });
+    cx.run_until_parked();
+
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.open_entry_at(PaneSide::Local, 0, window, cx);
+    });
+    cx.run_until_parked();
+
+    let expected = fixture.join("note.txt").display().to_string();
+    OPENED_SYSTEM_PATHS.with(|paths| {
+        assert_eq!(
+            *paths.borrow(),
+            vec![expected],
+            "opening a local file requests the system default application"
+        );
+    });
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.active_tab().expect("tab").local.path,
+            Some(base_for_pane(&fixture)),
+            "opening a file must not navigate the pane"
+        );
+    });
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+fn base_for_pane(fixture: &std::path::Path) -> LocalPath {
+    LocalPath::new(fixture.to_string_lossy().into_owned())
+}
+
+/// Opening a remote file still edits a temp copy; it must never reach the
+/// system open path, because a download keeps the remote exec bit.
+#[gpui_kit::test]
+fn opening_a_remote_file_never_reaches_the_system_opener(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    install_system_path_seams();
+    OPENED_SYSTEM_PATHS.with(|paths| paths.borrow_mut().clear());
+    connect_and_drain(&workspace, &mut cx, &channels);
+
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        workspace.active_tab_mut().expect("tab").remote.entries = vec![RemoteEntry {
+            name: "run.sh".to_string(),
+            path: RemotePath::new("/home/tester/run.sh"),
+            kind: FileKind::File,
+            size: Some(4),
+            permissions: Some(0o755),
+            modified_at: None,
+            link_target: None,
+        }];
+        workspace.focused_side = PaneSide::Remote;
+        workspace.select_index(PaneSide::Remote, 0, cx);
+    });
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.open_entry_at(PaneSide::Remote, 0, window, cx);
+    });
+    cx.run_until_parked();
+
+    OPENED_SYSTEM_PATHS.with(|paths| {
+        assert!(
+            paths.borrow().is_empty(),
+            "a remote file must be edited in a temp copy, not executed: {:?}",
+            paths.borrow()
+        );
+    });
+    assert!(
+        matches!(
+            channels.command_rx.try_recv(),
+            Ok(AppCommand::StartTransfer(_))
+        ),
+        "the remote open starts an edit download instead"
+    );
+}
+
+/// A status line reports one action's outcome; it must not outlive that moment.
+///
+/// The fixture's home-folder listing is allowed to settle first: its completed
+/// read retires its own loading line, and that path must not touch a message
+/// set afterwards.
+#[gpui_kit::test]
+fn a_status_line_expires_after_its_lifetime(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.run_until_parked();
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.show_status("Path copied: /tmp/a".into(), cx);
+    });
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some("Path copied: /tmp/a")
+        );
+    });
+
+    cx.cx
+        .executor()
+        .advance_clock(crate::workspace::view_state::StatusLine::LIFETIME);
+    cx.run_until_parked();
+
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.status_message_for_test(),
+            None,
+            "the line is gone once its lifetime elapses"
+        );
+    });
+}
+
+/// A newer line must survive an older line's timer firing.
+#[gpui_kit::test]
+fn a_newer_status_line_is_not_cleared_by_an_older_timer(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.run_until_parked();
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.show_status("first".into(), cx);
+    });
+    cx.cx
+        .executor()
+        .advance_clock(crate::workspace::view_state::StatusLine::LIFETIME / 2);
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.show_status("second".into(), cx);
+    });
+
+    // Past the first line's deadline (t=6s), still inside the second line's
+    // (shown at t=3s, deadline t=9s). Only the generation check keeps the older
+    // timer from clearing the newer line.
+    cx.cx.executor().advance_clock(
+        crate::workspace::view_state::StatusLine::LIFETIME / 2 + Duration::from_millis(1),
+    );
+    cx.run_until_parked();
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some("second"),
+            "the older expiry must not clear the newer message"
+        );
+    });
+}
+
+/// A completed download offers reveal, and the button reveals the file it wrote.
+#[gpui_kit::test]
+fn a_completed_download_reveals_its_destination(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    install_system_path_seams();
+    REVEALED_PATHS.with(|paths| paths.borrow_mut().clear());
+    let destination = LocalPath::new("/tmp/downloads/report.pdf");
+    workspace.update(&mut cx, |_workspace, cx| {
+        seed_finished_transfer(
+            cx,
+            TransferId(70),
+            TransferDirection::Download,
+            TransferEndpoint::Remote(RemotePath::new("/srv/report.pdf")),
+            TransferEndpoint::Local(destination.clone()),
+        );
+    });
+    cx.run_until_parked();
+
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.reveal_transfer_destination(TransferId(70), cx);
+    });
+    cx.run_until_parked();
+
+    REVEALED_PATHS.with(|paths| {
+        assert_eq!(
+            *paths.borrow(),
+            vec![destination.as_str().to_string()],
+            "reveal points at the downloaded file"
+        );
+    });
+}
+
+/// An upload's destination lives on the server, so revealing it must say so
+/// rather than opening a meaningless local path.
+#[gpui_kit::test]
+fn revealing_a_remote_destination_reports_instead_of_opening_it(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    install_system_path_seams();
+    REVEALED_PATHS.with(|paths| paths.borrow_mut().clear());
+    workspace.update(&mut cx, |_workspace, cx| {
+        seed_finished_transfer(
+            cx,
+            TransferId(71),
+            TransferDirection::Upload,
+            TransferEndpoint::Local(LocalPath::new("/tmp/dest/report.pdf")),
+            TransferEndpoint::Remote(RemotePath::new("/srv/report.pdf")),
+        );
+    });
+    cx.run_until_parked();
+
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.reveal_transfer_destination(TransferId(71), cx);
+    });
+    cx.run_until_parked();
+
+    REVEALED_PATHS.with(|paths| {
+        assert!(
+            paths.borrow().is_empty(),
+            "a remote destination is never revealed locally"
+        );
+    });
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some("This file is on the server.")
+        );
+    });
+}
+
+/// Publish a plan whose single job is already `Completed`.
+fn seed_finished_transfer(
+    cx: &mut gpui_kit::App,
+    id: TransferId,
+    direction: TransferDirection,
+    source: TransferEndpoint,
+    destination: TransferEndpoint,
+) {
+    use crate::resources::ActiveTransfers as _;
+    use macsftp_core::{
+        ConflictPolicy, MetadataPolicy, Timestamp, TransferJob, TransferPlan, TransferPlanId,
+        TransferPlanSnapshot, TransferPlanState, TransferState,
+    };
+    let job = TransferJob {
+        id,
+        direction,
+        source,
+        destination,
+        state: TransferState::Queued,
+        metadata_policy: MetadataPolicy::default(),
+        conflict_policy: ConflictPolicy::default(),
+        warnings: Vec::new(),
+        created_at: Timestamp::from_secs_since_epoch(1),
+    };
+    let plan = TransferPlan {
+        id: TransferPlanId(id.0),
+        root_job_id: id,
+        source_root: job.source.clone(),
+        destination_root: job.destination.clone(),
+        state: TransferPlanState::Queued,
+        planned_count: 1,
+        total_bytes: None,
+        child_jobs: Vec::new(),
+        conflict_policy: job.conflict_policy.clone(),
+    };
+    cx.apply_transfer_event(
+        &AppEvent::TransferPlanStarted(Box::new(TransferPlanSnapshot {
+            plan,
+            root_job: job,
+        })),
+        Timestamp::from_secs_since_epoch(1),
+    );
+    cx.apply_transfer_event(
+        &AppEvent::TransferCompleted { transfer_id: id },
+        Timestamp::from_secs_since_epoch(2),
+    );
+}
+
+/// Go to Folder opens pre-filled with the pane's current path, selected, so
+/// navigating to a sibling directory means typing one segment instead of the
+/// whole path.
+#[gpui_kit::test]
+fn go_to_path_prefills_the_current_folder(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    let (fixture, base) = temp_local_fixture("goto-prefill");
+    set_local_path_and_wait(&workspace, &mut cx, base.clone());
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.focus_pane(PaneSide::Local, window, cx);
+        workspace.open_go_to_path(window, cx);
+    });
+    cx.run_until_parked();
+
+    workspace.read_with(&cx, |workspace, _| {
+        assert!(workspace.go_to_path.open);
+        assert_eq!(
+            workspace.go_to_path.input.value(),
+            fixture.to_string_lossy(),
+            "the dialog starts from the folder being shown"
+        );
+        assert!(
+            !workspace.go_to_path.select_on_first_render,
+            "the selection was applied to the fresh field"
+        );
+    });
+
+    // The same path round-trips: pressing Enter with the prefill navigates to
+    // where the pane already is and does not error.
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.submit_go_to_path(window, cx);
+    });
+    cx.run_until_parked();
+    workspace.read_with(&cx, |workspace, _| {
+        assert!(!workspace.go_to_path.open);
+        assert_eq!(
+            workspace.active_tab().expect("tab").local.path,
+            Some(base),
+            "the pane stays on the pre-filled folder"
+        );
+    });
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+/// Submitting an edited prefill navigates to the edited path: the selection
+/// must have left the field editable, not read-only.
+#[gpui_kit::test]
+fn go_to_path_prefill_is_editable(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    let (fixture, base) = temp_local_fixture("goto-edit");
+    let sibling = fixture.join("other");
+    std::fs::create_dir_all(&sibling).expect("sibling dir");
+    set_local_path_and_wait(&workspace, &mut cx, base.clone());
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.focus_pane(PaneSide::Local, window, cx);
+        workspace.open_go_to_path(window, cx);
+    });
+    cx.run_until_parked();
+
+    // Simulate the user editing the selected prefill down to the fixture root
+    // and pressing Enter.
+    workspace.update(&mut cx, |workspace, _cx| {
+        workspace
+            .go_to_path
+            .input
+            .set_value(fixture.to_string_lossy().into_owned());
+    });
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.submit_go_to_path(window, cx);
+    });
+    cx.run_until_parked();
+
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.active_tab().expect("tab").local.path,
+            Some(base_for_pane(&fixture)),
+            "the edited prefill navigated to the fixture root"
+        );
+    });
+    let _ = std::fs::remove_dir_all(&fixture);
+    let _ = std::fs::remove_dir_all(&sibling);
+}
+
+/// The password field starts masked and its Show/Hide toggle flips the mask
+/// without touching the stored value. A fresh form always starts masked.
+#[gpui_kit::test]
+fn password_reveal_toggles_the_mask(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.open_connect_form(window, cx);
+    });
+    cx.run_until_parked();
+
+    workspace.update(&mut cx, |workspace, _cx| {
+        let form = workspace
+            .connect_form_ui
+            .form
+            .as_mut()
+            .expect("the connect form opened");
+        form.password.set_value("s3cret-password");
+        assert!(!form.show_password, "a fresh form starts masked");
+    });
+    cx.run_until_parked();
+
+    // Masked by default: the toggle reads "Show".
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            window.find(("connect-reveal", 3usize)).label(),
+            Some("Show"),
+            "a fresh form offers Show, not Hide"
+        );
+    });
+
+    // Show: the flag flips, the value stays, the toggle reads "Hide".
+    workspace.update(&mut cx, |workspace, _cx| {
+        let form = workspace.connect_form_ui.form.as_mut().expect("form");
+        form.show_password = true;
+    });
+    cx.update(|window, cx| {
+        window.render_frame(cx);
+        assert_eq!(
+            window.find(("connect-reveal", 3usize)).label(),
+            Some("Hide"),
+            "the revealed field offers Hide"
+        );
+    });
+
+    // Hide again: the value survives, the mask returns.
+    workspace.update(&mut cx, |workspace, _cx| {
+        let form = workspace.connect_form_ui.form.as_mut().expect("form");
+        form.show_password = false;
+        assert_eq!(form.password.value(), "s3cret-password");
+    });
+
+    // A form opened from a saved profile starts masked too, even when the
+    // previous form was left revealed.
+    workspace.update(&mut cx, |workspace, _cx| {
+        let form = workspace.connect_form_ui.form.as_mut().expect("form");
+        form.show_password = true;
+    });
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.open_connect_form(window, cx);
+    });
+    cx.run_until_parked();
+    workspace.read_with(&cx, |workspace, _| {
+        let form = workspace.connect_form_ui.form.as_ref().expect("form");
+        assert!(
+            !form.show_password,
+            "a reopened form starts masked, never inheriting the reveal"
+        );
+    });
+}
+
+/// The recent-connections context menu targets the exact row: reconnecting,
+/// copying its endpoint, or forgetting that one entry — nothing disabled,
+/// because none of it needs a session.
+#[gpui_kit::test]
+fn recent_connections_menu_targets_the_row(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.connect_with(test_settings(), None, window, cx);
+    });
+    let _ = channels.command_rx.try_recv();
+    let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.handle_app_event(
+            AppEvent::TabConnected(RemoteScoped::new(
+                scope,
+                TabConnected {
+                    remote_root: RemotePath::new(TEST_REMOTE_ROOT),
+                },
+            )),
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+
+    // The successful connect registered the recent entry this menu targets.
+    let recent_id = workspace.read_with(&cx, |_, cx| {
+        cx.resources()
+            .recents
+            .entries()
+            .first()
+            .expect("a successful connect registers a recent")
+            .id
+    });
+
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.forget_recent_connection(recent_id, cx);
+    });
+    cx.run_until_parked();
+
+    workspace.read_with(&cx, |workspace, cx| {
+        assert!(
+            cx.resources().recents.entries().is_empty(),
+            "forgetting removes the targeted entry"
+        );
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some("Removed from Recent Connections.")
+        );
+    });
+
+    // Forgetting an already-gone id is a no-op, not an error.
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.forget_recent_connection(recent_id + 100, cx);
+    });
+    cx.run_until_parked();
+    workspace.read_with(&cx, |_, cx| {
+        assert!(
+            cx.resources().recents.entries().is_empty(),
+            "the no-op forget leaves the store alone"
+        );
+    });
+}
+
+/// Copying a recent connection's endpoint puts `user@host:port` on the
+/// clipboard — the string a terminal needs — without connecting.
+#[gpui_kit::test]
+fn copying_a_recent_endpoint_copies_user_host_port(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.connect_with(test_settings(), None, window, cx);
+    });
+    let _ = channels.command_rx.try_recv();
+    let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.handle_app_event(
+            AppEvent::TabConnected(RemoteScoped::new(
+                scope,
+                TabConnected {
+                    remote_root: RemotePath::new(TEST_REMOTE_ROOT),
+                },
+            )),
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+
+    let recent_id = workspace.read_with(&cx, |_, cx| {
+        cx.resources()
+            .recents
+            .entries()
+            .first()
+            .expect("recent registered")
+            .id
+    });
+    cx.update(|_window, cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("".into())));
+
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.copy_recent_endpoint(recent_id, cx);
+    });
+    cx.update(|_window, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("tester@mock.example.com:22".to_string()),
+            "the endpoint is user@host:port"
+        );
+    });
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some("Endpoint copied: tester@mock.example.com:22")
+        );
+    });
+}
+
+/// The divider between the panes sets how much width each side gets, and the
+/// split survives a window resize because it is stored as a ratio.
+#[gpui_kit::test]
+fn pane_divider_sets_the_split_between_the_panes(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.simulate_resize(size(px(1200.0), px(800.0)));
+    cx.run_until_parked();
+
+    let local_before = cx
+        .debug_bounds("local-file-pane")
+        .expect("local pane is laid out");
+    let remote_before = cx
+        .debug_bounds("remote-file-pane")
+        .expect("remote pane is laid out");
+    let divider = cx
+        .debug_bounds("pane-divider")
+        .expect("the divider is laid out");
+    assert!(
+        divider.left() >= local_before.right() - px(1.0)
+            && divider.right() <= remote_before.left() + px(1.0),
+        "the divider sits between the panes: {divider:?} {local_before:?} {remote_before:?}"
+    );
+    let total = local_before.size.width + remote_before.size.width;
+    let local_share = local_before.size.width / total;
+    assert!(
+        (local_share - 0.5).abs() < 0.02,
+        "the panes start evenly split: {local_share}"
+    );
+
+    // Dragging the divider gives the local pane less room.
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.pane_split_ratio = 0.3;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let local_after = cx
+        .debug_bounds("local-file-pane")
+        .expect("local pane is laid out");
+    let remote_after = cx
+        .debug_bounds("remote-file-pane")
+        .expect("remote pane is laid out");
+    let total_after = local_after.size.width + remote_after.size.width;
+    let share = local_after.size.width / total_after;
+    assert!(
+        (share - 0.3).abs() < 0.02,
+        "the divider's ratio drives the split: {share}"
+    );
+
+    // The ratio survives a window resize that still leaves room for it.
+    cx.simulate_resize(size(px(1400.0), px(900.0)));
+    cx.run_until_parked();
+    let local_resized = cx
+        .debug_bounds("local-file-pane")
+        .expect("local pane is laid out");
+    let remote_resized = cx
+        .debug_bounds("remote-file-pane")
+        .expect("remote pane is laid out");
+    let total_resized = local_resized.size.width + remote_resized.size.width;
+    let share_resized = local_resized.size.width / total_resized;
+    assert!(
+        (share_resized - 0.3).abs() < 0.02,
+        "the ratio survives a resize: {share_resized}"
+    );
+}
+
+/// The divider stops where a pane would become unusable.
+#[gpui_kit::test]
+fn pane_divider_stops_at_the_usable_limits(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.simulate_resize(size(px(1200.0), px(800.0)));
+    cx.run_until_parked();
+
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.pane_split_ratio = 0.0;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let local = cx
+        .debug_bounds("local-file-pane")
+        .expect("local pane is laid out");
+    let remote = cx
+        .debug_bounds("remote-file-pane")
+        .expect("remote pane is laid out");
+    assert!(
+        local.size.width > px(0.0) && remote.size.width > px(0.0),
+        "neither pane collapses: {local:?} {remote:?}"
+    );
+    assert!(
+        local.size.width / (local.size.width + remote.size.width) >= 0.2,
+        "the local pane keeps a usable share"
+    );
+    assert!(
+        local.size.width >= crate::workspace::pane_split::MIN_PANE_WIDTH,
+        "the pane keeps enough width for its path bar: {local:?}"
+    );
+}
+
+/// A download whose source cannot be named still queues the other sources and
+/// says how many started, instead of cancelling the ones already queued.
+#[gpui_kit::test]
+fn a_download_with_an_unusable_name_keeps_the_other_sources(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        let tab = workspace.active_tab_mut().expect("active tab");
+        tab.local.path = Some(LocalPath::new("/tmp/downloads"));
+        // A name with a control character cannot become a local file name.
+        tab.remote.entries = vec![
+            RemoteEntry {
+                name: "good.txt".to_string(),
+                path: RemotePath::new("/home/tester/good.txt"),
+                kind: FileKind::File,
+                size: Some(1),
+                permissions: Some(0o644),
+                modified_at: None,
+                link_target: None,
+            },
+            RemoteEntry {
+                name: "bad\u{1}name.txt".to_string(),
+                path: RemotePath::new("/home/tester/bad\u{1}name.txt"),
+                kind: FileKind::File,
+                size: Some(1),
+                permissions: Some(0o644),
+                modified_at: None,
+                link_target: None,
+            },
+        ];
+        tab.selection.selected_paths = tab
+            .remote
+            .entries
+            .iter()
+            .map(|entry| EntryPath::Remote(entry.path.clone()))
+            .collect();
+        workspace.download_selection(cx);
+    });
+
+    let mut queued = 0;
+    while let Ok(command) = channels.command_rx.try_recv() {
+        if matches!(command, AppCommand::StartTransfer(_)) {
+            queued += 1;
+        }
+    }
+    assert_eq!(queued, 1, "the usable source is still downloaded");
+    workspace.read_with(&cx, |workspace, _| {
+        let message = workspace.status_message_for_test().unwrap_or_default();
+        assert!(
+            message.contains("1 could not be started"),
+            "the user is told one item did not start: {message:?}"
+        );
+    });
+}
+
+/// A divider drag keeps working after the pointer leaves the divider's own
+/// five points — which is the first thing a horizontal drag does. Drag events
+/// are dispatched by hitbox, so a listener on the divider would stop firing.
+#[gpui_kit::test]
+fn a_divider_drag_continues_after_the_pointer_leaves_the_divider(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.simulate_resize(size(px(1000.0), px(700.0)));
+    cx.run_until_parked();
+
+    let divider = cx
+        .debug_bounds("pane-divider")
+        .expect("the divider is laid out");
+    let start = divider.center();
+
+    // Grab the divider.
+    cx.simulate_event(gpui_kit::MouseDownEvent {
+        position: start,
+        button: gpui_kit::MouseButton::Left,
+        click_count: 1,
+        ..Default::default()
+    });
+    cx.run_until_parked();
+    workspace.read_with(&cx, |workspace, _| {
+        assert!(
+            workspace.pane_split_drag.is_some(),
+            "the press starts a divider drag"
+        );
+    });
+
+    // Move well past the divider's box, the way a real drag does.
+    let target_x = start.x + px(180.0);
+    cx.simulate_event(gpui_kit::MouseMoveEvent {
+        position: point(target_x, start.y),
+        ..Default::default()
+    });
+    cx.run_until_parked();
+
+    workspace.read_with(&cx, |workspace, _| {
+        assert!(
+            workspace.pane_split_ratio > 0.5,
+            "the drag kept tracking the pointer away from the divider: {}",
+            workspace.pane_split_ratio
+        );
+    });
+
+    // Releasing anywhere ends it.
+    cx.simulate_event(gpui_kit::MouseUpEvent {
+        position: point(target_x, start.y),
+        button: gpui_kit::MouseButton::Left,
+        click_count: 1,
+        ..Default::default()
+    });
+    cx.run_until_parked();
+    workspace.read_with(&cx, |workspace, _| {
+        assert!(workspace.pane_split_drag.is_none(), "the drag ends");
+    });
+}
+
+/// The divider's anchor is its own position, not the pointer's: grabbing it
+/// near an edge must not make it jump to the pointer on the first move.
+#[gpui_kit::test]
+fn grabbing_the_divider_off_centre_does_not_move_it(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.simulate_resize(size(px(1000.0), px(700.0)));
+    cx.run_until_parked();
+
+    let divider = cx
+        .debug_bounds("pane-divider")
+        .expect("the divider is laid out");
+    // Press on the divider's left edge rather than its centre.
+    let grab = point(divider.left() + px(0.5), divider.center().y);
+    cx.simulate_event(gpui_kit::MouseDownEvent {
+        position: grab,
+        button: gpui_kit::MouseButton::Left,
+        click_count: 1,
+        ..Default::default()
+    });
+    cx.run_until_parked();
+    let ratio_after_grab = workspace.read_with(&cx, |workspace, _| workspace.pane_split_ratio);
+
+    // A one-pixel move keeps the split essentially unchanged.
+    cx.simulate_event(gpui_kit::MouseMoveEvent {
+        position: point(grab.x + px(1.0), grab.y),
+        ..Default::default()
+    });
+    cx.run_until_parked();
+    workspace.read_with(&cx, |workspace, _| {
+        let moved = (workspace.pane_split_ratio - ratio_after_grab).abs();
+        assert!(
+            moved < 0.01,
+            "a one-pixel drag barely moves the split, not to the pointer: {moved}"
+        );
+    });
+}
+
+/// Releasing the divider drag outside the content row still ends it: otherwise
+/// letting go over the tab bar would leave the divider stuck to the pointer.
+#[gpui_kit::test]
+fn releasing_a_divider_drag_outside_the_content_ends_it(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.simulate_resize(size(px(1000.0), px(700.0)));
+    cx.run_until_parked();
+
+    let divider = cx
+        .debug_bounds("pane-divider")
+        .expect("the divider is laid out");
+    let start = divider.center();
+    cx.simulate_event(gpui_kit::MouseDownEvent {
+        position: start,
+        button: gpui_kit::MouseButton::Left,
+        click_count: 1,
+        ..Default::default()
+    });
+    cx.run_until_parked();
+    workspace.read_with(&cx, |workspace, _| {
+        assert!(workspace.pane_split_drag.is_some(), "the drag started");
+    });
+
+    // Release over the tab bar, above the content row.
+    cx.simulate_event(gpui_kit::MouseUpEvent {
+        position: point(start.x, px(6.0)),
+        button: gpui_kit::MouseButton::Left,
+        click_count: 1,
+        ..Default::default()
+    });
+    cx.run_until_parked();
+    workspace.read_with(&cx, |workspace, _| {
+        assert!(
+            workspace.pane_split_drag.is_none(),
+            "a release anywhere in the window ends the drag"
+        );
+    });
+}
+
+/// An entry that is not a regular file has no application to open it with, and
+/// handing a FIFO or socket to LaunchServices can block. The pane says so
+/// instead of trying.
+#[gpui_kit::test]
+fn opening_a_non_regular_local_entry_reports_instead_of_launching(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    install_system_path_seams();
+    OPENED_SYSTEM_PATHS.with(|paths| paths.borrow_mut().clear());
+
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        let tab = workspace.active_tab_mut().expect("active tab");
+        tab.local.entries = vec![macsftp_core::LocalEntry {
+            name: "daemon.sock".to_string(),
+            path: LocalPath::new("/tmp/daemon.sock"),
+            kind: FileKind::Other,
+            size: None,
+            permissions: None,
+            modified_at: None,
+            link_target: None,
+        }];
+        workspace.focused_side = PaneSide::Local;
+        workspace.open_entry_at(PaneSide::Local, 0, window, cx);
+    });
+    cx.run_until_parked();
+
+    OPENED_SYSTEM_PATHS.with(|paths| {
+        assert!(
+            paths.borrow().is_empty(),
+            "a socket is never handed to LaunchServices: {:?}",
+            paths.borrow()
+        );
+    });
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some("This item can’t be opened."),
+            "the user is told why nothing opened"
+        );
+    });
+}
+
+/// Leaving a sign-in method drops the secret that belonged to it, and a reveal
+/// never survives the switch: coming back has to ask before showing characters.
+#[gpui_kit::test]
+fn switching_the_sign_in_method_drops_the_old_secret_and_the_reveal(cx: &mut TestAppContext) {
+    use macsftp_core::AuthMethodKind;
+
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.open_connect_form(window, cx);
+    });
+    cx.run_until_parked();
+
+    workspace.update(&mut cx, |workspace, _cx| {
+        let form = workspace.connect_form_ui.form.as_mut().expect("form");
+        form.password.set_value("s3cret-password");
+        form.show_password = true;
+        form.set_auth_method(AuthMethodKind::PrivateKey);
+        assert!(
+            form.password.value().is_empty(),
+            "the password stops living in the form once the method changes"
+        );
+        assert!(
+            !form.show_password,
+            "the reveal does not survive the switch"
+        );
+
+        form.passphrase.set_value("key-passphrase");
+        form.show_passphrase = true;
+        form.set_auth_method(AuthMethodKind::Password);
+        assert!(
+            form.passphrase.value().is_empty(),
+            "the passphrase goes the same way"
+        );
+        assert!(!form.show_passphrase);
+    });
+
+    // Returning to a method asks again rather than remembering the reveal.
+    workspace.update(&mut cx, |workspace, _cx| {
+        let form = workspace.connect_form_ui.form.as_mut().expect("form");
+        form.set_auth_method(AuthMethodKind::SshAgent);
+        assert!(!form.show_password, "an agent sign-in reveals nothing");
+    });
+}
+
+/// The drawer is not virtualized, so a section builds a bounded page of rows
+/// and offers the rest behind a control. A mass transfer has one row per file.
+#[gpui_kit::test]
+fn a_long_transfer_section_pages_its_rows(cx: &mut TestAppContext) {
+    use macsftp_core::{
+        ConflictPolicy, MetadataPolicy, TransferJob, TransferPlan, TransferPlanSnapshot,
+        TransferPlanState, TransferState,
+    };
+
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    let total = crate::workspace::view_state::TransferDrawerUi::MAX_VISIBLE_ROWS + 5;
+    workspace.update(&mut cx, |_workspace, cx| {
+        for index in 0..total {
+            let id = macsftp_core::TransferId(500 + index as u64);
+            let job = TransferJob {
+                id,
+                direction: TransferDirection::Upload,
+                source: TransferEndpoint::Local(LocalPath::new(format!("/tmp/{index}.txt"))),
+                destination: TransferEndpoint::Remote(RemotePath::new(format!("/srv/{index}.txt"))),
+                state: TransferState::Queued,
+                metadata_policy: MetadataPolicy::default(),
+                conflict_policy: ConflictPolicy::default(),
+                warnings: Vec::new(),
+                created_at: macsftp_core::Timestamp::from_secs_since_epoch(1),
+            };
+            let plan = TransferPlan {
+                id: macsftp_core::TransferPlanId(id.0),
+                root_job_id: id,
+                source_root: job.source.clone(),
+                destination_root: job.destination.clone(),
+                state: TransferPlanState::Queued,
+                planned_count: 1,
+                total_bytes: None,
+                child_jobs: Vec::new(),
+                conflict_policy: ConflictPolicy::default(),
+            };
+            let now = macsftp_core::Timestamp::from_secs_since_epoch(1);
+            cx.apply_transfer_event(
+                &AppEvent::TransferPlanStarted(Box::new(TransferPlanSnapshot {
+                    plan,
+                    root_job: job,
+                })),
+                now,
+            );
+            cx.apply_transfer_event(
+                &AppEvent::TransferCompleted { transfer_id: id },
+                macsftp_core::Timestamp::from_secs_since_epoch(2),
+            );
+        }
+        cx.notify();
+    });
+    cx.simulate_resize(size(px(900.0), px(700.0)));
+    cx.run_until_parked();
+    // A tall drawer keeps the section header and the page inside the scroll
+    // viewport, so the test can click them by position.
+    workspace.update(&mut cx, |workspace, _cx| {
+        workspace.set_drawer_height(px(600.0), px(700.0));
+    });
+    cx.run_until_parked();
+
+    // The Completed section starts collapsed, so nothing is built for it yet.
+    let row_present = |cx: &mut VisualTestContext, id: u64| {
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.try_find(("transfer-row", id)).is_some()
+        })
+    };
+    assert!(
+        !row_present(&mut cx, 500),
+        "a collapsed section builds no rows"
+    );
+
+    // Expanding it builds only the first page.
+    cx.dispatch_action(ShowTransferDrawer);
+    let toggle = cx
+        .debug_bounds("toggle-completed")
+        .expect("the Completed section header is visible");
+    cx.simulate_click(toggle.center(), gpui_kit::Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        row_present(&mut cx, 500),
+        "the first row of the page is built"
+    );
+    let page_end = 500 + crate::workspace::view_state::TransferDrawerUi::MAX_VISIBLE_ROWS as u64;
+    assert!(
+        !row_present(&mut cx, page_end),
+        "rows past the page are not built"
+    );
+    assert!(
+        cx.debug_bounds("toggle-completed-more").is_some(),
+        "the rest is offered behind a control"
+    );
+
+    // The control reveals them. Its own row sits past the page, below the
+    // drawer's viewport, so this drives the transition the control fires
+    // instead of clicking a position that is scrolled out of view.
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.transfer_drawer.set_showing_all(
+            crate::workspace::view_state::TransferSection::Completed,
+            true,
+        );
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(
+        row_present(&mut cx, page_end),
+        "showing all builds the remaining rows"
+    );
+}
+
+/// "Cancel All Transfers" is reachable the way every frequent command is: a
+/// chord, a menu item and a palette entry, all naming the same action.
+#[gpui_kit::test]
+fn cancel_all_transfers_is_reachable_from_chord_menu_and_palette(cx: &mut TestAppContext) {
+    use crate::app_actions::CancelAllTransfers;
+
+    assert_eq!(
+        crate::palette_commands::labeled_shortcut("Cancel All Transfers", "CancelAllTransfers"),
+        "Cancel All Transfers (⌘.)",
+        "the registry knows the chord, so tooltips and palette rows agree"
+    );
+    assert!(
+        crate::palette_commands::all_palette_commands()
+            .iter()
+            .any(|command| command.id == "CancelAllTransfers"),
+        "the palette lists the command"
+    );
+
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    // Two running transfers, each its own plan.
+    for index in 0..2u64 {
+        let id = TransferId(700 + index);
+        let job = macsftp_core::TransferJob {
+            id,
+            direction: TransferDirection::Upload,
+            source: TransferEndpoint::Local(LocalPath::new(format!("/tmp/{index}.txt"))),
+            destination: TransferEndpoint::Remote(RemotePath::new(format!("/srv/{index}.txt"))),
+            state: TransferState::Running {
+                bytes_done: 0,
+                bytes_total: Some(10),
+                started_at: macsftp_core::Timestamp::from_secs_since_epoch(1),
+            },
+            metadata_policy: macsftp_core::MetadataPolicy::default(),
+            conflict_policy: macsftp_core::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: macsftp_core::Timestamp::from_secs_since_epoch(1),
+        };
+        let plan = macsftp_core::TransferPlan {
+            id: macsftp_core::TransferPlanId(id.0),
+            root_job_id: id,
+            source_root: job.source.clone(),
+            destination_root: job.destination.clone(),
+            state: macsftp_core::TransferPlanState::Queued,
+            planned_count: 1,
+            total_bytes: Some(10),
+            child_jobs: Vec::new(),
+            conflict_policy: macsftp_core::ConflictPolicy::default(),
+        };
+        cx.update(|_window, cx| {
+            cx.apply_transfer_event(
+                &AppEvent::TransferPlanStarted(Box::new(macsftp_core::TransferPlanSnapshot {
+                    plan,
+                    root_job: job,
+                })),
+                macsftp_core::Timestamp::from_secs_since_epoch(1),
+            );
+        });
+    }
+    while channels.command_rx.try_recv().is_ok() {}
+
+    cx.dispatch_action(CancelAllTransfers);
+
+    let mut cancelled = Vec::new();
+    while let Ok(command) = channels.command_rx.try_recv() {
+        if let AppCommand::CancelTransfer { transfer_id, .. } = command {
+            cancelled.push(transfer_id);
+        }
+    }
+    cancelled.sort_by_key(|id| id.0);
+    assert_eq!(
+        cancelled,
+        vec![TransferId(700), TransferId(701)],
+        "the chord cancels every running transfer"
+    );
+    let _ = &workspace;
+}
+
+/// Finder's Cmd-C / Cmd-V for files: copy on one side, paste on the other, and
+/// the paste is the transfer that moves them.
+#[gpui_kit::test]
+fn copying_then_pasting_into_the_server_pane_uploads(cx: &mut TestAppContext) {
+    use crate::app_actions::{CopyFiles, PasteFiles};
+
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+    let (fixture, base) = temp_local_fixture("copy-paste");
+    for name in ["one.txt", "two.txt"] {
+        std::fs::write(fixture.join(name), b"x").expect("fixture file");
+    }
+    set_local_path_and_wait(&workspace, &mut cx, base);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.focus_pane(PaneSide::Local, window, cx);
+    });
+    cx.dispatch_action(SelectAllEntries);
+    cx.run_until_parked();
+
+    cx.dispatch_action(CopyFiles);
+    cx.run_until_parked();
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.file_clipboard.paths().len(),
+            2,
+            "both selected files are remembered"
+        );
+    });
+
+    // Pasting on the server side is the upload.
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.focus_pane(PaneSide::Remote, window, cx);
+    });
+    cx.dispatch_action(PasteFiles);
+    cx.run_until_parked();
+
+    let command = channels
+        .command_rx
+        .try_recv()
+        .expect("pasting into the server pane starts a transfer");
+    match command {
+        AppCommand::StartTransfer(command) => {
+            assert_eq!(command.direction, TransferDirection::Upload);
+            assert_eq!(command.sources.len(), 2, "both copied files move");
+        }
+        other => panic!("expected StartTransfer, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+/// Pasting into the pane the files already live in says so rather than doing
+/// nothing: a copy within one folder needs a server-side copy this client does
+/// not have.
+#[gpui_kit::test]
+fn pasting_into_the_same_pane_reports_instead_of_moving(cx: &mut TestAppContext) {
+    use crate::app_actions::{CopyFiles, PasteFiles};
+
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+    let (fixture, base) = temp_local_fixture("copy-paste-same");
+    std::fs::write(fixture.join("one.txt"), b"x").expect("fixture file");
+    set_local_path_and_wait(&workspace, &mut cx, base);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.focus_pane(PaneSide::Local, window, cx);
+    });
+    cx.dispatch_action(SelectAllEntries);
+    cx.run_until_parked();
+    while channels.command_rx.try_recv().is_ok() {}
+
+    cx.dispatch_action(CopyFiles);
+    cx.dispatch_action(PasteFiles);
+    cx.run_until_parked();
+
+    assert!(
+        channels.command_rx.try_recv().is_err(),
+        "a same-folder paste starts no transfer"
+    );
+    workspace.read_with(&cx, |workspace, _| {
+        let message = workspace.status_message_for_test().unwrap_or_default();
+        assert!(
+            message.contains("already on your Mac"),
+            "the user is told why nothing moved: {message:?}"
+        );
+    });
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+/// Pasting with nothing copied reports instead of silently doing nothing.
+#[gpui_kit::test]
+fn pasting_an_empty_file_clipboard_reports(cx: &mut TestAppContext) {
+    use crate::app_actions::PasteFiles;
+
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.dispatch_action(PasteFiles);
+    cx.run_until_parked();
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some("Nothing to paste.")
+        );
+    });
+}
+
+/// The divider position and the drawer height are part of the window the user
+/// left, so a restart should not put them back to the defaults.
+#[gpui_kit::test]
+fn the_window_layout_survives_a_restart(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.simulate_resize(size(px(1000.0), px(800.0)));
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.pane_split_ratio = 0.62;
+        workspace.set_drawer_height(px(220.0), px(800.0));
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    let snapshot = workspace.read_with(&cx, |workspace, _| workspace.build_session_snapshot());
+    assert_eq!(snapshot.pane_split_ratio, Some(0.62));
+    assert_eq!(snapshot.transfer_drawer_height, Some(220.0));
+
+    // Reopen a window from that snapshot with the same globals.
+    let client = RuntimeClient::new(
+        BridgeChannels::new(&RuntimeBridgeConfig::default())
+            .command_tx
+            .clone(),
+    );
+    let restored = cx.cx.add_window(|window, cx| {
+        Workspace::new(client, WindowSessionId(9), Some(snapshot), window, cx)
+    });
+    cx.run_until_parked();
+
+    restored
+        .read_with(&cx, |workspace, _| {
+            assert_eq!(
+                workspace.pane_split_ratio, 0.62,
+                "the divider reopens where it was left"
+            );
+            assert_eq!(
+                workspace.transfer_drawer.height,
+                px(220.0),
+                "the drawer reopens at the height it was left"
+            );
+        })
+        .expect("restored window is open");
 }

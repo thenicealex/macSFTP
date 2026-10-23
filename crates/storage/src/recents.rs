@@ -222,6 +222,23 @@ impl RecentsStore {
         }
     }
 
+    /// Remove one entry by id. The id is the entry's stable identity (see
+    /// [`RecentEntry::id`]), so a stale row can be forgotten without touching
+    /// its neighbours; reload-merge under the write lock keeps another app
+    /// instance's newer entries. Returns whether anything was removed; the
+    /// disk is only rewritten when it was.
+    pub fn forget(&mut self, id: u64) -> Result<bool, StorageError> {
+        let _lock = self.acquire_write_lock()?;
+        self.file = RecentsFile::load(&self.path)?;
+        let before = self.file.entries.len();
+        self.file.entries.retain(|entry| entry.id != id);
+        let removed = self.file.entries.len() != before;
+        if removed {
+            self.save()?;
+        }
+        Ok(removed)
+    }
+
     /// Drop the profile linkage from every entry referencing `profile_id`,
     /// keeping the entries as plain manual-connection history (the cached
     /// display label stays). Called when a profile is deleted: the stale

@@ -17,12 +17,92 @@ use macsftp_storage::{
 use macsftp_ui::{ActiveTheme, ScrollbarState, Theme, empty_state, text_button};
 use tracing::warn;
 
+/// How the workspace asks macOS to open or reveal a local path.
+///
+/// Both GPUI entry points (`open_with_system`, `reveal_path`) are
+/// `unimplemented!()` on the test platform, so a test that clicked "Open" would
+/// panic before it could assert anything. Routing them through one seam keeps
+/// the production calls intact and lets tests record the request instead, the
+/// same shape as the editor-launch hook in `event_coordinator`.
+type SystemPathOpener = fn(&App, &Path);
+
+/// The same seam for Finder reveals. Kept separate from the open hook so a test
+/// can tell "opened" from "revealed" instead of accepting either.
+type SystemPathRevealer = fn(&App, &Path);
+
+#[cfg(test)]
+thread_local! {
+    static SYSTEM_PATH_OPENER: std::cell::Cell<Option<SystemPathOpener>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn system_path_opener() -> SystemPathOpener {
+    SYSTEM_PATH_OPENER
+        .with(|opener| opener.get())
+        .unwrap_or(open_with_system)
+}
+
+#[cfg(not(test))]
+fn system_path_opener() -> SystemPathOpener {
+    open_with_system
+}
+
+fn open_with_system(cx: &App, path: &Path) {
+    cx.open_with_system(path);
+}
+
+#[cfg(test)]
+thread_local! {
+    static SYSTEM_PATH_REVEALER: std::cell::Cell<Option<SystemPathRevealer>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_system_path_opener(opener: SystemPathOpener) {
+    SYSTEM_PATH_OPENER.with(|cell| cell.set(Some(opener)));
+}
+
+#[cfg(test)]
+pub(crate) fn set_system_path_revealer(revealer: SystemPathRevealer) {
+    SYSTEM_PATH_REVEALER.with(|cell| cell.set(Some(revealer)));
+}
+
+#[cfg(test)]
+fn system_path_revealer() -> SystemPathRevealer {
+    SYSTEM_PATH_REVEALER
+        .with(|revealer| revealer.get())
+        .unwrap_or(reveal_path)
+}
+
+#[cfg(not(test))]
+fn system_path_revealer() -> SystemPathRevealer {
+    reveal_path
+}
+
+fn reveal_path(cx: &App, path: &Path) {
+    cx.reveal_path(path);
+}
+
+/// Reveal `path` in Finder.
+pub(crate) fn reveal_local_path(cx: &App, path: &Path) {
+    (system_path_revealer())(cx, path);
+}
+
+/// Open `path` in its default application. Local files only: a downloaded
+/// remote file keeps the remote exec bit, so this must never be handed a path
+/// that came from the server.
+pub(crate) fn open_local_path(cx: &mut App, path: &Path) {
+    (system_path_opener())(cx, path);
+}
+
 use crate::app_actions::{
-    ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, ConfirmTabSwitcher, CopyPath,
-    CopyVersionInfo, DeleteSelection, DownloadSelection, FilterPane, FocusLocalPane,
-    FocusRemotePane, GoToPath, MinimizeWindow, NavigateBack, NavigateForward, NewFolder, NewTab,
-    OpenCommandPalette, OpenLogFolder, OpenProfiles, OpenSelectedEntry, OpenSettings, PageDown,
-    PageUp, ParentDirectory, ReconnectTab, RefreshPane, RenameEntry, SelectAllEntries,
+    ActivateNextTab, ActivatePrevTab, CancelActiveModal, CancelAllTransfers, CloseTab,
+    ConfirmTabSwitcher, ConnectRecent, CopyFiles, CopyPath, CopyRecentEndpoint, CopyVersionInfo,
+    DeleteSelection, DownloadSelection, FilterPane, FocusLocalPane, FocusRemotePane, ForgetRecent,
+    GoToPath, MinimizeWindow, NavigateBack, NavigateForward, NewFolder, NewTab, OpenCommandPalette,
+    OpenLogFolder, OpenProfiles, OpenSelectedEntry, OpenSettings, PageDown, PageUp,
+    ParentDirectory, PasteFiles, ReconnectTab, RefreshPane, RenameEntry, SelectAllEntries,
     SelectFirstEntry, SelectLastEntry, SelectNextEntry, SelectNextEntryExtend, SelectPrevEntry,
     SelectPrevEntryExtend, ShowAbout, ShowInFinder, ShowTransferDrawer,
     SortByDateModifiedAscending, SortByDateModifiedDescending, SortByNameAscending,
@@ -88,7 +168,10 @@ pub struct Workspace {
     transfer_drawer: view_state::TransferDrawerUi,
 
     default_local_path: LocalPath,
-    status_message: Option<SharedString>,
+    status_message: Option<view_state::StatusLine>,
+    /// Bumped on every `show_status` so an older expiry timer cannot clear a
+    /// newer line that replaced it.
+    status_generation: u64,
     /// The link resolution whose “Checking the link…” line is still showing.
     /// Held here so a dropped result (tab switched, directory changed) can clear
     /// its own status without clobbering a newer message.
@@ -108,6 +191,16 @@ pub struct Workspace {
     /// `cmd-shift-[/]` still walk creation order in `state.tabs.tabs`.
     tab_mru: Vec<TabId>,
     tab_switcher: view_state::TabSwitcherUi,
+
+    /// Files copied out of a pane, waiting to be pasted into the other.
+    file_clipboard: view_state::FileClipboard,
+    /// Share of the content area given to the local pane, adjustable by
+    /// dragging the divider between the panes.
+    pane_split_ratio: f32,
+    /// The divider drag in flight: the pointer's x when the drag started and
+    /// the split ratio at that moment, so the panes follow the pointer 1:1
+    /// instead of accumulating rounding error.
+    pane_split_drag: Option<view_state::PaneSplitDrag>,
 
     /// Active-tab type-to-filter state (cleared on tab switch / navigate).
     local: view_state::PaneUi,
@@ -207,6 +300,7 @@ impl Workspace {
 
             default_local_path,
             status_message: None,
+            status_generation: 0,
             pending_link_check: None,
             config_error,
             log_file,
@@ -217,6 +311,9 @@ impl Workspace {
             palette: view_state::CommandPaletteUi::new(),
             tab_mru: Vec::new(),
             tab_switcher: view_state::TabSwitcherUi::new(),
+            file_clipboard: view_state::FileClipboard::default(),
+            pane_split_ratio: pane_split::DEFAULT_SPLIT_RATIO,
+            pane_split_drag: None,
             local: view_state::PaneUi::new(),
             remote: view_state::PaneUi::new(),
             remote_empty_scroll: gpui_kit::ScrollHandle::new(),
@@ -226,6 +323,17 @@ impl Workspace {
         };
         // Restored tabs remain disconnected until the user explicitly connects.
         if let Some(snapshot) = restore_session.as_ref() {
+            // Layout first: the panes below read the split, and a height is
+            // clamped against this window's viewport, not the old one's.
+            if let Some(ratio) = snapshot.pane_split_ratio {
+                workspace.pane_split_ratio = pane_split::clamp_split_ratio(ratio);
+            }
+            if let Some(height) = snapshot.transfer_drawer_height {
+                workspace.transfer_drawer.height = drawer_height::clamp_drawer_height(
+                    px(height),
+                    drawer_height::content_area_height_from_viewport(window.viewport_size().height),
+                );
+            }
             workspace.restore_session_tabs(snapshot, window, cx);
         }
         if workspace.state.tabs.tabs.is_empty() {
@@ -355,6 +463,8 @@ impl Workspace {
             id: self.window_session_id,
             active_tab_index,
             tabs,
+            pane_split_ratio: Some(self.pane_split_ratio),
+            transfer_drawer_height: Some(f32::from(self.transfer_drawer.height)),
         }
     }
     pub(crate) fn active_tab(&self) -> Option<&TabState> {
@@ -588,12 +698,12 @@ impl Workspace {
         match self.runtime_client.try_send(command) {
             Ok(()) => true,
             Err(CommandDispatchError::ChannelFull) => {
-                self.status_message = Some(STATUS_BUSY_TRY_AGAIN.into());
+                self.show_status(STATUS_BUSY_TRY_AGAIN.into(), cx);
                 cx.notify();
                 false
             }
             Err(CommandDispatchError::ChannelClosed) => {
-                self.status_message = Some(STATUS_CONNECTION_SERVICE_UNAVAILABLE.into());
+                self.show_status(STATUS_CONNECTION_SERVICE_UNAVAILABLE.into(), cx);
                 cx.notify();
                 false
             }
@@ -743,13 +853,53 @@ impl Workspace {
         if !self.owns_tab(tab_id) {
             return false;
         }
-        self.status_message = Some(message.into());
-        cx.notify();
+        self.show_status(message.into(), cx);
         true
     }
+
+    /// Put a transient line in the status bar and arrange for it to go away.
+    ///
+    /// The message reports the outcome of one action, so it must not outlive
+    /// that moment: without an expiry the bar keeps showing it until the user
+    /// happens to trigger something else, and a stale "Path copied" reads as the
+    /// app's current state. The timer is dropped with the workspace, and a newer
+    /// message replaces this one via its own timer; the generation check keeps an
+    /// older timer from clearing a newer line.
+    pub(crate) fn show_status(&mut self, message: view_state::StatusLine, cx: &mut Context<Self>) {
+        self.status_generation = self.status_generation.wrapping_add(1);
+        let generation = self.status_generation;
+        self.status_message = Some(message);
+        cx.notify();
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |workspace, cx| {
+            executor.timer(view_state::StatusLine::LIFETIME).await;
+            let _ = workspace.update(cx, |workspace, cx| {
+                if workspace.status_generation != generation {
+                    return;
+                }
+                if workspace.status_message.take().is_some() {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Add a tab without going through the runtime, for tests that need a
+    /// second tab in a known state. The active tab is unchanged.
+    #[cfg(test)]
+    pub(crate) fn open_tab_for_test(&mut self, tab: TabState) {
+        self.state.tabs.open_tab(tab);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tab_for_test(&self, tab_id: TabId) -> Option<&TabState> {
+        self.state.tabs.find_tab(tab_id)
+    }
+
     #[cfg(test)]
     pub(crate) fn status_message_for_test(&self) -> Option<String> {
-        self.status_message.as_ref().map(|s| s.to_string())
+        self.status_message.as_ref().map(|s| s.message.to_string())
     }
 
     /// Show the shared “Checking the link…” line and remember which entry owns
@@ -768,7 +918,7 @@ impl Workspace {
             entry,
             session_epoch,
         });
-        self.status_message = Some(LINK_CHECK_STATUS.into());
+        self.show_status(LINK_CHECK_STATUS.into(), cx);
         cx.notify();
     }
 
@@ -802,8 +952,8 @@ impl Workspace {
         self.pending_link_check = None;
         if self
             .status_message
-            .as_deref()
-            .is_some_and(|message| message == LINK_CHECK_STATUS)
+            .as_ref()
+            .is_some_and(|line| line.message == LINK_CHECK_STATUS)
         {
             self.status_message = None;
         }
@@ -815,8 +965,8 @@ impl Workspace {
         if self.pending_link_check.take().is_some()
             && self
                 .status_message
-                .as_deref()
-                .is_some_and(|message| message == LINK_CHECK_STATUS)
+                .as_ref()
+                .is_some_and(|line| line.message == LINK_CHECK_STATUS)
         {
             self.status_message = None;
         }
@@ -987,7 +1137,7 @@ impl Workspace {
     }
     pub(crate) fn open_log_folder(&self, cx: &mut Context<Self>) {
         if let Some(directory) = Path::new(self.log_file.as_str()).parent() {
-            cx.reveal_path(directory);
+            reveal_local_path(cx, directory);
         }
     }
     pub(crate) fn open_local_network_settings(&self, cx: &mut Context<Self>) {
@@ -1155,7 +1305,23 @@ impl Render for Workspace {
                 .flex()
                 .flex_1()
                 .min_h_0()
+                // Drag events are dispatched by hitbox, so the divider's own
+                // five points cannot own them: the pointer leaves that box the
+                // moment a horizontal drag starts. The whole content row
+                // receives them, and the listener only acts while a divider
+                // drag is in flight.
+                .on_mouse_move(cx.listener(
+                    |workspace, event: &gpui_kit::MouseMoveEvent, window, cx| {
+                        workspace.apply_pane_divider_drag(event.position.x, window, cx);
+                    },
+                ))
+                // The resize cursor covers the content row for the duration of
+                // the drag, because the pointer is no longer over the divider.
+                .when(self.pane_split_drag.is_some(), |row| {
+                    row.cursor_col_resize()
+                })
                 .child(self.render_pane(PaneSide::Local, window, cx))
+                .child(self.render_pane_divider(window, cx))
                 .child(self.render_pane(PaneSide::Remote, window, cx))
                 .into_any_element()
         } else {
@@ -1199,9 +1365,14 @@ impl Render for Workspace {
             .track_focus(&self.workspace_focus)
             // Always attach so clear works even before the tree re-renders
             // after drag start (drawer_resize may still be None on last paint).
+            // Releasing anywhere in the window also ends a pane divider drag:
+            // the content row only sees releases over itself, so letting go
+            // over the tab bar would otherwise leave the divider stuck to the
+            // pointer.
             .on_mouse_up(
                 gpui_kit::MouseButton::Left,
                 cx.listener(|workspace, _event, _window, cx| {
+                    workspace.finish_pane_divider_drag(cx);
                     if workspace.transfer_drawer.resize.take().is_some() {
                         cx.notify();
                     }
@@ -1247,6 +1418,11 @@ impl Render for Workspace {
             .on_action(cx.listener(|workspace, _: &RefreshPane, window, cx| {
                 workspace.refresh_focused_pane(window, cx);
             }))
+            .on_action(
+                cx.listener(|workspace, _: &CancelAllTransfers, _window, cx| {
+                    workspace.cancel_all_transfers(cx);
+                }),
+            )
             .on_action(cx.listener(|workspace, _: &UploadSelection, _window, cx| {
                 workspace.upload_selection(cx);
             }))
@@ -1326,9 +1502,30 @@ impl Render for Workspace {
             .on_action(cx.listener(|workspace, _: &CopyPath, _window, cx| {
                 workspace.copy_focused_path(cx);
             }))
+            .on_action(cx.listener(|workspace, _: &CopyFiles, _window, cx| {
+                workspace.copy_files(cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &PasteFiles, _window, cx| {
+                workspace.paste_files(cx);
+            }))
             .on_action(cx.listener(|workspace, _: &ShowInFinder, _window, cx| {
                 workspace.reveal_local_selection(cx);
             }))
+            .on_action(
+                cx.listener(|workspace, action: &ConnectRecent, window, cx| {
+                    workspace.open_recent_connection(action.id, window, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|workspace, action: &CopyRecentEndpoint, _window, cx| {
+                    workspace.copy_recent_endpoint(action.id, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|workspace, action: &ForgetRecent, _window, cx| {
+                    workspace.forget_recent_connection(action.id, cx);
+                }),
+            )
             .on_action(cx.listener(|workspace, _: &DeleteSelection, window, cx| {
                 workspace.request_delete_selection(window, cx);
             }))
@@ -1464,6 +1661,7 @@ mod helpers;
 mod modals;
 mod nav;
 mod overlay;
+mod pane_split;
 mod panes;
 mod profiles;
 mod remote_edit;

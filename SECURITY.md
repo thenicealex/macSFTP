@@ -54,6 +54,17 @@ patched version or commit is available.
 - Remote-edit uploads require an explicit user action and a live remote
   metadata check. Cached directory listings must never authorize overwriting a
   remote file.
+- A download preserves the source permission bits, so a file the server marks
+  executable lands on disk executable. Opening such a file hands it to
+  LaunchServices, which runs `.command`-shaped content outright. Every
+  completed download is therefore checked, and executables get the
+  `com.apple.quarantine` attribute so the first launch goes through the macOS
+  confirmation instead of executing silently. Documents are left unmarked: they
+  have nothing to launch, and remote-edit temp copies are excluded because the
+  editor flow opens them and they are not reachable from a pane. The attribute
+  call receives a canonical absolute path, so no part of a path can be read as
+  an `xattr` option. The check runs on the background executor and its failure
+  is logged without the path.
 - Remote-edit temporary copies can contain sensitive data. They use a
   per-process namespace and must be removed when their owning tab or window is
   closed; cleanup failures must remain diagnosable without logging paths or

@@ -26,6 +26,7 @@ pub struct TransferRow {
     detail_label: SharedString,
     on_cancel: Option<ClickHandler>,
     on_retry: Option<ClickHandler>,
+    on_reveal: Option<ClickHandler>,
 }
 
 pub fn transfer_row(
@@ -46,6 +47,7 @@ pub fn transfer_row(
         detail_label: "".into(),
         on_cancel: None,
         on_retry: None,
+        on_reveal: None,
     }
 }
 
@@ -76,6 +78,16 @@ impl TransferRow {
         self.on_retry = Some(Box::new(handler));
         self
     }
+
+    /// Offer a reveal control for a finished transfer, so the user can find the
+    /// file it produced without navigating there by hand.
+    pub fn on_reveal(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_reveal = Some(Box::new(handler));
+        self
+    }
 }
 
 impl RenderOnce for TransferRow {
@@ -91,6 +103,14 @@ impl RenderOnce for TransferRow {
                 ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "cancel".into()),
                 IconName::Close,
                 "Cancel Transfer",
+            )
+            .on_click(move |event, window, cx| handler(event, window, cx))
+        });
+        let reveal_button = self.on_reveal.map(|handler| {
+            icon_button(
+                ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "reveal".into()),
+                IconName::Folder,
+                "Show in Finder",
             )
             .on_click(move |event, window, cx| handler(event, window, cx))
         });
@@ -138,6 +158,7 @@ impl RenderOnce for TransferRow {
                             .text_color(self.state_color)
                             .child(self.state_label),
                     )
+                    .children(reveal_button)
                     .children(cancel_button)
                     .children(retry_button),
             )

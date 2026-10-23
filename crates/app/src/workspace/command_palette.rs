@@ -176,6 +176,7 @@ impl Workspace {
             "SortByDateModifiedDescending" => {
                 self.set_sort(FileSortField::ModifiedAt, SortDirection::Descending, cx)
             }
+            "CancelAllTransfers" => self.cancel_all_transfers(cx),
             "CopyPath" => self.copy_focused_path(cx),
             "ShowInFinder" => self.reveal_local_selection(cx),
             "ReconnectTab" => self.request_connect(window, cx),

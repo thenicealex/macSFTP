@@ -63,6 +63,11 @@ pub(crate) struct ConnectForm {
     pub(crate) profile_picker_open: bool,
     /// Filter text for the inline profile picker list.
     pub(crate) profile_picker_filter: InputState,
+    /// Whether the password field currently shows characters instead of
+    /// bullets. Deliberately per-form: a fresh form always starts masked.
+    pub(crate) show_password: bool,
+    /// Same toggle for the key passphrase field.
+    pub(crate) show_passphrase: bool,
 }
 
 impl ConnectForm {
@@ -83,6 +88,8 @@ impl ConnectForm {
             source_profile_id: None,
             profile_picker_open: false,
             profile_picker_filter: InputState::new(),
+            show_password: false,
+            show_passphrase: false,
         }
     }
 
@@ -212,6 +219,25 @@ impl ConnectForm {
                 self.detach_from_profile();
             }
             self.auth_method = method;
+            // A secret for a method the user just left stops living in the
+            // form, and a reveal never survives the switch: coming back to
+            // Password has to ask before it shows the characters again.
+            match method {
+                AuthMethodKind::Password => {
+                    self.passphrase.clear();
+                    self.show_passphrase = false;
+                }
+                AuthMethodKind::PrivateKey => {
+                    self.password.clear();
+                    self.show_password = false;
+                }
+                AuthMethodKind::KeyboardInteractive | AuthMethodKind::SshAgent => {
+                    self.password.clear();
+                    self.passphrase.clear();
+                    self.show_password = false;
+                    self.show_passphrase = false;
+                }
+            }
             if !self.field_order().contains(&self.focused_field) {
                 self.focused_field = match method {
                     AuthMethodKind::Password => ConnectField::Password,
@@ -392,10 +418,9 @@ impl crate::workspace::Workspace {
                                     };
                                     if target_diverged {
                                         form.detach_from_profile();
-                                        workspace.status_message = Some(
+                                        workspace.show_status(
                                             "Saved credentials cleared because connection details were changed."
-                                                .into(),
-                                        );
+                                                .into(),cx);
                                     }
                                 }
                             }

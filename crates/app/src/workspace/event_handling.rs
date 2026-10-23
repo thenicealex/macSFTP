@@ -303,12 +303,13 @@ impl crate::workspace::Workspace {
                     tab.remote.is_refreshing = false;
                     tab.remote.error = Some(scoped.payload.error.clone());
                 }
-                self.status_message = Some(
+                self.show_status(
                     format!(
                         "{}: {}",
                         scoped.payload.error.title, scoped.payload.error.message
                     )
                     .into(),
+                    cx,
                 );
             }
             AppEvent::FsOperationFailed { scope, failure } => {

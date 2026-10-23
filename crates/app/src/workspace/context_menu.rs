@@ -11,8 +11,9 @@ use macsftp_core::FileKind;
 use tracing::warn;
 
 use crate::app_actions::{
-    CopyPath, DeleteSelection, DownloadSelection, NewFolder, OpenSelectedEntry, RefreshPane,
-    RenameEntry, ShowInFinder, UploadSelection,
+    ConnectRecent, CopyFiles, CopyPath, CopyRecentEndpoint, DeleteSelection, DownloadSelection,
+    ForgetRecent, NewFolder, OpenSelectedEntry, PasteFiles, RefreshPane, RenameEntry, ShowInFinder,
+    UploadSelection,
 };
 use crate::workspace::{PaneSide, Workspace};
 
@@ -37,6 +38,7 @@ pub(crate) fn file_context_menu(
     side: PaneSide,
     target: ContextMenuTarget,
     remote_ready: bool,
+    can_paste: bool,
 ) -> NativeMenu {
     match (side, target) {
         (_, ContextMenuTarget::Background) => {
@@ -46,23 +48,24 @@ pub(crate) fn file_context_menu(
                 .separator()
                 .menu_with_disabled("Refresh", !enabled, Box::new(RefreshPane))
         }
-        (PaneSide::Local, ContextMenuTarget::Entry(kind)) => {
-            let mut menu = NativeMenu::new();
-            // A link may point at a folder, so it gets the same open affordance
-            // as a folder; the click resolves the target before navigating.
-            if matches!(kind, FileKind::Directory | FileKind::Symlink) {
-                menu = menu.menu("Open", Box::new(OpenSelectedEntry)).separator();
-            }
-            menu.menu_with_disabled("Upload", !remote_ready, Box::new(UploadSelection))
-                .separator()
-                .menu("Rename…", Box::new(RenameEntry))
-                .menu("New Folder…", Box::new(NewFolder))
-                .separator()
-                .menu("Delete…", Box::new(DeleteSelection))
-                .separator()
-                .menu("Copy Path", Box::new(CopyPath))
-                .menu("Show in Finder", Box::new(ShowInFinder))
-        }
+        // Every local row opens: folders navigate, links resolve their target,
+        // and files go to their default application (the Finder convention for
+        // the user's own disk), so the entry kind no longer splits the menu.
+        (PaneSide::Local, ContextMenuTarget::Entry(_)) => NativeMenu::new()
+            .menu("Open", Box::new(OpenSelectedEntry))
+            .separator()
+            .menu_with_disabled("Upload", !remote_ready, Box::new(UploadSelection))
+            .separator()
+            .menu("Rename…", Box::new(RenameEntry))
+            .menu("New Folder…", Box::new(NewFolder))
+            .separator()
+            .menu("Delete…", Box::new(DeleteSelection))
+            .separator()
+            .menu("Copy", Box::new(CopyFiles))
+            .menu_with_disabled("Paste", !can_paste, Box::new(PasteFiles))
+            .separator()
+            .menu("Copy Path", Box::new(CopyPath))
+            .menu("Show in Finder", Box::new(ShowInFinder)),
         (PaneSide::Remote, ContextMenuTarget::Entry(kind)) => {
             let open_label = match kind {
                 FileKind::Directory | FileKind::Symlink => "Open",
@@ -77,6 +80,11 @@ pub(crate) fn file_context_menu(
                 .menu_with_disabled("New Folder…", !remote_ready, Box::new(NewFolder))
                 .separator()
                 .menu_with_disabled("Delete…", !remote_ready, Box::new(DeleteSelection))
+                .separator()
+                .menu("Copy", Box::new(CopyFiles))
+                // Pasting into the server pane needs the session, unlike
+                // copying the selection it would move.
+                .menu_with_disabled("Paste", !can_paste || !remote_ready, Box::new(PasteFiles))
                 .separator()
                 .menu("Copy Path", Box::new(CopyPath))
         }
@@ -105,9 +113,36 @@ impl Workspace {
             None => ContextMenuTarget::Background,
         };
         let remote_ready = self.fs_scope_for_side(PaneSide::Remote).is_some();
-        let menu = file_context_menu(side, target, remote_ready);
+        let can_paste = !self.file_clipboard.is_empty();
+        let menu = file_context_menu(side, target, remote_ready, can_paste);
         if let Err(error) = macsftp_native_menu::show(menu, position, window, cx) {
             warn!(%error, "could not present the file context menu");
+        }
+    }
+
+    /// Present the recent-connection row menu: reconnect, copy the endpoint,
+    /// or forget the entry. Pure row actions — no pane state is involved, so
+    /// unlike the file menu nothing here is ever disabled.
+    pub(crate) fn show_recent_context_menu(
+        &mut self,
+        recent_id: u64,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let menu = NativeMenu::new()
+            .menu("Connect", Box::new(ConnectRecent { id: recent_id }))
+            .menu(
+                "Copy user@host:port",
+                Box::new(CopyRecentEndpoint { id: recent_id }),
+            )
+            .separator()
+            .menu(
+                "Remove from Recent Connections",
+                Box::new(ForgetRecent { id: recent_id }),
+            );
+        if let Err(error) = macsftp_native_menu::show(menu, position, window, cx) {
+            warn!(%error, "could not present the recent connections menu");
         }
     }
 
@@ -163,6 +198,7 @@ mod tests {
             PaneSide::Local,
             ContextMenuTarget::Entry(FileKind::Directory),
             true,
+            true,
         );
         assert_eq!(
             layout(&menu),
@@ -175,6 +211,9 @@ mod tests {
                 (Some("New Folder…"), false),
                 (None, false),
                 (Some("Delete…"), false),
+                (None, false),
+                (Some("Copy"), false),
+                (Some("Paste"), false),
                 (None, false),
                 (Some("Copy Path"), false),
                 (Some("Show in Finder"), false),
@@ -189,20 +228,18 @@ mod tests {
         assert_action::<ShowInFinder>(&menu, "Show in Finder");
     }
 
+    /// A local file opens in its default application, so the menu leads with
+    /// Open exactly like a folder or link does.
     #[test]
-    fn local_file_menu_has_no_open_command() {
+    fn local_file_menu_leads_with_open() {
         let menu = file_context_menu(
             PaneSide::Local,
             ContextMenuTarget::Entry(FileKind::File),
             true,
+            true,
         );
-        assert!(
-            layout(&menu)
-                .iter()
-                .all(|(label, _)| *label != Some("Open")),
-            "opening a local file with its default app is not an app command yet"
-        );
-        assert_eq!(layout(&menu)[0], (Some("Upload"), false));
+        assert_eq!(layout(&menu)[0], (Some("Open"), false));
+        assert_action::<OpenSelectedEntry>(&menu, "Open");
         assert_action::<UploadSelection>(&menu, "Upload");
     }
 
@@ -211,6 +248,7 @@ mod tests {
         let menu = file_context_menu(
             PaneSide::Remote,
             ContextMenuTarget::Entry(FileKind::File),
+            true,
             true,
         );
         assert_eq!(
@@ -224,6 +262,9 @@ mod tests {
                 (Some("New Folder…"), false),
                 (None, false),
                 (Some("Delete…"), false),
+                (None, false),
+                (Some("Copy"), false),
+                (Some("Paste"), false),
                 (None, false),
                 (Some("Copy Path"), false),
             ]
@@ -244,10 +285,14 @@ mod tests {
             PaneSide::Remote,
             ContextMenuTarget::Entry(FileKind::Directory),
             false,
+            true,
         );
         for (label, disabled) in layout(&menu) {
             match label {
                 Some("Copy Path") => assert!(!disabled, "Copy Path works offline"),
+                // Copying a selection needs no session; pasting it into the
+                // server pane does.
+                Some("Copy") => assert!(!disabled, "Copy works offline"),
                 Some(_) => assert!(disabled, "{label:?} needs the session"),
                 None => {}
             }
@@ -260,13 +305,37 @@ mod tests {
             PaneSide::Local,
             ContextMenuTarget::Entry(FileKind::File),
             false,
+            true,
         );
-        assert_eq!(layout(&disconnected)[0], (Some("Upload"), true));
+        // Open stays available offline: a local file needs no session.
+        assert_eq!(layout(&disconnected)[0], (Some("Open"), false));
+        assert_eq!(layout(&disconnected)[2], (Some("Upload"), true));
+    }
+
+    /// Paste is offered but disabled with nothing copied, and Copy is always
+    /// available: it only needs the selection.
+    #[test]
+    fn paste_waits_for_a_copied_selection() {
+        let menu = file_context_menu(
+            PaneSide::Local,
+            ContextMenuTarget::Entry(FileKind::File),
+            true,
+            false,
+        );
+        for (label, disabled) in layout(&menu) {
+            match label {
+                Some("Paste") => assert!(disabled, "nothing is copied yet"),
+                Some("Copy") => assert!(!disabled, "Copy only needs the selection"),
+                _ => {}
+            }
+        }
+        assert_action::<CopyFiles>(&menu, "Copy");
+        assert_action::<PasteFiles>(&menu, "Paste");
     }
 
     #[test]
     fn background_menu_offers_new_folder_then_refresh() {
-        let menu = file_context_menu(PaneSide::Local, ContextMenuTarget::Background, false);
+        let menu = file_context_menu(PaneSide::Local, ContextMenuTarget::Background, false, true);
         assert_eq!(
             layout(&menu),
             vec![
@@ -278,7 +347,8 @@ mod tests {
         assert_action::<NewFolder>(&menu, "New Folder…");
         assert_action::<RefreshPane>(&menu, "Refresh");
 
-        let offline = file_context_menu(PaneSide::Remote, ContextMenuTarget::Background, false);
+        let offline =
+            file_context_menu(PaneSide::Remote, ContextMenuTarget::Background, false, true);
         assert_eq!(
             layout(&offline),
             vec![

@@ -1,8 +1,9 @@
+use std::path::Path;
 use std::time::Instant;
 
 use gpui_kit::{
     App, ClickEvent, ClipboardItem, Context, KeyDownEvent, ScrollStrategy, UniformListScrollHandle,
-    Window,
+    Window, div,
 };
 use macsftp_core::{
     AppCommand, ConnectionState, DisconnectReason, EntryPath, FileKind, FileSortField, LocalPath,
@@ -23,7 +24,45 @@ use macsftp_core::HistoryOp;
 /// Visible-list page step for PageUp / PageDown (design §3).
 pub const PAGE_SIZE: usize = 10;
 
+/// The status line a local directory read announces while in flight; the
+/// completed read retires exactly this line, nothing else.
+const LOCAL_LOADING_STATUS: &str = "Loading files on your Mac…";
+
 impl crate::workspace::Workspace {
+    /// Flex weight of a pane in the shared content area.
+    ///
+    /// The weights are the split ratio and its complement, so the divider's
+    /// position is the ratio of the total: dragging to 30% gives the local
+    /// pane 0.3 and the remote pane 0.7.
+    pub(crate) fn pane_split_weight(&self, side: PaneSide, content_width: gpui_kit::Pixels) -> f32 {
+        let ratio = pane_split::clamp_split_ratio_for_width(self.pane_split_ratio, content_width);
+        match side {
+            PaneSide::Local => ratio,
+            PaneSide::Remote => 1.0 - ratio,
+        }
+    }
+
+    /// Where the divider sits in the window, in window coordinates.
+    ///
+    /// The drag anchors on the divider's own position rather than on the
+    /// pointer, so grabbing it off-centre does not make it jump sideways.
+    /// The panes fill the content area, which starts at the window's left
+    /// edge, so the local pane's width is the distance from there to the
+    /// divider.
+    pub(crate) fn divider_position(
+        &self,
+        window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::Pixels> {
+        let content_width = window.viewport_size().width;
+        if content_width <= gpui_kit::px(0.0) {
+            return None;
+        }
+        let ratio = pane_split::clamp_split_ratio_for_width(self.pane_split_ratio, content_width);
+        let usable = (content_width - pane_split::DIVIDER_WIDTH).max(gpui_kit::px(0.0));
+        Some(usable * ratio + pane_split::DIVIDER_WIDTH / 2.0)
+    }
+
     pub(crate) fn focus_pane(
         &mut self,
         side: PaneSide,
@@ -344,7 +383,23 @@ impl crate::workspace::Workspace {
                         let path = entry.path.clone();
                         self.open_local_symlink(path, window, cx);
                     }
-                    _ => {}
+                    // A local file is the user's own data on their own disk, so
+                    // the Finder convention applies: opening it hands it to its
+                    // default application. Remote files never take this path —
+                    // they are edited in a temp copy instead (see below), because
+                    // a download preserves the remote exec bit and opening it
+                    // would run attacker-controlled content.
+                    FileKind::File => {
+                        let path = entry.path.clone();
+                        open_local_path(cx, Path::new(path.as_str()));
+                    }
+                    // A socket, FIFO, device or an entry whose metadata could
+                    // not be read has no application to open it with, and
+                    // handing it to LaunchServices can block on a FIFO. Say so
+                    // instead of trying.
+                    FileKind::Other | FileKind::Unknown => {
+                        self.show_status("This item can’t be opened.".into(), cx);
+                    }
                 }
             }
             PaneSide::Remote => {
@@ -415,9 +470,9 @@ impl crate::workspace::Workspace {
                         workspace.navigate_pane_local(path, HistoryOp::Push, window, cx);
                     }
                     Ok(_) => {
-                        workspace.status_message =
-                            Some("This link points to a file, not a folder.".into());
-                        cx.notify();
+                        // The link points at a file: open it like any other
+                        // local file instead of refusing it as a folder.
+                        open_local_path(cx, Path::new(path.as_str()));
                     }
                     Err(error) => {
                         workspace.status_message =
@@ -439,7 +494,7 @@ impl crate::workspace::Workspace {
         };
         let tab_id = tab.id;
         let Some((session_epoch, _)) = connected_transfer_session(tab) else {
-            self.status_message = Some("Connect to the server before opening this item.".into());
+            self.show_status("Connect to the server before opening this item.".into(), cx);
             cx.notify();
             return false;
         };
@@ -493,14 +548,33 @@ impl crate::workspace::Workspace {
         path: LocalPath,
         cx: &mut Context<Self>,
     ) {
+        self.read_local_directory(tab_id, path, false, cx);
+    }
+
+    /// Re-read a local folder without disturbing what the user is looking at.
+    ///
+    /// Used after a transfer finishes: the listing must gain the new files but
+    /// the scroll position and selection belong to the user, and the pane must
+    /// not announce a navigation it did not make.
+    fn reload_local_directory(&mut self, tab_id: TabId, path: LocalPath, cx: &mut Context<Self>) {
+        self.read_local_directory(tab_id, path, true, cx);
+    }
+
+    fn read_local_directory(
+        &mut self,
+        tab_id: TabId,
+        path: LocalPath,
+        preserve_view: bool,
+        cx: &mut Context<Self>,
+    ) {
         // The read generation lives on the tab itself, so requesting for a
         // missing tab cannot create phantom side-table state.
         let Some(tab) = self.state.tabs.find_tab_mut(tab_id) else {
             return;
         };
         let request_epoch = tab.local.begin_local_read();
-        if self.state.tabs.active_tab_id == Some(tab_id) {
-            self.status_message = Some("Loading files on your Mac…".into());
+        if !preserve_view && self.state.tabs.active_tab_id == Some(tab_id) {
+            self.show_status(LOCAL_LOADING_STATUS.into(), cx);
         }
         let read_path = path.clone();
         let read_task = cx
@@ -521,7 +595,18 @@ impl crate::workspace::Workspace {
                         macsftp_core::sort_entries(&mut entries, &tab.sort);
                         tab.local.entries = entries;
                         tab.local.error = None;
-                        if is_active {
+                        // Retire only the loading line this read put up. A
+                        // message the user earned while the folder was loading
+                        // (a path copy, an error) must survive the listing
+                        // landing, and a background reload never announced
+                        // itself, so it must not take down a navigation's line.
+                        if is_active
+                            && !preserve_view
+                            && workspace
+                                .status_message
+                                .as_ref()
+                                .is_some_and(|line| line.message == LOCAL_LOADING_STATUS)
+                        {
                             workspace.status_message = None;
                         }
                     }
@@ -543,7 +628,7 @@ impl crate::workspace::Workspace {
                         );
                     }
                 }
-                if is_active {
+                if is_active && !preserve_view {
                     workspace.local.scroll = UniformListScrollHandle::new();
                 }
                 cx.notify();
@@ -598,6 +683,23 @@ impl crate::workspace::Workspace {
         path: RemotePath,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.read_remote_directory(tab_id, path, false, cx)
+    }
+
+    /// Remote counterpart of [`Self::reload_local_directory`]: re-read the
+    /// folder a finished transfer wrote into while keeping the user's
+    /// selection, scroll position and status text.
+    fn reload_remote_directory(&mut self, tab_id: TabId, path: RemotePath, cx: &mut Context<Self>) {
+        self.read_remote_directory(tab_id, path, true, cx);
+    }
+
+    fn read_remote_directory(
+        &mut self,
+        tab_id: TabId,
+        path: RemotePath,
+        preserve_view: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if !self.send_command(
             AppCommand::ReadRemoteDir {
                 tab_id,
@@ -614,7 +716,9 @@ impl crate::workspace::Workspace {
             tab.remote.path = Some(path);
             tab.remote.is_refreshing = true;
             tab.remote.error = None;
-            tab.selection.selected_paths.clear();
+            if !preserve_view {
+                tab.selection.selected_paths.clear();
+            }
         }
         cx.notify();
         true
@@ -654,6 +758,55 @@ impl crate::workspace::Workspace {
                 if let Some(path) = tab.remote.path.clone() {
                     self.request_remote_directory(tab.id, path, cx);
                 }
+            }
+        }
+    }
+
+    /// Re-read the folders a finished transfer wrote into.
+    ///
+    /// Only panes that are already showing one of those folders are re-read, so
+    /// finishing an upload never yanks a pane back to where the files landed,
+    /// and a tab showing something else costs nothing but a path comparison.
+    pub(crate) fn reload_visible_directories(
+        &mut self,
+        local_directories: &[LocalPath],
+        remote_directories: &[RemotePath],
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Every tab, not just the active one: a tab in the background can be
+        // showing the folder that received the files, and returning to a stale
+        // listing after a transfer finished is exactly the confusion this
+        // reload exists to prevent. The comparison is two path reads per tab,
+        // and a tab that does not match costs nothing else.
+        let matches: Vec<(TabId, Option<LocalPath>, Option<RemotePath>, bool)> = self
+            .state
+            .tabs
+            .tabs
+            .iter()
+            .map(|tab| {
+                let local = tab
+                    .local
+                    .path
+                    .clone()
+                    .filter(|path| local_directories.contains(path));
+                let remote = tab
+                    .remote
+                    .path
+                    .clone()
+                    .filter(|path| remote_directories.contains(path));
+                let connected = matches!(tab.connection, ConnectionState::Connected { .. });
+                (tab.id, local, remote, connected)
+            })
+            .collect();
+        for (tab_id, local, remote, connected) in matches {
+            if let Some(path) = local {
+                self.reload_local_directory(tab_id, path, cx);
+            }
+            if let Some(path) = remote
+                && connected
+            {
+                self.reload_remote_directory(tab_id, path, cx);
             }
         }
     }
@@ -1009,29 +1162,134 @@ impl crate::workspace::Workspace {
             PaneSide::Remote => tab.nav.remote.can_forward(),
         }
     }
+    /// Copy Path copies the selected entries, matching Finder: the context
+    /// menu selects the row under the pointer before it is presented, so the
+    /// item's own path is what lands on the clipboard. Only an empty selection
+    /// (toolbar button or shortcut with no rows picked) falls back to the pane's
+    /// current folder. Several selected rows are copied one path per line.
     pub(crate) fn copy_focused_path(&mut self, cx: &mut Context<Self>) {
         let side = self.focused_side;
-        let Some(tab) = self.active_tab() else {
+        let mut paths: Vec<String> = self
+            .selected_fs_entries(side)
+            .iter()
+            .map(|entry| entry.path.as_str().to_string())
+            .collect();
+        if paths.is_empty() {
+            let folder = self.active_tab().and_then(|tab| {
+                let path = match side {
+                    PaneSide::Local => tab.local.path.as_ref().map(|path| path.as_str()),
+                    PaneSide::Remote => tab.remote.path.as_ref().map(|path| path.as_str()),
+                };
+                path.map(str::to_string)
+            });
+            paths.extend(folder);
+        }
+        let Some(first_path) = paths.first().cloned() else {
             return;
         };
-        let path_text = match side {
-            PaneSide::Local => tab
-                .local
-                .path
-                .as_ref()
-                .map(|path| path.as_str().to_string()),
-            PaneSide::Remote => tab
-                .remote
-                .path
-                .as_ref()
-                .map(|path| path.as_str().to_string()),
+        let message = if paths.len() == 1 {
+            format!("Path copied: {first_path}")
+        } else {
+            format!("{} paths copied", paths.len())
         };
-        if let Some(path_text) = path_text {
-            cx.write_to_clipboard(ClipboardItem::new_string(path_text.clone()));
-            self.status_message = Some(format!("Path copied: {path_text}").into());
-            cx.notify();
+        cx.write_to_clipboard(ClipboardItem::new_string(paths.join("\n")));
+        self.show_status(message.into(), cx);
+        cx.notify();
+    }
+    /// Copy the focused pane's selection into the file clipboard.
+    ///
+    /// Finder's Cmd-C for files: the selection is remembered, and pasting it in
+    /// the other pane becomes the transfer that moves it there. The paths also
+    /// go on the system clipboard as text, so the same keystroke still gives a
+    /// terminal paste something useful.
+    pub(crate) fn copy_files(&mut self, cx: &mut Context<Self>) {
+        let side = self.focused_side;
+        let paths = self
+            .selected_fs_entries(side)
+            .into_iter()
+            .map(|entry| match entry.path {
+                macsftp_core::FsPath::Local(path) => EntryPath::Local(path),
+                macsftp_core::FsPath::Remote(path) => EntryPath::Remote(path),
+            })
+            .collect::<Vec<_>>();
+        if paths.is_empty() {
+            self.show_status("Select files or folders to copy.".into(), cx);
+            return;
+        }
+        let text = paths
+            .iter()
+            .map(|path| match path {
+                EntryPath::Local(path) => path.as_str().to_string(),
+                EntryPath::Remote(path) => path.as_str().to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        let count = paths.len();
+        self.file_clipboard.set(paths);
+        self.show_status(
+            if count == 1 {
+                "Copied 1 item.".into()
+            } else {
+                format!("Copied {count} items.").into()
+            },
+            cx,
+        );
+    }
+
+    /// Paste the file clipboard into the focused pane.
+    ///
+    /// The two panes are the two locations, so a paste that crosses them is the
+    /// upload or download that moves the files. A paste into the pane the files
+    /// already live in is reported instead of silently doing nothing: copying
+    /// within one folder needs a server-side copy this client does not have.
+    pub(crate) fn paste_files(&mut self, cx: &mut Context<Self>) {
+        let side = self.focused_side;
+        if self.file_clipboard.is_empty() {
+            self.show_status("Nothing to paste.".into(), cx);
+            return;
+        }
+        let copied = self.file_clipboard.paths().to_vec();
+        match side {
+            PaneSide::Remote => {
+                let sources: Vec<LocalPath> = copied
+                    .iter()
+                    .filter_map(|path| match path {
+                        EntryPath::Local(local) => Some(local.clone()),
+                        EntryPath::Remote(_) => None,
+                    })
+                    .collect();
+                if sources.is_empty() {
+                    self.show_status(
+                        "Those items are already in this folder. Copying within one folder is not supported yet."
+                            .into(),
+                        cx,
+                    );
+                    return;
+                }
+                self.begin_upload(sources, cx);
+            }
+            PaneSide::Local => {
+                let sources: Vec<RemotePath> = copied
+                    .iter()
+                    .filter_map(|path| match path {
+                        EntryPath::Remote(remote) => Some(remote.clone()),
+                        EntryPath::Local(_) => None,
+                    })
+                    .collect();
+                if sources.is_empty() {
+                    self.show_status(
+                        "Those items are already on your Mac. Copying within one folder is not supported yet."
+                            .into(),
+                        cx,
+                    );
+                    return;
+                }
+                self.begin_download(sources, cx);
+            }
         }
     }
+
     pub(crate) fn toggle_selection_at(
         &mut self,
         side: PaneSide,
@@ -1107,4 +1365,72 @@ impl crate::workspace::Workspace {
         self.focus_pane(self.focused_side, window, cx);
         cx.notify();
     }
+}
+
+impl crate::workspace::Workspace {
+    /// Copy a recent connection's `user@host:port` — the string a terminal or
+    /// another client needs — without opening the connection.
+    pub(crate) fn copy_recent_endpoint(&mut self, recent_id: u64, cx: &mut Context<Self>) {
+        let Some(endpoint) = cx
+            .resources()
+            .recents
+            .entries()
+            .iter()
+            .find(|entry| entry.id == recent_id)
+            .map(|entry| format!("{}@{}:{}", entry.username, entry.host, entry.port))
+        else {
+            return;
+        };
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(endpoint.clone()));
+        self.show_status(format!("Endpoint copied: {endpoint}").into(), cx);
+    }
+
+    /// Remove one recent connection. The row disappears immediately; a stale
+    /// host the user mis-typed once does not follow them around.
+    pub(crate) fn forget_recent_connection(&mut self, recent_id: u64, cx: &mut Context<Self>) {
+        match cx.resources_mut().recents.forget(recent_id) {
+            Ok(true) => {
+                self.show_status("Removed from Recent Connections.".into(), cx);
+                // The recents store is process-wide, so every window's Recent
+                // Connections list is stale now, not just this one.
+                cx.refresh_windows();
+            }
+            Ok(false) => {}
+            Err(error) => {
+                warn!(%error, "could not forget a recent connection");
+                self.show_status(
+                    "The recent connection couldn’t be removed. Try again.".into(),
+                    cx,
+                );
+            }
+        }
+    }
+}
+
+/// The divider between the local and remote panes.
+///
+/// The box is a few points wide — a wider gutter would cost a narrow window
+/// real space — and the drawn rule sits in the middle of it. The rest of the
+/// box is transparent but still grabbable, which is what makes a one-pixel
+/// line practical to hit.
+pub(crate) fn render_pane_divider(theme: &macsftp_ui::Theme) -> gpui_kit::Stateful<gpui_kit::Div> {
+    div()
+        .id("pane-divider")
+        .debug_selector(|| "pane-divider".into())
+        .flex_none()
+        .w(pane_split::DIVIDER_WIDTH)
+        .h_full()
+        .relative()
+        .cursor_col_resize()
+        // The rule sits in the middle of the divider's box; the rest of the
+        // box is transparent but still grabbable.
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(pane_split::DIVIDER_WIDTH / 2.0 - pane_split::DIVIDER_RULE_WIDTH / 2.0)
+                .w(pane_split::DIVIDER_RULE_WIDTH)
+                .bg(theme.colors.border),
+        )
 }

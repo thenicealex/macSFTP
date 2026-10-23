@@ -221,6 +221,91 @@ pub fn rename_entry(from: &LocalPath, to: &LocalPath) -> std::io::Result<()> {
     std::fs::rename(from.as_str(), to.as_str())
 }
 
+/// The LaunchServices attribute that makes macOS ask before opening a file.
+const QUARANTINE_ATTR: &str = "com.apple.quarantine";
+
+/// Whether `path` is a regular file carrying any executable bit.
+///
+/// Directories have execute bits too (they mean "traversable"), so only
+/// regular files count here.
+pub fn is_executable_file(path: &LocalPath) -> bool {
+    match std::fs::symlink_metadata(path.as_str()) {
+        Ok(metadata) => {
+            metadata.file_type().is_file() && metadata.permissions().mode() & 0o111 != 0
+        }
+        Err(_) => false,
+    }
+}
+
+/// Mark a downloaded executable so LaunchServices asks before running it.
+///
+/// An SFTP download preserves the remote permission bits, so a file the
+/// server marked executable lands on disk executable. Opening such a file
+/// hands it to LaunchServices, which runs `.command`/`.app`-shaped content
+/// outright. The quarantine attribute is the macOS mechanism for "this came
+/// from somewhere else": it makes the first launch go through a confirmation
+/// instead of executing silently.
+///
+/// Only executables are marked. A document has nothing to launch, so
+/// quarantining it would put a "downloaded from the internet" prompt in front
+/// of every PDF for no safety gain. Files that already carry the attribute are
+/// left alone, so a file the user has already confirmed is not asked about
+/// again.
+///
+/// Returns whether the attribute was written.
+pub fn quarantine_executable_download(path: &LocalPath) -> std::io::Result<bool> {
+    if !is_executable_file(path) {
+        return Ok(false);
+    }
+    // `xattr` parses its trailing argument as a path, so hand it a canonical
+    // one: a relative path (the local pane can be pointed at one) whose first
+    // component starts with `-` would otherwise be read as an option.
+    let canonical = std::fs::canonicalize(path.as_str())?;
+    let canonical = canonical.to_string_lossy();
+    if has_quarantine(&canonical) {
+        return Ok(false);
+    }
+    let status = build_quarantine_command(&canonical).status()?;
+    if status.success() {
+        Ok(true)
+    } else {
+        Err(std::io::Error::other(format!(
+            "could not mark the download as quarantined (xattr exit {status})"
+        )))
+    }
+}
+
+/// Whether the quarantine attribute is already present on `path`.
+fn has_quarantine(path: &str) -> bool {
+    std::process::Command::new("/usr/bin/xattr")
+        .arg("-p")
+        .arg(QUARANTINE_ATTR)
+        .arg(path)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+/// The `xattr` invocation that writes a quarantine flag.
+///
+/// Format is `flags;hex-time;agent-name;hex-pid`; `0083` means "downloaded,
+/// quarantine active, no user approval yet". Extracted so the argument wiring
+/// is unit tested without spawning.
+fn build_quarantine_command(path: &str) -> std::process::Command {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    let mut command = std::process::Command::new("/usr/bin/xattr");
+    command
+        .arg("-w")
+        .arg(QUARANTINE_ATTR)
+        .arg(format!("0083;{now:x};macSFTP;{pid:x}"))
+        .arg(path);
+    command
+}
+
 /// Create a single directory under `parent` named `name` (not recursive).
 pub fn create_directory(parent: &LocalPath, name: &str) -> std::io::Result<LocalPath> {
     let path = parent.join(name);
@@ -663,13 +748,14 @@ impl Drop for EditWatcher {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use macsftp_core::{FileKind, LocalPath, Timestamp};
 
     use super::{
-        AppPaths, LocalEntryDraft, create_directory, delete_entry, read_local_directory,
-        rename_entry,
+        AppPaths, LocalEntryDraft, build_quarantine_command, create_directory, delete_entry,
+        is_executable_file, quarantine_executable_download, read_local_directory, rename_entry,
     };
 
     /// Per-process unique sequence so parallel test invocations never share a
@@ -1050,5 +1136,119 @@ mod tests {
         if let Err(e) = std::fs::remove_dir_all(&dir) {
             eprintln!("cleanup error: {e}");
         }
+    }
+    /// A fresh fixture directory, unique per test so parallel runs do not share it.
+    fn quarantine_fixture(label: &str) -> (std::path::PathBuf, LocalPath) {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "macsftp-quarantine-{label}-{}-{seq}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        (
+            dir.clone(),
+            LocalPath::new(dir.to_string_lossy().into_owned()),
+        )
+    }
+
+    #[test]
+    fn quarantine_command_writes_the_launch_services_attribute() {
+        let command = build_quarantine_command("/tmp/script.sh");
+        assert_eq!(command.get_program(), "/usr/bin/xattr");
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args.len(), 4, "{args:?}");
+        assert_eq!(args[0], "-w");
+        assert_eq!(args[1], "com.apple.quarantine");
+        assert!(args[2].starts_with("0083;"), "flag field: {:?}", args[2]);
+        assert!(args[2].contains(";macSFTP;"), "agent field: {:?}", args[2]);
+        assert_eq!(args[3], "/tmp/script.sh");
+    }
+
+    #[test]
+    fn only_regular_files_with_an_execute_bit_count_as_executable() {
+        let (dir, base) = quarantine_fixture("kind");
+        let plain = base.join("note.txt");
+        std::fs::write(plain.as_str(), b"hi").expect("write plain");
+        assert!(!is_executable_file(&plain), "a data file is not executable");
+
+        let script = base.join("run.sh");
+        std::fs::write(script.as_str(), b"#!/bin/sh\n").expect("write script");
+        std::fs::set_permissions(script.as_str(), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+        assert!(
+            is_executable_file(&script),
+            "a script with +x is executable"
+        );
+
+        // A directory is traversable, which is not the same as runnable.
+        assert!(
+            !is_executable_file(&base),
+            "a directory is never an executable download"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_downloaded_executable_gets_quarantined_once() {
+        let (dir, base) = quarantine_fixture("mark");
+        let script = base.join("run.command");
+        std::fs::write(script.as_str(), b"#!/bin/sh\necho hi\n").expect("write script");
+        std::fs::set_permissions(script.as_str(), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+
+        let marked = quarantine_executable_download(&script).expect("mark the download");
+        assert!(marked, "an executable download is marked");
+        let again = quarantine_executable_download(&script).expect("second mark is a no-op");
+        assert!(!again, "the attribute is not rewritten once present");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A path whose components start with `-` still gets marked correctly:
+    /// the attribute call is handed a canonical absolute path, so `xattr` can
+    /// never read part of the path as an option.
+    #[test]
+    fn a_path_with_dash_components_is_marked_correctly() {
+        let (dir, base) = quarantine_fixture("dash");
+        let dashed = base.join("-dashed");
+        std::fs::create_dir_all(dashed.as_str()).expect("dashed dir");
+        let script = dashed.join("-run.sh");
+        std::fs::write(script.as_str(), b"#!/bin/sh\n").expect("write script");
+        std::fs::set_permissions(script.as_str(), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+
+        let marked = quarantine_executable_download(&script).expect("mark the download");
+        assert!(marked, "a dashed path is still marked");
+
+        let status = std::process::Command::new("/usr/bin/xattr")
+            .arg("-p")
+            .arg("com.apple.quarantine")
+            .arg(script.as_str())
+            .output()
+            .expect("query the attribute");
+        assert!(
+            status.status.success(),
+            "the attribute landed on the intended file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_plain_download_is_left_alone() {
+        let (dir, base) = quarantine_fixture("plain");
+        let document = base.join("report.pdf");
+        std::fs::write(document.as_str(), b"%PDF-1.4").expect("write document");
+
+        let marked = quarantine_executable_download(&document).expect("no-op on a document");
+        assert!(
+            !marked,
+            "a document is not quarantined: it has nothing to launch"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -113,6 +113,8 @@ fn dispatch_event(event: AppEvent, cx: &mut App) {
         advance_edit_sessions(&event, cx);
         advance_conflict_compare(&event, cx);
         cx.refresh_windows();
+        reload_panes_for_finished_plan(&event, cx);
+        quarantine_completed_download(&event, cx);
         return;
     }
 
@@ -163,6 +165,133 @@ fn dispatch_event(event: AppEvent, cx: &mut App) {
                 });
             }
         }
+    }
+}
+
+/// Mark a just-downloaded executable so macOS asks before running it.
+///
+/// An SFTP download keeps the remote permission bits, so a file the server
+/// marked executable lands on disk executable. Opening such a file hands it to
+/// LaunchServices, which runs `.command`-shaped content outright — and a
+/// download carries no quarantine flag of its own, because it did not come
+/// through a browser. Setting the attribute makes the first launch go through a
+/// confirmation instead of executing silently.
+///
+/// Only executables are marked (see `quarantine_executable_download`), and the
+/// work runs on the background executor: it is a `stat` plus at most two small
+/// process spawns, none of which belongs on the UI thread.
+fn quarantine_completed_download(event: &AppEvent, cx: &mut App) {
+    let AppEvent::TransferCompleted { transfer_id } = event else {
+        return;
+    };
+    let Some(job) = cx.transfers().find_job(*transfer_id) else {
+        return;
+    };
+    if job.direction != TransferDirection::Download {
+        return;
+    }
+    let TransferEndpoint::Local(path) = job.destination.clone() else {
+        return;
+    };
+    // Remote-edit downloads land in the app's own edits directory and are
+    // opened by the editor flow, not by the user double-clicking a listing.
+    // Quarantining them would put a Gatekeeper prompt in front of every
+    // "open for editing" of an executable file, for no gain: the file is not
+    // reachable from the local pane.
+    let edits_dir = std::path::Path::new(cx.resources().app_paths.edits_dir.as_str());
+    if std::path::Path::new(path.as_str()).starts_with(edits_dir) {
+        return;
+    }
+    cx.background_executor()
+        .spawn(async move {
+            if let Err(error) = macsftp_platform::quarantine_executable_download(&path) {
+                // The xattr failure never mentions the path, so this stays
+                // inside the "no paths in diagnostics" rule.
+                warn!(error = %error, "could not mark a downloaded executable as quarantined");
+            }
+        })
+        .detach();
+}
+
+/// Reload the panes a finished transfer wrote into.
+///
+/// The file panes render the last directory listing the runtime delivered, so
+/// without this an upload or download completes and the new file is simply
+/// absent until the user refreshes by hand. Each upload's remote destination
+/// directory and each download's local destination directory is re-read once
+/// per finished plan; a pane showing another folder is left alone.
+///
+/// Reloading is skipped while the plan is still outstanding, and a plan that
+/// only touched edit temp files reloads nothing visible: its destination parent
+/// is the edits directory, which no pane ever lists.
+fn reload_panes_for_finished_plan(event: &AppEvent, cx: &mut App) {
+    let plan_id = match event {
+        // A plan reaches its terminal state once its last job lands. The
+        // reducer records that transition, because re-deriving it here would
+        // mean scanning the plan's jobs on every one of thousands of
+        // completions — the difference between one directory read at the end of
+        // a directory transfer and a quadratic scan per file.
+        AppEvent::TransferCompleted { .. } | AppEvent::TransferSkipped { .. } => {
+            let Some(plan_id) = cx.transfers().just_finished_plan else {
+                return;
+            };
+            plan_id
+        }
+        // Plan-level outcomes are once per plan already.
+        AppEvent::TransferPlanFailed { plan_id, .. }
+        | AppEvent::TransferPlanCancelled { plan_id } => *plan_id,
+        _ => return,
+    };
+
+    // Read the directories out of the store before any window borrow: an
+    // upload and a download of the same plan contribute different sides. One
+    // pass over the jobs, with the plan's ids in a set, keeps this linear.
+    let (root_job_id, child_ids) = {
+        let Some(plan) = cx.transfers().find_plan(plan_id) else {
+            return;
+        };
+        (
+            plan.root_job_id,
+            plan.child_jobs
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<TransferId>>(),
+        )
+    };
+    let mut local_directories = Vec::new();
+    let mut remote_directories = Vec::new();
+    // The root job is a real transfer row of its own: a download that publishes
+    // no children is the root whose destination names the folder that received
+    // the file.
+    for job in &cx.transfers().jobs {
+        if job.id != root_job_id && !child_ids.contains(&job.id) {
+            continue;
+        }
+        match job.destination.parent_directory() {
+            Some(TransferEndpoint::Local(path)) => local_directories.push(path),
+            Some(TransferEndpoint::Remote(path)) => remote_directories.push(path),
+            None => {}
+        }
+    }
+    local_directories.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    local_directories.dedup();
+    remote_directories.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    remote_directories.dedup();
+    if local_directories.is_empty() && remote_directories.is_empty() {
+        return;
+    }
+
+    for window in workspace_windows(cx) {
+        let local_directories = local_directories.clone();
+        let remote_directories = remote_directories.clone();
+        let _closed = window.update(cx, |workspace, window, cx| {
+            workspace.reload_visible_directories(
+                &local_directories,
+                &remote_directories,
+                window,
+                cx,
+            );
+        });
     }
 }
 
@@ -2511,5 +2640,573 @@ mod tests {
             .expect("read workspace");
 
         std::fs::remove_dir_all(&session_dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod reload_tests {
+    use super::*;
+    use crate::app_actions;
+    use crate::resources::{AppResources, SharedTransfers};
+    use crate::workspace::Workspace;
+    use gpui_kit::TestAppContext;
+    use macsftp_core::{
+        ConflictPolicy, ConnectionState, LocalPath, MetadataPolicy, RemotePath,
+        RuntimeBridgeConfig, SessionId, Timestamp, TransferDirection, TransferEndpoint, TransferId,
+        TransferJob, TransferPlan, TransferPlanId, TransferPlanSnapshot, TransferPlanState,
+        TransferState, WindowSessionId,
+    };
+    use macsftp_sftp::{BridgeChannels, RuntimeClient};
+    use macsftp_storage::ConfigStore;
+
+    fn install_globals(cx: &mut TestAppContext, label: &str) {
+        let home =
+            std::env::temp_dir().join(format!("macsftp-reload-{label}-{}", std::process::id()));
+        let app_paths = macsftp_platform::AppPaths::from_home_dir(home.to_string_lossy().as_ref());
+        let config = ConfigStore::with_defaults(app_paths.config_file.clone());
+        cx.update(|cx| {
+            macsftp_ui::Theme::dark().install(cx);
+            app_actions::init(cx);
+            cx.set_global(AppResources::load_for_test(app_paths, config));
+            cx.set_global(SharedTransfers::default());
+        });
+    }
+
+    /// A connected window showing `/srv` on the server and `/tmp/dest` locally.
+    fn connected_window(
+        cx: &mut TestAppContext,
+    ) -> (gpui_kit::WindowHandle<Workspace>, BridgeChannels) {
+        let channels = BridgeChannels::new(&RuntimeBridgeConfig::default());
+        let client = RuntimeClient::new(channels.command_tx.clone());
+        let window = cx
+            .add_window(|window, cx| Workspace::new(client, WindowSessionId(1), None, window, cx));
+        window
+            .update(cx, |workspace, _window, _cx| {
+                let tab = workspace.active_tab_mut().expect("window opens with a tab");
+                tab.session_epoch = 1;
+                tab.connection = ConnectionState::Connected {
+                    session_id: SessionId(1),
+                    session_epoch: 1,
+                    connected_at: Timestamp::from_secs_since_epoch(1),
+                };
+                tab.remote.path = Some(RemotePath::new("/srv"));
+                tab.local.path = Some(LocalPath::new("/tmp/dest"));
+            })
+            .expect("seed pane paths");
+        (window, channels)
+    }
+
+    fn start_plan(cx: &mut TestAppContext, root_job: TransferJob) {
+        let plan = TransferPlan {
+            id: TransferPlanId(root_job.id.0),
+            root_job_id: root_job.id,
+            source_root: root_job.source.clone(),
+            destination_root: root_job.destination.clone(),
+            state: TransferPlanState::Planning,
+            planned_count: 0,
+            total_bytes: None,
+            child_jobs: Vec::new(),
+            conflict_policy: root_job.conflict_policy.clone(),
+        };
+        cx.update(|cx| {
+            dispatch_event(
+                AppEvent::TransferPlanStarted(Box::new(TransferPlanSnapshot { plan, root_job })),
+                cx,
+            );
+        });
+    }
+
+    /// Publish one child job for `plan_id`: the shape a real planner emits
+    /// before any bytes move. Returns the child's id.
+    fn add_child(
+        cx: &mut TestAppContext,
+        plan_id: TransferPlanId,
+        index: u64,
+        direction: TransferDirection,
+        source: TransferEndpoint,
+        destination: TransferEndpoint,
+    ) -> TransferId {
+        let child = TransferJob {
+            id: TransferId(plan_id.0 * 100 + index),
+            direction,
+            source,
+            destination,
+            state: TransferState::Queued,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: Timestamp::from_secs_since_epoch(1),
+        };
+        let id = child.id;
+        cx.update(|cx| {
+            dispatch_event(
+                AppEvent::TransferPlanProgress(macsftp_core::TransferPlanProgress {
+                    plan_id,
+                    child_jobs: vec![child],
+                    planned_count: 1,
+                    total_bytes: None,
+                }),
+                cx,
+            );
+        });
+        id
+    }
+
+    fn finished_transfer(cx: &mut TestAppContext, transfer_id: TransferId) {
+        cx.update(|cx| dispatch_event(AppEvent::TransferCompleted { transfer_id }, cx));
+        cx.run_until_parked();
+        cx.run_until_parked();
+    }
+
+    /// A finished download reloads the local pane that received the file, so
+    /// the new name appears without the user pressing ⌘R.
+    #[gpui_kit::test]
+    fn a_finished_download_reloads_the_local_pane(cx: &mut TestAppContext) {
+        install_globals(cx, "download");
+        let destination_dir =
+            std::env::temp_dir().join(format!("macsftp-reload-dest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&destination_dir);
+        std::fs::create_dir_all(&destination_dir).expect("destination fixture");
+        let destination = LocalPath::new(destination_dir.to_string_lossy().into_owned());
+
+        let (window, channels) = connected_window(cx);
+        window
+            .update(cx, |workspace, _window, _cx| {
+                workspace.active_tab_mut().expect("tab").local.path = Some(destination.clone());
+            })
+            .expect("point the local pane at the fixture");
+        start_plan(
+            cx,
+            TransferJob {
+                id: TransferId(1),
+                direction: TransferDirection::Download,
+                source: TransferEndpoint::Remote(RemotePath::new("/srv/downloaded.txt")),
+                destination: TransferEndpoint::Local(destination.join("downloaded.txt")),
+                state: TransferState::Planning,
+                metadata_policy: MetadataPolicy::default(),
+                conflict_policy: ConflictPolicy::default(),
+                warnings: Vec::new(),
+                created_at: Timestamp::from_secs_since_epoch(1),
+            },
+        );
+        // The single-file download plan publishes no children; the file the
+        // runtime just wrote is simulated here.
+        std::fs::write(destination_dir.join("downloaded.txt"), b"data").expect("write download");
+        while channels.command_rx.try_recv().is_ok() {}
+
+        finished_transfer(cx, TransferId(1));
+
+        window
+            .read_with(cx, |workspace, _cx| {
+                let names: Vec<&str> = workspace
+                    .active_tab()
+                    .expect("tab")
+                    .local
+                    .entries
+                    .iter()
+                    .map(|entry| entry.name.as_str())
+                    .collect();
+                assert_eq!(
+                    names,
+                    vec!["downloaded.txt"],
+                    "the local pane lists the file the transfer wrote"
+                );
+            })
+            .expect("window is open");
+        let _ = std::fs::remove_dir_all(&destination_dir);
+    }
+
+    /// A finished upload asks the runtime to re-read the remote folder that
+    /// received the file.
+    #[gpui_kit::test]
+    fn a_finished_upload_reloads_the_remote_pane(cx: &mut TestAppContext) {
+        install_globals(cx, "upload");
+        let (_window, channels) = connected_window(cx);
+        let plan_id = TransferPlanId(2);
+        start_plan(
+            cx,
+            TransferJob {
+                id: TransferId(2),
+                direction: TransferDirection::Upload,
+                source: TransferEndpoint::Local(LocalPath::new("/tmp/dest")),
+                destination: TransferEndpoint::Remote(RemotePath::new("/srv")),
+                state: TransferState::Planning,
+                metadata_policy: MetadataPolicy::default(),
+                conflict_policy: ConflictPolicy::default(),
+                warnings: Vec::new(),
+                created_at: Timestamp::from_secs_since_epoch(1),
+            },
+        );
+        let child = add_child(
+            cx,
+            plan_id,
+            0,
+            TransferDirection::Upload,
+            TransferEndpoint::Local(LocalPath::new("/tmp/dest/a.txt")),
+            TransferEndpoint::Remote(RemotePath::new("/srv/a.txt")),
+        );
+        while channels.command_rx.try_recv().is_ok() {}
+
+        finished_transfer(cx, child);
+
+        let mut reads = Vec::new();
+        while let Ok(command) = channels.command_rx.try_recv() {
+            if let AppCommand::ReadRemoteDir { path, .. } = command {
+                reads.push(path);
+            }
+        }
+        assert_eq!(
+            reads,
+            vec![RemotePath::new("/srv")],
+            "the upload's destination folder is re-read exactly once"
+        );
+    }
+
+    /// A finished download of an executable marks the file so macOS asks
+    /// before running it. The download preserved the remote execute bit, and
+    /// nothing else would put a quarantine flag on an SFTP download.
+    #[gpui_kit::test]
+    fn a_downloaded_executable_is_marked_for_launch_services(cx: &mut TestAppContext) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        install_globals(cx, "quarantine-download");
+        let dir =
+            std::env::temp_dir().join(format!("macsftp-quarantine-app-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        let script = dir.join("run.command");
+        std::fs::write(&script, b"#!/bin/sh\necho hi\n").expect("write script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+        let destination = LocalPath::new(script.to_string_lossy().into_owned());
+
+        let plan_id = TransferPlanId(21);
+        start_plan(
+            cx,
+            TransferJob {
+                id: TransferId(21),
+                direction: TransferDirection::Download,
+                source: TransferEndpoint::Remote(RemotePath::new("/srv/run.command")),
+                destination: TransferEndpoint::Local(destination.clone()),
+                state: TransferState::Queued,
+                metadata_policy: MetadataPolicy::default(),
+                conflict_policy: ConflictPolicy::default(),
+                warnings: Vec::new(),
+                created_at: Timestamp::from_secs_since_epoch(1),
+            },
+        );
+        let _ = plan_id;
+
+        cx.update(|cx| {
+            dispatch_event(
+                AppEvent::TransferCompleted {
+                    transfer_id: TransferId(21),
+                },
+                cx,
+            );
+        });
+        // The marking runs on the background executor.
+        cx.run_until_parked();
+        cx.run_until_parked();
+
+        let status = std::process::Command::new("/usr/bin/xattr")
+            .arg("-p")
+            .arg("com.apple.quarantine")
+            .arg(destination.as_str())
+            .output()
+            .expect("query the attribute");
+        assert!(
+            status.status.success(),
+            "the downloaded executable is quarantined: {:?}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Remote-edit downloads are opened by the editor flow, not by the user
+    /// clicking a listing, so they are not quarantined: a Gatekeeper prompt in
+    /// front of every "open for editing" would be noise with no safety gain.
+    #[gpui_kit::test]
+    fn a_remote_edit_download_is_not_quarantined(cx: &mut TestAppContext) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        install_globals(cx, "quarantine-edit");
+        let edits_dir = cx.update(|cx| cx.resources().app_paths.edits_dir.clone());
+        let session_dir = std::path::PathBuf::from(edits_dir.as_str()).join("test-edit-run");
+        let _ = std::fs::remove_dir_all(&session_dir);
+        std::fs::create_dir_all(&session_dir).expect("edit session dir");
+        let script = session_dir.join("run.sh");
+        std::fs::write(&script, b"#!/bin/sh\n").expect("write script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+        let destination = LocalPath::new(script.to_string_lossy().into_owned());
+
+        start_plan(
+            cx,
+            TransferJob {
+                id: TransferId(31),
+                direction: TransferDirection::Download,
+                source: TransferEndpoint::Remote(RemotePath::new("/srv/run.sh")),
+                destination: TransferEndpoint::Local(destination.clone()),
+                state: TransferState::Queued,
+                metadata_policy: MetadataPolicy::default(),
+                conflict_policy: ConflictPolicy::default(),
+                warnings: Vec::new(),
+                created_at: Timestamp::from_secs_since_epoch(1),
+            },
+        );
+        cx.update(|cx| {
+            dispatch_event(
+                AppEvent::TransferCompleted {
+                    transfer_id: TransferId(31),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        cx.run_until_parked();
+
+        let status = std::process::Command::new("/usr/bin/xattr")
+            .arg("-p")
+            .arg("com.apple.quarantine")
+            .arg(destination.as_str())
+            .output()
+            .expect("query the attribute");
+        assert!(
+            !status.status.success(),
+            "an edit download keeps no quarantine flag"
+        );
+        let _ = std::fs::remove_dir_all(&session_dir);
+    }
+
+    /// A tab in the background is reloaded too: coming back to a stale listing
+    /// after a transfer finished is the exact confusion the reload prevents.
+    #[gpui_kit::test]
+    fn a_background_tab_showing_the_destination_is_reloaded(cx: &mut TestAppContext) {
+        install_globals(cx, "reload-background");
+        let dir =
+            std::env::temp_dir().join(format!("macsftp-reload-background-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        std::fs::write(dir.join("landed.txt"), b"x").expect("write download");
+        let destination_dir = LocalPath::new(dir.to_string_lossy().into_owned());
+
+        let (window, channels) = connected_window(cx);
+        // A second tab showing the folder the download lands in, then focus the
+        // first tab so the second one is in the background.
+        let background_tab = window
+            .update(cx, |workspace, _window, cx| {
+                let tab_id = cx.resources().next_tab_id();
+                let mut tab = macsftp_core::TabState::new(tab_id, "background");
+                tab.local.path = Some(destination_dir.clone());
+                workspace.open_tab_for_test(tab);
+                tab_id
+            })
+            .expect("add the background tab");
+
+        start_plan(
+            cx,
+            TransferJob {
+                id: TransferId(41),
+                direction: TransferDirection::Download,
+                source: TransferEndpoint::Remote(RemotePath::new("/srv/landed.txt")),
+                destination: TransferEndpoint::Local(destination_dir.join("landed.txt")),
+                state: TransferState::Queued,
+                metadata_policy: MetadataPolicy::default(),
+                conflict_policy: ConflictPolicy::default(),
+                warnings: Vec::new(),
+                created_at: Timestamp::from_secs_since_epoch(1),
+            },
+        );
+        while channels.command_rx.try_recv().is_ok() {}
+
+        cx.update(|cx| {
+            dispatch_event(
+                AppEvent::TransferCompleted {
+                    transfer_id: TransferId(41),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        cx.run_until_parked();
+
+        window
+            .read_with(cx, |workspace, _cx| {
+                let tab = workspace
+                    .tab_for_test(background_tab)
+                    .expect("background tab");
+                assert!(
+                    tab.local
+                        .entries
+                        .iter()
+                        .any(|entry| entry.name == "landed.txt"),
+                    "the background tab lists the file the transfer wrote"
+                );
+            })
+            .expect("window is open");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reducer records the plan's terminal transition, and that record is
+    /// what the reload keys on: re-deriving it per completion would make a
+    /// directory transfer quadratic.
+    #[gpui_kit::test]
+    fn a_plan_completion_is_recorded_when_its_last_job_lands(cx: &mut TestAppContext) {
+        install_globals(cx, "plan-finished");
+        let plan_id = TransferPlanId(11);
+        start_plan(
+            cx,
+            TransferJob {
+                id: TransferId(11),
+                direction: TransferDirection::Upload,
+                source: TransferEndpoint::Local(LocalPath::new("/tmp/dest")),
+                destination: TransferEndpoint::Remote(RemotePath::new("/srv")),
+                state: TransferState::Queued,
+                metadata_policy: MetadataPolicy::default(),
+                conflict_policy: ConflictPolicy::default(),
+                warnings: Vec::new(),
+                created_at: Timestamp::from_secs_since_epoch(1),
+            },
+        );
+        let child = add_child(
+            cx,
+            plan_id,
+            0,
+            TransferDirection::Upload,
+            TransferEndpoint::Local(LocalPath::new("/tmp/dest/a.txt")),
+            TransferEndpoint::Remote(RemotePath::new("/srv/a.txt")),
+        );
+        cx.run_until_parked();
+        cx.read(|cx| {
+            assert_eq!(
+                cx.transfers().just_finished_plan,
+                None,
+                "publishing a child does not finish the plan"
+            );
+        });
+
+        cx.update(|cx| {
+            dispatch_event(AppEvent::TransferCompleted { transfer_id: child }, cx);
+        });
+        cx.read(|cx| {
+            assert_eq!(
+                cx.transfers().just_finished_plan,
+                Some(plan_id),
+                "the last child finishing is recorded as the plan's completion"
+            );
+        });
+    }
+
+    /// A plan with many children reloads the pane exactly once, when the last
+    /// child lands. Reloading on every child's completion would issue one
+    /// directory read per transferred file.
+    #[gpui_kit::test]
+    fn a_multi_file_plan_reloads_the_pane_only_once(cx: &mut TestAppContext) {
+        install_globals(cx, "reload-once");
+        let (_window, channels) = connected_window(cx);
+        let plan_id = TransferPlanId(9);
+        start_plan(
+            cx,
+            TransferJob {
+                id: TransferId(9),
+                direction: TransferDirection::Upload,
+                source: TransferEndpoint::Local(LocalPath::new("/tmp/dest")),
+                destination: TransferEndpoint::Remote(RemotePath::new("/srv")),
+                state: TransferState::Queued,
+                metadata_policy: MetadataPolicy::default(),
+                conflict_policy: ConflictPolicy::default(),
+                warnings: Vec::new(),
+                created_at: Timestamp::from_secs_since_epoch(1),
+            },
+        );
+        let children: Vec<TransferId> = (0..5)
+            .map(|index| {
+                add_child(
+                    cx,
+                    plan_id,
+                    index as u64,
+                    TransferDirection::Upload,
+                    TransferEndpoint::Local(LocalPath::new(format!("/tmp/dest/{index}.txt"))),
+                    TransferEndpoint::Remote(RemotePath::new(format!("/srv/{index}.txt"))),
+                )
+            })
+            .collect();
+        while channels.command_rx.try_recv().is_ok() {}
+
+        // Four of five children land: the plan is still running, so the pane
+        // must not be re-read yet.
+        for child in &children[..4] {
+            cx.update(|cx| {
+                dispatch_event(
+                    AppEvent::TransferCompleted {
+                        transfer_id: *child,
+                    },
+                    cx,
+                );
+            });
+        }
+        cx.run_until_parked();
+        assert!(
+            channels.command_rx.try_recv().is_err(),
+            "a running plan must not re-read the directory"
+        );
+
+        // The last child finishes the plan; now the pane is re-read, once.
+        cx.update(|cx| {
+            dispatch_event(
+                AppEvent::TransferCompleted {
+                    transfer_id: children[4],
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let mut reads = 0;
+        while let Ok(command) = channels.command_rx.try_recv() {
+            if matches!(command, AppCommand::ReadRemoteDir { .. }) {
+                reads += 1;
+            }
+        }
+        assert_eq!(reads, 1, "the finished plan re-reads the pane exactly once");
+    }
+
+    /// A plan for a folder elsewhere must not yank a pane that is showing a
+    /// different directory.
+    #[gpui_kit::test]
+    fn a_finished_upload_leaves_panes_on_other_folders_alone(cx: &mut TestAppContext) {
+        install_globals(cx, "elsewhere");
+        let (_window, channels) = connected_window(cx);
+        let plan_id = TransferPlanId(3);
+        start_plan(
+            cx,
+            TransferJob {
+                id: TransferId(3),
+                direction: TransferDirection::Upload,
+                source: TransferEndpoint::Local(LocalPath::new("/tmp/dest")),
+                destination: TransferEndpoint::Remote(RemotePath::new("/elsewhere")),
+                state: TransferState::Planning,
+                metadata_policy: MetadataPolicy::default(),
+                conflict_policy: ConflictPolicy::default(),
+                warnings: Vec::new(),
+                created_at: Timestamp::from_secs_since_epoch(1),
+            },
+        );
+        let child = add_child(
+            cx,
+            plan_id,
+            0,
+            TransferDirection::Upload,
+            TransferEndpoint::Local(LocalPath::new("/tmp/dest/a.txt")),
+            TransferEndpoint::Remote(RemotePath::new("/elsewhere/a.txt")),
+        );
+        while channels.command_rx.try_recv().is_ok() {}
+
+        finished_transfer(cx, child);
+
+        assert!(
+            channels.command_rx.try_recv().is_err(),
+            "the remote pane shows /srv, so /elsewhere is not re-read"
+        );
     }
 }

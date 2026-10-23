@@ -44,6 +44,58 @@ pub(crate) struct TypeSelect {
     last_input: Option<Instant>,
 }
 
+/// A transient line in the status bar.
+///
+/// Status messages report the outcome of one action (a copy, a save, a failed
+/// link) and stay true only for that moment. Without an expiry the bar keeps
+/// rendering the last message until the user happens to trigger something else,
+/// so a "Path copied" line from ten minutes ago still reads as the app's current
+/// state. `Workspace::show_status` arms a one-shot timer when the message is set;
+/// the message is dropped there, not here.
+#[derive(Debug, Clone)]
+pub(crate) struct StatusLine {
+    pub(crate) message: gpui_kit::SharedString,
+}
+
+impl StatusLine {
+    /// How long a transient status line stays on screen. Long enough to read a
+    /// path or an error, short enough that it does not fossilise; anything the
+    /// user must act on lives in a modal or the pane, not here.
+    pub(crate) const LIFETIME: Duration = Duration::from_secs(6);
+
+    pub(crate) fn new(message: impl Into<gpui_kit::SharedString>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl From<String> for StatusLine {
+    fn from(message: String) -> Self {
+        Self::new(message)
+    }
+}
+
+impl From<&str> for StatusLine {
+    fn from(message: &str) -> Self {
+        Self::new(message)
+    }
+}
+
+impl From<gpui_kit::SharedString> for StatusLine {
+    fn from(message: gpui_kit::SharedString) -> Self {
+        Self::new(message)
+    }
+}
+
+impl std::ops::Deref for StatusLine {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.message
+    }
+}
+
 impl TypeSelect {
     /// Keystrokes closer together than this extend the same prefix.
     pub(crate) const CONTINUATION_WINDOW: Duration = Duration::from_millis(1000);
@@ -152,6 +204,10 @@ pub(crate) struct GoToPathUi {
     pub(crate) open: bool,
     pub(crate) input: InputState,
     pub(crate) error: Option<gpui_kit::SharedString>,
+    /// The dialog pre-filled with the pane's current path; the fresh text
+    /// field selects it on creation so typing replaces the prefill while an
+    /// arrow key keeps it for editing. Cleared once applied.
+    pub(crate) select_on_first_render: bool,
 }
 
 impl GoToPathUi {
@@ -160,6 +216,59 @@ impl GoToPathUi {
             open: false,
             input: InputState::new(),
             error: None,
+            select_on_first_render: false,
+        }
+    }
+}
+
+/// Entries the user copied out of a pane, waiting to be pasted into the other.
+///
+/// Finder's convention, with the app's two panes as the two locations: copy on
+/// one side, paste on the other, and the paste becomes the upload or download
+/// that moves them. Kept in view state because it is a scratch buffer — a
+/// restart has nothing to paste from.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FileClipboard {
+    paths: Vec<macsftp_core::EntryPath>,
+}
+
+impl FileClipboard {
+    pub(crate) fn set(&mut self, paths: Vec<macsftp_core::EntryPath>) {
+        self.paths = paths;
+    }
+
+    pub(crate) fn paths(&self) -> &[macsftp_core::EntryPath] {
+        &self.paths
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+}
+
+/// The four groups the transfer drawer renders, in display order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransferSection {
+    InProgress,
+    Waiting,
+    Completed,
+    Failed,
+}
+
+impl TransferSection {
+    pub(crate) const ALL: [Self; 4] = [
+        Self::InProgress,
+        Self::Waiting,
+        Self::Completed,
+        Self::Failed,
+    ];
+
+    fn index(self) -> usize {
+        match self {
+            Self::InProgress => 0,
+            Self::Waiting => 1,
+            Self::Completed => 2,
+            Self::Failed => 3,
         }
     }
 }
@@ -169,8 +278,15 @@ pub(crate) struct TransferDrawerUi {
     pub(crate) open: bool,
     pub(crate) height: Pixels,
     pub(crate) resize: Option<drawer_height::TransferDrawerResize>,
-    pub(crate) completed_section_expanded: bool,
-    pub(crate) failed_section_expanded: bool,
+    /// Per section: whether the collapsible ones (Complete, Failed) show their
+    /// rows at all. The two live sections always show theirs.
+    expanded_sections: [bool; 4],
+    /// Per section: whether every row is built. A section that is not showing
+    /// everything builds the first [`TransferDrawerUi::MAX_VISIBLE_ROWS`] and
+    /// offers the rest, because the drawer is not virtualized — every row it
+    /// builds is laid out on every frame, and a mass transfer has one row per
+    /// file.
+    show_all_sections: [bool; 4],
     pub(crate) scroll: gpui_kit::ScrollHandle,
     pub(crate) scrollbar: ScrollbarState,
 }
@@ -183,10 +299,44 @@ impl TransferDrawerUi {
             open: true,
             height: drawer_height::DEFAULT_DRAWER_HEIGHT,
             resize: None,
-            completed_section_expanded: false,
-            failed_section_expanded: false,
+            expanded_sections: [false; 4],
+            show_all_sections: [false; 4],
             scroll: gpui_kit::ScrollHandle::new(),
             scrollbar: ScrollbarState::new(),
+        }
+    }
+
+    /// Rows a section renders before it collapses the rest.
+    pub(crate) const MAX_VISIBLE_ROWS: usize = 25;
+
+    pub(crate) fn is_expanded(&self, section: TransferSection) -> bool {
+        self.expanded_sections[section.index()]
+    }
+
+    pub(crate) fn set_expanded(&mut self, section: TransferSection, expanded: bool) {
+        self.expanded_sections[section.index()] = expanded;
+        if !expanded {
+            // A section that is folded away starts its next page over.
+            self.show_all_sections[section.index()] = false;
+        }
+    }
+
+    pub(crate) fn set_showing_all(&mut self, section: TransferSection, show_all: bool) {
+        self.show_all_sections[section.index()] = show_all;
+    }
+
+    pub(crate) fn collapse_all_sections(&mut self) {
+        self.expanded_sections = [false; 4];
+        self.show_all_sections = [false; 4];
+    }
+
+    /// How many rows of `section` to build, and how many are left behind the
+    /// control.
+    pub(crate) fn visible_rows(&self, section: TransferSection, total: usize) -> (usize, usize) {
+        if self.show_all_sections[section.index()] || total <= Self::MAX_VISIBLE_ROWS {
+            (total, 0)
+        } else {
+            (Self::MAX_VISIBLE_ROWS, total - Self::MAX_VISIBLE_ROWS)
         }
     }
 }
@@ -201,6 +351,21 @@ impl ConnectFormUi {
     pub(crate) fn new(focus: gpui_kit::FocusHandle) -> Self {
         Self { form: None, focus }
     }
+}
+
+/// A divider drag between the two file panes, in flight.
+///
+/// The divider follows the pointer 1:1, so the drag remembers where it
+/// started: the pointer's travel from that point is applied to the split the
+/// drag began with, so the divider never jumps to the pointer and no rounding
+/// error accumulates.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PaneSplitDrag {
+    /// The divider's own x when the drag started.
+    pub(crate) start_x: gpui_kit::Pixels,
+    /// The pointer's x when the drag started, so the pointer's travel can be
+    /// applied to the divider's position rather than replacing it.
+    pub(crate) pointer_x: gpui_kit::Pixels,
 }
 
 /// Modal and popover input state owned by the view while a prompt is open.

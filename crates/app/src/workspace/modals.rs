@@ -397,7 +397,30 @@ impl crate::workspace::Workspace {
         self.modal_inputs.about_open = false;
         self.text_inputs.remove(&TextInputTarget::GoToPath);
         self.go_to_path.open = true;
-        self.go_to_path.input.clear();
+        // Pre-fill with the folder being shown so editing one segment (a
+        // sibling directory, a version bump) does not mean retyping the whole
+        // path. The selection turns the prefill into an affordance: typing
+        // replaces it, an arrow key keeps it for editing.
+        let current = match self.focused_side {
+            PaneSide::Local => self
+                .active_tab()
+                .and_then(|tab| tab.local.path.clone())
+                .map(|path| path.as_str().to_string()),
+            PaneSide::Remote => self
+                .active_tab()
+                .and_then(|tab| tab.remote.path.clone())
+                .map(|path| path.as_str().to_string()),
+        };
+        match current {
+            Some(current) => {
+                self.go_to_path.input.set_value(current);
+                self.go_to_path.select_on_first_render = true;
+            }
+            None => {
+                self.go_to_path.input.clear();
+                self.go_to_path.select_on_first_render = false;
+            }
+        }
         self.go_to_path.error = None;
         window.focus(&self.modal_focus, cx);
         cx.notify();
@@ -441,7 +464,7 @@ impl crate::workspace::Workspace {
                         "This location wasn’t found."
                     };
                     self.go_to_path.error = Some(message.into());
-                    self.status_message = Some(message.into());
+                    self.show_status(message.into(), cx);
                     cx.notify();
                     return;
                 }
@@ -530,7 +553,11 @@ impl crate::workspace::Workspace {
                             div()
                                 .text_size(px(12.0))
                                 .text_color(theme.colors.text_muted)
-                                .child("Enter a full folder path. Press Enter to open or Esc to cancel."),
+                                .child(if self.go_to_path.input.value().is_empty() {
+                                    "Enter a full folder path. Press Enter to open or Esc to cancel."
+                                } else {
+                                    "Edit the path, then press Enter to open or Esc to cancel."
+                                }),
                         )
                         .child(self.render_text_input(TextInputTarget::GoToPath, "go-to-path-input", cx))
                         .when_some(self.go_to_path.error.clone(), |card, error| {
@@ -576,13 +603,17 @@ impl crate::workspace::Workspace {
         let form = self.connect_form_ui.form.as_ref()?;
         let theme = cx.theme().clone();
 
+        // `secret` is Some for secret fields: the value renders as characters
+        // while the toggle is on, and a trailing Show/Hide button flips it.
         let field_row = |label: &'static str,
                          field: ConnectField,
                          state: &InputState,
                          placeholder: &'static str,
-                         masked: bool,
+                         secret: Option<bool>,
                          cx: &mut Context<Self>| {
-            div()
+            let revealed = secret.unwrap_or(false);
+            let masked = secret.is_some() && !revealed;
+            let mut row = div()
                 .id(("connect-field", field as usize))
                 .flex()
                 .items_center()
@@ -606,7 +637,7 @@ impl crate::workspace::Workspace {
                         .text_color(theme.colors.text_muted)
                         .child(label),
                 )
-                .child(div().flex_1().min_w_0().child(if masked {
+                .child(div().flex_1().min_w_0().child(if secret.is_some() {
                     text_field(
                         ("connect-input", field as usize),
                         TextFieldModel {
@@ -627,7 +658,37 @@ impl crate::workspace::Workspace {
                         cx,
                     )
                     .into_any_element()
-                }))
+                }));
+            if secret.is_some() {
+                row = row.child(
+                    text_button(
+                        ("connect-reveal", field as usize),
+                        if revealed { "Hide" } else { "Show" },
+                    )
+                    .on_click(cx.listener(
+                        move |workspace, _event, window, cx| {
+                            if let Some(form) = &mut workspace.connect_form_ui.form {
+                                match field {
+                                    ConnectField::Password => {
+                                        form.show_password = !form.show_password
+                                    }
+                                    ConnectField::Passphrase => {
+                                        form.show_passphrase = !form.show_passphrase;
+                                    }
+                                    _ => {}
+                                }
+                                if form.focused_field == field
+                                    && let Some(input) = form.inputs.get(&field)
+                                {
+                                    input.focus(window, cx);
+                                }
+                                cx.notify();
+                            }
+                        },
+                    )),
+                );
+            }
+            row
         };
 
         let auth_toggle = |label: &'static str,
@@ -881,7 +942,7 @@ impl crate::workspace::Workspace {
                 ConnectField::Host,
                 &form.host,
                 ConnectField::Host.placeholder(),
-                false,
+                None,
                 cx,
             ))
             .child(field_row(
@@ -889,7 +950,7 @@ impl crate::workspace::Workspace {
                 ConnectField::Port,
                 &form.port,
                 ConnectField::Port.placeholder(),
-                false,
+                None,
                 cx,
             ))
             .child(field_row(
@@ -897,7 +958,7 @@ impl crate::workspace::Workspace {
                 ConnectField::Username,
                 &form.username,
                 ConnectField::Username.placeholder(),
-                false,
+                None,
                 cx,
             ))
             .child(
@@ -951,7 +1012,7 @@ impl crate::workspace::Workspace {
                 ConnectField::Password,
                 form.password.as_input_state(),
                 ConnectField::Password.placeholder(),
-                true,
+                Some(form.show_password),
                 cx,
             )),
             AuthMethodKind::PrivateKey => card
@@ -960,7 +1021,7 @@ impl crate::workspace::Workspace {
                     ConnectField::KeyPath,
                     &form.key_path,
                     ConnectField::KeyPath.placeholder(),
-                    false,
+                    None,
                     cx,
                 ))
                 .child(field_row(
@@ -968,7 +1029,7 @@ impl crate::workspace::Workspace {
                     ConnectField::Passphrase,
                     form.passphrase.as_input_state(),
                     ConnectField::Passphrase.placeholder(),
-                    true,
+                    Some(form.show_passphrase),
                     cx,
                 )),
             AuthMethodKind::KeyboardInteractive => card.child(
@@ -983,7 +1044,7 @@ impl crate::workspace::Workspace {
                     ConnectField::AgentSocket,
                     &form.agent_socket,
                     ConnectField::AgentSocket.placeholder(),
-                    false,
+                    None,
                     cx,
                 ))
                 .child(

@@ -18,13 +18,13 @@ use gpui_kit::{Menu, MenuItem, OsAction, SystemMenuType};
 
 use crate::APP_NAME;
 use crate::app_actions::{
-    BringAllToFront, CloseTab, CloseWindow, CopyVersionInfo, DeleteSelection, DownloadSelection,
-    FilterPane, FocusLocalPane, FocusRemotePane, GoToPath, HideApplication, HideOtherApplications,
-    MinimizeWindow, NewFolder, NewTab, NewWindow, OpenLogFolder, OpenSettings, Quit, ReconnectTab,
-    RefreshPane, RenameEntry, ShowAbout, ShowAllApplications, ShowTransferDrawer,
-    SortByDateModifiedAscending, SortByDateModifiedDescending, SortByNameAscending,
-    SortByNameDescending, SortBySizeAscending, SortBySizeDescending, ToggleHiddenFiles,
-    UploadEditedFile, UploadSelection, ZoomWindow,
+    BringAllToFront, CancelAllTransfers, CloseTab, CloseWindow, CopyVersionInfo, DeleteSelection,
+    DownloadSelection, FilterPane, FocusLocalPane, FocusRemotePane, GoToPath, HideApplication,
+    HideOtherApplications, MinimizeWindow, NewFolder, NewTab, NewWindow, OpenLogFolder,
+    OpenSettings, Quit, ReconnectTab, RefreshPane, RenameEntry, ShowAbout, ShowAllApplications,
+    ShowTransferDrawer, SortByDateModifiedAscending, SortByDateModifiedDescending,
+    SortByNameAscending, SortByNameDescending, SortBySizeAscending, SortBySizeDescending,
+    ToggleHiddenFiles, UploadEditedFile, UploadSelection, ZoomWindow,
 };
 
 pub(crate) fn menu_bar() -> Vec<Menu> {
@@ -75,6 +75,7 @@ fn file_menu() -> Menu {
             MenuItem::action("Upload", UploadSelection),
             MenuItem::action("Upload Edited File", UploadEditedFile),
             MenuItem::action("Download", DownloadSelection),
+            MenuItem::action("Cancel All Transfers", CancelAllTransfers),
             MenuItem::separator(),
             MenuItem::action("Close Tab", CloseTab),
             MenuItem::action("Close Window", CloseWindow),
@@ -263,6 +264,12 @@ mod tests {
                 Box::new(DownloadSelection),
                 Some("cmd-d"),
                 Some("DownloadSelection"),
+            ),
+            (
+                "File ▸ Cancel All Transfers".to_string(),
+                Box::new(CancelAllTransfers),
+                Some("cmd-period"),
+                Some("CancelAllTransfers"),
             ),
             (
                 "File ▸ Close Tab".to_string(),

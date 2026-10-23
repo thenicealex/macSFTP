@@ -93,6 +93,13 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         when: PaletteWhen::ConnectedRemote,
     },
     PaletteCommand {
+        id: "CancelAllTransfers",
+        title: "Cancel All Transfers",
+        keywords: &["stop", "abort", "cancel", "transfers", "queue"],
+        keybinding: Some("⌘."),
+        when: PaletteWhen::HasActiveTab,
+    },
+    PaletteCommand {
         id: "ShowTransferDrawer",
         title: "Transfers",
         keywords: &[
