@@ -11311,3 +11311,44 @@ fn releasing_a_divider_drag_outside_the_content_ends_it(cx: &mut TestAppContext)
         );
     });
 }
+
+/// An entry that is not a regular file has no application to open it with, and
+/// handing a FIFO or socket to LaunchServices can block. The pane says so
+/// instead of trying.
+#[gpui_kit::test]
+fn opening_a_non_regular_local_entry_reports_instead_of_launching(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    install_system_path_seams();
+    OPENED_SYSTEM_PATHS.with(|paths| paths.borrow_mut().clear());
+
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        let tab = workspace.active_tab_mut().expect("active tab");
+        tab.local.entries = vec![macsftp_core::LocalEntry {
+            name: "daemon.sock".to_string(),
+            path: LocalPath::new("/tmp/daemon.sock"),
+            kind: FileKind::Other,
+            size: None,
+            permissions: None,
+            modified_at: None,
+            link_target: None,
+        }];
+        workspace.focused_side = PaneSide::Local;
+        workspace.open_entry_at(PaneSide::Local, 0, window, cx);
+    });
+    cx.run_until_parked();
+
+    OPENED_SYSTEM_PATHS.with(|paths| {
+        assert!(
+            paths.borrow().is_empty(),
+            "a socket is never handed to LaunchServices: {:?}",
+            paths.borrow()
+        );
+    });
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some("This item can’t be opened."),
+            "the user is told why nothing opened"
+        );
+    });
+}

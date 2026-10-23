@@ -257,10 +257,15 @@ pub fn quarantine_executable_download(path: &LocalPath) -> std::io::Result<bool>
     if !is_executable_file(path) {
         return Ok(false);
     }
-    if has_quarantine(path) {
+    // `xattr` parses its trailing argument as a path, so hand it a canonical
+    // one: a relative path (the local pane can be pointed at one) whose first
+    // component starts with `-` would otherwise be read as an option.
+    let canonical = std::fs::canonicalize(path.as_str())?;
+    let canonical = canonical.to_string_lossy();
+    if has_quarantine(&canonical) {
         return Ok(false);
     }
-    let status = build_quarantine_command(path).status()?;
+    let status = build_quarantine_command(&canonical).status()?;
     if status.success() {
         Ok(true)
     } else {
@@ -271,11 +276,11 @@ pub fn quarantine_executable_download(path: &LocalPath) -> std::io::Result<bool>
 }
 
 /// Whether the quarantine attribute is already present on `path`.
-fn has_quarantine(path: &LocalPath) -> bool {
+fn has_quarantine(path: &str) -> bool {
     std::process::Command::new("/usr/bin/xattr")
         .arg("-p")
         .arg(QUARANTINE_ATTR)
-        .arg(path.as_str())
+        .arg(path)
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
@@ -286,7 +291,7 @@ fn has_quarantine(path: &LocalPath) -> bool {
 /// Format is `flags;hex-time;agent-name;hex-pid`; `0083` means "downloaded,
 /// quarantine active, no user approval yet". Extracted so the argument wiring
 /// is unit tested without spawning.
-fn build_quarantine_command(path: &LocalPath) -> std::process::Command {
+fn build_quarantine_command(path: &str) -> std::process::Command {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
@@ -297,7 +302,7 @@ fn build_quarantine_command(path: &LocalPath) -> std::process::Command {
         .arg("-w")
         .arg(QUARANTINE_ATTR)
         .arg(format!("0083;{now:x};macSFTP;{pid:x}"))
-        .arg(path.as_str());
+        .arg(path);
     command
 }
 
@@ -1150,8 +1155,7 @@ mod tests {
 
     #[test]
     fn quarantine_command_writes_the_launch_services_attribute() {
-        let path = LocalPath::new("/tmp/script.sh");
-        let command = build_quarantine_command(&path);
+        let command = build_quarantine_command("/tmp/script.sh");
         assert_eq!(command.get_program(), "/usr/bin/xattr");
         let args: Vec<String> = command
             .get_args()
@@ -1202,6 +1206,35 @@ mod tests {
         let again = quarantine_executable_download(&script).expect("second mark is a no-op");
         assert!(!again, "the attribute is not rewritten once present");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A path whose components start with `-` still gets marked correctly:
+    /// the attribute call is handed a canonical absolute path, so `xattr` can
+    /// never read part of the path as an option.
+    #[test]
+    fn a_path_with_dash_components_is_marked_correctly() {
+        let (dir, base) = quarantine_fixture("dash");
+        let dashed = base.join("-dashed");
+        std::fs::create_dir_all(dashed.as_str()).expect("dashed dir");
+        let script = dashed.join("-run.sh");
+        std::fs::write(script.as_str(), b"#!/bin/sh\n").expect("write script");
+        std::fs::set_permissions(script.as_str(), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+
+        let marked = quarantine_executable_download(&script).expect("mark the download");
+        assert!(marked, "a dashed path is still marked");
+
+        let status = std::process::Command::new("/usr/bin/xattr")
+            .arg("-p")
+            .arg("com.apple.quarantine")
+            .arg(script.as_str())
+            .output()
+            .expect("query the attribute");
+        assert!(
+            status.status.success(),
+            "the attribute landed on the intended file"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

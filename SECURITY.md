@@ -60,8 +60,11 @@ patched version or commit is available.
   completed download is therefore checked, and executables get the
   `com.apple.quarantine` attribute so the first launch goes through the macOS
   confirmation instead of executing silently. Documents are left unmarked: they
-  have nothing to launch. The check runs on the background executor and its
-  failure is logged without the path.
+  have nothing to launch, and remote-edit temp copies are excluded because the
+  editor flow opens them and they are not reachable from a pane. The attribute
+  call receives a canonical absolute path, so no part of a path can be read as
+  an `xattr` option. The check runs on the background executor and its failure
+  is logged without the path.
 - Remote-edit temporary copies can contain sensitive data. They use a
   per-process namespace and must be removed when their owning tab or window is
   closed; cleanup failures must remain diagnosable without logging paths or

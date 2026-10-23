@@ -193,6 +193,15 @@ fn quarantine_completed_download(event: &AppEvent, cx: &mut App) {
     let TransferEndpoint::Local(path) = job.destination.clone() else {
         return;
     };
+    // Remote-edit downloads land in the app's own edits directory and are
+    // opened by the editor flow, not by the user double-clicking a listing.
+    // Quarantining them would put a Gatekeeper prompt in front of every
+    // "open for editing" of an executable file, for no gain: the file is not
+    // reachable from the local pane.
+    let edits_dir = std::path::Path::new(cx.resources().app_paths.edits_dir.as_str());
+    if std::path::Path::new(path.as_str()).starts_with(edits_dir) {
+        return;
+    }
     cx.background_executor()
         .spawn(async move {
             if let Err(error) = macsftp_platform::quarantine_executable_download(&path) {
@@ -2923,6 +2932,62 @@ mod reload_tests {
             String::from_utf8_lossy(&status.stderr)
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Remote-edit downloads are opened by the editor flow, not by the user
+    /// clicking a listing, so they are not quarantined: a Gatekeeper prompt in
+    /// front of every "open for editing" would be noise with no safety gain.
+    #[gpui_kit::test]
+    fn a_remote_edit_download_is_not_quarantined(cx: &mut TestAppContext) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        install_globals(cx, "quarantine-edit");
+        let edits_dir = cx.update(|cx| cx.resources().app_paths.edits_dir.clone());
+        let session_dir = std::path::PathBuf::from(edits_dir.as_str()).join("test-edit-run");
+        let _ = std::fs::remove_dir_all(&session_dir);
+        std::fs::create_dir_all(&session_dir).expect("edit session dir");
+        let script = session_dir.join("run.sh");
+        std::fs::write(&script, b"#!/bin/sh\n").expect("write script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+        let destination = LocalPath::new(script.to_string_lossy().into_owned());
+
+        start_plan(
+            cx,
+            TransferJob {
+                id: TransferId(31),
+                direction: TransferDirection::Download,
+                source: TransferEndpoint::Remote(RemotePath::new("/srv/run.sh")),
+                destination: TransferEndpoint::Local(destination.clone()),
+                state: TransferState::Queued,
+                metadata_policy: MetadataPolicy::default(),
+                conflict_policy: ConflictPolicy::default(),
+                warnings: Vec::new(),
+                created_at: Timestamp::from_secs_since_epoch(1),
+            },
+        );
+        cx.update(|cx| {
+            dispatch_event(
+                AppEvent::TransferCompleted {
+                    transfer_id: TransferId(31),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        cx.run_until_parked();
+
+        let status = std::process::Command::new("/usr/bin/xattr")
+            .arg("-p")
+            .arg("com.apple.quarantine")
+            .arg(destination.as_str())
+            .output()
+            .expect("query the attribute");
+        assert!(
+            !status.status.success(),
+            "an edit download keeps no quarantine flag"
+        );
+        let _ = std::fs::remove_dir_all(&session_dir);
     }
 
     /// A plan's own state cannot say whether it is finished: a single-file plan

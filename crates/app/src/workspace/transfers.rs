@@ -102,9 +102,10 @@ impl crate::workspace::Workspace {
         // therefore become several plans, queued in selection order, where an
         // upload hands the whole list to one plan (local traversal needs no
         // connection). Both shapes reach the drawer as ordinary rows.
+        let total = sources.len();
         let mut queued = 0;
         let mut skipped = 0;
-        for source in sources {
+        for (index, source) in sources.into_iter().enumerate() {
             let destination = match destination_for(&source) {
                 Ok(destination) => destination,
                 Err(message) => {
@@ -127,9 +128,9 @@ impl crate::workspace::Workspace {
                 conflict_policy: Default::default(),
             });
             if !self.send_command(command, cx) {
-                // The command channel is full: the rest cannot be queued
-                // now. Say so instead of dropping them silently.
-                skipped += 1;
+                // The command channel is full: this source and every one after
+                // it cannot be queued now. Count them all, not just this one.
+                skipped += total - index;
                 break;
             }
             queued += 1;

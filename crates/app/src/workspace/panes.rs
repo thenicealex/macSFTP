@@ -389,9 +389,16 @@ impl crate::workspace::Workspace {
                     // they are edited in a temp copy instead (see below), because
                     // a download preserves the remote exec bit and opening it
                     // would run attacker-controlled content.
-                    _ => {
+                    FileKind::File => {
                         let path = entry.path.clone();
                         open_local_path(cx, Path::new(path.as_str()));
+                    }
+                    // A socket, FIFO, device or an entry whose metadata could
+                    // not be read has no application to open it with, and
+                    // handing it to LaunchServices can block on a FIFO. Say so
+                    // instead of trying.
+                    FileKind::Other | FileKind::Unknown => {
+                        self.show_status("This item can’t be opened.".into(), cx);
                     }
                 }
             }

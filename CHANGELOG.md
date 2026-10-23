@@ -31,10 +31,13 @@ based on Keep a Changelog, and releases use semantic versioning.
   marked `+x`) is now flagged with the macOS quarantine attribute, so the first
   launch asks for confirmation instead of running silently. The download keeps
   the server's permission bits, and nothing else would have marked an SFTP
-  download as untrusted. Documents are not quarantined.
+  download as untrusted. Documents are not quarantined, and neither are
+  remote-edit temp copies, which the editor flow opens.
 
 ### Fixed
 
+- Opening a socket, FIFO, device or an entry whose metadata could not be read
+  reports that it cannot be opened instead of handing it to LaunchServices.
 - A finished transfer re-reads the pane that received its files exactly once
   per plan. A plan with many files used to trigger one directory read per
   transferred file.
