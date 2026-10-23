@@ -219,6 +219,25 @@ impl ConnectForm {
                 self.detach_from_profile();
             }
             self.auth_method = method;
+            // A secret for a method the user just left stops living in the
+            // form, and a reveal never survives the switch: coming back to
+            // Password has to ask before it shows the characters again.
+            match method {
+                AuthMethodKind::Password => {
+                    self.passphrase.clear();
+                    self.show_passphrase = false;
+                }
+                AuthMethodKind::PrivateKey => {
+                    self.password.clear();
+                    self.show_password = false;
+                }
+                AuthMethodKind::KeyboardInteractive | AuthMethodKind::SshAgent => {
+                    self.password.clear();
+                    self.passphrase.clear();
+                    self.show_password = false;
+                    self.show_passphrase = false;
+                }
+            }
             if !self.field_order().contains(&self.focused_field) {
                 self.focused_field = match method {
                     AuthMethodKind::Password => ConnectField::Password,

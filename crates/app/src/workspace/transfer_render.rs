@@ -853,6 +853,7 @@ mod tests {
         child_state: TransferState,
     ) -> TransferStore {
         TransferStore {
+            just_finished_plan: None,
             plans: vec![TransferPlan {
                 id: TransferPlanId(1),
                 root_job_id: TransferId(1),

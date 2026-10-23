@@ -226,68 +226,57 @@ fn quarantine_completed_download(event: &AppEvent, cx: &mut App) {
 /// is the edits directory, which no pane ever lists.
 fn reload_panes_for_finished_plan(event: &AppEvent, cx: &mut App) {
     let plan_id = match event {
-        AppEvent::TransferPlanCompleted { plan_id }
-        | AppEvent::TransferPlanFailed { plan_id, .. }
-        | AppEvent::TransferPlanCancelled { plan_id } => *plan_id,
-        // A single-file plan publishes no children and finishes its plan in the
-        // same `TransferCompleted` that finishes the job, so the completion
-        // itself has to be the trigger here as well.
-        //
-        // A plan with children finishes only when its LAST child lands, and
-        // every child emits its own `TransferCompleted`. Reloading on each of
-        // those would re-read the directory once per transferred file — a
-        // thousand-file upload would issue a thousand directory reads. The
-        // plan's own state cannot be the gate (a single-file plan never
-        // publishes children, so its state stays `Planning` even after the
-        // file landed); the jobs' states can: the plan is finished exactly
-        // when none of its jobs can still write.
-        AppEvent::TransferCompleted { transfer_id } => {
-            let Some(plan_id) = cx.transfers().plan_id_for_job(*transfer_id) else {
+        // A plan reaches its terminal state once its last job lands. The
+        // reducer records that transition, because re-deriving it here would
+        // mean scanning the plan's jobs on every one of thousands of
+        // completions — the difference between one directory read at the end of
+        // a directory transfer and a quadratic scan per file.
+        AppEvent::TransferCompleted { .. } | AppEvent::TransferSkipped { .. } => {
+            let Some(plan_id) = cx.transfers().just_finished_plan else {
                 return;
             };
-            if !cx.transfers().plan_is_finished(plan_id) {
-                return;
-            }
             plan_id
         }
+        // Plan-level outcomes are once per plan already.
+        AppEvent::TransferPlanFailed { plan_id, .. }
+        | AppEvent::TransferPlanCancelled { plan_id } => *plan_id,
         _ => return,
     };
 
     // Read the directories out of the store before any window borrow: an
-    // upload and a download of the same plan contribute different sides.
-    let (local_directories, remote_directories) = match cx.transfers().find_plan(plan_id) {
-        Some(plan) => {
-            // The root job is a real transfer row of its own: a single-file
-            // download publishes no children, so it is the root whose
-            // destination names the folder that received the file.
-            let destinations: Vec<TransferEndpoint> = plan
-                .child_jobs
+    // upload and a download of the same plan contribute different sides. One
+    // pass over the jobs, with the plan's ids in a set, keeps this linear.
+    let (root_job_id, child_ids) = {
+        let Some(plan) = cx.transfers().find_plan(plan_id) else {
+            return;
+        };
+        (
+            plan.root_job_id,
+            plan.child_jobs
                 .iter()
-                .filter_map(|id| cx.transfers().find_job(*id))
-                .map(|job| job.destination.clone())
-                .chain(
-                    cx.transfers()
-                        .find_job(plan.root_job_id)
-                        .map(|job| job.destination.clone()),
-                )
-                .collect();
-            let mut local = Vec::new();
-            let mut remote = Vec::new();
-            for destination in destinations {
-                match destination.parent_directory() {
-                    Some(TransferEndpoint::Local(path)) => local.push(path),
-                    Some(TransferEndpoint::Remote(path)) => remote.push(path),
-                    None => {}
-                }
-            }
-            local.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-            local.dedup();
-            remote.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-            remote.dedup();
-            (local, remote)
-        }
-        None => return,
+                .copied()
+                .collect::<std::collections::HashSet<TransferId>>(),
+        )
     };
+    let mut local_directories = Vec::new();
+    let mut remote_directories = Vec::new();
+    // The root job is a real transfer row of its own: a download that publishes
+    // no children is the root whose destination names the folder that received
+    // the file.
+    for job in &cx.transfers().jobs {
+        if job.id != root_job_id && !child_ids.contains(&job.id) {
+            continue;
+        }
+        match job.destination.parent_directory() {
+            Some(TransferEndpoint::Local(path)) => local_directories.push(path),
+            Some(TransferEndpoint::Remote(path)) => remote_directories.push(path),
+            None => {}
+        }
+    }
+    local_directories.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    local_directories.dedup();
+    remote_directories.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    remote_directories.dedup();
     if local_directories.is_empty() && remote_directories.is_empty() {
         return;
     }
@@ -2990,11 +2979,11 @@ mod reload_tests {
         let _ = std::fs::remove_dir_all(&session_dir);
     }
 
-    /// A plan's own state cannot say whether it is finished: a single-file plan
-    /// never publishes children, so its state stays `Planning` even after the
-    /// file landed. The jobs' states can.
+    /// The reducer records the plan's terminal transition, and that record is
+    /// what the reload keys on: re-deriving it per completion would make a
+    /// directory transfer quadratic.
     #[gpui_kit::test]
-    fn a_plan_is_finished_only_when_its_jobs_are(cx: &mut TestAppContext) {
+    fn a_plan_completion_is_recorded_when_its_last_job_lands(cx: &mut TestAppContext) {
         install_globals(cx, "plan-finished");
         let plan_id = TransferPlanId(11);
         start_plan(
@@ -3019,10 +3008,12 @@ mod reload_tests {
             TransferEndpoint::Local(LocalPath::new("/tmp/dest/a.txt")),
             TransferEndpoint::Remote(RemotePath::new("/srv/a.txt")),
         );
+        cx.run_until_parked();
         cx.read(|cx| {
-            assert!(
-                !cx.transfers().plan_is_finished(plan_id),
-                "a plan with a queued child is not finished"
+            assert_eq!(
+                cx.transfers().just_finished_plan,
+                None,
+                "publishing a child does not finish the plan"
             );
         });
 
@@ -3030,9 +3021,10 @@ mod reload_tests {
             dispatch_event(AppEvent::TransferCompleted { transfer_id: child }, cx);
         });
         cx.read(|cx| {
-            assert!(
-                cx.transfers().plan_is_finished(plan_id),
-                "the plan is finished once its last child landed"
+            assert_eq!(
+                cx.transfers().just_finished_plan,
+                Some(plan_id),
+                "the last child finishing is recorded as the plan's completion"
             );
         });
     }

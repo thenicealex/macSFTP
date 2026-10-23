@@ -117,6 +117,8 @@ route 支持 Direct、单跳 saved-profile JumpHost（jump profile 自身必须 
 
 目录传输必须使用 `TransferPlan`，不能伪装成单文件 job。planning 流式发布 child jobs；首个 child 立即可见，后续批量发布。`TransferManager` 是进程级 owner，传输状态至少区分 planning、queued、running、waiting-for-conflict、completed、skipped、cancelled 和 failed。
 
+传输状态归约必须与 job 数量线性：`finalize_plan_for_job` 和「plan 是否结束」都用 id 集合 + 单次遍历，禁止按 child id 逐个线性查找 job——目录传输的完成事件数等于文件数，按次扫描会让 UI 线程在整个传输期间冻结（2000 个 child 时实测超过两分钟）。plan 的终态转换由 reducer 记录在 `TransferStore::just_finished_plan`（每个 event 开头清空），UI 直接读这一位，不要自己再推导一次。
+
 传输完成后必须让文件列表跟上磁盘事实：一个 plan 进入终态（completed / failed / cancelled，单文件 plan 由 `TransferCompleted` 触发）时，`AppEventCoordinator::reload_panes_for_finished_plan` 取该 plan 根 job 与全部 child job 的目标路径的父目录，只重读当前活动 tab 中仍显示在那些目录的 pane。重读走 `reload_local_directory` / `reload_remote_directory`，与用户主动导航的区别是保留 selection、scroll 与状态文案，且不推送导航历史。禁止用 `request_local_directory` / `request_remote_directory` 直接做这件事——它们会清空 selection 并重置滚动位置，用户刚看到结果就丢了上下文。pane 显示其它目录时不得被拉回文件落地的目录。
 
 - conflict 是等待用户决定的状态，不是普通失败；

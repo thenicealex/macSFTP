@@ -863,6 +863,16 @@ pub struct TransferStore {
     pub plans: Vec<TransferPlan>,
     pub jobs: Vec<TransferJob>,
     pub pending_conflicts: Vec<ConflictRequest>,
+    /// The plan that just reached a terminal state during the event being
+    /// applied, if any.
+    ///
+    /// The reducer is the only place that knows when a plan's last job landed,
+    /// so it records the transition here instead of leaving every observer to
+    /// re-derive it. Re-deriving is what makes a directory transfer quadratic:
+    /// thousands of child completions, each scanning the plan's job list.
+    /// Cleared at the start of every `apply_event`, so it describes exactly one
+    /// event.
+    pub just_finished_plan: Option<TransferPlanId>,
 }
 
 impl TransferStore {
@@ -872,36 +882,6 @@ impl TransferStore {
 
     pub fn find_job(&self, transfer_id: TransferId) -> Option<&TransferJob> {
         self.jobs.iter().find(|job| job.id == transfer_id)
-    }
-
-    /// Whether every job of `plan_id` has reached a terminal state.
-    ///
-    /// A plan's own state is not the same question: a single-file plan never
-    /// publishes children, so the reducer cannot mark the plan terminal from a
-    /// child completion and it stays `Planning` even though the file landed.
-    /// Asking about the jobs answers the question the UI actually has — "is
-    /// this plan still going to write more files into that directory?" — and
-    /// it stays true once every file has landed, so a directory read happens
-    /// once rather than once per file.
-    pub fn plan_is_finished(&self, plan_id: TransferPlanId) -> bool {
-        let Some(plan) = self.plans.iter().find(|plan| plan.id == plan_id) else {
-            return false;
-        };
-        let mut ids: Vec<TransferId> = plan.child_jobs.clone();
-        ids.push(plan.root_job_id);
-        ids.iter().all(|id| {
-            self.jobs
-                .iter()
-                .find(|job| job.id == *id)
-                .is_some_and(|job| {
-                    matches!(
-                        job.state,
-                        TransferState::Completed
-                            | TransferState::Skipped
-                            | TransferState::Failed { .. }
-                    )
-                })
-        })
     }
 
     /// The plan a job belongs to: either its root or one of its published
@@ -926,6 +906,7 @@ impl TransferStore {
     /// duplicate plans, jobs, warnings, or conflicts. Window views observe
     /// this store but never replay runtime transfer events themselves.
     pub fn apply_event(&mut self, event: &AppEvent, now: Timestamp) -> bool {
+        self.just_finished_plan = None;
         match event {
             AppEvent::TransferPlanStarted(snapshot) => {
                 self.insert_plan(snapshot.plan.clone()) | self.insert_job(snapshot.root_job.clone())
@@ -1204,6 +1185,9 @@ impl TransferStore {
         for child_job_id in child_job_ids {
             changed |= self.set_job_state(child_job_id, job_state.clone());
         }
+        if changed {
+            self.just_finished_plan = Some(plan_id);
+        }
         changed
     }
 
@@ -1239,6 +1223,7 @@ impl TransferStore {
         }
         if self.plans[plan_index].state != TransferPlanState::Cancelled {
             self.plans[plan_index].state = TransferPlanState::Cancelled;
+            self.just_finished_plan = Some(plan_id);
             changed = true;
         }
         changed
@@ -1278,6 +1263,16 @@ impl TransferStore {
             .iter()
             .position(|plan| plan.child_jobs.contains(&transfer_id))
         else {
+            // A plan that published no children has no child to finalize: its
+            // root job finishing is the whole story, so record that instead of
+            // leaving the plan unfinished forever.
+            if let Some(plan) = self
+                .plans
+                .iter()
+                .find(|plan| plan.root_job_id == transfer_id && plan.child_jobs.is_empty())
+            {
+                self.just_finished_plan = Some(plan.id);
+            }
             return false;
         };
         if matches!(
@@ -1288,19 +1283,34 @@ impl TransferStore {
         ) {
             return false;
         }
+        // One pass over the jobs with the plan's ids in a set. Looking each
+        // child up by scanning the job list would be quadratic, and this runs
+        // on every completion — a directory transfer has thousands of them, so
+        // the scan would dominate the UI thread.
         let child_jobs = self.plans[plan_index].child_jobs.clone();
+        let wanted: std::collections::HashSet<TransferId> = child_jobs.iter().copied().collect();
         let mut any_failed = false;
-        for child_id in &child_jobs {
-            let Some(job) = self.jobs.iter().find(|job| job.id == *child_id) else {
-                return false;
-            };
+        let mut finished = 0usize;
+        for job in &self.jobs {
+            if !wanted.contains(&job.id) {
+                continue;
+            }
             match job.state {
-                TransferState::Completed | TransferState::Skipped => {}
-                TransferState::Failed { .. } => any_failed = true,
+                TransferState::Completed | TransferState::Skipped => finished += 1,
+                TransferState::Failed { .. } => {
+                    any_failed = true;
+                    finished += 1;
+                }
                 _ => return false,
             }
         }
+        // A child that vanished from the store cannot be accounted for, so the
+        // plan stays unfinished rather than claiming a completion it cannot see.
+        if finished != wanted.len() {
+            return false;
+        }
 
+        let plan_id = self.plans[plan_index].id;
         let root_job_id = self.plans[plan_index].root_job_id;
         let (plan_state, root_state) = if any_failed {
             let error = UserFacingError::new(
@@ -1324,6 +1334,7 @@ impl TransferStore {
         if let Some(root_job) = self.jobs.iter_mut().find(|job| job.id == root_job_id) {
             root_job.state = root_state;
         }
+        self.just_finished_plan = Some(plan_id);
         true
     }
 
@@ -4963,6 +4974,7 @@ mod tests {
     #[test]
     fn clear_terminal_removes_completed_jobs_and_orphaned_plans() {
         let mut store = TransferStore {
+            just_finished_plan: None,
             jobs: vec![
                 TransferJob {
                     id: TransferId(1),
@@ -5019,6 +5031,7 @@ mod tests {
     #[test]
     fn clear_terminal_preserves_plan_with_remaining_jobs() {
         let mut store = TransferStore {
+            just_finished_plan: None,
             jobs: vec![
                 TransferJob {
                     id: TransferId(1),
@@ -5069,6 +5082,7 @@ mod tests {
     #[test]
     fn clear_terminal_returns_false_when_nothing_to_clear() {
         let mut store = TransferStore {
+            just_finished_plan: None,
             jobs: vec![TransferJob {
                 id: TransferId(1),
                 direction: TransferDirection::Upload,
@@ -5312,5 +5326,79 @@ mod tests {
         // Equal suffix lengths preserve relative order: *.gz came before *.md
         assert_eq!(rules[3].pattern, "*.gz");
         assert_eq!(rules[4].pattern, "*.md");
+    }
+    /// Finishing a plan with thousands of files must not be quadratic: the
+    /// reducer sees one completion per file, and a per-completion scan of the
+    /// plan's jobs would freeze the UI thread for the whole transfer.
+    #[test]
+    fn finishing_a_large_plan_stays_linear() {
+        const CHILDREN: u64 = 2_000;
+        let now = Timestamp::from_secs_since_epoch(1);
+        let plan_id = TransferPlanId(1);
+        let job = |id: u64, state: super::TransferState| super::TransferJob {
+            id: TransferId(id),
+            direction: TransferDirection::Upload,
+            source: TransferEndpoint::Local(LocalPath::new(format!("/tmp/{id}"))),
+            destination: TransferEndpoint::Remote(RemotePath::new(format!("/srv/{id}"))),
+            state,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+
+        let mut store = super::TransferStore::default();
+        store.plans.push(super::TransferPlan {
+            id: plan_id,
+            root_job_id: TransferId(1),
+            source_root: TransferEndpoint::Local(LocalPath::new("/tmp")),
+            destination_root: TransferEndpoint::Remote(RemotePath::new("/srv")),
+            state: super::TransferPlanState::Queued,
+            planned_count: CHILDREN as usize,
+            total_bytes: None,
+            child_jobs: (0..CHILDREN).map(|index| TransferId(index + 2)).collect(),
+            conflict_policy: super::ConflictPolicy::default(),
+        });
+        store.jobs.push(job(
+            1,
+            super::TransferState::Running {
+                bytes_done: 0,
+                bytes_total: None,
+                started_at: now,
+            },
+        ));
+        for index in 0..CHILDREN {
+            store
+                .jobs
+                .push(job(index + 2, super::TransferState::Queued));
+        }
+
+        let started = std::time::Instant::now();
+        for index in 0..CHILDREN {
+            store.apply_event(
+                &AppEvent::TransferCompleted {
+                    transfer_id: TransferId(index + 2),
+                },
+                now,
+            );
+        }
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            store.plans[0].state,
+            super::TransferPlanState::Completed,
+            "the plan finishes once every child has landed"
+        );
+        assert_eq!(
+            store.just_finished_plan,
+            Some(plan_id),
+            "the final completion is the one that is recorded"
+        );
+        // A quadratic reducer takes minutes here; the linear one is
+        // milliseconds. The bound is loose so a loaded CI machine cannot flake.
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "finishing {CHILDREN} children took {elapsed:?}"
+        );
     }
 }

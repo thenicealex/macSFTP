@@ -11356,3 +11356,47 @@ fn opening_a_non_regular_local_entry_reports_instead_of_launching(cx: &mut TestA
         );
     });
 }
+
+/// Leaving a sign-in method drops the secret that belonged to it, and a reveal
+/// never survives the switch: coming back has to ask before showing characters.
+#[gpui_kit::test]
+fn switching_the_sign_in_method_drops_the_old_secret_and_the_reveal(cx: &mut TestAppContext) {
+    use macsftp_core::AuthMethodKind;
+
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.open_connect_form(window, cx);
+    });
+    cx.run_until_parked();
+
+    workspace.update(&mut cx, |workspace, _cx| {
+        let form = workspace.connect_form_ui.form.as_mut().expect("form");
+        form.password.set_value("s3cret-password");
+        form.show_password = true;
+        form.set_auth_method(AuthMethodKind::PrivateKey);
+        assert!(
+            form.password.value().is_empty(),
+            "the password stops living in the form once the method changes"
+        );
+        assert!(
+            !form.show_password,
+            "the reveal does not survive the switch"
+        );
+
+        form.passphrase.set_value("key-passphrase");
+        form.show_passphrase = true;
+        form.set_auth_method(AuthMethodKind::Password);
+        assert!(
+            form.passphrase.value().is_empty(),
+            "the passphrase goes the same way"
+        );
+        assert!(!form.show_passphrase);
+    });
+
+    // Returning to a method asks again rather than remembering the reveal.
+    workspace.update(&mut cx, |workspace, _cx| {
+        let form = workspace.connect_form_ui.form.as_mut().expect("form");
+        form.set_auth_method(AuthMethodKind::SshAgent);
+        assert!(!form.show_password, "an agent sign-in reveals nothing");
+    });
+}
