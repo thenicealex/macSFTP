@@ -489,5 +489,4 @@ mod tests {
         assert_eq!(window.pane_split_ratio, None);
         assert_eq!(window.transfer_drawer_height, None);
     }
-
 }
