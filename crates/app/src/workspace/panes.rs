@@ -1009,28 +1009,39 @@ impl crate::workspace::Workspace {
             PaneSide::Remote => tab.nav.remote.can_forward(),
         }
     }
+    /// Copy Path copies the selected entries, matching Finder: the context
+    /// menu selects the row under the pointer before it is presented, so the
+    /// item's own path is what lands on the clipboard. Only an empty selection
+    /// (toolbar button or shortcut with no rows picked) falls back to the pane's
+    /// current folder. Several selected rows are copied one path per line.
     pub(crate) fn copy_focused_path(&mut self, cx: &mut Context<Self>) {
         let side = self.focused_side;
-        let Some(tab) = self.active_tab() else {
+        let mut paths: Vec<String> = self
+            .selected_fs_entries(side)
+            .iter()
+            .map(|entry| entry.path.as_str().to_string())
+            .collect();
+        if paths.is_empty() {
+            let folder = self.active_tab().and_then(|tab| {
+                let path = match side {
+                    PaneSide::Local => tab.local.path.as_ref().map(|path| path.as_str()),
+                    PaneSide::Remote => tab.remote.path.as_ref().map(|path| path.as_str()),
+                };
+                path.map(str::to_string)
+            });
+            paths.extend(folder);
+        }
+        let Some(first_path) = paths.first().cloned() else {
             return;
         };
-        let path_text = match side {
-            PaneSide::Local => tab
-                .local
-                .path
-                .as_ref()
-                .map(|path| path.as_str().to_string()),
-            PaneSide::Remote => tab
-                .remote
-                .path
-                .as_ref()
-                .map(|path| path.as_str().to_string()),
+        let message = if paths.len() == 1 {
+            format!("Path copied: {first_path}")
+        } else {
+            format!("{} paths copied", paths.len())
         };
-        if let Some(path_text) = path_text {
-            cx.write_to_clipboard(ClipboardItem::new_string(path_text.clone()));
-            self.status_message = Some(format!("Path copied: {path_text}").into());
-            cx.notify();
-        }
+        cx.write_to_clipboard(ClipboardItem::new_string(paths.join("\n")));
+        self.status_message = Some(message.into());
+        cx.notify();
     }
     pub(crate) fn toggle_selection_at(
         &mut self,

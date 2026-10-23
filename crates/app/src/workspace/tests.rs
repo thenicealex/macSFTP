@@ -37,10 +37,10 @@ use super::{
     WorkspaceSurface,
 };
 use crate::app_actions::{
-    self, ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, FilterPane, GoToPath,
-    NavigateBack, NewTab, OpenProfiles, OpenSettings, PageDown, SelectAllEntries, SelectNextEntry,
-    SelectNextEntryExtend, SelectPrevEntry, ShowAbout, ShowTransferDrawer, SortByNameAscending,
-    SortBySizeAscending, SortBySizeDescending, ToggleHiddenFiles,
+    self, ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, CopyPath, FilterPane,
+    GoToPath, NavigateBack, NewTab, OpenProfiles, OpenSettings, PageDown, SelectAllEntries,
+    SelectNextEntry, SelectNextEntryExtend, SelectPrevEntry, ShowAbout, ShowTransferDrawer,
+    SortByNameAscending, SortBySizeAscending, SortBySizeDescending, ToggleHiddenFiles,
 };
 use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::session_coordinator::SessionCoordinator;
@@ -9902,6 +9902,149 @@ fn right_click_on_blank_space_keeps_the_selection(cx: &mut TestAppContext) {
         assert_eq!(tab.selection.selected_paths, vec![expected]);
     });
     let _ = std::fs::remove_dir_all(&fixture);
+}
+
+#[gpui_kit::test]
+fn copy_path_copies_the_right_clicked_entry(cx: &mut TestAppContext) {
+    let (fixture, workspace, mut cx) =
+        workspace_with_local_files(cx, "copy-path-entry", &["a.txt", "b.txt", "c.txt"]);
+    let row_height = workspace.read_with(&cx, |_workspace, cx| cx.theme().sizes.file_row_height);
+    let expected = local_visible_entry(&workspace, &cx, 1);
+    let expected_text = match expected {
+        EntryPath::Local(path) => path.as_str().to_string(),
+        EntryPath::Remote(_) => panic!("local fixture must select a local path"),
+    };
+    let viewport = cx
+        .debug_bounds("local-list-container-viewport")
+        .expect("local list viewport is laid out");
+
+    right_click_local_pane(
+        &mut cx,
+        point(viewport.center().x, viewport.top() + row_height * 1.5),
+    );
+    cx.dispatch_action(CopyPath);
+    cx.run_until_parked();
+
+    cx.update(|_window, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(expected_text.clone()),
+            "Copy Path copies the entry's own path, not its folder"
+        );
+    });
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some(format!("Path copied: {expected_text}").as_str())
+        );
+    });
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+#[gpui_kit::test]
+fn copy_path_copies_a_multi_selection_one_path_per_line(cx: &mut TestAppContext) {
+    let (fixture, workspace, mut cx) =
+        workspace_with_local_files(cx, "copy-path-multi", &["a.txt", "b.txt", "c.txt"]);
+    cx.dispatch_action(SelectAllEntries);
+    cx.run_until_parked();
+    let expected: Vec<String> = (0..3)
+        .map(|index| match local_visible_entry(&workspace, &cx, index) {
+            EntryPath::Local(path) => path.as_str().to_string(),
+            EntryPath::Remote(_) => panic!("local fixture must list local paths"),
+        })
+        .collect();
+
+    cx.dispatch_action(CopyPath);
+    cx.run_until_parked();
+
+    cx.update(|_window, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(expected.join("\n")),
+            "every selected entry contributes one clipboard line"
+        );
+    });
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some("3 paths copied")
+        );
+    });
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+/// With nothing selected the toolbar button and shortcut still have a useful
+/// meaning: the path of the folder the pane is showing.
+#[gpui_kit::test]
+fn copy_path_falls_back_to_the_pane_folder_when_nothing_is_selected(cx: &mut TestAppContext) {
+    let (fixture, workspace, mut cx) =
+        workspace_with_local_files(cx, "copy-path-empty", &["a.txt"]);
+    workspace.read_with(&cx, |workspace, _| {
+        assert!(
+            workspace
+                .active_tab()
+                .expect("active tab")
+                .selection
+                .selected_paths
+                .is_empty(),
+            "a freshly listed folder has no selection"
+        );
+    });
+
+    cx.dispatch_action(CopyPath);
+    cx.run_until_parked();
+
+    let folder = LocalPath::new(fixture.to_string_lossy().into_owned());
+    cx.update(|_window, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(folder.as_str().to_string()),
+            "an empty selection copies the current folder"
+        );
+    });
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+#[gpui_kit::test]
+fn copy_path_copies_a_remote_entry_even_while_disconnected(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    let scope = connect_and_land_on_root(&workspace, &mut cx, &channels);
+    let remote_path = RemotePath::new(format!("{TEST_REMOTE_ROOT}/doc.txt"));
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.handle_app_event(
+            AppEvent::RemoteDirLoaded(RemoteScoped::new(
+                scope,
+                RemoteDirSnapshot {
+                    path: RemotePath::new(TEST_REMOTE_ROOT),
+                    entries: vec![RemoteEntry {
+                        name: "doc.txt".to_string(),
+                        path: remote_path.clone(),
+                        kind: FileKind::File,
+                        size: Some(10),
+                        permissions: Some(0o644),
+                        modified_at: None,
+                        link_target: None,
+                    }],
+                },
+            )),
+            window,
+            cx,
+        );
+        workspace.focused_side = PaneSide::Remote;
+        workspace.select_index(PaneSide::Remote, 0, cx);
+    });
+    cx.run_until_parked();
+
+    cx.dispatch_action(CopyPath);
+    cx.run_until_parked();
+
+    cx.update(|_window, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some(remote_path.as_str().to_string()),
+            "Copy Path needs no live session to read a listed remote path"
+        );
+    });
 }
 
 #[gpui_kit::test]

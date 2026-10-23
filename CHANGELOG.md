@@ -5,6 +5,13 @@ based on Keep a Changelog, and releases use semantic versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- **Copy Path** now copies the selected entries' own paths, one per line,
+  matching Finder; an empty selection still copies the pane's folder. Right
+  clicking a file and choosing Copy Path therefore yields
+  `/a/b/file.txt` instead of `/a/b`.
+
 ## [0.6.0] - 2026-10-19
 
 ### Added
