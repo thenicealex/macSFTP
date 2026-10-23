@@ -397,7 +397,30 @@ impl crate::workspace::Workspace {
         self.modal_inputs.about_open = false;
         self.text_inputs.remove(&TextInputTarget::GoToPath);
         self.go_to_path.open = true;
-        self.go_to_path.input.clear();
+        // Pre-fill with the folder being shown so editing one segment (a
+        // sibling directory, a version bump) does not mean retyping the whole
+        // path. The selection turns the prefill into an affordance: typing
+        // replaces it, an arrow key keeps it for editing.
+        let current = match self.focused_side {
+            PaneSide::Local => self
+                .active_tab()
+                .and_then(|tab| tab.local.path.clone())
+                .map(|path| path.as_str().to_string()),
+            PaneSide::Remote => self
+                .active_tab()
+                .and_then(|tab| tab.remote.path.clone())
+                .map(|path| path.as_str().to_string()),
+        };
+        match current {
+            Some(current) => {
+                self.go_to_path.input.set_value(current);
+                self.go_to_path.select_on_first_render = true;
+            }
+            None => {
+                self.go_to_path.input.clear();
+                self.go_to_path.select_on_first_render = false;
+            }
+        }
         self.go_to_path.error = None;
         window.focus(&self.modal_focus, cx);
         cx.notify();
@@ -530,7 +553,11 @@ impl crate::workspace::Workspace {
                             div()
                                 .text_size(px(12.0))
                                 .text_color(theme.colors.text_muted)
-                                .child("Enter a full folder path. Press Enter to open or Esc to cancel."),
+                                .child(if self.go_to_path.input.value().is_empty() {
+                                    "Enter a full folder path. Press Enter to open or Esc to cancel."
+                                } else {
+                                    "Edit the path, then press Enter to open or Esc to cancel."
+                                }),
                         )
                         .child(self.render_text_input(TextInputTarget::GoToPath, "go-to-path-input", cx))
                         .when_some(self.go_to_path.error.clone(), |card, error| {

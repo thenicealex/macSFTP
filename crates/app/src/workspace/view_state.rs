@@ -204,6 +204,10 @@ pub(crate) struct GoToPathUi {
     pub(crate) open: bool,
     pub(crate) input: InputState,
     pub(crate) error: Option<gpui_kit::SharedString>,
+    /// The dialog pre-filled with the pane's current path; the fresh text
+    /// field selects it on creation so typing replaces the prefill while an
+    /// arrow key keeps it for editing. Cleared once applied.
+    pub(crate) select_on_first_render: bool,
 }
 
 impl GoToPathUi {
@@ -212,6 +216,7 @@ impl GoToPathUi {
             open: false,
             input: InputState::new(),
             error: None,
+            select_on_first_render: false,
         }
     }
 }

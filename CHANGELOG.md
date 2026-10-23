@@ -7,6 +7,9 @@ based on Keep a Changelog, and releases use semantic versioning.
 
 ### Added
 
+- **Go to Folder** (⌘⇧G) opens pre-filled with the folder the pane is showing,
+  selected, so reaching a sibling directory means editing one segment instead
+  of retyping the whole path.
 - Double-clicking (or pressing Enter on, or right-click Open for) a local file
   now hands it to its default application, matching Finder. Remote files keep
   the existing edit-in-temp-copy flow.

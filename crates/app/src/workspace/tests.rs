@@ -10748,3 +10748,86 @@ fn seed_finished_transfer(
         Timestamp::from_secs_since_epoch(2),
     );
 }
+
+/// Go to Folder opens pre-filled with the pane's current path, selected, so
+/// navigating to a sibling directory means typing one segment instead of the
+/// whole path.
+#[gpui_kit::test]
+fn go_to_path_prefills_the_current_folder(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    let (fixture, base) = temp_local_fixture("goto-prefill");
+    set_local_path_and_wait(&workspace, &mut cx, base.clone());
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.focus_pane(PaneSide::Local, window, cx);
+        workspace.open_go_to_path(window, cx);
+    });
+    cx.run_until_parked();
+
+    workspace.read_with(&cx, |workspace, _| {
+        assert!(workspace.go_to_path.open);
+        assert_eq!(
+            workspace.go_to_path.input.value(),
+            fixture.to_string_lossy(),
+            "the dialog starts from the folder being shown"
+        );
+        assert!(
+            !workspace.go_to_path.select_on_first_render,
+            "the selection was applied to the fresh field"
+        );
+    });
+
+    // The same path round-trips: pressing Enter with the prefill navigates to
+    // where the pane already is and does not error.
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.submit_go_to_path(window, cx);
+    });
+    cx.run_until_parked();
+    workspace.read_with(&cx, |workspace, _| {
+        assert!(!workspace.go_to_path.open);
+        assert_eq!(
+            workspace.active_tab().expect("tab").local.path,
+            Some(base),
+            "the pane stays on the pre-filled folder"
+        );
+    });
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+/// Submitting an edited prefill navigates to the edited path: the selection
+/// must have left the field editable, not read-only.
+#[gpui_kit::test]
+fn go_to_path_prefill_is_editable(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    let (fixture, base) = temp_local_fixture("goto-edit");
+    let sibling = fixture.join("other");
+    std::fs::create_dir_all(&sibling).expect("sibling dir");
+    set_local_path_and_wait(&workspace, &mut cx, base.clone());
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.focus_pane(PaneSide::Local, window, cx);
+        workspace.open_go_to_path(window, cx);
+    });
+    cx.run_until_parked();
+
+    // Simulate the user editing the selected prefill down to the fixture root
+    // and pressing Enter.
+    workspace.update(&mut cx, |workspace, _cx| {
+        workspace
+            .go_to_path
+            .input
+            .set_value(fixture.to_string_lossy().into_owned());
+    });
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.submit_go_to_path(window, cx);
+    });
+    cx.run_until_parked();
+
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.active_tab().expect("tab").local.path,
+            Some(base_for_pane(&fixture)),
+            "the edited prefill navigated to the fixture root"
+        );
+    });
+    let _ = std::fs::remove_dir_all(&fixture);
+    let _ = std::fs::remove_dir_all(&sibling);
+}

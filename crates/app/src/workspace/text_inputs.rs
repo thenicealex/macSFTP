@@ -183,6 +183,14 @@ impl Workspace {
             input.sync(&value, window, cx);
             if fresh && target != TextInputTarget::ProfileFilter {
                 input.focus(window, cx);
+                // A pre-filled Go to Folder selects the path on creation: typing
+                // replaces it, an arrow key keeps it for editing.
+                if target == TextInputTarget::GoToPath && self.go_to_path.select_on_first_render {
+                    self.go_to_path.select_on_first_render = false;
+                    input.state().update(cx, |state, cx| {
+                        state.select_all(window, cx);
+                    });
+                }
             }
         }
     }
