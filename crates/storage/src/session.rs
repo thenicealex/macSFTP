@@ -18,16 +18,25 @@ pub struct SessionTabSnapshot {
     pub remote_path: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// `PartialEq` only: the remembered layout is an `f32`, which has no `Eq`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionWindowSnapshot {
     pub id: WindowSessionId,
     #[serde(default)]
     pub active_tab_index: usize,
     #[serde(default)]
     pub tabs: Vec<SessionTabSnapshot>,
+    /// Share of the content area the local pane took, so a window reopens with
+    /// the balance the user left it at. `serde(default)` keeps sessions written
+    /// before it was recorded loading unchanged.
+    #[serde(default)]
+    pub pane_split_ratio: Option<f32>,
+    /// Transfer drawer height in points.
+    #[serde(default)]
+    pub transfer_drawer_height: Option<f32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionFile {
     pub version: u32,
     #[serde(default)]
@@ -82,6 +91,8 @@ impl SessionFile {
                                 id: WindowSessionId(1),
                                 active_tab_index: legacy.active_tab_index,
                                 tabs: legacy.tabs,
+                                pane_split_ratio: None,
+                                transfer_drawer_height: None,
                             }],
                         })
                     }
@@ -249,6 +260,8 @@ mod tests {
             windows: vec![SessionWindowSnapshot {
                 id: WindowSessionId(7),
                 active_tab_index: 1,
+                pane_split_ratio: None,
+                transfer_drawer_height: None,
                 tabs: vec![
                     SessionTabSnapshot {
                         title: "a.example".into(),
@@ -370,6 +383,8 @@ mod tests {
             active_window_index: 0,
             windows: vec![SessionWindowSnapshot {
                 id: WindowSessionId(1),
+                pane_split_ratio: None,
+                transfer_drawer_height: None,
                 active_tab_index: 0,
                 tabs: vec![SessionTabSnapshot {
                     title: "h".into(),
@@ -443,4 +458,36 @@ mod tests {
             r#"{"version": 99}"#
         );
     }
+    /// The remembered layout is an `f32` in JSON, so it has to survive a
+    /// write/read round trip exactly — otherwise a restart would nudge the
+    /// divider every time.
+    #[test]
+    fn remembered_layout_round_trips_through_json() {
+        let snapshot = SessionWindowSnapshot {
+            id: WindowSessionId(3),
+            active_tab_index: 0,
+            tabs: Vec::new(),
+            pane_split_ratio: Some(0.62),
+            transfer_drawer_height: Some(220.5),
+        };
+        let file = SessionFile {
+            version: SessionFile::CURRENT_VERSION,
+            active_window_index: 0,
+            windows: vec![snapshot.clone()],
+        };
+        let json = serde_json::to_string(&file).expect("serialize the session");
+        let back: SessionFile = serde_json::from_str(&json).expect("deserialize the session");
+        assert_eq!(back.windows.first(), Some(&snapshot));
+    }
+
+    /// A session written before the layout was recorded still loads.
+    #[test]
+    fn a_session_without_a_layout_loads_with_defaults() {
+        let json = r#"{"version":2,"active_window_index":0,"windows":[{"id":1,"active_tab_index":0,"tabs":[]}]}"#;
+        let file: SessionFile = serde_json::from_str(json).expect("legacy session loads");
+        let window = file.windows.first().expect("one window");
+        assert_eq!(window.pane_split_ratio, None);
+        assert_eq!(window.transfer_drawer_height, None);
+    }
+
 }

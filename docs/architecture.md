@@ -174,7 +174,7 @@ Profile 更新由 `ProfileStore` 协调：校验请求和 route → 写入或读
 - `ProfileStore::save_request` 是唯一公开保存入口；更底层的 profile-file 写入只允许 storage 内部调用，测试夹具只能使用 `#[cfg(test)]` helper。Connect 中手工输入的 credential 只用于当前连接，不得因曾选择 Profile 而回写持久化状态。
 - `profiles.json` v5 删除了从未有生产消费者的 `group_id` 预留字段；读取 v4 时忽略该字段，并在下一次成功写入时升级为 v5。未来真正实现 Profile group/folder 时必须重新设计模型和 migration，不能复用历史占位语义。
 - 损坏或未来版本文件不能被空默认值静默覆盖。session 文件恢复失败时必须先保存原始 corrupt backup，成功后才重新开放 checkpoint。
-- 跨启动只恢复窗口、tab 和非敏感连接元数据；不恢复 transfer catalog 或 secret。
+- 跨启动只恢复窗口、tab、非敏感连接元数据和窗口布局（分栏比例、transfer drawer 高度）；不恢复 transfer catalog 或 secret。布局字段一律 `serde(default)` 可缺省，旧 session 文件不得因此失效；恢复时按当前窗口尺寸重新 clamp，不能把上次的大高度套到小窗口上。
 - Connect 表单的 password / passphrase 字段默认掩码，但提供 Show/Hide 切换供用户核对长口令与跳板机口令。切换只影响渲染（`TextFieldModel::masked`），secret 值的存储、zeroize 与 Keychain 路径不变；每次打开表单一律回到掩码态，不继承上一次的显示状态。
 
 ## 12. UI 与 UX 约束

@@ -323,6 +323,17 @@ impl Workspace {
         };
         // Restored tabs remain disconnected until the user explicitly connects.
         if let Some(snapshot) = restore_session.as_ref() {
+            // Layout first: the panes below read the split, and a height is
+            // clamped against this window's viewport, not the old one's.
+            if let Some(ratio) = snapshot.pane_split_ratio {
+                workspace.pane_split_ratio = pane_split::clamp_split_ratio(ratio);
+            }
+            if let Some(height) = snapshot.transfer_drawer_height {
+                workspace.transfer_drawer.height = drawer_height::clamp_drawer_height(
+                    px(height),
+                    drawer_height::content_area_height_from_viewport(window.viewport_size().height),
+                );
+            }
             workspace.restore_session_tabs(snapshot, window, cx);
         }
         if workspace.state.tabs.tabs.is_empty() {
@@ -452,6 +463,8 @@ impl Workspace {
             id: self.window_session_id,
             active_tab_index,
             tabs,
+            pane_split_ratio: Some(self.pane_split_ratio),
+            transfer_drawer_height: Some(f32::from(self.transfer_drawer.height)),
         }
     }
     pub(crate) fn active_tab(&self) -> Option<&TabState> {

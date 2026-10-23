@@ -9149,6 +9149,8 @@ fn restore_session_rebuilds_tabs_without_connect(cx: &mut TestAppContext) {
         version: SessionFile::CURRENT_VERSION,
         active_window_index: 0,
         windows: vec![SessionWindowSnapshot {
+            pane_split_ratio: None,
+            transfer_drawer_height: None,
             id: WindowSessionId(9),
             active_tab_index: 1,
             tabs: vec![
@@ -11689,4 +11691,47 @@ fn pasting_an_empty_file_clipboard_reports(cx: &mut TestAppContext) {
             Some("Nothing to paste.")
         );
     });
+}
+
+/// The divider position and the drawer height are part of the window the user
+/// left, so a restart should not put them back to the defaults.
+#[gpui_kit::test]
+fn the_window_layout_survives_a_restart(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.simulate_resize(size(px(1000.0), px(800.0)));
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.pane_split_ratio = 0.62;
+        workspace.set_drawer_height(px(220.0), px(800.0));
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    let snapshot = workspace.read_with(&cx, |workspace, _| workspace.build_session_snapshot());
+    assert_eq!(snapshot.pane_split_ratio, Some(0.62));
+    assert_eq!(snapshot.transfer_drawer_height, Some(220.0));
+
+    // Reopen a window from that snapshot with the same globals.
+    let client = RuntimeClient::new(
+        BridgeChannels::new(&RuntimeBridgeConfig::default())
+            .command_tx
+            .clone(),
+    );
+    let restored = cx.cx.add_window(|window, cx| {
+        Workspace::new(client, WindowSessionId(9), Some(snapshot), window, cx)
+    });
+    cx.run_until_parked();
+
+    restored
+        .read_with(&cx, |workspace, _| {
+            assert_eq!(
+                workspace.pane_split_ratio, 0.62,
+                "the divider reopens where it was left"
+            );
+            assert_eq!(
+                workspace.transfer_drawer.height,
+                px(220.0),
+                "the drawer reopens at the height it was left"
+            );
+        })
+        .expect("restored window is open");
 }

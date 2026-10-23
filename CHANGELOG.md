@@ -9,6 +9,7 @@ based on Keep a Changelog, and releases use semantic versioning.
 
 - The local and remote panes can be resized by dragging the divider between
   them, so a wide listing or a long local path can get the room it needs.
+  The split and the drawer height are remembered per window across restarts.
   A pane never shrinks below the width its path bar needs, and a window too
   narrow for both falls back to an even split.
 - **⌘C / ⌘V** work on files: copy a selection in one pane and paste it in the
