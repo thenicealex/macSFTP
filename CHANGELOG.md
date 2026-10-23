@@ -35,7 +35,10 @@ based on Keep a Changelog, and releases use semantic versioning.
 - Removing a recent connection now updates every window's list, not just the
   one the command came from.
 - The pane divider follows the pointer from where it was grabbed instead of
-  jumping to the pointer's side.
+  jumping to the pointer's side, keeps tracking after the pointer leaves the
+  divider, and draws a single rule instead of doubling the pane border.
+- A completed upload no longer offers a **Show in Finder** button that could
+  only report that its destination is on the server.
 
 ### Changed
 

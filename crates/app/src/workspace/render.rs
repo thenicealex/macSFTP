@@ -84,24 +84,6 @@ impl DragPayload {
     }
 }
 
-/// GPUI drag payload for the pane divider: the split the drag started from,
-/// so the divider can follow the pointer 1:1 from wherever it was grabbed.
-#[derive(Clone, Debug)]
-pub(crate) struct PaneSplitDragValue;
-
-/// Empty drag preview: the divider itself is the feedback, so no ghost is drawn.
-pub(crate) struct PaneSplitDragGhost;
-
-impl gpui_kit::Render for PaneSplitDragGhost {
-    fn render(
-        &mut self,
-        _window: &mut gpui_kit::Window,
-        _cx: &mut gpui_kit::Context<Self>,
-    ) -> impl gpui_kit::IntoElement {
-        div().w(px(1.0)).h(px(1.0))
-    }
-}
-
 impl crate::workspace::Workspace {
     /// Native window title (§12.7): the active tab's title — the connection's
     /// name or host — or the app name while no tab is open. macOS shows it in
@@ -342,93 +324,66 @@ impl crate::workspace::Workspace {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme().clone();
-        let divider = crate::workspace::panes::render_pane_divider(self.pane_split_ratio, &theme);
-        divider
-            .on_mouse_down(
-                gpui_kit::MouseButton::Left,
-                cx.listener(
-                    move |workspace, event: &gpui_kit::MouseDownEvent, window, cx| {
-                        // The divider's own position at grab time, not the
-                        // pointer's: the pointer can sit anywhere inside the
-                        // divider's box, and anchoring on the pointer would
-                        // make the divider jump sideways on the first move.
-                        let divider_x = workspace
-                            .divider_position(window, cx)
-                            .unwrap_or(event.position.x);
-                        workspace.pane_split_drag = Some(view_state::PaneSplitDrag {
-                            start_x: divider_x,
-                            pointer_x: event.position.x,
-                        });
-                        cx.set_active_drag_cursor_style(
-                            gpui_kit::CursorStyle::ResizeLeftRight,
-                            window,
-                        );
-                        cx.notify();
-                    },
-                ),
-            )
-            // GPUI only delivers drag events once a drag is registered; the
-            // value carries the split the drag started from so the divider can
-            // follow the pointer 1:1 from wherever it was grabbed.
-            .on_drag(PaneSplitDragValue, {
-                let workspace_entity = cx.entity();
-                move |_value, _offset, window, cx| {
-                    let pointer_x = window.mouse_position().x;
-                    workspace_entity.update(cx, |workspace, cx| {
-                        let divider_x = workspace.divider_position(window, cx).unwrap_or(pointer_x);
-                        workspace.pane_split_drag = Some(view_state::PaneSplitDrag {
-                            start_x: divider_x,
-                            pointer_x,
-                        });
-                        cx.set_active_drag_cursor_style(
-                            gpui_kit::CursorStyle::ResizeLeftRight,
-                            window,
-                        );
-                        cx.notify();
+        let divider = crate::workspace::panes::render_pane_divider(&theme);
+        divider.on_mouse_down(
+            gpui_kit::MouseButton::Left,
+            cx.listener(
+                move |workspace, event: &gpui_kit::MouseDownEvent, window, cx| {
+                    // The divider's own position at grab time, not the
+                    // pointer's: the pointer can sit anywhere inside the
+                    // divider's box, and anchoring on the pointer would
+                    // make the divider jump sideways on the first move.
+                    let divider_x = workspace
+                        .divider_position(window, cx)
+                        .unwrap_or(event.position.x);
+                    workspace.pane_split_drag = Some(view_state::PaneSplitDrag {
+                        start_x: divider_x,
+                        pointer_x: event.position.x,
                     });
-                    cx.new(|_| PaneSplitDragGhost)
-                }
-            })
-            .on_drag_move(cx.listener(
-                |workspace, event: &gpui_kit::DragMoveEvent<PaneSplitDragValue>, window, cx| {
-                    if workspace.pane_split_drag.is_none() {
-                        return;
-                    }
-                    // The divider follows the pointer 1:1 from where it was
-                    // grabbed: the pointer's travel since the drag started is
-                    // applied to the ratio the drag started from, so no
-                    // rounding error accumulates and the divider does not jump
-                    // to the pointer on the first move.
-                    let content_width = window.viewport_size().width;
-                    let drag_start_x = workspace
-                        .pane_split_drag
-                        .map(|drag| drag.start_x)
-                        .unwrap_or(event.event.position.x);
-                    let pointer_start_x = workspace
-                        .pane_split_drag
-                        .map(|drag| drag.pointer_x)
-                        .unwrap_or(event.event.position.x);
-                    // The divider travels with the pointer: its position at
-                    // grab time plus the pointer's travel since then.
-                    let divider_x = drag_start_x + (event.event.position.x - pointer_start_x);
-                    let ratio = pane_split::split_ratio_for_pointer(
-                        divider_x,
-                        content_width,
-                        pane_split::DIVIDER_WIDTH,
-                    );
-                    workspace.pane_split_ratio = ratio;
-                    cx.set_active_drag_cursor_style(gpui_kit::CursorStyle::ResizeLeftRight, window);
+                    // No `set_active_drag_cursor_style`: this is not a GPUI drag
+                    // (the divider tracks plain mouse moves, see
+                    // `apply_pane_divider_drag`), so that call would be a no-op.
+                    // The content row carries the resize cursor while a drag is
+                    // in flight instead.
+                    let _ = window;
                     cx.notify();
                 },
-            ))
-            .on_mouse_up(
-                gpui_kit::MouseButton::Left,
-                cx.listener(|workspace, _event, _window, cx| {
-                    if workspace.pane_split_drag.take().is_some() {
-                        cx.notify();
-                    }
-                }),
-            )
+            ),
+        )
+    }
+
+    /// Apply the in-flight pane divider drag to the split.
+    ///
+    /// This lives on the whole content row rather than on the divider itself:
+    /// drag events are dispatched by hitbox, so a listener on a five-point-wide
+    /// divider stops firing the moment the pointer leaves it sideways — which
+    /// is the first thing a horizontal drag does.
+    pub(crate) fn apply_pane_divider_drag(
+        &mut self,
+        pointer_x: gpui_kit::Pixels,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(drag) = self.pane_split_drag else {
+            return;
+        };
+        let content_width = window.viewport_size().width;
+        // The divider travels with the pointer: its position at grab time plus
+        // the pointer's travel since then.
+        let divider_x = drag.start_x + (pointer_x - drag.pointer_x);
+        self.pane_split_ratio = pane_split::split_ratio_for_pointer(
+            divider_x,
+            content_width,
+            pane_split::DIVIDER_WIDTH,
+        );
+        cx.notify();
+    }
+
+    /// End an in-flight pane divider drag, if any.
+    pub(crate) fn finish_pane_divider_drag(&mut self, cx: &mut Context<Self>) {
+        if self.pane_split_drag.take().is_some() {
+            cx.notify();
+        }
     }
 
     pub(crate) fn render_pane(
@@ -1421,9 +1376,8 @@ impl crate::workspace::Workspace {
                     workspace.handle_type_select_key(side, event, window, cx);
                 }
             }))
-            .when(side == PaneSide::Local, |pane| {
-                pane.border_r_1().border_color(theme.colors.border)
-            })
+            // No right border on the local pane: the divider between the panes
+            // draws the separator now, and both would read as a double rule.
             .id(if side == PaneSide::Local {
                 "local-file-pane"
             } else {

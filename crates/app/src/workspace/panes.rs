@@ -588,10 +588,13 @@ impl crate::workspace::Workspace {
                         macsftp_core::sort_entries(&mut entries, &tab.sort);
                         tab.local.entries = entries;
                         tab.local.error = None;
-                        // Retire only this read's own loading line: a message
-                        // the user earned while the folder was loading (a path
-                        // copy, an error) must survive the listing landing.
+                        // Retire only the loading line this read put up. A
+                        // message the user earned while the folder was loading
+                        // (a path copy, an error) must survive the listing
+                        // landing, and a background reload never announced
+                        // itself, so it must not take down a navigation's line.
                         if is_active
+                            && !preserve_view
                             && workspace
                                 .status_message
                                 .as_ref()
@@ -1288,20 +1291,17 @@ impl crate::workspace::Workspace {
     }
 }
 
-/// The divider between the local and remote panes: a one-pixel rule with a
-/// wider invisible hit target, so it is easy to grab without looking heavy.
-pub(crate) fn render_pane_divider(
-    ratio: f32,
-    theme: &macsftp_ui::Theme,
-) -> gpui_kit::Stateful<gpui_kit::Div> {
-    let _ = ratio;
+/// The divider between the local and remote panes.
+///
+/// The box is a few points wide — a wider gutter would cost a narrow window
+/// real space — and the drawn rule sits in the middle of it. The rest of the
+/// box is transparent but still grabbable, which is what makes a one-pixel
+/// line practical to hit.
+pub(crate) fn render_pane_divider(theme: &macsftp_ui::Theme) -> gpui_kit::Stateful<gpui_kit::Div> {
     div()
         .id("pane-divider")
         .debug_selector(|| "pane-divider".into())
         .flex_none()
-        // The divider occupies one pixel of layout — a wider gutter would cost
-        // a narrow window real space — while the grab target is the hit box
-        // that overflows it on both sides.
         .w(pane_split::DIVIDER_WIDTH)
         .h_full()
         .relative()

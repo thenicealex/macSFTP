@@ -11177,3 +11177,98 @@ fn a_download_with_an_unusable_name_keeps_the_other_sources(cx: &mut TestAppCont
         );
     });
 }
+
+/// A divider drag keeps working after the pointer leaves the divider's own
+/// five points — which is the first thing a horizontal drag does. Drag events
+/// are dispatched by hitbox, so a listener on the divider would stop firing.
+#[gpui_kit::test]
+fn a_divider_drag_continues_after_the_pointer_leaves_the_divider(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.simulate_resize(size(px(1000.0), px(700.0)));
+    cx.run_until_parked();
+
+    let divider = cx
+        .debug_bounds("pane-divider")
+        .expect("the divider is laid out");
+    let start = divider.center();
+
+    // Grab the divider.
+    cx.simulate_event(gpui_kit::MouseDownEvent {
+        position: start,
+        button: gpui_kit::MouseButton::Left,
+        click_count: 1,
+        ..Default::default()
+    });
+    cx.run_until_parked();
+    workspace.read_with(&cx, |workspace, _| {
+        assert!(
+            workspace.pane_split_drag.is_some(),
+            "the press starts a divider drag"
+        );
+    });
+
+    // Move well past the divider's box, the way a real drag does.
+    let target_x = start.x + px(180.0);
+    cx.simulate_event(gpui_kit::MouseMoveEvent {
+        position: point(target_x, start.y),
+        ..Default::default()
+    });
+    cx.run_until_parked();
+
+    workspace.read_with(&cx, |workspace, _| {
+        assert!(
+            workspace.pane_split_ratio > 0.5,
+            "the drag kept tracking the pointer away from the divider: {}",
+            workspace.pane_split_ratio
+        );
+    });
+
+    // Releasing anywhere ends it.
+    cx.simulate_event(gpui_kit::MouseUpEvent {
+        position: point(target_x, start.y),
+        button: gpui_kit::MouseButton::Left,
+        click_count: 1,
+        ..Default::default()
+    });
+    cx.run_until_parked();
+    workspace.read_with(&cx, |workspace, _| {
+        assert!(workspace.pane_split_drag.is_none(), "the drag ends");
+    });
+}
+
+/// The divider's anchor is its own position, not the pointer's: grabbing it
+/// near an edge must not make it jump to the pointer on the first move.
+#[gpui_kit::test]
+fn grabbing_the_divider_off_centre_does_not_move_it(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.simulate_resize(size(px(1000.0), px(700.0)));
+    cx.run_until_parked();
+
+    let divider = cx
+        .debug_bounds("pane-divider")
+        .expect("the divider is laid out");
+    // Press on the divider's left edge rather than its centre.
+    let grab = point(divider.left() + px(0.5), divider.center().y);
+    cx.simulate_event(gpui_kit::MouseDownEvent {
+        position: grab,
+        button: gpui_kit::MouseButton::Left,
+        click_count: 1,
+        ..Default::default()
+    });
+    cx.run_until_parked();
+    let ratio_after_grab = workspace.read_with(&cx, |workspace, _| workspace.pane_split_ratio);
+
+    // A one-pixel move keeps the split essentially unchanged.
+    cx.simulate_event(gpui_kit::MouseMoveEvent {
+        position: point(grab.x + px(1.0), grab.y),
+        ..Default::default()
+    });
+    cx.run_until_parked();
+    workspace.read_with(&cx, |workspace, _| {
+        let moved = (workspace.pane_split_ratio - ratio_after_grab).abs();
+        assert!(
+            moved < 0.01,
+            "a one-pixel drag barely moves the split, not to the pointer: {moved}"
+        );
+    });
+}

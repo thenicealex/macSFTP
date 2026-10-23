@@ -1277,6 +1277,27 @@ impl Render for Workspace {
                 .flex()
                 .flex_1()
                 .min_h_0()
+                // Drag events are dispatched by hitbox, so the divider's own
+                // five points cannot own them: the pointer leaves that box the
+                // moment a horizontal drag starts. The whole content row
+                // receives them, and the listener only acts while a divider
+                // drag is in flight.
+                .on_mouse_move(cx.listener(
+                    |workspace, event: &gpui_kit::MouseMoveEvent, window, cx| {
+                        workspace.apply_pane_divider_drag(event.position.x, window, cx);
+                    },
+                ))
+                // The resize cursor covers the content row for the duration of
+                // the drag, because the pointer is no longer over the divider.
+                .when(self.pane_split_drag.is_some(), |row| {
+                    row.cursor_col_resize()
+                })
+                .on_mouse_up(
+                    gpui_kit::MouseButton::Left,
+                    cx.listener(|workspace, _event, _window, cx| {
+                        workspace.finish_pane_divider_drag(cx);
+                    }),
+                )
                 .child(self.render_pane(PaneSide::Local, window, cx))
                 .child(self.render_pane_divider(window, cx))
                 .child(self.render_pane(PaneSide::Remote, window, cx))

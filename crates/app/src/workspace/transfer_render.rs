@@ -570,10 +570,13 @@ impl crate::workspace::Workspace {
                 });
             });
         }
-        // Only a completed transfer has a file to point at. Offering reveal on a
-        // failed or cancelled row would send the user to a path that may not
-        // exist, so the control stays absent rather than disabled.
-        if matches!(job.state, TransferState::Completed) {
+        // Reveal needs a local destination to point at. A completed upload's
+        // destination lives on the server, where Finder cannot go, so the
+        // control is absent instead of reporting that it cannot help; a failed
+        // or cancelled row may have no file at all.
+        let revealable = matches!(job.state, TransferState::Completed)
+            && matches!(job.destination, macsftp_core::TransferEndpoint::Local(_));
+        if revealable {
             row = row.on_reveal(move |_event, _window, cx| {
                 workspace.update(cx, |workspace, cx| {
                     workspace.reveal_transfer_destination(job_id, cx);
@@ -584,11 +587,12 @@ impl crate::workspace::Workspace {
         row
     }
 
-    /// Reveal a finished transfer's destination in Finder.
+    /// Reveal a finished download's destination in Finder.
     ///
-    /// Only local destinations are revealable: a remote path lives on the
-    /// server, where the equivalent affordance is opening its folder in the
-    /// remote pane instead.
+    /// Only local destinations are revealable, and the row only offers the
+    /// control for those (see `render_transfer_job`); a remote path is reported
+    /// rather than opened, so a caller that gets here with one is told why
+    /// nothing happened.
     pub(crate) fn reveal_transfer_destination(
         &mut self,
         transfer_id: macsftp_core::TransferId,

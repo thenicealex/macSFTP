@@ -12,7 +12,7 @@ The dark-maximized and light form-focus captures remain the original 2026-10-11 
 
 | Capture | Verified behavior |
 | --- | --- |
-| [Light, 720×480](light-720x480.jpg) | Compact default transfer drawer, first-connection card centered on its Connect button, draggable pane divider, visible footer entry |
+| [Light, 720×480](light-720x480.jpg) | Compact default transfer drawer, first-connection card centered on its Connect button, draggable pane divider drawn as a single rule, visible footer entry |
 | [Dark, 720×480](dark-720x480.jpg) | Theme colors, centered queue guidance and the outward focus ring on the Base connection button |
 | [Dark, maximized](dark-wide.jpg) | Resizing retains balanced pane layout and drawer height |
 | [Light focus, 720×480](light-focus-720x480.jpg) | Connection shortcut opens the form; Tab moves to Port with a visible focus ring |
