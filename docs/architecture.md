@@ -223,6 +223,7 @@ Profile 更新由 `ProfileStore` 协调：校验请求和 route → 写入或读
 - 可滚动 surface 使用统一的 theme-aware scrollbar：虚拟列表和普通 scroll container 各自绑定 handle，但共享 overflow、drag、track paging 和 resize 语义。
 - 只在内容溢出时显示 track/thumb，thumb 必须可拖动、track 点击按 viewport 翻页、滚轮与键盘滚动后位置同步；隐藏原生滚动条避免双滚动条。
 - 窄 pane、短窗口和动态内容变化后，thumb 大小与位置必须重新反映真实 viewport，不能遮挡主要操作或造成列表宽度跳变。
+- 跨 pane 拖拽携带的是整个选区，而不是被抓住的那一行：拖拽 payload 在抓取行属于当前选区时展开为分区的全部选中路径，否则只携带该行。拖到对侧 pane 时必须搬走全部路径，不能只传第一个文件；资源管理器里拖一个已选项就是搬整组选中项。上传把整组交给同一个 plan（本地遍历不需要连接）；下载因为远端 planner 只解析一棵远端树，必须**每个源各发一个单源 plan**，目标为「本地目录/源名」。
 
 ### 12.4 安全决策显式
 

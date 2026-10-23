@@ -5,8 +5,15 @@ based on Keep a Changelog, and releases use semantic versioning.
 
 ## [Unreleased]
 
+### Added
+
+- Dragging a row that is part of a multi-selection moves every selected file;
+  dropping it on the other pane transfers the whole group in one plan.
+
 ### Changed
 
+- Downloading several server files (or a folder) no longer stops at a
+  single-file check: multiple sources land side by side in the local folder.
 - **Copy Path** now copies the selected entries' own paths, one per line,
   matching Finder; an empty selection still copies the pane's folder. Right
   clicking a file and choosing Copy Path therefore yields

@@ -79,34 +79,58 @@ impl crate::workspace::Workspace {
             cx.notify();
             return;
         };
-        if sources.len() != 1 {
-            self.status_message = Some("Select one server file or folder to download.".into());
+        if sources.is_empty() {
+            self.status_message = Some("Select files or folders on the server to download.".into());
             cx.notify();
             return;
         }
-        let destination = match append_local_name(&local_directory, &sources[0]) {
-            Ok(destination) => destination,
-            Err(message) => {
-                self.status_message = Some(message.into());
-                cx.notify();
-                return;
-            }
+
+        // Every source becomes its own single-source plan, so each plan's
+        // destination is the exact local path for that item: one file keeps its
+        // own name, and a folder recreates its tree under a matching name.
+        let destination_for = |source: &RemotePath| -> Result<LocalPath, &'static str> {
+            append_local_name(&local_directory, source)
         };
         let tab_id = tab.id;
         let metadata_policy = cx.resources().config.config().metadata_policy.clone();
-        let command = AppCommand::StartTransfer(macsftp_core::StartTransferCommand {
-            tab_id,
-            session_epoch,
-            profile_id,
-            direction: macsftp_core::TransferDirection::Download,
-            sources: sources.into_iter().map(TransferEndpoint::Remote).collect(),
-            destination: TransferEndpoint::Local(destination),
-            metadata_policy,
-            conflict_policy: Default::default(),
-        });
-        if self.send_command(command, cx) {
+
+        // Download planning is per-source: the remote planner resolves a single
+        // remote tree against one local destination. Several selected items
+        // therefore become several plans, queued in selection order, where an
+        // upload hands the whole list to one plan (local traversal needs no
+        // connection). Both shapes reach the drawer as ordinary rows.
+        let mut queued = 0;
+        for source in sources {
+            let destination = match destination_for(&source) {
+                Ok(destination) => destination,
+                Err(message) => {
+                    self.status_message = Some(message.into());
+                    cx.notify();
+                    return;
+                }
+            };
+            let command = AppCommand::StartTransfer(macsftp_core::StartTransferCommand {
+                tab_id,
+                session_epoch,
+                profile_id,
+                direction: macsftp_core::TransferDirection::Download,
+                sources: vec![TransferEndpoint::Remote(source)],
+                destination: TransferEndpoint::Local(destination),
+                metadata_policy: metadata_policy.clone(),
+                conflict_policy: Default::default(),
+            });
+            if !self.send_command(command, cx) {
+                break;
+            }
+            queued += 1;
+        }
+        if queued > 0 {
             self.transfer_drawer.open = true;
-            self.status_message = Some("Preparing download…".into());
+            self.status_message = Some(if queued == 1 {
+                "Preparing download…".into()
+            } else {
+                format!("Preparing {queued} downloads…").into()
+            });
             cx.notify();
         }
     }

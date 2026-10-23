@@ -51,6 +51,7 @@ use crate::workspace::helpers::format_recent_label;
 use crate::workspace::overlay::{OVERLAY_FADE, OverlayFade};
 use crate::workspace::profiles::{PassphrasePolicy, ProfileEditorState, ProfileRouteKind};
 use crate::workspace::profiles::{SettingsSection, profile_matches_filter};
+use crate::workspace::render::DragPayload;
 use crate::workspace::transfer_render::{PROGRESS_SMOOTHING, painted_progress};
 use macsftp_core::HistoryOp;
 use macsftp_ui::InputState;
@@ -10275,4 +10276,190 @@ fn compare_edit_conflict_dispatches_download_transfer(cx: &mut TestAppContext) {
     assert_eq!(cmd.destination, TransferEndpoint::Local(expected_dest));
 
     std::fs::remove_dir_all(&session_dir).ok();
+}
+
+/// A drag carries the whole pane selection, so dragging one row out of a
+/// multi-selection moves every selected file instead of silently dropping all
+/// but the row under the pointer.
+#[gpui_kit::test]
+fn drag_payload_expands_to_the_selection_when_the_row_is_selected(cx: &mut TestAppContext) {
+    let (fixture, workspace, mut cx) =
+        workspace_with_local_files(cx, "drag-payload", &["a.txt", "b.txt", "c.txt"]);
+    cx.dispatch_action(SelectAllEntries);
+    cx.run_until_parked();
+
+    let selected: Vec<EntryPath> = (0..3)
+        .map(|index| local_visible_entry(&workspace, &cx, index))
+        .collect();
+    let dragged = selected[1].clone();
+    let payload = DragPayload::new(dragged.clone(), PaneSide::Local, &selected);
+    assert_eq!(
+        payload.paths, selected,
+        "dragging a selected row carries the whole selection"
+    );
+    assert_eq!(payload.path, dragged, "the payload keeps the grabbed row");
+
+    // A row outside the selection drags alone.
+    let unselected = EntryPath::Local(LocalPath::new("/tmp/elsewhere.txt"));
+    let lone = DragPayload::new(unselected.clone(), PaneSide::Local, &selected);
+    assert_eq!(lone.paths, vec![unselected]);
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+#[gpui_kit::test]
+fn drag_payload_with_an_empty_selection_carries_just_the_row(cx: &mut TestAppContext) {
+    let (fixture, workspace, cx) = workspace_with_local_files(cx, "drag-payload-empty", &["a.txt"]);
+    let row = local_visible_entry(&workspace, &cx, 0);
+    let payload = DragPayload::new(row.clone(), PaneSide::Local, &[]);
+    assert_eq!(payload.paths, vec![row]);
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+/// Dropping several local files on the remote pane uploads all of them.
+#[gpui_kit::test]
+fn dropping_a_multi_selection_uploads_every_selected_file(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+    let (fixture, base) = temp_local_fixture("drop-multi-upload");
+    for name in ["one.txt", "two.txt"] {
+        std::fs::write(fixture.join(name), b"x").expect("fixture file");
+    }
+    set_local_path_and_wait(&workspace, &mut cx, base.clone());
+    cx.dispatch_action(SelectAllEntries);
+    cx.run_until_parked();
+    let selected = workspace.update(&mut cx, |workspace, _| {
+        workspace
+            .active_tab()
+            .expect("active tab")
+            .selection
+            .selected_paths
+            .clone()
+    });
+    assert_eq!(selected.len(), 2, "both files are selected");
+
+    // The drop handler is a thin adapter over `begin_upload`; driving the same
+    // expansion it performs keeps the assertion on the command that reaches the
+    // runtime.
+    let payload = DragPayload::new(selected[0].clone(), PaneSide::Local, &selected);
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.begin_upload(payload.local_sources(), cx);
+    });
+
+    let command = channels
+        .command_rx
+        .try_recv()
+        .expect("dropping the selection must enqueue a StartTransfer");
+    match command {
+        AppCommand::StartTransfer(command) => {
+            assert_eq!(
+                command.sources.len(),
+                2,
+                "both dragged files reach the transfer command"
+            );
+            assert!(matches!(command.destination, TransferEndpoint::Remote(_)));
+        }
+        other => panic!("expected StartTransfer, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+/// Downloading several server files queues one plan per source: the remote
+/// planner resolves a single remote tree against one local destination, so a
+/// multi-source command would be rejected at planning time.
+#[gpui_kit::test]
+fn multi_file_download_queues_one_plan_per_source(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        let tab = workspace.active_tab_mut().expect("active tab");
+        tab.local.path = Some(LocalPath::new("/tmp/downloads"));
+        tab.remote.entries = ["one.txt", "two.txt", "three.txt"]
+            .iter()
+            .map(|name| RemoteEntry {
+                name: (*name).to_string(),
+                path: RemotePath::new(format!("{TEST_REMOTE_ROOT}/{name}")),
+                kind: FileKind::File,
+                size: Some(1),
+                permissions: Some(0o644),
+                modified_at: None,
+                link_target: None,
+            })
+            .collect();
+        tab.selection.selected_paths = tab
+            .remote
+            .entries
+            .iter()
+            .map(|entry| EntryPath::Remote(entry.path.clone()))
+            .collect();
+        workspace.download_selection(cx);
+    });
+
+    let mut destinations = Vec::new();
+    while let Ok(command) = channels.command_rx.try_recv() {
+        if let AppCommand::StartTransfer(command) = command {
+            assert_eq!(command.direction, TransferDirection::Download);
+            assert_eq!(
+                command.sources.len(),
+                1,
+                "each download plan carries exactly one remote source"
+            );
+            assert!(
+                matches!(command.destination, TransferEndpoint::Local(_)),
+                "the destination is the local folder"
+            );
+            match command.destination {
+                TransferEndpoint::Local(path) => destinations.push(path.as_str().to_string()),
+                TransferEndpoint::Remote(_) => {
+                    panic!("a download destination is local")
+                }
+            }
+        }
+    }
+    assert_eq!(
+        destinations,
+        vec![
+            "/tmp/downloads/one.txt".to_string(),
+            "/tmp/downloads/two.txt".to_string(),
+            "/tmp/downloads/three.txt".to_string()
+        ],
+        "every selected file gets its own download, named after the source"
+    );
+}
+
+/// A folder download still targets `<local folder>/<folder name>`: the remote
+/// planner recreates the tree from that root.
+#[gpui_kit::test]
+fn folder_download_keeps_the_selected_folder_name(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+    let source = RemotePath::new("/home/tester/project");
+
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        let tab = workspace.active_tab_mut().expect("active tab");
+        tab.local.path = Some(LocalPath::new("/tmp/downloads"));
+        tab.remote.entries = vec![RemoteEntry {
+            name: "project".to_string(),
+            path: source.clone(),
+            kind: FileKind::Directory,
+            size: None,
+            permissions: Some(0o755),
+            modified_at: None,
+            link_target: None,
+        }];
+        tab.selection.selected_paths = vec![EntryPath::Remote(source.clone())];
+        workspace.download_selection(cx);
+    });
+
+    let command = channels
+        .command_rx
+        .try_recv()
+        .expect("a folder download is enqueued");
+    let AppCommand::StartTransfer(command) = command else {
+        panic!("expected StartTransfer");
+    };
+    assert_eq!(
+        command.destination,
+        TransferEndpoint::Local(LocalPath::new("/tmp/downloads/project"))
+    );
 }
