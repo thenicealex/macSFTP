@@ -1356,7 +1356,7 @@ impl crate::workspace::Workspace {
         div()
             .flex()
             .flex_col()
-            .flex_grow(self.pane_split_weight(side))
+            .flex_grow(self.pane_split_weight(side, window.viewport_size().width))
             .flex_shrink_1()
             .flex_basis(gpui_kit::relative(0.0))
             .min_w_0()

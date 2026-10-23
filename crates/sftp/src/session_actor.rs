@@ -2398,6 +2398,12 @@ async fn preserve_upload_metadata(
         use std::os::unix::fs::MetadataExt;
 
         if job.metadata_policy.preserve_permissions {
+            // The full mode is kept on the way out, unlike the download path,
+            // which strips the special bits. The asymmetry is deliberate: an
+            // upload carries the user's own file to their own server, so its
+            // mode is intent worth preserving; a download carries bytes from a
+            // server into the local disk, where an attacker-chosen setuid bit
+            // has no business being created on the user's behalf.
             attributes.permissions = Some(source_metadata.mode());
         }
     }

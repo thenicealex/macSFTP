@@ -11077,8 +11077,8 @@ fn pane_divider_sets_the_split_between_the_panes(cx: &mut TestAppContext) {
         "the divider's ratio drives the split: {share}"
     );
 
-    // The ratio survives a window resize.
-    cx.simulate_resize(size(px(900.0), px(600.0)));
+    // The ratio survives a window resize that still leaves room for it.
+    cx.simulate_resize(size(px(1400.0), px(900.0)));
     cx.run_until_parked();
     let local_resized = cx
         .debug_bounds("local-file-pane")
@@ -11119,6 +11119,10 @@ fn pane_divider_stops_at_the_usable_limits(cx: &mut TestAppContext) {
     assert!(
         local.size.width / (local.size.width + remote.size.width) >= 0.2,
         "the local pane keeps a usable share"
+    );
+    assert!(
+        local.size.width >= crate::workspace::pane_split::MIN_PANE_WIDTH,
+        "the pane keeps enough width for its path bar: {local:?}"
     );
 }
 

@@ -34,8 +34,8 @@ impl crate::workspace::Workspace {
     /// The weights are the split ratio and its complement, so the divider's
     /// position is the ratio of the total: dragging to 30% gives the local
     /// pane 0.3 and the remote pane 0.7.
-    pub(crate) fn pane_split_weight(&self, side: PaneSide) -> f32 {
-        let ratio = pane_split::clamp_split_ratio(self.pane_split_ratio);
+    pub(crate) fn pane_split_weight(&self, side: PaneSide, content_width: gpui_kit::Pixels) -> f32 {
+        let ratio = pane_split::clamp_split_ratio_for_width(self.pane_split_ratio, content_width);
         match side {
             PaneSide::Local => ratio,
             PaneSide::Remote => 1.0 - ratio,
@@ -58,7 +58,7 @@ impl crate::workspace::Workspace {
         if content_width <= gpui_kit::px(0.0) {
             return None;
         }
-        let ratio = pane_split::clamp_split_ratio(self.pane_split_ratio);
+        let ratio = pane_split::clamp_split_ratio_for_width(self.pane_split_ratio, content_width);
         let usable = (content_width - pane_split::DIVIDER_WIDTH).max(gpui_kit::px(0.0));
         Some(usable * ratio + pane_split::DIVIDER_WIDTH / 2.0)
     }
