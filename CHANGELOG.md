@@ -12,6 +12,8 @@ based on Keep a Changelog, and releases use semantic versioning.
   of retyping the whole path.
 - The connect form's password and key-passphrase fields have a **Show** toggle
   for checking a long or jump-host secret without retyping it.
+- Recent connections have a context menu: reconnect, copy the
+  `user@host:port` endpoint, or remove that entry.
 - Double-clicking (or pressing Enter on, or right-click Open for) a local file
   now hands it to its default application, matching Finder. Remote files keep
   the existing edit-in-temp-copy flow.

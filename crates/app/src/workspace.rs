@@ -97,12 +97,13 @@ pub(crate) fn open_local_path(cx: &mut App, path: &Path) {
 }
 
 use crate::app_actions::{
-    ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, ConfirmTabSwitcher, CopyPath,
-    CopyVersionInfo, DeleteSelection, DownloadSelection, FilterPane, FocusLocalPane,
-    FocusRemotePane, GoToPath, MinimizeWindow, NavigateBack, NavigateForward, NewFolder, NewTab,
-    OpenCommandPalette, OpenLogFolder, OpenProfiles, OpenSelectedEntry, OpenSettings, PageDown,
-    PageUp, ParentDirectory, ReconnectTab, RefreshPane, RenameEntry, SelectAllEntries,
-    SelectFirstEntry, SelectLastEntry, SelectNextEntry, SelectNextEntryExtend, SelectPrevEntry,
+    ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, ConfirmTabSwitcher,
+    ConnectRecent, CopyPath, CopyRecentEndpoint, CopyVersionInfo, DeleteSelection,
+    DownloadSelection, FilterPane, FocusLocalPane, FocusRemotePane, ForgetRecent, GoToPath,
+    MinimizeWindow, NavigateBack, NavigateForward, NewFolder, NewTab, OpenCommandPalette,
+    OpenLogFolder, OpenProfiles, OpenSelectedEntry, OpenSettings, PageDown, PageUp,
+    ParentDirectory, ReconnectTab, RefreshPane, RenameEntry, SelectAllEntries, SelectFirstEntry,
+    SelectLastEntry, SelectNextEntry, SelectNextEntryExtend, SelectPrevEntry,
     SelectPrevEntryExtend, ShowAbout, ShowInFinder, ShowTransferDrawer,
     SortByDateModifiedAscending, SortByDateModifiedDescending, SortByNameAscending,
     SortByNameDescending, SortBySizeAscending, SortBySizeDescending, TabSwitcherNext,
@@ -1440,6 +1441,21 @@ impl Render for Workspace {
             .on_action(cx.listener(|workspace, _: &ShowInFinder, _window, cx| {
                 workspace.reveal_local_selection(cx);
             }))
+            .on_action(
+                cx.listener(|workspace, action: &ConnectRecent, window, cx| {
+                    workspace.open_recent_connection(action.id, window, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|workspace, action: &CopyRecentEndpoint, _window, cx| {
+                    workspace.copy_recent_endpoint(action.id, cx);
+                }),
+            )
+            .on_action(
+                cx.listener(|workspace, action: &ForgetRecent, _window, cx| {
+                    workspace.forget_recent_connection(action.id, cx);
+                }),
+            )
             .on_action(cx.listener(|workspace, _: &DeleteSelection, window, cx| {
                 workspace.request_delete_selection(window, cx);
             }))

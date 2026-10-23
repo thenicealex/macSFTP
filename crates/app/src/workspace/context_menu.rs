@@ -11,8 +11,8 @@ use macsftp_core::FileKind;
 use tracing::warn;
 
 use crate::app_actions::{
-    CopyPath, DeleteSelection, DownloadSelection, NewFolder, OpenSelectedEntry, RefreshPane,
-    RenameEntry, ShowInFinder, UploadSelection,
+    ConnectRecent, CopyPath, CopyRecentEndpoint, DeleteSelection, DownloadSelection, ForgetRecent,
+    NewFolder, OpenSelectedEntry, RefreshPane, RenameEntry, ShowInFinder, UploadSelection,
 };
 use crate::workspace::{PaneSide, Workspace};
 
@@ -106,6 +106,32 @@ impl Workspace {
         let menu = file_context_menu(side, target, remote_ready);
         if let Err(error) = macsftp_native_menu::show(menu, position, window, cx) {
             warn!(%error, "could not present the file context menu");
+        }
+    }
+
+    /// Present the recent-connection row menu: reconnect, copy the endpoint,
+    /// or forget the entry. Pure row actions — no pane state is involved, so
+    /// unlike the file menu nothing here is ever disabled.
+    pub(crate) fn show_recent_context_menu(
+        &mut self,
+        recent_id: u64,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let menu = NativeMenu::new()
+            .menu("Connect", Box::new(ConnectRecent { id: recent_id }))
+            .menu(
+                "Copy user@host:port",
+                Box::new(CopyRecentEndpoint { id: recent_id }),
+            )
+            .separator()
+            .menu(
+                "Remove from Recent Connections",
+                Box::new(ForgetRecent { id: recent_id }),
+            );
+        if let Err(error) = macsftp_native_menu::show(menu, position, window, cx) {
+            warn!(%error, "could not present the recent connections menu");
         }
     }
 

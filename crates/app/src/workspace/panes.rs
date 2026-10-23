@@ -1213,3 +1213,41 @@ impl crate::workspace::Workspace {
         cx.notify();
     }
 }
+
+impl crate::workspace::Workspace {
+    /// Copy a recent connection's `user@host:port` — the string a terminal or
+    /// another client needs — without opening the connection.
+    pub(crate) fn copy_recent_endpoint(&mut self, recent_id: u64, cx: &mut Context<Self>) {
+        let Some(endpoint) = cx
+            .resources()
+            .recents
+            .entries()
+            .iter()
+            .find(|entry| entry.id == recent_id)
+            .map(|entry| format!("{}@{}:{}", entry.username, entry.host, entry.port))
+        else {
+            return;
+        };
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(endpoint.clone()));
+        self.show_status(format!("Endpoint copied: {endpoint}").into(), cx);
+    }
+
+    /// Remove one recent connection. The row disappears immediately; a stale
+    /// host the user mis-typed once does not follow them around.
+    pub(crate) fn forget_recent_connection(&mut self, recent_id: u64, cx: &mut Context<Self>) {
+        match cx.resources_mut().recents.forget(recent_id) {
+            Ok(true) => {
+                self.show_status("Removed from Recent Connections.".into(), cx);
+                cx.notify();
+            }
+            Ok(false) => {}
+            Err(error) => {
+                warn!(%error, "could not forget a recent connection");
+                self.show_status(
+                    "The recent connection couldn’t be removed. Try again.".into(),
+                    cx,
+                );
+            }
+        }
+    }
+}

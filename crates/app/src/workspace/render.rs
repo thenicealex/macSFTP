@@ -914,6 +914,22 @@ impl crate::workspace::Workspace {
                                                             .open_recent_connection(id, window, cx);
                                                     },
                                                 ))
+                                                .on_mouse_up(
+                                                    gpui_kit::MouseButton::Right,
+                                                    cx.listener(
+                                                        move |workspace,
+                                                              event: &gpui_kit::MouseUpEvent,
+                                                              window,
+                                                              cx| {
+                                                            workspace.show_recent_context_menu(
+                                                                id,
+                                                                event.position,
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    ),
+                                                )
                                         },
                                     )),
                             )

@@ -10902,3 +10902,119 @@ fn password_reveal_toggles_the_mask(cx: &mut TestAppContext) {
         );
     });
 }
+
+/// The recent-connections context menu targets the exact row: reconnecting,
+/// copying its endpoint, or forgetting that one entry — nothing disabled,
+/// because none of it needs a session.
+#[gpui_kit::test]
+fn recent_connections_menu_targets_the_row(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.connect_with(test_settings(), None, window, cx);
+    });
+    let _ = channels.command_rx.try_recv();
+    let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.handle_app_event(
+            AppEvent::TabConnected(RemoteScoped::new(
+                scope,
+                TabConnected {
+                    remote_root: RemotePath::new(TEST_REMOTE_ROOT),
+                },
+            )),
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+
+    // The successful connect registered the recent entry this menu targets.
+    let recent_id = workspace.read_with(&cx, |_, cx| {
+        cx.resources()
+            .recents
+            .entries()
+            .first()
+            .expect("a successful connect registers a recent")
+            .id
+    });
+
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.forget_recent_connection(recent_id, cx);
+    });
+    cx.run_until_parked();
+
+    workspace.read_with(&cx, |workspace, cx| {
+        assert!(
+            cx.resources().recents.entries().is_empty(),
+            "forgetting removes the targeted entry"
+        );
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some("Removed from Recent Connections.")
+        );
+    });
+
+    // Forgetting an already-gone id is a no-op, not an error.
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.forget_recent_connection(recent_id + 100, cx);
+    });
+    cx.run_until_parked();
+    workspace.read_with(&cx, |_, cx| {
+        assert!(
+            cx.resources().recents.entries().is_empty(),
+            "the no-op forget leaves the store alone"
+        );
+    });
+}
+
+/// Copying a recent connection's endpoint puts `user@host:port` on the
+/// clipboard — the string a terminal needs — without connecting.
+#[gpui_kit::test]
+fn copying_a_recent_endpoint_copies_user_host_port(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.connect_with(test_settings(), None, window, cx);
+    });
+    let _ = channels.command_rx.try_recv();
+    let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.handle_app_event(
+            AppEvent::TabConnected(RemoteScoped::new(
+                scope,
+                TabConnected {
+                    remote_root: RemotePath::new(TEST_REMOTE_ROOT),
+                },
+            )),
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+
+    let recent_id = workspace.read_with(&cx, |_, cx| {
+        cx.resources()
+            .recents
+            .entries()
+            .first()
+            .expect("recent registered")
+            .id
+    });
+    cx.update(|_window, cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("".into())));
+
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.copy_recent_endpoint(recent_id, cx);
+    });
+    cx.update(|_window, cx| {
+        assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("tester@mock.example.com:22".to_string()),
+            "the endpoint is user@host:port"
+        );
+    });
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some("Endpoint copied: tester@mock.example.com:22")
+        );
+    });
+}

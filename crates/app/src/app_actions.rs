@@ -183,3 +183,25 @@ pub(crate) fn keybindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-q", Quit, None),
     ]
 }
+
+/// Recent-connection context-menu commands. Unlike the unit actions above,
+/// these carry the recent entry's id, because the menu targets one specific
+/// row rather than the focused pane. They have no keystrokes and stay out of
+/// the command palette: they exist so the native menu can dispatch a row.
+#[derive(Clone, PartialEq, Eq, Debug, gpui_kit::Action)]
+#[action(namespace = macsftp, no_json)]
+pub(crate) struct ConnectRecent {
+    pub(crate) id: u64,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, gpui_kit::Action)]
+#[action(namespace = macsftp, no_json)]
+pub(crate) struct CopyRecentEndpoint {
+    pub(crate) id: u64,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, gpui_kit::Action)]
+#[action(namespace = macsftp, no_json)]
+pub(crate) struct ForgetRecent {
+    pub(crate) id: u64,
+}
