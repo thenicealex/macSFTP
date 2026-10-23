@@ -764,11 +764,9 @@ impl crate::workspace::Workspace {
 
     /// Re-read the folders a finished transfer wrote into.
     ///
-    /// Only the active tab is considered: a background tab keeps its stale
-    /// listing until the user switches to it and a refresh happens there, which
-    /// avoids issuing a read for every open tab on every completed file. A pane
-    /// showing some other folder is left alone, so finishing an upload never
-    /// yanks the remote pane back to where the files landed.
+    /// Only panes that are already showing one of those folders are re-read, so
+    /// finishing an upload never yanks a pane back to where the files landed,
+    /// and a tab showing something else costs nothing but a path comparison.
     pub(crate) fn reload_visible_directories(
         &mut self,
         local_directories: &[LocalPath],
@@ -776,23 +774,40 @@ impl crate::workspace::Workspace {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tab) = self.active_tab() else {
-            return;
-        };
-        let tab_id = tab.id;
-        let local_current = tab.local.path.clone();
-        let remote_current = tab.remote.path.clone();
-        let remote_connected = matches!(tab.connection, ConnectionState::Connected { .. });
-        if let Some(current) = local_current
-            && local_directories.contains(&current)
-        {
-            self.reload_local_directory(tab_id, current, cx);
-        }
-        if let Some(current) = remote_current
-            && remote_directories.contains(&current)
-            && remote_connected
-        {
-            self.reload_remote_directory(tab_id, current, cx);
+        // Every tab, not just the active one: a tab in the background can be
+        // showing the folder that received the files, and returning to a stale
+        // listing after a transfer finished is exactly the confusion this
+        // reload exists to prevent. The comparison is two path reads per tab,
+        // and a tab that does not match costs nothing else.
+        let matches: Vec<(TabId, Option<LocalPath>, Option<RemotePath>, bool)> = self
+            .state
+            .tabs
+            .tabs
+            .iter()
+            .map(|tab| {
+                let local = tab
+                    .local
+                    .path
+                    .clone()
+                    .filter(|path| local_directories.contains(path));
+                let remote = tab
+                    .remote
+                    .path
+                    .clone()
+                    .filter(|path| remote_directories.contains(path));
+                let connected = matches!(tab.connection, ConnectionState::Connected { .. });
+                (tab.id, local, remote, connected)
+            })
+            .collect();
+        for (tab_id, local, remote, connected) in matches {
+            if let Some(path) = local {
+                self.reload_local_directory(tab_id, path, cx);
+            }
+            if let Some(path) = remote
+                && connected
+            {
+                self.reload_remote_directory(tab_id, path, cx);
+            }
         }
     }
 

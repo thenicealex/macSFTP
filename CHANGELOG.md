@@ -59,7 +59,8 @@ based on Keep a Changelog, and releases use semantic versioning.
   the next action happens to overwrite them.
 - Finishing an upload or download now re-reads the pane that received the
   files, so new names appear without pressing ⌘R. The reload keeps the pane's
-  selection and scroll position, and leaves panes showing other folders alone.
+  selection and scroll position, leaves panes showing other folders alone, and
+  covers background tabs so switching back does not show a stale listing.
 - Downloading several server files (or a folder) no longer stops at a
   single-file check: multiple sources land side by side in the local folder.
 - **Copy Path** now copies the selected entries' own paths, one per line,

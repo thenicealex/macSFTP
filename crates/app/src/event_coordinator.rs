@@ -2979,6 +2979,75 @@ mod reload_tests {
         let _ = std::fs::remove_dir_all(&session_dir);
     }
 
+    /// A tab in the background is reloaded too: coming back to a stale listing
+    /// after a transfer finished is the exact confusion the reload prevents.
+    #[gpui_kit::test]
+    fn a_background_tab_showing_the_destination_is_reloaded(cx: &mut TestAppContext) {
+        install_globals(cx, "reload-background");
+        let dir =
+            std::env::temp_dir().join(format!("macsftp-reload-background-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        std::fs::write(dir.join("landed.txt"), b"x").expect("write download");
+        let destination_dir = LocalPath::new(dir.to_string_lossy().into_owned());
+
+        let (window, channels) = connected_window(cx);
+        // A second tab showing the folder the download lands in, then focus the
+        // first tab so the second one is in the background.
+        let background_tab = window
+            .update(cx, |workspace, _window, cx| {
+                let tab_id = cx.resources().next_tab_id();
+                let mut tab = macsftp_core::TabState::new(tab_id, "background");
+                tab.local.path = Some(destination_dir.clone());
+                workspace.open_tab_for_test(tab);
+                tab_id
+            })
+            .expect("add the background tab");
+
+        start_plan(
+            cx,
+            TransferJob {
+                id: TransferId(41),
+                direction: TransferDirection::Download,
+                source: TransferEndpoint::Remote(RemotePath::new("/srv/landed.txt")),
+                destination: TransferEndpoint::Local(destination_dir.join("landed.txt")),
+                state: TransferState::Queued,
+                metadata_policy: MetadataPolicy::default(),
+                conflict_policy: ConflictPolicy::default(),
+                warnings: Vec::new(),
+                created_at: Timestamp::from_secs_since_epoch(1),
+            },
+        );
+        while channels.command_rx.try_recv().is_ok() {}
+
+        cx.update(|cx| {
+            dispatch_event(
+                AppEvent::TransferCompleted {
+                    transfer_id: TransferId(41),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        cx.run_until_parked();
+
+        window
+            .read_with(cx, |workspace, _cx| {
+                let tab = workspace
+                    .tab_for_test(background_tab)
+                    .expect("background tab");
+                assert!(
+                    tab.local
+                        .entries
+                        .iter()
+                        .any(|entry| entry.name == "landed.txt"),
+                    "the background tab lists the file the transfer wrote"
+                );
+            })
+            .expect("window is open");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The reducer records the plan's terminal transition, and that record is
     /// what the reload keys on: re-deriving it per completion would make a
     /// directory transfer quadratic.

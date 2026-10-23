@@ -869,6 +869,18 @@ impl Workspace {
         .detach();
     }
 
+    /// Add a tab without going through the runtime, for tests that need a
+    /// second tab in a known state. The active tab is unchanged.
+    #[cfg(test)]
+    pub(crate) fn open_tab_for_test(&mut self, tab: TabState) {
+        self.state.tabs.open_tab(tab);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tab_for_test(&self, tab_id: TabId) -> Option<&TabState> {
+        self.state.tabs.find_tab(tab_id)
+    }
+
     #[cfg(test)]
     pub(crate) fn status_message_for_test(&self) -> Option<String> {
         self.status_message.as_ref().map(|s| s.message.to_string())
