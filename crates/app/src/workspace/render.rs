@@ -861,9 +861,19 @@ impl crate::workspace::Workspace {
                 if recent_rows.is_empty() {
                     surface.flex_1().justify_center().into_any_element()
                 } else {
+                    // The scroll content takes at least the viewport height so
+                    // the card centers while it fits, and grows instead of
+                    // overflowing negatively once the rows are taller than the
+                    // pane (a negative offset would hide the top row from
+                    // scrolling entirely).
                     macsftp_ui::scroll_area(
                         "remote-connection-empty",
-                        surface.flex_none(),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .justify_center()
+                            .min_h_full()
+                            .child(surface.flex_none()),
                         &self.remote_empty_scroll,
                         &self.remote_empty_scrollbar,
                         window,
@@ -935,8 +945,8 @@ impl crate::workspace::Workspace {
                         }))
                         .into_any_element();
                     Some(remote_empty_with_recents(
-                        Some("Connect to a server".into()),
-                        Some("Choose a saved connection or enter server details.".into()),
+                        None,
+                        None,
                         vec![connect_action],
                         window,
                         cx,

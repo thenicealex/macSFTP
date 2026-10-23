@@ -1058,10 +1058,20 @@ fn compact_workspace_scrolls_recent_connections(cx: &mut TestAppContext) {
             .is_some(),
         "short windows expose a scrollbar for all recent connections"
     );
-    let position = cx
+    let viewport = cx
         .debug_bounds("remote-list-container-viewport")
-        .expect("remote viewport exists")
-        .center();
+        .expect("remote viewport exists");
+    let card = cx
+        .debug_bounds("remote-empty-card")
+        .expect("recent connection card is visible");
+    // Overflowing content starts at the top edge (inside the card's own
+    // vertical padding): centering it would push the first row above the
+    // viewport, where neither scrolling nor clipping could bring it back.
+    assert!(
+        card.top() >= viewport.top() && card.top() <= viewport.top() + px(12.0),
+        "overflowing recent connections start at the viewport top: {card:?} in {viewport:?}"
+    );
+    let position = viewport.center();
     cx.simulate_event(ScrollWheelEvent {
         position,
         delta: ScrollDelta::Pixels(point(px(0.0), px(-120.0))),
@@ -1070,6 +1080,46 @@ fn compact_workspace_scrolls_recent_connections(cx: &mut TestAppContext) {
     workspace.read_with(&cx, |workspace, _| {
         assert!(workspace.remote_empty_scroll.offset().y < px(0.0))
     });
+}
+
+#[gpui_kit::test]
+fn compact_workspace_centers_recent_connections_that_fit(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    workspace.update(&mut cx, |_workspace, cx| {
+        for index in 0..3 {
+            cx.resources_mut()
+                .recents
+                .upsert(macsftp_storage::RecentEntryInput {
+                    host: format!("recent-{index}.example.com"),
+                    port: 22,
+                    username: "operator".into(),
+                    profile_id: None,
+                    display_name: None,
+                    last_remote_path: None,
+                    last_connected_at: index,
+                })
+                .expect("seed recent connection fixture");
+        }
+        cx.notify();
+    });
+    for dimensions in [size(px(720.0), px(480.0)), size(px(1200.0), px(800.0))] {
+        cx.simulate_resize(dimensions);
+        cx.run_until_parked();
+        let viewport = cx
+            .debug_bounds("remote-list-container-viewport")
+            .expect("remote viewport exists");
+        let card = cx
+            .debug_bounds("remote-empty-card")
+            .expect("recent connection card is visible");
+        assert!(
+            card.size.height < viewport.size.height,
+            "fixture card must fit the viewport: {card:?} in {viewport:?}"
+        );
+        assert!(
+            (card.center().y - viewport.center().y).abs() < px(2.0),
+            "a card that fits is vertically centered: {card:?} in {viewport:?}"
+        );
+    }
 }
 
 #[gpui_kit::test]
