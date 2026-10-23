@@ -7,6 +7,8 @@ based on Keep a Changelog, and releases use semantic versioning.
 
 ### Added
 
+- The local and remote panes can be resized by dragging the divider between
+  them, so a wide listing or a long local path can get the room it needs.
 - **Go to Folder** (⌘⇧G) opens pre-filled with the folder the pane is showing,
   selected, so reaching a sibling directory means editing one segment instead
   of retyping the whole path.

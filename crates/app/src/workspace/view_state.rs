@@ -260,6 +260,18 @@ impl ConnectFormUi {
     }
 }
 
+/// A divider drag between the two file panes, in flight.
+///
+/// The divider follows the pointer 1:1, so the drag remembers where it
+/// started: the pointer's travel from that point is applied to the split the
+/// drag began with, so the divider never jumps to the pointer and no rounding
+/// error accumulates.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PaneSplitDrag {
+    /// The pointer's x when the drag started.
+    pub(crate) start_x: gpui_kit::Pixels,
+}
+
 /// Modal and popover input state owned by the view while a prompt is open.
 pub(crate) struct ModalInputsUi {
     /// Draft name for the active transfer-conflict rename decision. It is

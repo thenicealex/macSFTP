@@ -13,8 +13,8 @@ use macsftp_ui::{
 
 use crate::palette_commands::labeled_shortcut;
 use crate::resources::ActiveResources;
-use crate::workspace::PaneSide;
 use crate::workspace::overlay::OverlayFade;
+use crate::workspace::{PaneSide, pane_split, view_state};
 
 /// Left inset of the transparent titlebar reserved for the native macOS
 /// traffic lights (`TitlebarOptions::traffic_light_position`).
@@ -81,6 +81,24 @@ impl DragPayload {
                 EntryPath::Local(_) => None,
             })
             .collect()
+    }
+}
+
+/// GPUI drag payload for the pane divider: the split the drag started from,
+/// so the divider can follow the pointer 1:1 from wherever it was grabbed.
+#[derive(Clone, Debug)]
+pub(crate) struct PaneSplitDragValue;
+
+/// Empty drag preview: the divider itself is the feedback, so no ghost is drawn.
+pub(crate) struct PaneSplitDragGhost;
+
+impl gpui_kit::Render for PaneSplitDragGhost {
+    fn render(
+        &mut self,
+        _window: &mut gpui_kit::Window,
+        _cx: &mut gpui_kit::Context<Self>,
+    ) -> impl gpui_kit::IntoElement {
+        div().w(px(1.0)).h(px(1.0))
     }
 }
 
@@ -315,6 +333,84 @@ impl crate::workspace::Workspace {
                 )
                 .into_any_element(),
         )
+    }
+
+    /// The divider between the two panes, with its drag behavior.
+    pub(crate) fn render_pane_divider(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme().clone();
+        let divider = crate::workspace::panes::render_pane_divider(self.pane_split_ratio, &theme);
+        divider
+            .on_mouse_down(
+                gpui_kit::MouseButton::Left,
+                cx.listener(
+                    move |workspace, event: &gpui_kit::MouseDownEvent, window, cx| {
+                        workspace.pane_split_drag = Some(view_state::PaneSplitDrag {
+                            start_x: event.position.x,
+                        });
+                        cx.set_active_drag_cursor_style(
+                            gpui_kit::CursorStyle::ResizeLeftRight,
+                            window,
+                        );
+                        cx.notify();
+                    },
+                ),
+            )
+            // GPUI only delivers drag events once a drag is registered; the
+            // value carries the split the drag started from so the divider can
+            // follow the pointer 1:1 from wherever it was grabbed.
+            .on_drag(PaneSplitDragValue, {
+                let workspace_entity = cx.entity();
+                move |_value, _offset, window, cx| {
+                    let start_x = window.mouse_position().x;
+                    workspace_entity.update(cx, |workspace, cx| {
+                        workspace.pane_split_drag = Some(view_state::PaneSplitDrag { start_x });
+                        cx.set_active_drag_cursor_style(
+                            gpui_kit::CursorStyle::ResizeLeftRight,
+                            window,
+                        );
+                        cx.notify();
+                    });
+                    cx.new(|_| PaneSplitDragGhost)
+                }
+            })
+            .on_drag_move(cx.listener(
+                |workspace, event: &gpui_kit::DragMoveEvent<PaneSplitDragValue>, window, cx| {
+                    if workspace.pane_split_drag.is_none() {
+                        return;
+                    }
+                    // The divider follows the pointer 1:1 from where it was
+                    // grabbed: the pointer's travel since the drag started is
+                    // applied to the ratio the drag started from, so no
+                    // rounding error accumulates and the divider does not jump
+                    // to the pointer on the first move.
+                    let content_width = window.viewport_size().width;
+                    let drag_start_x = workspace
+                        .pane_split_drag
+                        .map(|drag| drag.start_x)
+                        .unwrap_or(event.event.position.x);
+                    let divider_x = drag_start_x + (event.event.position.x - drag_start_x);
+                    let ratio = pane_split::split_ratio_for_pointer(
+                        divider_x,
+                        content_width,
+                        pane_split::DIVIDER_WIDTH,
+                    );
+                    workspace.pane_split_ratio = ratio;
+                    cx.set_active_drag_cursor_style(gpui_kit::CursorStyle::ResizeLeftRight, window);
+                    cx.notify();
+                },
+            ))
+            .on_mouse_up(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|workspace, _event, _window, cx| {
+                    if workspace.pane_split_drag.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
     }
 
     pub(crate) fn render_pane(
@@ -1279,10 +1375,17 @@ impl crate::workspace::Workspace {
             list.into_any_element()
         };
 
+        // The panes share the content area by flex weight, so the divider's
+        // ratio decides how much each side gets (see `pane_split`). The three
+        // flex properties together are what `flex_1()` does: the grow factor
+        // carries the ratio, and shrink 1 with a zero basis keeps both panes
+        // collapsible instead of letting a long path push the other one out.
         div()
             .flex()
             .flex_col()
-            .flex_1()
+            .flex_grow(self.pane_split_weight(side))
+            .flex_shrink_1()
+            .flex_basis(gpui_kit::relative(0.0))
             .min_w_0()
             .key_context("FilePane")
             .track_focus(self.pane_focus(side))
@@ -1307,6 +1410,13 @@ impl crate::workspace::Workspace {
                 "local-file-pane"
             } else {
                 "remote-file-pane"
+            })
+            .debug_selector(move || {
+                if side == PaneSide::Local {
+                    "local-file-pane".into()
+                } else {
+                    "remote-file-pane".into()
+                }
             })
             .on_mouse_up(
                 gpui_kit::MouseButton::Right,

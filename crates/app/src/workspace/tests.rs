@@ -11018,3 +11018,96 @@ fn copying_a_recent_endpoint_copies_user_host_port(cx: &mut TestAppContext) {
         );
     });
 }
+
+/// The divider between the panes sets how much width each side gets, and the
+/// split survives a window resize because it is stored as a ratio.
+#[gpui_kit::test]
+fn pane_divider_sets_the_split_between_the_panes(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.simulate_resize(size(px(1200.0), px(800.0)));
+    cx.run_until_parked();
+
+    let local_before = cx
+        .debug_bounds("local-file-pane")
+        .expect("local pane is laid out");
+    let remote_before = cx
+        .debug_bounds("remote-file-pane")
+        .expect("remote pane is laid out");
+    let divider = cx
+        .debug_bounds("pane-divider")
+        .expect("the divider is laid out");
+    assert!(
+        divider.left() >= local_before.right() - px(1.0)
+            && divider.right() <= remote_before.left() + px(1.0),
+        "the divider sits between the panes: {divider:?} {local_before:?} {remote_before:?}"
+    );
+    let total = local_before.size.width + remote_before.size.width;
+    let local_share = local_before.size.width / total;
+    assert!(
+        (local_share - 0.5).abs() < 0.02,
+        "the panes start evenly split: {local_share}"
+    );
+
+    // Dragging the divider gives the local pane less room.
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.pane_split_ratio = 0.3;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let local_after = cx
+        .debug_bounds("local-file-pane")
+        .expect("local pane is laid out");
+    let remote_after = cx
+        .debug_bounds("remote-file-pane")
+        .expect("remote pane is laid out");
+    let total_after = local_after.size.width + remote_after.size.width;
+    let share = local_after.size.width / total_after;
+    assert!(
+        (share - 0.3).abs() < 0.02,
+        "the divider's ratio drives the split: {share}"
+    );
+
+    // The ratio survives a window resize.
+    cx.simulate_resize(size(px(900.0), px(600.0)));
+    cx.run_until_parked();
+    let local_resized = cx
+        .debug_bounds("local-file-pane")
+        .expect("local pane is laid out");
+    let remote_resized = cx
+        .debug_bounds("remote-file-pane")
+        .expect("remote pane is laid out");
+    let total_resized = local_resized.size.width + remote_resized.size.width;
+    let share_resized = local_resized.size.width / total_resized;
+    assert!(
+        (share_resized - 0.3).abs() < 0.02,
+        "the ratio survives a resize: {share_resized}"
+    );
+}
+
+/// The divider stops where a pane would become unusable.
+#[gpui_kit::test]
+fn pane_divider_stops_at_the_usable_limits(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.simulate_resize(size(px(1200.0), px(800.0)));
+    cx.run_until_parked();
+
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.pane_split_ratio = 0.0;
+        cx.notify();
+    });
+    cx.run_until_parked();
+    let local = cx
+        .debug_bounds("local-file-pane")
+        .expect("local pane is laid out");
+    let remote = cx
+        .debug_bounds("remote-file-pane")
+        .expect("remote pane is laid out");
+    assert!(
+        local.size.width > px(0.0) && remote.size.width > px(0.0),
+        "neither pane collapses: {local:?} {remote:?}"
+    );
+    assert!(
+        local.size.width / (local.size.width + remote.size.width) >= 0.2,
+        "the local pane keeps a usable share"
+    );
+}

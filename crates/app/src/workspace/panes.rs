@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use gpui_kit::{
     App, ClickEvent, ClipboardItem, Context, KeyDownEvent, ScrollStrategy, UniformListScrollHandle,
-    Window,
+    Window, div,
 };
 use macsftp_core::{
     AppCommand, ConnectionState, DisconnectReason, EntryPath, FileKind, FileSortField, LocalPath,
@@ -29,6 +29,19 @@ pub const PAGE_SIZE: usize = 10;
 const LOCAL_LOADING_STATUS: &str = "Loading files on your Mac…";
 
 impl crate::workspace::Workspace {
+    /// Flex weight of a pane in the shared content area.
+    ///
+    /// The weights are the split ratio and its complement, so the divider's
+    /// position is the ratio of the total: dragging to 30% gives the local
+    /// pane 0.3 and the remote pane 0.7.
+    pub(crate) fn pane_split_weight(&self, side: PaneSide) -> f32 {
+        let ratio = pane_split::clamp_split_ratio(self.pane_split_ratio);
+        match side {
+            PaneSide::Local => ratio,
+            PaneSide::Remote => 1.0 - ratio,
+        }
+    }
+
     pub(crate) fn focus_pane(
         &mut self,
         side: PaneSide,
@@ -1250,4 +1263,35 @@ impl crate::workspace::Workspace {
             }
         }
     }
+}
+
+/// The divider between the local and remote panes: a one-pixel rule with a
+/// wider invisible hit target, so it is easy to grab without looking heavy.
+pub(crate) fn render_pane_divider(
+    ratio: f32,
+    theme: &macsftp_ui::Theme,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let _ = ratio;
+    div()
+        .id("pane-divider")
+        .debug_selector(|| "pane-divider".into())
+        .flex_none()
+        // The divider occupies one pixel of layout — a wider gutter would cost
+        // a narrow window real space — while the grab target is the hit box
+        // that overflows it on both sides.
+        .w(pane_split::DIVIDER_WIDTH)
+        .h_full()
+        .relative()
+        .cursor_col_resize()
+        // The rule sits in the middle of the divider's box; the rest of the
+        // box is transparent but still grabbable.
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(pane_split::DIVIDER_WIDTH / 2.0 - pane_split::DIVIDER_RULE_WIDTH / 2.0)
+                .w(pane_split::DIVIDER_RULE_WIDTH)
+                .bg(theme.colors.border),
+        )
 }

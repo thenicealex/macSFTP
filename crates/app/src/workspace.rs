@@ -192,6 +192,14 @@ pub struct Workspace {
     tab_mru: Vec<TabId>,
     tab_switcher: view_state::TabSwitcherUi,
 
+    /// Share of the content area given to the local pane, adjustable by
+    /// dragging the divider between the panes.
+    pane_split_ratio: f32,
+    /// The divider drag in flight: the pointer's x when the drag started and
+    /// the split ratio at that moment, so the panes follow the pointer 1:1
+    /// instead of accumulating rounding error.
+    pane_split_drag: Option<view_state::PaneSplitDrag>,
+
     /// Active-tab type-to-filter state (cleared on tab switch / navigate).
     local: view_state::PaneUi,
     remote: view_state::PaneUi,
@@ -301,6 +309,8 @@ impl Workspace {
             palette: view_state::CommandPaletteUi::new(),
             tab_mru: Vec::new(),
             tab_switcher: view_state::TabSwitcherUi::new(),
+            pane_split_ratio: pane_split::DEFAULT_SPLIT_RATIO,
+            pane_split_drag: None,
             local: view_state::PaneUi::new(),
             remote: view_state::PaneUi::new(),
             remote_empty_scroll: gpui_kit::ScrollHandle::new(),
@@ -1268,6 +1278,7 @@ impl Render for Workspace {
                 .flex_1()
                 .min_h_0()
                 .child(self.render_pane(PaneSide::Local, window, cx))
+                .child(self.render_pane_divider(window, cx))
                 .child(self.render_pane(PaneSide::Remote, window, cx))
                 .into_any_element()
         } else {
@@ -1591,6 +1602,7 @@ mod helpers;
 mod modals;
 mod nav;
 mod overlay;
+mod pane_split;
 mod panes;
 mod profiles;
 mod remote_edit;
