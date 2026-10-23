@@ -441,7 +441,7 @@ impl crate::workspace::Workspace {
                         "This location wasn’t found."
                     };
                     self.go_to_path.error = Some(message.into());
-                    self.status_message = Some(message.into());
+                    self.show_status(message.into(), cx);
                     cx.notify();
                     return;
                 }

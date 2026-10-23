@@ -143,12 +143,12 @@ impl crate::workspace::Workspace {
         let side = self.focused_side;
         let entries = self.selected_fs_entries(side);
         if entries.is_empty() {
-            self.status_message = Some("Select files or folders to delete.".into());
+            self.show_status("Select files or folders to delete.".into(), cx);
             cx.notify();
             return;
         }
         let Some(scope) = self.fs_scope_for_side(side) else {
-            self.status_message = Some("Connect to the server before deleting files.".into());
+            self.show_status("Connect to the server before deleting files.".into(), cx);
             cx.notify();
             return;
         };
@@ -204,12 +204,12 @@ impl crate::workspace::Workspace {
         let side = self.focused_side;
         let mut entries = self.selected_fs_entries(side);
         if entries.len() != 1 {
-            self.status_message = Some("Select one file or folder to rename.".into());
+            self.show_status("Select one file or folder to rename.".into(), cx);
             cx.notify();
             return;
         }
         if side == PaneSide::Remote && self.fs_scope_for_side(side).is_none() {
-            self.status_message = Some("Connect to the server before renaming files.".into());
+            self.show_status("Connect to the server before renaming files.".into(), cx);
             cx.notify();
             return;
         }
@@ -247,7 +247,7 @@ impl crate::workspace::Workspace {
             }
         };
         let Some(parent) = parent else {
-            self.status_message = Some("No folder is open.".into());
+            self.show_status("No folder is open.".into(), cx);
             cx.notify();
             return;
         };
@@ -294,7 +294,7 @@ impl crate::workspace::Workspace {
             }
         }
         let Some(scope) = self.fs_scope_for_side(edit.side) else {
-            self.status_message = Some("Not Connected".into());
+            self.show_status("Not Connected".into(), cx);
             cx.notify();
             return;
         };
@@ -356,7 +356,7 @@ impl crate::workspace::Workspace {
                 if !self.send_command(AppCommand::Fs(command), cx) {
                     return;
                 }
-                self.status_message = Some("Working…".into());
+                self.show_status("Working…".into(), cx);
                 cx.notify();
             }
         }
@@ -373,7 +373,7 @@ impl crate::workspace::Workspace {
             Some(FsPath::Local(path)) => Some(path),
             _ => None,
         };
-        self.status_message = Some("Working…".into());
+        self.show_status("Working…".into(), cx);
         cx.notify();
         let operation_task = cx
             .background_executor()
@@ -402,7 +402,7 @@ impl crate::workspace::Workspace {
         cx: &mut Context<Self>,
     ) {
         // Keep the listing visible; phase 1 reports via status bar only.
-        self.status_message = Some(format!("{}: {}", failure.title, failure.message).into());
+        self.show_status(format!("{}: {}", failure.title, failure.message).into(), cx);
         cx.notify();
     }
 
@@ -411,7 +411,7 @@ impl crate::workspace::Workspace {
         let Some(entry) = entries.first() else {
             // Reachable from the palette with the server pane focused, so say
             // what the command needs instead of doing nothing (§8).
-            self.status_message = Some("Select one file or folder to show in Finder.".into());
+            self.show_status("Select one file or folder to show in Finder.".into(), cx);
             cx.notify();
             return;
         };

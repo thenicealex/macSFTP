@@ -392,10 +392,9 @@ impl crate::workspace::Workspace {
                                     };
                                     if target_diverged {
                                         form.detach_from_profile();
-                                        workspace.status_message = Some(
+                                        workspace.show_status(
                                             "Saved credentials cleared because connection details were changed."
-                                                .into(),
-                                        );
+                                                .into(),cx);
                                     }
                                 }
                             }

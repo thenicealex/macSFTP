@@ -563,13 +563,13 @@ impl crate::workspace::Workspace {
             });
         }
         if can_retry_transfer(job) {
+            let workspace = workspace.clone();
             row = row.on_retry(move |_event, _window, cx| {
                 workspace.update(cx, |workspace, cx| {
                     workspace.retry_transfer(job_id, cx);
                 });
             });
         }
-
         row
     }
     /// Count of selected paths on the focused pane (local or remote).
@@ -628,8 +628,8 @@ impl crate::workspace::Workspace {
         if selected_count > 0 {
             spoken.push_str(&format!(", {selected_count} selected"));
         }
-        if let Some(message) = &self.status_message {
-            spoken.push_str(&format!(", {message}"));
+        if let Some(line) = &self.status_message {
+            spoken.push_str(&format!(", {}", line.message));
         }
 
         div()
@@ -670,11 +670,12 @@ impl crate::workspace::Workspace {
                                 .child(format!("{selected_count} selected")),
                         )
                     })
-                    .children(
-                        self.status_message.clone().map(|message| {
-                            div().min_w_0().truncate().child(format!("— {message}"))
-                        }),
-                    ),
+                    .children(self.status_message.clone().map(|line| {
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .child(format!("— {}", line.message))
+                    })),
             )
             .child(
                 div()

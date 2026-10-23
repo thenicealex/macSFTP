@@ -15,6 +15,8 @@ based on Keep a Changelog, and releases use semantic versioning.
 
 ### Changed
 
+- Status-bar messages now expire after six seconds instead of lingering until
+  the next action happens to overwrite them.
 - Finishing an upload or download now re-reads the pane that received the
   files, so new names appear without pressing ⌘R. The reload keeps the pane's
   selection and scroll position, and leaves panes showing other folders alone.

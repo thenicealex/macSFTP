@@ -24,6 +24,10 @@ use macsftp_core::HistoryOp;
 /// Visible-list page step for PageUp / PageDown (design §3).
 pub const PAGE_SIZE: usize = 10;
 
+/// The status line a local directory read announces while in flight; the
+/// completed read retires exactly this line, nothing else.
+const LOCAL_LOADING_STATUS: &str = "Loading files on your Mac…";
+
 impl crate::workspace::Workspace {
     pub(crate) fn focus_pane(
         &mut self,
@@ -449,7 +453,7 @@ impl crate::workspace::Workspace {
         };
         let tab_id = tab.id;
         let Some((session_epoch, _)) = connected_transfer_session(tab) else {
-            self.status_message = Some("Connect to the server before opening this item.".into());
+            self.show_status("Connect to the server before opening this item.".into(), cx);
             cx.notify();
             return false;
         };
@@ -529,7 +533,7 @@ impl crate::workspace::Workspace {
         };
         let request_epoch = tab.local.begin_local_read();
         if !preserve_view && self.state.tabs.active_tab_id == Some(tab_id) {
-            self.status_message = Some("Loading files on your Mac…".into());
+            self.show_status(LOCAL_LOADING_STATUS.into(), cx);
         }
         let read_path = path.clone();
         let read_task = cx
@@ -550,7 +554,15 @@ impl crate::workspace::Workspace {
                         macsftp_core::sort_entries(&mut entries, &tab.sort);
                         tab.local.entries = entries;
                         tab.local.error = None;
-                        if is_active {
+                        // Retire only this read's own loading line: a message
+                        // the user earned while the folder was loading (a path
+                        // copy, an error) must survive the listing landing.
+                        if is_active
+                            && workspace
+                                .status_message
+                                .as_ref()
+                                .is_some_and(|line| line.message == LOCAL_LOADING_STATUS)
+                        {
                             workspace.status_message = None;
                         }
                     }
@@ -1122,7 +1134,7 @@ impl crate::workspace::Workspace {
             format!("{} paths copied", paths.len())
         };
         cx.write_to_clipboard(ClipboardItem::new_string(paths.join("\n")));
-        self.status_message = Some(message.into());
+        self.show_status(message.into(), cx);
         cx.notify();
     }
     pub(crate) fn toggle_selection_at(

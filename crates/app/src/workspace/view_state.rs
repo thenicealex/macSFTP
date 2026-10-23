@@ -44,6 +44,58 @@ pub(crate) struct TypeSelect {
     last_input: Option<Instant>,
 }
 
+/// A transient line in the status bar.
+///
+/// Status messages report the outcome of one action (a copy, a save, a failed
+/// link) and stay true only for that moment. Without an expiry the bar keeps
+/// rendering the last message until the user happens to trigger something else,
+/// so a "Path copied" line from ten minutes ago still reads as the app's current
+/// state. `Workspace::show_status` arms a one-shot timer when the message is set;
+/// the message is dropped there, not here.
+#[derive(Debug, Clone)]
+pub(crate) struct StatusLine {
+    pub(crate) message: gpui_kit::SharedString,
+}
+
+impl StatusLine {
+    /// How long a transient status line stays on screen. Long enough to read a
+    /// path or an error, short enough that it does not fossilise; anything the
+    /// user must act on lives in a modal or the pane, not here.
+    pub(crate) const LIFETIME: Duration = Duration::from_secs(6);
+
+    pub(crate) fn new(message: impl Into<gpui_kit::SharedString>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl From<String> for StatusLine {
+    fn from(message: String) -> Self {
+        Self::new(message)
+    }
+}
+
+impl From<&str> for StatusLine {
+    fn from(message: &str) -> Self {
+        Self::new(message)
+    }
+}
+
+impl From<gpui_kit::SharedString> for StatusLine {
+    fn from(message: gpui_kit::SharedString) -> Self {
+        Self::new(message)
+    }
+}
+
+impl std::ops::Deref for StatusLine {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.message
+    }
+}
+
 impl TypeSelect {
     /// Keystrokes closer together than this extend the same prefix.
     pub(crate) const CONTINUATION_WINDOW: Duration = Duration::from_millis(1000);

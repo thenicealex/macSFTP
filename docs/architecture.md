@@ -204,6 +204,7 @@ Profile 更新由 `ProfileStore` 协调：校验请求和 route → 写入或读
 - 路径栏按功能成组：导航（后退、前进、上级、刷新）、面包屑、文件操作（复制路径、隐藏文件、新建文件夹、删除）、传输（上传或下载）；组间用 1px 竖线分隔，图标命中区保持冻结的 26×22，窄 pane 下优先保证面包屑的末段（当前目录）可见。
 - 空状态只提供下一步操作（如 `Open Connection`、`Choose Local Folder`、`Retry`），不含长篇功能说明。
 - 文件列表、传输列表、tab、路径栏和状态栏保持紧凑；组件高度稳定，hover、loading、progress 不引发布局变化。
+- 状态栏消息是单次动作的瞬时结果，必须过期（`StatusLine::LIFETIME`，6s）：`show_status` 在写入时启动一次性 timer，到点用 generation guard 清除自己的那条，更晚的消息不能被更早的 timer 清掉。后台目录读取只允许退役自己设置的 "Loading files on your Mac…" 行，不得清除用户在加载期间得到的其它消息。
 
 ### 12.2 交互入口
 

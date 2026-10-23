@@ -108,13 +108,16 @@ impl Workspace {
             return;
         };
         if phase != EditPhase::Editing {
-            self.status_message = Some(match phase {
-                EditPhase::Downloading => "Your copy is still downloading.".into(),
-                EditPhase::CheckingRemote => "The server file is already being checked.".into(),
-                EditPhase::UploadingBack => "Your changes are already uploading.".into(),
-                EditPhase::RemoteConflict => "Review the server file’s changes first.".into(),
-                EditPhase::Editing => "Your copy is ready to edit.".into(),
-            });
+            self.show_status(
+                match phase {
+                    EditPhase::Downloading => "Your copy is still downloading.".into(),
+                    EditPhase::CheckingRemote => "The server file is already being checked.".into(),
+                    EditPhase::UploadingBack => "Your changes are already uploading.".into(),
+                    EditPhase::RemoteConflict => "Review the server file’s changes first.".into(),
+                    EditPhase::Editing => "Your copy is ready to edit.".into(),
+                },
+                cx,
+            );
             cx.notify();
             return;
         }
@@ -126,7 +129,7 @@ impl Workspace {
             return;
         };
         let Some((session_epoch, connection_key)) = connected_edit_session(tab) else {
-            self.status_message = Some("Reconnect before uploading your changes.".into());
+            self.show_status("Reconnect before uploading your changes.".into(), cx);
             cx.notify();
             return;
         };
@@ -148,9 +151,10 @@ impl Workspace {
                     session.pending_check_id = None;
                     session.checking_local_mtime = None;
                 }
-                self.status_message = Some(
+                self.show_status(
                     "Your edited copy couldn’t be read. Check file permissions and try again."
                         .into(),
+                    cx,
                 );
                 cx.notify();
                 return;
@@ -172,7 +176,7 @@ impl Workspace {
             path: session.io_path,
         });
         if self.send_command(command, cx) {
-            self.status_message = Some("Checking the server file before uploading…".into());
+            self.show_status("Checking the server file before uploading…".into(), cx);
         } else if let Some(session) = cx.resources_mut().edit_sessions.get_mut(session_id) {
             session.phase = EditPhase::Editing;
             session.pending_check_id = None;
@@ -208,7 +212,7 @@ impl Workspace {
             return;
         };
         let Some((session_epoch, connection_key)) = connected_edit_session(tab) else {
-            self.status_message = Some("Connect to the server before editing.".into());
+            self.show_status("Connect to the server before editing.".into(), cx);
             cx.notify();
             return;
         };
@@ -237,7 +241,7 @@ impl Workspace {
                         .is_ok_and(|workspace| workspace.owns_tab(existing_tab_id))
                 });
             if owner_is_live {
-                self.status_message = Some(match existing_phase {
+                self.show_status(match existing_phase {
                     EditPhase::RemoteConflict => {
                         "The link now points somewhere else. Resolve the open edit before reopening it."
                             .into()
@@ -246,7 +250,7 @@ impl Workspace {
                         "The link now points somewhere else. Finish the open edit before reopening it."
                             .into()
                     }
-                });
+                }, cx);
                 cx.notify();
                 return;
             }
@@ -278,7 +282,7 @@ impl Workspace {
                         .is_ok_and(|workspace| workspace.owns_tab(existing_tab_id))
                 });
             if owner_is_live {
-                self.status_message = Some(match existing_phase {
+                self.show_status(match existing_phase {
                     EditPhase::Editing | EditPhase::UploadingBack => {
                         let config = cx.resources().config.config();
                         let file_name = std::path::Path::new(existing_temp_path.as_str())
@@ -305,7 +309,7 @@ impl Workspace {
                     EditPhase::RemoteConflict => {
                         "Review the server file’s changes before reopening.".into()
                     }
-                });
+                }, cx);
                 cx.notify();
                 return;
             }
@@ -389,7 +393,7 @@ impl Workspace {
             conflict_policy: ConflictPolicy::OverwriteAll,
         });
         if self.send_command(command, cx) {
-            self.status_message = Some("Opening your copy…".into());
+            self.show_status("Opening your copy…".into(), cx);
             cx.notify();
         } else {
             // The command never entered the channel (full/closed). The
@@ -417,12 +421,12 @@ impl Workspace {
         };
         let Some(tab) = self.state.tabs.find_tab(pending.tab_id) else {
             // The tab closed while the modal was open; nothing to edit into.
-            self.status_message = Some("Connect to the server before editing.".into());
+            self.show_status("Connect to the server before editing.".into(), cx);
             cx.notify();
             return;
         };
         let Some((session_epoch, connection_key)) = connected_edit_session(tab) else {
-            self.status_message = Some("Connect to the server before editing.".into());
+            self.show_status("Connect to the server before editing.".into(), cx);
             cx.notify();
             return;
         };

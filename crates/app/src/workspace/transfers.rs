@@ -13,17 +13,17 @@ impl crate::workspace::Workspace {
             return;
         };
         let Some((session_epoch, profile_id)) = connected_transfer_session(tab) else {
-            self.status_message = Some("Connect to the server before uploading.".into());
+            self.show_status("Connect to the server before uploading.".into(), cx);
             cx.notify();
             return;
         };
         let Some(remote_directory) = tab.remote.path.clone() else {
-            self.status_message = Some("Choose a destination folder on the server.".into());
+            self.show_status("Choose a destination folder on the server.".into(), cx);
             cx.notify();
             return;
         };
         if sources.is_empty() {
-            self.status_message = Some("Select files or folders on your Mac to upload.".into());
+            self.show_status("Select files or folders on your Mac to upload.".into(), cx);
             cx.notify();
             return;
         }
@@ -61,7 +61,7 @@ impl crate::workspace::Workspace {
         });
         if self.send_command(command, cx) {
             self.transfer_drawer.open = true;
-            self.status_message = Some("Preparing upload…".into());
+            self.show_status("Preparing upload…".into(), cx);
             cx.notify();
         }
     }
@@ -70,17 +70,20 @@ impl crate::workspace::Workspace {
             return;
         };
         let Some((session_epoch, profile_id)) = connected_transfer_session(tab) else {
-            self.status_message = Some("Connect to the server before downloading.".into());
+            self.show_status("Connect to the server before downloading.".into(), cx);
             cx.notify();
             return;
         };
         let Some(local_directory) = tab.local.path.clone() else {
-            self.status_message = Some("Choose a destination folder on your Mac.".into());
+            self.show_status("Choose a destination folder on your Mac.".into(), cx);
             cx.notify();
             return;
         };
         if sources.is_empty() {
-            self.status_message = Some("Select files or folders on the server to download.".into());
+            self.show_status(
+                "Select files or folders on the server to download.".into(),
+                cx,
+            );
             cx.notify();
             return;
         }
@@ -104,7 +107,7 @@ impl crate::workspace::Workspace {
             let destination = match destination_for(&source) {
                 Ok(destination) => destination,
                 Err(message) => {
-                    self.status_message = Some(message.into());
+                    self.show_status(message.into(), cx);
                     cx.notify();
                     return;
                 }
@@ -126,11 +129,14 @@ impl crate::workspace::Workspace {
         }
         if queued > 0 {
             self.transfer_drawer.open = true;
-            self.status_message = Some(if queued == 1 {
-                "Preparing download…".into()
-            } else {
-                format!("Preparing {queued} downloads…").into()
-            });
+            self.show_status(
+                if queued == 1 {
+                    "Preparing download…".into()
+                } else {
+                    format!("Preparing {queued} downloads…").into()
+                },
+                cx,
+            );
             cx.notify();
         }
     }

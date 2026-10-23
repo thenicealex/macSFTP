@@ -131,7 +131,10 @@ pub struct Workspace {
     transfer_drawer: view_state::TransferDrawerUi,
 
     default_local_path: LocalPath,
-    status_message: Option<SharedString>,
+    status_message: Option<view_state::StatusLine>,
+    /// Bumped on every `show_status` so an older expiry timer cannot clear a
+    /// newer line that replaced it.
+    status_generation: u64,
     /// The link resolution whose “Checking the link…” line is still showing.
     /// Held here so a dropped result (tab switched, directory changed) can clear
     /// its own status without clobbering a newer message.
@@ -250,6 +253,7 @@ impl Workspace {
 
             default_local_path,
             status_message: None,
+            status_generation: 0,
             pending_link_check: None,
             config_error,
             log_file,
@@ -631,12 +635,12 @@ impl Workspace {
         match self.runtime_client.try_send(command) {
             Ok(()) => true,
             Err(CommandDispatchError::ChannelFull) => {
-                self.status_message = Some(STATUS_BUSY_TRY_AGAIN.into());
+                self.show_status(STATUS_BUSY_TRY_AGAIN.into(), cx);
                 cx.notify();
                 false
             }
             Err(CommandDispatchError::ChannelClosed) => {
-                self.status_message = Some(STATUS_CONNECTION_SERVICE_UNAVAILABLE.into());
+                self.show_status(STATUS_CONNECTION_SERVICE_UNAVAILABLE.into(), cx);
                 cx.notify();
                 false
             }
@@ -786,13 +790,41 @@ impl Workspace {
         if !self.owns_tab(tab_id) {
             return false;
         }
-        self.status_message = Some(message.into());
-        cx.notify();
+        self.show_status(message.into(), cx);
         true
     }
+
+    /// Put a transient line in the status bar and arrange for it to go away.
+    ///
+    /// The message reports the outcome of one action, so it must not outlive
+    /// that moment: without an expiry the bar keeps showing it until the user
+    /// happens to trigger something else, and a stale "Path copied" reads as the
+    /// app's current state. The timer is dropped with the workspace, and a newer
+    /// message replaces this one via its own timer; the generation check keeps an
+    /// older timer from clearing a newer line.
+    pub(crate) fn show_status(&mut self, message: view_state::StatusLine, cx: &mut Context<Self>) {
+        self.status_generation = self.status_generation.wrapping_add(1);
+        let generation = self.status_generation;
+        self.status_message = Some(message);
+        cx.notify();
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |workspace, cx| {
+            executor.timer(view_state::StatusLine::LIFETIME).await;
+            let _ = workspace.update(cx, |workspace, cx| {
+                if workspace.status_generation != generation {
+                    return;
+                }
+                if workspace.status_message.take().is_some() {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     #[cfg(test)]
     pub(crate) fn status_message_for_test(&self) -> Option<String> {
-        self.status_message.as_ref().map(|s| s.to_string())
+        self.status_message.as_ref().map(|s| s.message.to_string())
     }
 
     /// Show the shared “Checking the link…” line and remember which entry owns
@@ -811,7 +843,7 @@ impl Workspace {
             entry,
             session_epoch,
         });
-        self.status_message = Some(LINK_CHECK_STATUS.into());
+        self.show_status(LINK_CHECK_STATUS.into(), cx);
         cx.notify();
     }
 
@@ -845,8 +877,8 @@ impl Workspace {
         self.pending_link_check = None;
         if self
             .status_message
-            .as_deref()
-            .is_some_and(|message| message == LINK_CHECK_STATUS)
+            .as_ref()
+            .is_some_and(|line| line.message == LINK_CHECK_STATUS)
         {
             self.status_message = None;
         }
@@ -858,8 +890,8 @@ impl Workspace {
         if self.pending_link_check.take().is_some()
             && self
                 .status_message
-                .as_deref()
-                .is_some_and(|message| message == LINK_CHECK_STATUS)
+                .as_ref()
+                .is_some_and(|line| line.message == LINK_CHECK_STATUS)
         {
             self.status_message = None;
         }

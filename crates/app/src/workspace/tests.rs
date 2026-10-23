@@ -10560,3 +10560,67 @@ fn opening_a_remote_file_never_reaches_the_system_opener(cx: &mut TestAppContext
         "the remote open starts an edit download instead"
     );
 }
+
+/// A status line reports one action's outcome; it must not outlive that moment.
+///
+/// The fixture's home-folder listing is allowed to settle first: its completed
+/// read retires its own loading line, and that path must not touch a message
+/// set afterwards.
+#[gpui_kit::test]
+fn a_status_line_expires_after_its_lifetime(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.run_until_parked();
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.show_status("Path copied: /tmp/a".into(), cx);
+    });
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some("Path copied: /tmp/a")
+        );
+    });
+
+    cx.cx
+        .executor()
+        .advance_clock(crate::workspace::view_state::StatusLine::LIFETIME);
+    cx.run_until_parked();
+
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.status_message_for_test(),
+            None,
+            "the line is gone once its lifetime elapses"
+        );
+    });
+}
+
+/// A newer line must survive an older line's timer firing.
+#[gpui_kit::test]
+fn a_newer_status_line_is_not_cleared_by_an_older_timer(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.run_until_parked();
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.show_status("first".into(), cx);
+    });
+    cx.cx
+        .executor()
+        .advance_clock(crate::workspace::view_state::StatusLine::LIFETIME / 2);
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.show_status("second".into(), cx);
+    });
+
+    // Past the first line's deadline (t=6s), still inside the second line's
+    // (shown at t=3s, deadline t=9s). Only the generation check keeps the older
+    // timer from clearing the newer line.
+    cx.cx.executor().advance_clock(
+        crate::workspace::view_state::StatusLine::LIFETIME / 2 + Duration::from_millis(1),
+    );
+    cx.run_until_parked();
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some("second"),
+            "the older expiry must not clear the newer message"
+        );
+    });
+}
