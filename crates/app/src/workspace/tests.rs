@@ -11272,3 +11272,42 @@ fn grabbing_the_divider_off_centre_does_not_move_it(cx: &mut TestAppContext) {
         );
     });
 }
+
+/// Releasing the divider drag outside the content row still ends it: otherwise
+/// letting go over the tab bar would leave the divider stuck to the pointer.
+#[gpui_kit::test]
+fn releasing_a_divider_drag_outside_the_content_ends_it(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.simulate_resize(size(px(1000.0), px(700.0)));
+    cx.run_until_parked();
+
+    let divider = cx
+        .debug_bounds("pane-divider")
+        .expect("the divider is laid out");
+    let start = divider.center();
+    cx.simulate_event(gpui_kit::MouseDownEvent {
+        position: start,
+        button: gpui_kit::MouseButton::Left,
+        click_count: 1,
+        ..Default::default()
+    });
+    cx.run_until_parked();
+    workspace.read_with(&cx, |workspace, _| {
+        assert!(workspace.pane_split_drag.is_some(), "the drag started");
+    });
+
+    // Release over the tab bar, above the content row.
+    cx.simulate_event(gpui_kit::MouseUpEvent {
+        position: point(start.x, px(6.0)),
+        button: gpui_kit::MouseButton::Left,
+        click_count: 1,
+        ..Default::default()
+    });
+    cx.run_until_parked();
+    workspace.read_with(&cx, |workspace, _| {
+        assert!(
+            workspace.pane_split_drag.is_none(),
+            "a release anywhere in the window ends the drag"
+        );
+    });
+}

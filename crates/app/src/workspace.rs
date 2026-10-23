@@ -1292,12 +1292,6 @@ impl Render for Workspace {
                 .when(self.pane_split_drag.is_some(), |row| {
                     row.cursor_col_resize()
                 })
-                .on_mouse_up(
-                    gpui_kit::MouseButton::Left,
-                    cx.listener(|workspace, _event, _window, cx| {
-                        workspace.finish_pane_divider_drag(cx);
-                    }),
-                )
                 .child(self.render_pane(PaneSide::Local, window, cx))
                 .child(self.render_pane_divider(window, cx))
                 .child(self.render_pane(PaneSide::Remote, window, cx))
@@ -1343,9 +1337,14 @@ impl Render for Workspace {
             .track_focus(&self.workspace_focus)
             // Always attach so clear works even before the tree re-renders
             // after drag start (drawer_resize may still be None on last paint).
+            // Releasing anywhere in the window also ends a pane divider drag:
+            // the content row only sees releases over itself, so letting go
+            // over the tab bar would otherwise leave the divider stuck to the
+            // pointer.
             .on_mouse_up(
                 gpui_kit::MouseButton::Left,
                 cx.listener(|workspace, _event, _window, cx| {
+                    workspace.finish_pane_divider_drag(cx);
                     if workspace.transfer_drawer.resize.take().is_some() {
                         cx.notify();
                     }
