@@ -11400,3 +11400,113 @@ fn switching_the_sign_in_method_drops_the_old_secret_and_the_reveal(cx: &mut Tes
         assert!(!form.show_password, "an agent sign-in reveals nothing");
     });
 }
+
+/// The drawer is not virtualized, so a section builds a bounded page of rows
+/// and offers the rest behind a control. A mass transfer has one row per file.
+#[gpui_kit::test]
+fn a_long_transfer_section_pages_its_rows(cx: &mut TestAppContext) {
+    use macsftp_core::{
+        ConflictPolicy, MetadataPolicy, TransferJob, TransferPlan, TransferPlanSnapshot,
+        TransferPlanState, TransferState,
+    };
+
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    let total = crate::workspace::view_state::TransferDrawerUi::MAX_VISIBLE_ROWS + 5;
+    workspace.update(&mut cx, |_workspace, cx| {
+        for index in 0..total {
+            let id = macsftp_core::TransferId(500 + index as u64);
+            let job = TransferJob {
+                id,
+                direction: TransferDirection::Upload,
+                source: TransferEndpoint::Local(LocalPath::new(format!("/tmp/{index}.txt"))),
+                destination: TransferEndpoint::Remote(RemotePath::new(format!("/srv/{index}.txt"))),
+                state: TransferState::Queued,
+                metadata_policy: MetadataPolicy::default(),
+                conflict_policy: ConflictPolicy::default(),
+                warnings: Vec::new(),
+                created_at: macsftp_core::Timestamp::from_secs_since_epoch(1),
+            };
+            let plan = TransferPlan {
+                id: macsftp_core::TransferPlanId(id.0),
+                root_job_id: id,
+                source_root: job.source.clone(),
+                destination_root: job.destination.clone(),
+                state: TransferPlanState::Queued,
+                planned_count: 1,
+                total_bytes: None,
+                child_jobs: Vec::new(),
+                conflict_policy: ConflictPolicy::default(),
+            };
+            let now = macsftp_core::Timestamp::from_secs_since_epoch(1);
+            cx.apply_transfer_event(
+                &AppEvent::TransferPlanStarted(Box::new(TransferPlanSnapshot {
+                    plan,
+                    root_job: job,
+                })),
+                now,
+            );
+            cx.apply_transfer_event(
+                &AppEvent::TransferCompleted { transfer_id: id },
+                macsftp_core::Timestamp::from_secs_since_epoch(2),
+            );
+        }
+        cx.notify();
+    });
+    cx.simulate_resize(size(px(900.0), px(700.0)));
+    cx.run_until_parked();
+    // A tall drawer keeps the section header and the page inside the scroll
+    // viewport, so the test can click them by position.
+    workspace.update(&mut cx, |workspace, _cx| {
+        workspace.set_drawer_height(px(600.0), px(700.0));
+    });
+    cx.run_until_parked();
+
+    // The Completed section starts collapsed, so nothing is built for it yet.
+    let row_present = |cx: &mut VisualTestContext, id: u64| {
+        cx.update(|window, cx| {
+            window.render_frame(cx);
+            window.try_find(("transfer-row", id)).is_some()
+        })
+    };
+    assert!(
+        !row_present(&mut cx, 500),
+        "a collapsed section builds no rows"
+    );
+
+    // Expanding it builds only the first page.
+    cx.dispatch_action(ShowTransferDrawer);
+    let toggle = cx
+        .debug_bounds("toggle-completed")
+        .expect("the Completed section header is visible");
+    cx.simulate_click(toggle.center(), gpui_kit::Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        row_present(&mut cx, 500),
+        "the first row of the page is built"
+    );
+    let page_end = 500 + crate::workspace::view_state::TransferDrawerUi::MAX_VISIBLE_ROWS as u64;
+    assert!(
+        !row_present(&mut cx, page_end),
+        "rows past the page are not built"
+    );
+    assert!(
+        cx.debug_bounds("toggle-completed-more").is_some(),
+        "the rest is offered behind a control"
+    );
+
+    // The control reveals them. Its own row sits past the page, below the
+    // drawer's viewport, so this drives the transition the control fires
+    // instead of clicking a position that is scrolled out of view.
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.transfer_drawer.set_showing_all(
+            crate::workspace::view_state::TransferSection::Completed,
+            true,
+        );
+        cx.notify();
+    });
+    cx.run_until_parked();
+    assert!(
+        row_present(&mut cx, page_end),
+        "showing all builds the remaining rows"
+    );
+}

@@ -221,13 +221,47 @@ impl GoToPathUi {
     }
 }
 
+/// The four groups the transfer drawer renders, in display order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransferSection {
+    InProgress,
+    Waiting,
+    Completed,
+    Failed,
+}
+
+impl TransferSection {
+    pub(crate) const ALL: [Self; 4] = [
+        Self::InProgress,
+        Self::Waiting,
+        Self::Completed,
+        Self::Failed,
+    ];
+
+    fn index(self) -> usize {
+        match self {
+            Self::InProgress => 0,
+            Self::Waiting => 1,
+            Self::Completed => 2,
+            Self::Failed => 3,
+        }
+    }
+}
+
 /// Transfer drawer visibility, geometry, and section expansion state.
 pub(crate) struct TransferDrawerUi {
     pub(crate) open: bool,
     pub(crate) height: Pixels,
     pub(crate) resize: Option<drawer_height::TransferDrawerResize>,
-    pub(crate) completed_section_expanded: bool,
-    pub(crate) failed_section_expanded: bool,
+    /// Per section: whether the collapsible ones (Complete, Failed) show their
+    /// rows at all. The two live sections always show theirs.
+    expanded_sections: [bool; 4],
+    /// Per section: whether every row is built. A section that is not showing
+    /// everything builds the first [`TransferDrawerUi::MAX_VISIBLE_ROWS`] and
+    /// offers the rest, because the drawer is not virtualized — every row it
+    /// builds is laid out on every frame, and a mass transfer has one row per
+    /// file.
+    show_all_sections: [bool; 4],
     pub(crate) scroll: gpui_kit::ScrollHandle,
     pub(crate) scrollbar: ScrollbarState,
 }
@@ -240,10 +274,44 @@ impl TransferDrawerUi {
             open: true,
             height: drawer_height::DEFAULT_DRAWER_HEIGHT,
             resize: None,
-            completed_section_expanded: false,
-            failed_section_expanded: false,
+            expanded_sections: [false; 4],
+            show_all_sections: [false; 4],
             scroll: gpui_kit::ScrollHandle::new(),
             scrollbar: ScrollbarState::new(),
+        }
+    }
+
+    /// Rows a section renders before it collapses the rest.
+    pub(crate) const MAX_VISIBLE_ROWS: usize = 25;
+
+    pub(crate) fn is_expanded(&self, section: TransferSection) -> bool {
+        self.expanded_sections[section.index()]
+    }
+
+    pub(crate) fn set_expanded(&mut self, section: TransferSection, expanded: bool) {
+        self.expanded_sections[section.index()] = expanded;
+        if !expanded {
+            // A section that is folded away starts its next page over.
+            self.show_all_sections[section.index()] = false;
+        }
+    }
+
+    pub(crate) fn set_showing_all(&mut self, section: TransferSection, show_all: bool) {
+        self.show_all_sections[section.index()] = show_all;
+    }
+
+    pub(crate) fn collapse_all_sections(&mut self) {
+        self.expanded_sections = [false; 4];
+        self.show_all_sections = [false; 4];
+    }
+
+    /// How many rows of `section` to build, and how many are left behind the
+    /// control.
+    pub(crate) fn visible_rows(&self, section: TransferSection, total: usize) -> (usize, usize) {
+        if self.show_all_sections[section.index()] || total <= Self::MAX_VISIBLE_ROWS {
+            (total, 0)
+        } else {
+            (Self::MAX_VISIBLE_ROWS, total - Self::MAX_VISIBLE_ROWS)
         }
     }
 }

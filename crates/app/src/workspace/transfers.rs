@@ -259,8 +259,7 @@ impl crate::workspace::Workspace {
     }
     pub(crate) fn clear_transfer_records(&mut self, cx: &mut Context<Self>) {
         if cx.clear_terminal_transfers() {
-            self.transfer_drawer.completed_section_expanded = false;
-            self.transfer_drawer.failed_section_expanded = false;
+            self.transfer_drawer.collapse_all_sections();
             cx.notify();
         }
     }
