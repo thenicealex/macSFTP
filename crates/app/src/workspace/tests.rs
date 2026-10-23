@@ -11510,3 +11510,80 @@ fn a_long_transfer_section_pages_its_rows(cx: &mut TestAppContext) {
         "showing all builds the remaining rows"
     );
 }
+
+/// "Cancel All Transfers" is reachable the way every frequent command is: a
+/// chord, a menu item and a palette entry, all naming the same action.
+#[gpui_kit::test]
+fn cancel_all_transfers_is_reachable_from_chord_menu_and_palette(cx: &mut TestAppContext) {
+    use crate::app_actions::CancelAllTransfers;
+
+    assert_eq!(
+        crate::palette_commands::labeled_shortcut("Cancel All Transfers", "CancelAllTransfers"),
+        "Cancel All Transfers (⌘.)",
+        "the registry knows the chord, so tooltips and palette rows agree"
+    );
+    assert!(
+        crate::palette_commands::all_palette_commands()
+            .iter()
+            .any(|command| command.id == "CancelAllTransfers"),
+        "the palette lists the command"
+    );
+
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    // Two running transfers, each its own plan.
+    for index in 0..2u64 {
+        let id = TransferId(700 + index);
+        let job = macsftp_core::TransferJob {
+            id,
+            direction: TransferDirection::Upload,
+            source: TransferEndpoint::Local(LocalPath::new(format!("/tmp/{index}.txt"))),
+            destination: TransferEndpoint::Remote(RemotePath::new(format!("/srv/{index}.txt"))),
+            state: TransferState::Running {
+                bytes_done: 0,
+                bytes_total: Some(10),
+                started_at: macsftp_core::Timestamp::from_secs_since_epoch(1),
+            },
+            metadata_policy: macsftp_core::MetadataPolicy::default(),
+            conflict_policy: macsftp_core::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: macsftp_core::Timestamp::from_secs_since_epoch(1),
+        };
+        let plan = macsftp_core::TransferPlan {
+            id: macsftp_core::TransferPlanId(id.0),
+            root_job_id: id,
+            source_root: job.source.clone(),
+            destination_root: job.destination.clone(),
+            state: macsftp_core::TransferPlanState::Queued,
+            planned_count: 1,
+            total_bytes: Some(10),
+            child_jobs: Vec::new(),
+            conflict_policy: macsftp_core::ConflictPolicy::default(),
+        };
+        cx.update(|_window, cx| {
+            cx.apply_transfer_event(
+                &AppEvent::TransferPlanStarted(Box::new(macsftp_core::TransferPlanSnapshot {
+                    plan,
+                    root_job: job,
+                })),
+                macsftp_core::Timestamp::from_secs_since_epoch(1),
+            );
+        });
+    }
+    while channels.command_rx.try_recv().is_ok() {}
+
+    cx.dispatch_action(CancelAllTransfers);
+
+    let mut cancelled = Vec::new();
+    while let Ok(command) = channels.command_rx.try_recv() {
+        if let AppCommand::CancelTransfer { transfer_id, .. } = command {
+            cancelled.push(transfer_id);
+        }
+    }
+    cancelled.sort_by_key(|id| id.0);
+    assert_eq!(
+        cancelled,
+        vec![TransferId(700), TransferId(701)],
+        "the chord cancels every running transfer"
+    );
+    let _ = &workspace;
+}

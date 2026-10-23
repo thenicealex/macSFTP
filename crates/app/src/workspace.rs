@@ -97,10 +97,10 @@ pub(crate) fn open_local_path(cx: &mut App, path: &Path) {
 }
 
 use crate::app_actions::{
-    ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, ConfirmTabSwitcher,
-    ConnectRecent, CopyPath, CopyRecentEndpoint, CopyVersionInfo, DeleteSelection,
-    DownloadSelection, FilterPane, FocusLocalPane, FocusRemotePane, ForgetRecent, GoToPath,
-    MinimizeWindow, NavigateBack, NavigateForward, NewFolder, NewTab, OpenCommandPalette,
+    ActivateNextTab, ActivatePrevTab, CancelActiveModal, CancelAllTransfers, CloseTab,
+    ConfirmTabSwitcher, ConnectRecent, CopyPath, CopyRecentEndpoint, CopyVersionInfo,
+    DeleteSelection, DownloadSelection, FilterPane, FocusLocalPane, FocusRemotePane, ForgetRecent,
+    GoToPath, MinimizeWindow, NavigateBack, NavigateForward, NewFolder, NewTab, OpenCommandPalette,
     OpenLogFolder, OpenProfiles, OpenSelectedEntry, OpenSettings, PageDown, PageUp,
     ParentDirectory, ReconnectTab, RefreshPane, RenameEntry, SelectAllEntries, SelectFirstEntry,
     SelectLastEntry, SelectNextEntry, SelectNextEntryExtend, SelectPrevEntry,
@@ -1402,6 +1402,11 @@ impl Render for Workspace {
             .on_action(cx.listener(|workspace, _: &RefreshPane, window, cx| {
                 workspace.refresh_focused_pane(window, cx);
             }))
+            .on_action(
+                cx.listener(|workspace, _: &CancelAllTransfers, _window, cx| {
+                    workspace.cancel_all_transfers(cx);
+                }),
+            )
             .on_action(cx.listener(|workspace, _: &UploadSelection, _window, cx| {
                 workspace.upload_selection(cx);
             }))

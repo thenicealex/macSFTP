@@ -280,13 +280,17 @@ impl crate::workspace::Workspace {
                 .when(active_jobs.len() + queued_jobs.len() > 0, |header| {
                     let workspace = workspace_entity.clone();
                     header.child(
-                        icon_button("cancel-all-transfers", IconName::Close, "Cancel All")
-                            .icon_color(theme.colors.warning)
-                            .on_click(move |_event, _window, cx| {
-                                workspace.update(cx, |workspace, cx| {
-                                    workspace.cancel_all_transfers(cx);
-                                });
-                            }),
+                        icon_button(
+                            "cancel-all-transfers",
+                            IconName::Close,
+                            labeled_shortcut("Cancel All Transfers", "CancelAllTransfers"),
+                        )
+                        .icon_color(theme.colors.warning)
+                        .on_click(move |_event, _window, cx| {
+                            workspace.update(cx, |workspace, cx| {
+                                workspace.cancel_all_transfers(cx);
+                            });
+                        }),
                     )
                 })
                 .when(completed_jobs.len() + failed_jobs.len() > 0, |header| {

@@ -17,6 +17,7 @@ actions!(
         UploadSelection,
         UploadEditedFile,
         DownloadSelection,
+        CancelAllTransfers,
         OpenCommandPalette,
         ShowTransferDrawer,
         ActivateNextTab,
@@ -133,6 +134,10 @@ pub(crate) fn keybindings() -> Vec<KeyBinding> {
         // bindings on the same chord leave the second one unreachable.
         KeyBinding::new("cmd-shift-u", UploadEditedFile, Some("Workspace")),
         KeyBinding::new("cmd-d", DownloadSelection, Some("Workspace")),
+        // macOS's standard "cancel", so the chord users already reach for while
+        // something is running stops every transfer rather than only the
+        // focused one.
+        KeyBinding::new("cmd-period", CancelAllTransfers, Some("Workspace")),
         KeyBinding::new("down", SelectNextEntry, Some("FilePane")),
         KeyBinding::new("up", SelectPrevEntry, Some("FilePane")),
         KeyBinding::new("shift-down", SelectNextEntryExtend, Some("FilePane")),
