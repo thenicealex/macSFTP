@@ -11587,3 +11587,106 @@ fn cancel_all_transfers_is_reachable_from_chord_menu_and_palette(cx: &mut TestAp
     );
     let _ = &workspace;
 }
+
+/// Finder's Cmd-C / Cmd-V for files: copy on one side, paste on the other, and
+/// the paste is the transfer that moves them.
+#[gpui_kit::test]
+fn copying_then_pasting_into_the_server_pane_uploads(cx: &mut TestAppContext) {
+    use crate::app_actions::{CopyFiles, PasteFiles};
+
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+    let (fixture, base) = temp_local_fixture("copy-paste");
+    for name in ["one.txt", "two.txt"] {
+        std::fs::write(fixture.join(name), b"x").expect("fixture file");
+    }
+    set_local_path_and_wait(&workspace, &mut cx, base);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.focus_pane(PaneSide::Local, window, cx);
+    });
+    cx.dispatch_action(SelectAllEntries);
+    cx.run_until_parked();
+
+    cx.dispatch_action(CopyFiles);
+    cx.run_until_parked();
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.file_clipboard.paths().len(),
+            2,
+            "both selected files are remembered"
+        );
+    });
+
+    // Pasting on the server side is the upload.
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.focus_pane(PaneSide::Remote, window, cx);
+    });
+    cx.dispatch_action(PasteFiles);
+    cx.run_until_parked();
+
+    let command = channels
+        .command_rx
+        .try_recv()
+        .expect("pasting into the server pane starts a transfer");
+    match command {
+        AppCommand::StartTransfer(command) => {
+            assert_eq!(command.direction, TransferDirection::Upload);
+            assert_eq!(command.sources.len(), 2, "both copied files move");
+        }
+        other => panic!("expected StartTransfer, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+/// Pasting into the pane the files already live in says so rather than doing
+/// nothing: a copy within one folder needs a server-side copy this client does
+/// not have.
+#[gpui_kit::test]
+fn pasting_into_the_same_pane_reports_instead_of_moving(cx: &mut TestAppContext) {
+    use crate::app_actions::{CopyFiles, PasteFiles};
+
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+    let (fixture, base) = temp_local_fixture("copy-paste-same");
+    std::fs::write(fixture.join("one.txt"), b"x").expect("fixture file");
+    set_local_path_and_wait(&workspace, &mut cx, base);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.focus_pane(PaneSide::Local, window, cx);
+    });
+    cx.dispatch_action(SelectAllEntries);
+    cx.run_until_parked();
+    while channels.command_rx.try_recv().is_ok() {}
+
+    cx.dispatch_action(CopyFiles);
+    cx.dispatch_action(PasteFiles);
+    cx.run_until_parked();
+
+    assert!(
+        channels.command_rx.try_recv().is_err(),
+        "a same-folder paste starts no transfer"
+    );
+    workspace.read_with(&cx, |workspace, _| {
+        let message = workspace.status_message_for_test().unwrap_or_default();
+        assert!(
+            message.contains("already on your Mac"),
+            "the user is told why nothing moved: {message:?}"
+        );
+    });
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+/// Pasting with nothing copied reports instead of silently doing nothing.
+#[gpui_kit::test]
+fn pasting_an_empty_file_clipboard_reports(cx: &mut TestAppContext) {
+    use crate::app_actions::PasteFiles;
+
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    cx.dispatch_action(PasteFiles);
+    cx.run_until_parked();
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some("Nothing to paste.")
+        );
+    });
+}

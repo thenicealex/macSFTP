@@ -228,6 +228,7 @@ Profile 更新由 `ProfileStore` 协调：校验请求和 route → 写入或读
 - 文件列表必须虚拟化，10k entries 不创建长期 row entity；表头显示排序状态；selection 绑定稳定 id/path，禁止绑定 row index。
 - 键盘导航覆盖上/下、page up/down、home/end、shift 多选和 enter 默认动作；directory、file、symlink 和 hidden row 有可区分但克制的 icon 或 marker；hover action 易于发现但不改变列宽或 row 高度。
 - 聚焦的 pane 里键入字母是 Finder 式 type-select：前缀累积约 1 秒（连续按键继续同一前缀；超时、导航、切 tab、Escape 后重置），跳到第一个匹配项并滚动到它，从当前 selection 之后扫描并在末尾回绕，所以重复按同一字母会依次跳过匹配项；前缀匹配不到时退回最后键入的字符、不改变 selection。列表不缩小、不出现筛选栏。筛选只保留显式入口：⌘F（Filter Files）、菜单/palette 命令或筛选字段本身，筛选栏出现后键入才进入筛选。
+- ⌘C / ⌘V 作用于文件，采用 Finder 语义：⌘C 记住当前 pane 的选区（同时把路径写入系统剪贴板，方便粘到终端），⌘V 在**另一侧** pane 粘贴即触发对应的上传或下载。同一个 pane 内粘贴不做任何搬动，只给出说明——同侧复制需要服务端 copy 能力，当前不提供，不能假装成功。
 - Enter 打开选中项、F2 重命名，不采用 Finder 的 Return=重命名：行内编辑需要 macOS 完整键盘访问的路径，且会让 Enter 的语义随 selection 状态漂移；重命名另有 File 菜单项与 palette 命令，F2 不是唯一入口。
 - 可滚动 surface 使用统一的 theme-aware scrollbar：虚拟列表和普通 scroll container 各自绑定 handle，但共享 overflow、drag、track paging 和 resize 语义。
 - 只在内容溢出时显示 track/thumb，thumb 必须可拖动、track 点击按 viewport 翻页、滚轮与键盘滚动后位置同步；隐藏原生滚动条避免双滚动条。

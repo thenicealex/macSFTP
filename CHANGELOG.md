@@ -11,6 +11,10 @@ based on Keep a Changelog, and releases use semantic versioning.
   them, so a wide listing or a long local path can get the room it needs.
   A pane never shrinks below the width its path bar needs, and a window too
   narrow for both falls back to an even split.
+- **⌘C / ⌘V** work on files: copy a selection in one pane and paste it in the
+  other, and the paste is the upload or download that moves it. The paths also
+  go on the system clipboard. Pasting into the same pane says why nothing moved
+  instead of silently doing nothing.
 - **Go to Folder** (⌘⇧G) opens pre-filled with the folder the pane is showing,
   selected, so reaching a sibling directory means editing one segment instead
   of retyping the whole path.

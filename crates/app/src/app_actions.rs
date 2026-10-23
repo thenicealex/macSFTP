@@ -18,6 +18,8 @@ actions!(
         UploadEditedFile,
         DownloadSelection,
         CancelAllTransfers,
+        CopyFiles,
+        PasteFiles,
         OpenCommandPalette,
         ShowTransferDrawer,
         ActivateNextTab,
@@ -158,6 +160,11 @@ pub(crate) fn keybindings() -> Vec<KeyBinding> {
         KeyBinding::new("cmd-]", NavigateForward, Some("Workspace")),
         KeyBinding::new("cmd-shift-g", GoToPath, Some("Workspace")),
         KeyBinding::new("cmd-f", FilterPane, Some("FilePane")),
+        // Finder's chords for files. An input inside a pane keeps its own
+        // bindings: GPUI matches the deepest focused context first, and GPUI
+        // Base binds cmd-c/cmd-v in "Input".
+        KeyBinding::new("cmd-c", CopyFiles, Some("FilePane")),
+        KeyBinding::new("cmd-v", PasteFiles, Some("FilePane")),
         KeyBinding::new("cmd-shift-c", CopyPath, Some("FilePane")),
         KeyBinding::new("cmd-backspace", DeleteSelection, Some("FilePane")),
         KeyBinding::new("f2", RenameEntry, Some("FilePane")),

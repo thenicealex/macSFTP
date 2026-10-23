@@ -221,6 +221,31 @@ impl GoToPathUi {
     }
 }
 
+/// Entries the user copied out of a pane, waiting to be pasted into the other.
+///
+/// Finder's convention, with the app's two panes as the two locations: copy on
+/// one side, paste on the other, and the paste becomes the upload or download
+/// that moves them. Kept in view state because it is a scratch buffer — a
+/// restart has nothing to paste from.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FileClipboard {
+    paths: Vec<macsftp_core::EntryPath>,
+}
+
+impl FileClipboard {
+    pub(crate) fn set(&mut self, paths: Vec<macsftp_core::EntryPath>) {
+        self.paths = paths;
+    }
+
+    pub(crate) fn paths(&self) -> &[macsftp_core::EntryPath] {
+        &self.paths
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+}
+
 /// The four groups the transfer drawer renders, in display order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TransferSection {

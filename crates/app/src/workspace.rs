@@ -98,12 +98,12 @@ pub(crate) fn open_local_path(cx: &mut App, path: &Path) {
 
 use crate::app_actions::{
     ActivateNextTab, ActivatePrevTab, CancelActiveModal, CancelAllTransfers, CloseTab,
-    ConfirmTabSwitcher, ConnectRecent, CopyPath, CopyRecentEndpoint, CopyVersionInfo,
+    ConfirmTabSwitcher, ConnectRecent, CopyFiles, CopyPath, CopyRecentEndpoint, CopyVersionInfo,
     DeleteSelection, DownloadSelection, FilterPane, FocusLocalPane, FocusRemotePane, ForgetRecent,
     GoToPath, MinimizeWindow, NavigateBack, NavigateForward, NewFolder, NewTab, OpenCommandPalette,
     OpenLogFolder, OpenProfiles, OpenSelectedEntry, OpenSettings, PageDown, PageUp,
-    ParentDirectory, ReconnectTab, RefreshPane, RenameEntry, SelectAllEntries, SelectFirstEntry,
-    SelectLastEntry, SelectNextEntry, SelectNextEntryExtend, SelectPrevEntry,
+    ParentDirectory, PasteFiles, ReconnectTab, RefreshPane, RenameEntry, SelectAllEntries,
+    SelectFirstEntry, SelectLastEntry, SelectNextEntry, SelectNextEntryExtend, SelectPrevEntry,
     SelectPrevEntryExtend, ShowAbout, ShowInFinder, ShowTransferDrawer,
     SortByDateModifiedAscending, SortByDateModifiedDescending, SortByNameAscending,
     SortByNameDescending, SortBySizeAscending, SortBySizeDescending, TabSwitcherNext,
@@ -192,6 +192,8 @@ pub struct Workspace {
     tab_mru: Vec<TabId>,
     tab_switcher: view_state::TabSwitcherUi,
 
+    /// Files copied out of a pane, waiting to be pasted into the other.
+    file_clipboard: view_state::FileClipboard,
     /// Share of the content area given to the local pane, adjustable by
     /// dragging the divider between the panes.
     pane_split_ratio: f32,
@@ -309,6 +311,7 @@ impl Workspace {
             palette: view_state::CommandPaletteUi::new(),
             tab_mru: Vec::new(),
             tab_switcher: view_state::TabSwitcherUi::new(),
+            file_clipboard: view_state::FileClipboard::default(),
             pane_split_ratio: pane_split::DEFAULT_SPLIT_RATIO,
             pane_split_drag: None,
             local: view_state::PaneUi::new(),
@@ -1485,6 +1488,12 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|workspace, _: &CopyPath, _window, cx| {
                 workspace.copy_focused_path(cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &CopyFiles, _window, cx| {
+                workspace.copy_files(cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &PasteFiles, _window, cx| {
+                workspace.paste_files(cx);
             }))
             .on_action(cx.listener(|workspace, _: &ShowInFinder, _window, cx| {
                 workspace.reveal_local_selection(cx);

@@ -1196,6 +1196,100 @@ impl crate::workspace::Workspace {
         self.show_status(message.into(), cx);
         cx.notify();
     }
+    /// Copy the focused pane's selection into the file clipboard.
+    ///
+    /// Finder's Cmd-C for files: the selection is remembered, and pasting it in
+    /// the other pane becomes the transfer that moves it there. The paths also
+    /// go on the system clipboard as text, so the same keystroke still gives a
+    /// terminal paste something useful.
+    pub(crate) fn copy_files(&mut self, cx: &mut Context<Self>) {
+        let side = self.focused_side;
+        let paths = self
+            .selected_fs_entries(side)
+            .into_iter()
+            .map(|entry| match entry.path {
+                macsftp_core::FsPath::Local(path) => EntryPath::Local(path),
+                macsftp_core::FsPath::Remote(path) => EntryPath::Remote(path),
+            })
+            .collect::<Vec<_>>();
+        if paths.is_empty() {
+            self.show_status("Select files or folders to copy.".into(), cx);
+            return;
+        }
+        let text = paths
+            .iter()
+            .map(|path| match path {
+                EntryPath::Local(path) => path.as_str().to_string(),
+                EntryPath::Remote(path) => path.as_str().to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        let count = paths.len();
+        self.file_clipboard.set(paths);
+        self.show_status(
+            if count == 1 {
+                "Copied 1 item.".into()
+            } else {
+                format!("Copied {count} items.").into()
+            },
+            cx,
+        );
+    }
+
+    /// Paste the file clipboard into the focused pane.
+    ///
+    /// The two panes are the two locations, so a paste that crosses them is the
+    /// upload or download that moves the files. A paste into the pane the files
+    /// already live in is reported instead of silently doing nothing: copying
+    /// within one folder needs a server-side copy this client does not have.
+    pub(crate) fn paste_files(&mut self, cx: &mut Context<Self>) {
+        let side = self.focused_side;
+        if self.file_clipboard.is_empty() {
+            self.show_status("Nothing to paste.".into(), cx);
+            return;
+        }
+        let copied = self.file_clipboard.paths().to_vec();
+        match side {
+            PaneSide::Remote => {
+                let sources: Vec<LocalPath> = copied
+                    .iter()
+                    .filter_map(|path| match path {
+                        EntryPath::Local(local) => Some(local.clone()),
+                        EntryPath::Remote(_) => None,
+                    })
+                    .collect();
+                if sources.is_empty() {
+                    self.show_status(
+                        "Those items are already in this folder. Copying within one folder is not supported yet."
+                            .into(),
+                        cx,
+                    );
+                    return;
+                }
+                self.begin_upload(sources, cx);
+            }
+            PaneSide::Local => {
+                let sources: Vec<RemotePath> = copied
+                    .iter()
+                    .filter_map(|path| match path {
+                        EntryPath::Remote(remote) => Some(remote.clone()),
+                        EntryPath::Local(_) => None,
+                    })
+                    .collect();
+                if sources.is_empty() {
+                    self.show_status(
+                        "Those items are already on your Mac. Copying within one folder is not supported yet."
+                            .into(),
+                        cx,
+                    );
+                    return;
+                }
+                self.begin_download(sources, cx);
+            }
+        }
+    }
+
     pub(crate) fn toggle_selection_at(
         &mut self,
         side: PaneSide,
