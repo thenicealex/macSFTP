@@ -103,13 +103,17 @@ impl crate::workspace::Workspace {
         // upload hands the whole list to one plan (local traversal needs no
         // connection). Both shapes reach the drawer as ordinary rows.
         let mut queued = 0;
+        let mut skipped = 0;
         for source in sources {
             let destination = match destination_for(&source) {
                 Ok(destination) => destination,
                 Err(message) => {
+                    // Keep going: one unusable name must not cancel the items
+                    // that were already queued, and the count below tells the
+                    // user what actually started.
+                    skipped += 1;
                     self.show_status(message.into(), cx);
-                    cx.notify();
-                    return;
+                    continue;
                 }
             };
             let command = AppCommand::StartTransfer(macsftp_core::StartTransferCommand {
@@ -123,22 +127,26 @@ impl crate::workspace::Workspace {
                 conflict_policy: Default::default(),
             });
             if !self.send_command(command, cx) {
+                // The command channel is full: the rest cannot be queued
+                // now. Say so instead of dropping them silently.
+                skipped += 1;
                 break;
             }
             queued += 1;
         }
         if queued > 0 {
             self.transfer_drawer.open = true;
-            self.show_status(
-                if queued == 1 {
-                    "Preparing download…".into()
-                } else {
-                    format!("Preparing {queued} downloads…").into()
-                },
-                cx,
-            );
-            cx.notify();
         }
+        let message = match (queued, skipped) {
+            (0, _) => "Could not start the download. Try again.".to_string(),
+            (1, 0) => "Preparing download…".to_string(),
+            (queued, 0) => format!("Preparing {queued} downloads…"),
+            (queued, skipped) => {
+                format!("Preparing {queued} downloads… {skipped} could not be started.")
+            }
+        };
+        self.show_status(message.into(), cx);
+        cx.notify();
     }
     pub(crate) fn upload_selection(&mut self, cx: &mut Context<Self>) {
         let sources: Vec<LocalPath> = self

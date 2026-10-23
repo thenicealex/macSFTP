@@ -42,6 +42,27 @@ impl crate::workspace::Workspace {
         }
     }
 
+    /// Where the divider sits in the window, in window coordinates.
+    ///
+    /// The drag anchors on the divider's own position rather than on the
+    /// pointer, so grabbing it off-centre does not make it jump sideways.
+    /// The panes fill the content area, which starts at the window's left
+    /// edge, so the local pane's width is the distance from there to the
+    /// divider.
+    pub(crate) fn divider_position(
+        &self,
+        window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::Pixels> {
+        let content_width = window.viewport_size().width;
+        if content_width <= gpui_kit::px(0.0) {
+            return None;
+        }
+        let ratio = pane_split::clamp_split_ratio(self.pane_split_ratio);
+        let usable = (content_width - pane_split::DIVIDER_WIDTH).max(gpui_kit::px(0.0));
+        Some(usable * ratio + pane_split::DIVIDER_WIDTH / 2.0)
+    }
+
     pub(crate) fn focus_pane(
         &mut self,
         side: PaneSide,
@@ -442,9 +463,9 @@ impl crate::workspace::Workspace {
                         workspace.navigate_pane_local(path, HistoryOp::Push, window, cx);
                     }
                     Ok(_) => {
-                        workspace.status_message =
-                            Some("This link points to a file, not a folder.".into());
-                        cx.notify();
+                        // The link points at a file: open it like any other
+                        // local file instead of refusing it as a folder.
+                        open_local_path(cx, Path::new(path.as_str()));
                     }
                     Err(error) => {
                         workspace.status_message =
@@ -1251,7 +1272,9 @@ impl crate::workspace::Workspace {
         match cx.resources_mut().recents.forget(recent_id) {
             Ok(true) => {
                 self.show_status("Removed from Recent Connections.".into(), cx);
-                cx.notify();
+                // The recents store is process-wide, so every window's Recent
+                // Connections list is stale now, not just this one.
+                cx.refresh_windows();
             }
             Ok(false) => {}
             Err(error) => {

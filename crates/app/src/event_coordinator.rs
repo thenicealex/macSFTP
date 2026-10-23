@@ -186,10 +186,22 @@ fn reload_panes_for_finished_plan(event: &AppEvent, cx: &mut App) {
         // A single-file plan publishes no children and finishes its plan in the
         // same `TransferCompleted` that finishes the job, so the completion
         // itself has to be the trigger here as well.
+        //
+        // A plan with children finishes only when its LAST child lands, and
+        // every child emits its own `TransferCompleted`. Reloading on each of
+        // those would re-read the directory once per transferred file — a
+        // thousand-file upload would issue a thousand directory reads. The
+        // plan's own state cannot be the gate (a single-file plan never
+        // publishes children, so its state stays `Planning` even after the
+        // file landed); the jobs' states can: the plan is finished exactly
+        // when none of its jobs can still write.
         AppEvent::TransferCompleted { transfer_id } => {
             let Some(plan_id) = cx.transfers().plan_id_for_job(*transfer_id) else {
                 return;
             };
+            if !cx.transfers().plan_is_finished(plan_id) {
+                return;
+            }
             plan_id
         }
         _ => return,
@@ -2674,12 +2686,13 @@ mod reload_tests {
     fn add_child(
         cx: &mut TestAppContext,
         plan_id: TransferPlanId,
+        index: u64,
         direction: TransferDirection,
         source: TransferEndpoint,
         destination: TransferEndpoint,
     ) -> TransferId {
         let child = TransferJob {
-            id: TransferId(plan_id.0 * 100),
+            id: TransferId(plan_id.0 * 100 + index),
             direction,
             source,
             destination,
@@ -2792,6 +2805,7 @@ mod reload_tests {
         let child = add_child(
             cx,
             plan_id,
+            0,
             TransferDirection::Upload,
             TransferEndpoint::Local(LocalPath::new("/tmp/dest/a.txt")),
             TransferEndpoint::Remote(RemotePath::new("/srv/a.txt")),
@@ -2811,6 +2825,126 @@ mod reload_tests {
             vec![RemotePath::new("/srv")],
             "the upload's destination folder is re-read exactly once"
         );
+    }
+
+    /// A plan's own state cannot say whether it is finished: a single-file plan
+    /// never publishes children, so its state stays `Planning` even after the
+    /// file landed. The jobs' states can.
+    #[gpui_kit::test]
+    fn a_plan_is_finished_only_when_its_jobs_are(cx: &mut TestAppContext) {
+        install_globals(cx, "plan-finished");
+        let plan_id = TransferPlanId(11);
+        start_plan(
+            cx,
+            TransferJob {
+                id: TransferId(11),
+                direction: TransferDirection::Upload,
+                source: TransferEndpoint::Local(LocalPath::new("/tmp/dest")),
+                destination: TransferEndpoint::Remote(RemotePath::new("/srv")),
+                state: TransferState::Queued,
+                metadata_policy: MetadataPolicy::default(),
+                conflict_policy: ConflictPolicy::default(),
+                warnings: Vec::new(),
+                created_at: Timestamp::from_secs_since_epoch(1),
+            },
+        );
+        let child = add_child(
+            cx,
+            plan_id,
+            0,
+            TransferDirection::Upload,
+            TransferEndpoint::Local(LocalPath::new("/tmp/dest/a.txt")),
+            TransferEndpoint::Remote(RemotePath::new("/srv/a.txt")),
+        );
+        cx.read(|cx| {
+            assert!(
+                !cx.transfers().plan_is_finished(plan_id),
+                "a plan with a queued child is not finished"
+            );
+        });
+
+        cx.update(|cx| {
+            dispatch_event(AppEvent::TransferCompleted { transfer_id: child }, cx);
+        });
+        cx.read(|cx| {
+            assert!(
+                cx.transfers().plan_is_finished(plan_id),
+                "the plan is finished once its last child landed"
+            );
+        });
+    }
+
+    /// A plan with many children reloads the pane exactly once, when the last
+    /// child lands. Reloading on every child's completion would issue one
+    /// directory read per transferred file.
+    #[gpui_kit::test]
+    fn a_multi_file_plan_reloads_the_pane_only_once(cx: &mut TestAppContext) {
+        install_globals(cx, "reload-once");
+        let (_window, channels) = connected_window(cx);
+        let plan_id = TransferPlanId(9);
+        start_plan(
+            cx,
+            TransferJob {
+                id: TransferId(9),
+                direction: TransferDirection::Upload,
+                source: TransferEndpoint::Local(LocalPath::new("/tmp/dest")),
+                destination: TransferEndpoint::Remote(RemotePath::new("/srv")),
+                state: TransferState::Queued,
+                metadata_policy: MetadataPolicy::default(),
+                conflict_policy: ConflictPolicy::default(),
+                warnings: Vec::new(),
+                created_at: Timestamp::from_secs_since_epoch(1),
+            },
+        );
+        let children: Vec<TransferId> = (0..5)
+            .map(|index| {
+                add_child(
+                    cx,
+                    plan_id,
+                    index as u64,
+                    TransferDirection::Upload,
+                    TransferEndpoint::Local(LocalPath::new(format!("/tmp/dest/{index}.txt"))),
+                    TransferEndpoint::Remote(RemotePath::new(format!("/srv/{index}.txt"))),
+                )
+            })
+            .collect();
+        while channels.command_rx.try_recv().is_ok() {}
+
+        // Four of five children land: the plan is still running, so the pane
+        // must not be re-read yet.
+        for child in &children[..4] {
+            cx.update(|cx| {
+                dispatch_event(
+                    AppEvent::TransferCompleted {
+                        transfer_id: *child,
+                    },
+                    cx,
+                );
+            });
+        }
+        cx.run_until_parked();
+        assert!(
+            channels.command_rx.try_recv().is_err(),
+            "a running plan must not re-read the directory"
+        );
+
+        // The last child finishes the plan; now the pane is re-read, once.
+        cx.update(|cx| {
+            dispatch_event(
+                AppEvent::TransferCompleted {
+                    transfer_id: children[4],
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let mut reads = 0;
+        while let Ok(command) = channels.command_rx.try_recv() {
+            if matches!(command, AppCommand::ReadRemoteDir { .. }) {
+                reads += 1;
+            }
+        }
+        assert_eq!(reads, 1, "the finished plan re-reads the pane exactly once");
     }
 
     /// A plan for a folder elsewhere must not yank a pane that is showing a
@@ -2837,6 +2971,7 @@ mod reload_tests {
         let child = add_child(
             cx,
             plan_id,
+            0,
             TransferDirection::Upload,
             TransferEndpoint::Local(LocalPath::new("/tmp/dest/a.txt")),
             TransferEndpoint::Remote(RemotePath::new("/elsewhere/a.txt")),

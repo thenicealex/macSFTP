@@ -348,8 +348,16 @@ impl crate::workspace::Workspace {
                 gpui_kit::MouseButton::Left,
                 cx.listener(
                     move |workspace, event: &gpui_kit::MouseDownEvent, window, cx| {
+                        // The divider's own position at grab time, not the
+                        // pointer's: the pointer can sit anywhere inside the
+                        // divider's box, and anchoring on the pointer would
+                        // make the divider jump sideways on the first move.
+                        let divider_x = workspace
+                            .divider_position(window, cx)
+                            .unwrap_or(event.position.x);
                         workspace.pane_split_drag = Some(view_state::PaneSplitDrag {
-                            start_x: event.position.x,
+                            start_x: divider_x,
+                            pointer_x: event.position.x,
                         });
                         cx.set_active_drag_cursor_style(
                             gpui_kit::CursorStyle::ResizeLeftRight,
@@ -365,9 +373,13 @@ impl crate::workspace::Workspace {
             .on_drag(PaneSplitDragValue, {
                 let workspace_entity = cx.entity();
                 move |_value, _offset, window, cx| {
-                    let start_x = window.mouse_position().x;
+                    let pointer_x = window.mouse_position().x;
                     workspace_entity.update(cx, |workspace, cx| {
-                        workspace.pane_split_drag = Some(view_state::PaneSplitDrag { start_x });
+                        let divider_x = workspace.divider_position(window, cx).unwrap_or(pointer_x);
+                        workspace.pane_split_drag = Some(view_state::PaneSplitDrag {
+                            start_x: divider_x,
+                            pointer_x,
+                        });
                         cx.set_active_drag_cursor_style(
                             gpui_kit::CursorStyle::ResizeLeftRight,
                             window,
@@ -392,7 +404,13 @@ impl crate::workspace::Workspace {
                         .pane_split_drag
                         .map(|drag| drag.start_x)
                         .unwrap_or(event.event.position.x);
-                    let divider_x = drag_start_x + (event.event.position.x - drag_start_x);
+                    let pointer_start_x = workspace
+                        .pane_split_drag
+                        .map(|drag| drag.pointer_x)
+                        .unwrap_or(event.event.position.x);
+                    // The divider travels with the pointer: its position at
+                    // grab time plus the pointer's travel since then.
+                    let divider_x = drag_start_x + (event.event.position.x - pointer_start_x);
                     let ratio = pane_split::split_ratio_for_pointer(
                         divider_x,
                         content_width,

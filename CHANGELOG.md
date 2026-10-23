@@ -25,6 +25,18 @@ based on Keep a Changelog, and releases use semantic versioning.
   downloaded file; an upload's destination lives on the server and says so
   instead.
 
+### Fixed
+
+- A finished transfer re-reads the pane that received its files exactly once
+  per plan. A plan with many files used to trigger one directory read per
+  transferred file.
+- A download whose source cannot be named no longer cancels the sources that
+  were already queued, and says how many could not be started.
+- Removing a recent connection now updates every window's list, not just the
+  one the command came from.
+- The pane divider follows the pointer from where it was grabbed instead of
+  jumping to the pointer's side.
+
 ### Changed
 
 - Status-bar messages now expire after six seconds instead of lingering until

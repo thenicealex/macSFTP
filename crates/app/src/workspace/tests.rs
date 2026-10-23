@@ -8072,6 +8072,9 @@ fn local_file_symlink_is_not_opened_as_a_folder(cx: &mut TestAppContext) {
     #[cfg(not(unix))]
     return;
 
+    install_system_path_seams();
+    OPENED_SYSTEM_PATHS.with(|paths| paths.borrow_mut().clear());
+
     set_local_path_and_wait(&workspace, &mut cx, base.clone());
     workspace.update_in(&mut cx, |workspace, window, cx| {
         let tab = workspace.active_tab().expect("active tab");
@@ -8091,6 +8094,13 @@ fn local_file_symlink_is_not_opened_as_a_folder(cx: &mut TestAppContext) {
             tab.local.path.as_ref(),
             Some(&base),
             "a file link must not navigate"
+        );
+    });
+    OPENED_SYSTEM_PATHS.with(|paths| {
+        assert_eq!(
+            *paths.borrow(),
+            vec![link.to_string_lossy().to_string()],
+            "a link to a file opens the file itself, following the link"
         );
     });
 }
@@ -11110,4 +11120,60 @@ fn pane_divider_stops_at_the_usable_limits(cx: &mut TestAppContext) {
         local.size.width / (local.size.width + remote.size.width) >= 0.2,
         "the local pane keeps a usable share"
     );
+}
+
+/// A download whose source cannot be named still queues the other sources and
+/// says how many started, instead of cancelling the ones already queued.
+#[gpui_kit::test]
+fn a_download_with_an_unusable_name_keeps_the_other_sources(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        let tab = workspace.active_tab_mut().expect("active tab");
+        tab.local.path = Some(LocalPath::new("/tmp/downloads"));
+        // A name with a control character cannot become a local file name.
+        tab.remote.entries = vec![
+            RemoteEntry {
+                name: "good.txt".to_string(),
+                path: RemotePath::new("/home/tester/good.txt"),
+                kind: FileKind::File,
+                size: Some(1),
+                permissions: Some(0o644),
+                modified_at: None,
+                link_target: None,
+            },
+            RemoteEntry {
+                name: "bad\u{1}name.txt".to_string(),
+                path: RemotePath::new("/home/tester/bad\u{1}name.txt"),
+                kind: FileKind::File,
+                size: Some(1),
+                permissions: Some(0o644),
+                modified_at: None,
+                link_target: None,
+            },
+        ];
+        tab.selection.selected_paths = tab
+            .remote
+            .entries
+            .iter()
+            .map(|entry| EntryPath::Remote(entry.path.clone()))
+            .collect();
+        workspace.download_selection(cx);
+    });
+
+    let mut queued = 0;
+    while let Ok(command) = channels.command_rx.try_recv() {
+        if matches!(command, AppCommand::StartTransfer(_)) {
+            queued += 1;
+        }
+    }
+    assert_eq!(queued, 1, "the usable source is still downloaded");
+    workspace.read_with(&cx, |workspace, _| {
+        let message = workspace.status_message_for_test().unwrap_or_default();
+        assert!(
+            message.contains("1 could not be started"),
+            "the user is told one item did not start: {message:?}"
+        );
+    });
 }

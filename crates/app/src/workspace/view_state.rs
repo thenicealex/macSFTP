@@ -268,8 +268,11 @@ impl ConnectFormUi {
 /// error accumulates.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PaneSplitDrag {
-    /// The pointer's x when the drag started.
+    /// The divider's own x when the drag started.
     pub(crate) start_x: gpui_kit::Pixels,
+    /// The pointer's x when the drag started, so the pointer's travel can be
+    /// applied to the divider's position rather than replacing it.
+    pub(crate) pointer_x: gpui_kit::Pixels,
 }
 
 /// Modal and popover input state owned by the view while a prompt is open.

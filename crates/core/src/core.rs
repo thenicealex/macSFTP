@@ -874,6 +874,36 @@ impl TransferStore {
         self.jobs.iter().find(|job| job.id == transfer_id)
     }
 
+    /// Whether every job of `plan_id` has reached a terminal state.
+    ///
+    /// A plan's own state is not the same question: a single-file plan never
+    /// publishes children, so the reducer cannot mark the plan terminal from a
+    /// child completion and it stays `Planning` even though the file landed.
+    /// Asking about the jobs answers the question the UI actually has — "is
+    /// this plan still going to write more files into that directory?" — and
+    /// it stays true once every file has landed, so a directory read happens
+    /// once rather than once per file.
+    pub fn plan_is_finished(&self, plan_id: TransferPlanId) -> bool {
+        let Some(plan) = self.plans.iter().find(|plan| plan.id == plan_id) else {
+            return false;
+        };
+        let mut ids: Vec<TransferId> = plan.child_jobs.clone();
+        ids.push(plan.root_job_id);
+        ids.iter().all(|id| {
+            self.jobs
+                .iter()
+                .find(|job| job.id == *id)
+                .is_some_and(|job| {
+                    matches!(
+                        job.state,
+                        TransferState::Completed
+                            | TransferState::Skipped
+                            | TransferState::Failed { .. }
+                    )
+                })
+        })
+    }
+
     /// The plan a job belongs to: either its root or one of its published
     /// children. Used to scope a cancellation, so the runtime can reclaim the
     /// records of a plan that never reaches the transfer manager.
