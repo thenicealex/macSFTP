@@ -12,6 +12,9 @@ based on Keep a Changelog, and releases use semantic versioning.
   the existing edit-in-temp-copy flow.
 - Dragging a row that is part of a multi-selection moves every selected file;
   dropping it on the other pane transfers the whole group in one plan.
+- Completed transfer rows gain a **Show in Finder** button that reveals the
+  downloaded file; an upload's destination lives on the server and says so
+  instead.
 
 ### Changed
 

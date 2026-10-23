@@ -156,6 +156,8 @@ thread_local! {
     static REOPENED_EDIT_PATHS: RefCell<Vec<LocalPath>> = const { RefCell::new(Vec::new()) };
     /// Paths the workspace asked macOS to open, in call order.
     static OPENED_SYSTEM_PATHS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// Paths the workspace asked Finder to reveal, in call order.
+    static REVEALED_PATHS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 fn record_edit_reopen(temp: &LocalPath, _editor: Option<&str>) -> std::io::Result<()> {
@@ -167,10 +169,15 @@ fn record_system_open(_cx: &App, path: &std::path::Path) {
     OPENED_SYSTEM_PATHS.with(|paths| paths.borrow_mut().push(path.display().to_string()));
 }
 
-/// Record system opens instead of reaching LaunchServices, which the test
-/// platform implements as `unimplemented!()`.
-fn install_system_path_opener_seam() {
+fn record_system_reveal(_cx: &App, path: &std::path::Path) {
+    REVEALED_PATHS.with(|paths| paths.borrow_mut().push(path.display().to_string()));
+}
+
+/// Record every system open/reveal instead of reaching LaunchServices, which the
+/// test platform implements as `unimplemented!()`.
+fn install_system_path_seams() {
     crate::workspace::set_system_path_opener(record_system_open);
+    crate::workspace::set_system_path_revealer(record_system_reveal);
 }
 
 fn init_workspace(
@@ -10481,7 +10488,7 @@ fn folder_download_keeps_the_selected_folder_name(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn opening_a_local_file_hands_it_to_the_system(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
-    install_system_path_opener_seam();
+    install_system_path_seams();
     OPENED_SYSTEM_PATHS.with(|paths| paths.borrow_mut().clear());
     let (fixture, base) = temp_local_fixture("open-local-file");
     std::fs::write(fixture.join("note.txt"), b"hi").expect("fixture file");
@@ -10507,14 +10514,14 @@ fn opening_a_local_file_hands_it_to_the_system(cx: &mut TestAppContext) {
     workspace.read_with(&cx, |workspace, _| {
         assert_eq!(
             workspace.active_tab().expect("tab").local.path,
-            Some(local_path_of(&fixture)),
+            Some(base_for_pane(&fixture)),
             "opening a file must not navigate the pane"
         );
     });
     let _ = std::fs::remove_dir_all(&fixture);
 }
 
-fn local_path_of(fixture: &std::path::Path) -> LocalPath {
+fn base_for_pane(fixture: &std::path::Path) -> LocalPath {
     LocalPath::new(fixture.to_string_lossy().into_owned())
 }
 
@@ -10523,7 +10530,7 @@ fn local_path_of(fixture: &std::path::Path) -> LocalPath {
 #[gpui_kit::test]
 fn opening_a_remote_file_never_reaches_the_system_opener(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
-    install_system_path_opener_seam();
+    install_system_path_seams();
     OPENED_SYSTEM_PATHS.with(|paths| paths.borrow_mut().clear());
     connect_and_drain(&workspace, &mut cx, &channels);
 
@@ -10623,4 +10630,121 @@ fn a_newer_status_line_is_not_cleared_by_an_older_timer(cx: &mut TestAppContext)
             "the older expiry must not clear the newer message"
         );
     });
+}
+
+/// A completed download offers reveal, and the button reveals the file it wrote.
+#[gpui_kit::test]
+fn a_completed_download_reveals_its_destination(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    install_system_path_seams();
+    REVEALED_PATHS.with(|paths| paths.borrow_mut().clear());
+    let destination = LocalPath::new("/tmp/downloads/report.pdf");
+    workspace.update(&mut cx, |_workspace, cx| {
+        seed_finished_transfer(
+            cx,
+            TransferId(70),
+            TransferDirection::Download,
+            TransferEndpoint::Remote(RemotePath::new("/srv/report.pdf")),
+            TransferEndpoint::Local(destination.clone()),
+        );
+    });
+    cx.run_until_parked();
+
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.reveal_transfer_destination(TransferId(70), cx);
+    });
+    cx.run_until_parked();
+
+    REVEALED_PATHS.with(|paths| {
+        assert_eq!(
+            *paths.borrow(),
+            vec![destination.as_str().to_string()],
+            "reveal points at the downloaded file"
+        );
+    });
+}
+
+/// An upload's destination lives on the server, so revealing it must say so
+/// rather than opening a meaningless local path.
+#[gpui_kit::test]
+fn revealing_a_remote_destination_reports_instead_of_opening_it(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    install_system_path_seams();
+    REVEALED_PATHS.with(|paths| paths.borrow_mut().clear());
+    workspace.update(&mut cx, |_workspace, cx| {
+        seed_finished_transfer(
+            cx,
+            TransferId(71),
+            TransferDirection::Upload,
+            TransferEndpoint::Local(LocalPath::new("/tmp/dest/report.pdf")),
+            TransferEndpoint::Remote(RemotePath::new("/srv/report.pdf")),
+        );
+    });
+    cx.run_until_parked();
+
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.reveal_transfer_destination(TransferId(71), cx);
+    });
+    cx.run_until_parked();
+
+    REVEALED_PATHS.with(|paths| {
+        assert!(
+            paths.borrow().is_empty(),
+            "a remote destination is never revealed locally"
+        );
+    });
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some("This file is on the server.")
+        );
+    });
+}
+
+/// Publish a plan whose single job is already `Completed`.
+fn seed_finished_transfer(
+    cx: &mut gpui_kit::App,
+    id: TransferId,
+    direction: TransferDirection,
+    source: TransferEndpoint,
+    destination: TransferEndpoint,
+) {
+    use crate::resources::ActiveTransfers as _;
+    use macsftp_core::{
+        ConflictPolicy, MetadataPolicy, Timestamp, TransferJob, TransferPlan, TransferPlanId,
+        TransferPlanSnapshot, TransferPlanState, TransferState,
+    };
+    let job = TransferJob {
+        id,
+        direction,
+        source,
+        destination,
+        state: TransferState::Queued,
+        metadata_policy: MetadataPolicy::default(),
+        conflict_policy: ConflictPolicy::default(),
+        warnings: Vec::new(),
+        created_at: Timestamp::from_secs_since_epoch(1),
+    };
+    let plan = TransferPlan {
+        id: TransferPlanId(id.0),
+        root_job_id: id,
+        source_root: job.source.clone(),
+        destination_root: job.destination.clone(),
+        state: TransferPlanState::Queued,
+        planned_count: 1,
+        total_bytes: None,
+        child_jobs: Vec::new(),
+        conflict_policy: job.conflict_policy.clone(),
+    };
+    cx.apply_transfer_event(
+        &AppEvent::TransferPlanStarted(Box::new(TransferPlanSnapshot {
+            plan,
+            root_job: job,
+        })),
+        Timestamp::from_secs_since_epoch(1),
+    );
+    cx.apply_transfer_event(
+        &AppEvent::TransferCompleted { transfer_id: id },
+        Timestamp::from_secs_since_epoch(2),
+    );
 }

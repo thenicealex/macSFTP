@@ -416,7 +416,7 @@ impl crate::workspace::Workspace {
             return;
         };
         if let Some(path) = entry.path.as_local() {
-            cx.reveal_path(Path::new(path.as_str()));
+            crate::workspace::reveal_local_path(cx, Path::new(path.as_str()));
         }
     }
 

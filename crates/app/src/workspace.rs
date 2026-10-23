@@ -17,14 +17,18 @@ use macsftp_storage::{
 use macsftp_ui::{ActiveTheme, ScrollbarState, Theme, empty_state, text_button};
 use tracing::warn;
 
-/// How the workspace asks macOS to open a local path.
+/// How the workspace asks macOS to open or reveal a local path.
 ///
-/// GPUI's `open_with_system` is `unimplemented!()` on the test platform, so a
-/// test that clicked "Open" would panic before it could assert anything.
-/// Routing the call through one seam keeps the production behavior intact and
-/// lets tests record the request instead, the same shape as the editor-launch
-/// hook in `event_coordinator`.
+/// Both GPUI entry points (`open_with_system`, `reveal_path`) are
+/// `unimplemented!()` on the test platform, so a test that clicked "Open" would
+/// panic before it could assert anything. Routing them through one seam keeps
+/// the production calls intact and lets tests record the request instead, the
+/// same shape as the editor-launch hook in `event_coordinator`.
 type SystemPathOpener = fn(&App, &Path);
+
+/// The same seam for Finder reveals. Kept separate from the open hook so a test
+/// can tell "opened" from "revealed" instead of accepting either.
+type SystemPathRevealer = fn(&App, &Path);
 
 #[cfg(test)]
 thread_local! {
@@ -49,8 +53,40 @@ fn open_with_system(cx: &App, path: &Path) {
 }
 
 #[cfg(test)]
+thread_local! {
+    static SYSTEM_PATH_REVEALER: std::cell::Cell<Option<SystemPathRevealer>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
 pub(crate) fn set_system_path_opener(opener: SystemPathOpener) {
     SYSTEM_PATH_OPENER.with(|cell| cell.set(Some(opener)));
+}
+
+#[cfg(test)]
+pub(crate) fn set_system_path_revealer(revealer: SystemPathRevealer) {
+    SYSTEM_PATH_REVEALER.with(|cell| cell.set(Some(revealer)));
+}
+
+#[cfg(test)]
+fn system_path_revealer() -> SystemPathRevealer {
+    SYSTEM_PATH_REVEALER
+        .with(|revealer| revealer.get())
+        .unwrap_or(reveal_path)
+}
+
+#[cfg(not(test))]
+fn system_path_revealer() -> SystemPathRevealer {
+    reveal_path
+}
+
+fn reveal_path(cx: &App, path: &Path) {
+    cx.reveal_path(path);
+}
+
+/// Reveal `path` in Finder.
+pub(crate) fn reveal_local_path(cx: &App, path: &Path) {
+    (system_path_revealer())(cx, path);
 }
 
 /// Open `path` in its default application. Local files only: a downloaded
@@ -1062,7 +1098,7 @@ impl Workspace {
     }
     pub(crate) fn open_log_folder(&self, cx: &mut Context<Self>) {
         if let Some(directory) = Path::new(self.log_file.as_str()).parent() {
-            cx.reveal_path(directory);
+            reveal_local_path(cx, directory);
         }
     }
     pub(crate) fn open_local_network_settings(&self, cx: &mut Context<Self>) {
