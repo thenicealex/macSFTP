@@ -493,13 +493,32 @@ impl crate::workspace::Workspace {
         path: LocalPath,
         cx: &mut Context<Self>,
     ) {
+        self.read_local_directory(tab_id, path, false, cx);
+    }
+
+    /// Re-read a local folder without disturbing what the user is looking at.
+    ///
+    /// Used after a transfer finishes: the listing must gain the new files but
+    /// the scroll position and selection belong to the user, and the pane must
+    /// not announce a navigation it did not make.
+    fn reload_local_directory(&mut self, tab_id: TabId, path: LocalPath, cx: &mut Context<Self>) {
+        self.read_local_directory(tab_id, path, true, cx);
+    }
+
+    fn read_local_directory(
+        &mut self,
+        tab_id: TabId,
+        path: LocalPath,
+        preserve_view: bool,
+        cx: &mut Context<Self>,
+    ) {
         // The read generation lives on the tab itself, so requesting for a
         // missing tab cannot create phantom side-table state.
         let Some(tab) = self.state.tabs.find_tab_mut(tab_id) else {
             return;
         };
         let request_epoch = tab.local.begin_local_read();
-        if self.state.tabs.active_tab_id == Some(tab_id) {
+        if !preserve_view && self.state.tabs.active_tab_id == Some(tab_id) {
             self.status_message = Some("Loading files on your Mac…".into());
         }
         let read_path = path.clone();
@@ -543,7 +562,7 @@ impl crate::workspace::Workspace {
                         );
                     }
                 }
-                if is_active {
+                if is_active && !preserve_view {
                     workspace.local.scroll = UniformListScrollHandle::new();
                 }
                 cx.notify();
@@ -598,6 +617,23 @@ impl crate::workspace::Workspace {
         path: RemotePath,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.read_remote_directory(tab_id, path, false, cx)
+    }
+
+    /// Remote counterpart of [`Self::reload_local_directory`]: re-read the
+    /// folder a finished transfer wrote into while keeping the user's
+    /// selection, scroll position and status text.
+    fn reload_remote_directory(&mut self, tab_id: TabId, path: RemotePath, cx: &mut Context<Self>) {
+        self.read_remote_directory(tab_id, path, true, cx);
+    }
+
+    fn read_remote_directory(
+        &mut self,
+        tab_id: TabId,
+        path: RemotePath,
+        preserve_view: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if !self.send_command(
             AppCommand::ReadRemoteDir {
                 tab_id,
@@ -614,7 +650,9 @@ impl crate::workspace::Workspace {
             tab.remote.path = Some(path);
             tab.remote.is_refreshing = true;
             tab.remote.error = None;
-            tab.selection.selected_paths.clear();
+            if !preserve_view {
+                tab.selection.selected_paths.clear();
+            }
         }
         cx.notify();
         true
@@ -655,6 +693,40 @@ impl crate::workspace::Workspace {
                     self.request_remote_directory(tab.id, path, cx);
                 }
             }
+        }
+    }
+
+    /// Re-read the folders a finished transfer wrote into.
+    ///
+    /// Only the active tab is considered: a background tab keeps its stale
+    /// listing until the user switches to it and a refresh happens there, which
+    /// avoids issuing a read for every open tab on every completed file. A pane
+    /// showing some other folder is left alone, so finishing an upload never
+    /// yanks the remote pane back to where the files landed.
+    pub(crate) fn reload_visible_directories(
+        &mut self,
+        local_directories: &[LocalPath],
+        remote_directories: &[RemotePath],
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        let tab_id = tab.id;
+        let local_current = tab.local.path.clone();
+        let remote_current = tab.remote.path.clone();
+        let remote_connected = matches!(tab.connection, ConnectionState::Connected { .. });
+        if let Some(current) = local_current
+            && local_directories.contains(&current)
+        {
+            self.reload_local_directory(tab_id, current, cx);
+        }
+        if let Some(current) = remote_current
+            && remote_directories.contains(&current)
+            && remote_connected
+        {
+            self.reload_remote_directory(tab_id, current, cx);
         }
     }
 

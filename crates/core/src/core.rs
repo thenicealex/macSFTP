@@ -2979,6 +2979,24 @@ pub enum TransferEndpoint {
     Remote(RemotePath),
 }
 
+impl TransferEndpoint {
+    /// The directory that contains this endpoint, or `None` for a root path
+    /// that has no parent left to reload.
+    pub fn parent_directory(&self) -> Option<Self> {
+        match self {
+            Self::Local(path) => path.parent().map(Self::Local),
+            Self::Remote(path) => path.parent().map(Self::Remote),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Local(path) => path.as_str(),
+            Self::Remote(path) => path.as_str(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MetadataPolicy {
     pub preserve_permissions: bool,
