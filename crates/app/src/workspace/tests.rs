@@ -154,11 +154,23 @@ fn unique_temp_dir(label: &str) -> std::path::PathBuf {
 
 thread_local! {
     static REOPENED_EDIT_PATHS: RefCell<Vec<LocalPath>> = const { RefCell::new(Vec::new()) };
+    /// Paths the workspace asked macOS to open, in call order.
+    static OPENED_SYSTEM_PATHS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
 fn record_edit_reopen(temp: &LocalPath, _editor: Option<&str>) -> std::io::Result<()> {
     REOPENED_EDIT_PATHS.with(|paths| paths.borrow_mut().push(temp.clone()));
     Ok(())
+}
+
+fn record_system_open(_cx: &App, path: &std::path::Path) {
+    OPENED_SYSTEM_PATHS.with(|paths| paths.borrow_mut().push(path.display().to_string()));
+}
+
+/// Record system opens instead of reaching LaunchServices, which the test
+/// platform implements as `unimplemented!()`.
+fn install_system_path_opener_seam() {
+    crate::workspace::set_system_path_opener(record_system_open);
 }
 
 fn init_workspace(
@@ -10461,5 +10473,90 @@ fn folder_download_keeps_the_selected_folder_name(cx: &mut TestAppContext) {
     assert_eq!(
         command.destination,
         TransferEndpoint::Local(LocalPath::new("/tmp/downloads/project"))
+    );
+}
+
+/// Double-clicking (or pressing Enter on) a local file hands it to its default
+/// application — the Finder convention. Before this, the row did nothing at all.
+#[gpui_kit::test]
+fn opening_a_local_file_hands_it_to_the_system(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _channels) = init_workspace(cx);
+    install_system_path_opener_seam();
+    OPENED_SYSTEM_PATHS.with(|paths| paths.borrow_mut().clear());
+    let (fixture, base) = temp_local_fixture("open-local-file");
+    std::fs::write(fixture.join("note.txt"), b"hi").expect("fixture file");
+    set_local_path_and_wait(&workspace, &mut cx, base);
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.focus_pane(PaneSide::Local, window, cx);
+    });
+    cx.run_until_parked();
+
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.open_entry_at(PaneSide::Local, 0, window, cx);
+    });
+    cx.run_until_parked();
+
+    let expected = fixture.join("note.txt").display().to_string();
+    OPENED_SYSTEM_PATHS.with(|paths| {
+        assert_eq!(
+            *paths.borrow(),
+            vec![expected],
+            "opening a local file requests the system default application"
+        );
+    });
+    workspace.read_with(&cx, |workspace, _| {
+        assert_eq!(
+            workspace.active_tab().expect("tab").local.path,
+            Some(local_path_of(&fixture)),
+            "opening a file must not navigate the pane"
+        );
+    });
+    let _ = std::fs::remove_dir_all(&fixture);
+}
+
+fn local_path_of(fixture: &std::path::Path) -> LocalPath {
+    LocalPath::new(fixture.to_string_lossy().into_owned())
+}
+
+/// Opening a remote file still edits a temp copy; it must never reach the
+/// system open path, because a download keeps the remote exec bit.
+#[gpui_kit::test]
+fn opening_a_remote_file_never_reaches_the_system_opener(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    install_system_path_opener_seam();
+    OPENED_SYSTEM_PATHS.with(|paths| paths.borrow_mut().clear());
+    connect_and_drain(&workspace, &mut cx, &channels);
+
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        workspace.active_tab_mut().expect("tab").remote.entries = vec![RemoteEntry {
+            name: "run.sh".to_string(),
+            path: RemotePath::new("/home/tester/run.sh"),
+            kind: FileKind::File,
+            size: Some(4),
+            permissions: Some(0o755),
+            modified_at: None,
+            link_target: None,
+        }];
+        workspace.focused_side = PaneSide::Remote;
+        workspace.select_index(PaneSide::Remote, 0, cx);
+    });
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.open_entry_at(PaneSide::Remote, 0, window, cx);
+    });
+    cx.run_until_parked();
+
+    OPENED_SYSTEM_PATHS.with(|paths| {
+        assert!(
+            paths.borrow().is_empty(),
+            "a remote file must be edited in a temp copy, not executed: {:?}",
+            paths.borrow()
+        );
+    });
+    assert!(
+        matches!(
+            channels.command_rx.try_recv(),
+            Ok(AppCommand::StartTransfer(_))
+        ),
+        "the remote open starts an edit download instead"
     );
 }

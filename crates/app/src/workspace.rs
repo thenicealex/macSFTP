@@ -17,6 +17,49 @@ use macsftp_storage::{
 use macsftp_ui::{ActiveTheme, ScrollbarState, Theme, empty_state, text_button};
 use tracing::warn;
 
+/// How the workspace asks macOS to open a local path.
+///
+/// GPUI's `open_with_system` is `unimplemented!()` on the test platform, so a
+/// test that clicked "Open" would panic before it could assert anything.
+/// Routing the call through one seam keeps the production behavior intact and
+/// lets tests record the request instead, the same shape as the editor-launch
+/// hook in `event_coordinator`.
+type SystemPathOpener = fn(&App, &Path);
+
+#[cfg(test)]
+thread_local! {
+    static SYSTEM_PATH_OPENER: std::cell::Cell<Option<SystemPathOpener>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn system_path_opener() -> SystemPathOpener {
+    SYSTEM_PATH_OPENER
+        .with(|opener| opener.get())
+        .unwrap_or(open_with_system)
+}
+
+#[cfg(not(test))]
+fn system_path_opener() -> SystemPathOpener {
+    open_with_system
+}
+
+fn open_with_system(cx: &App, path: &Path) {
+    cx.open_with_system(path);
+}
+
+#[cfg(test)]
+pub(crate) fn set_system_path_opener(opener: SystemPathOpener) {
+    SYSTEM_PATH_OPENER.with(|cell| cell.set(Some(opener)));
+}
+
+/// Open `path` in its default application. Local files only: a downloaded
+/// remote file keeps the remote exec bit, so this must never be handed a path
+/// that came from the server.
+pub(crate) fn open_local_path(cx: &mut App, path: &Path) {
+    (system_path_opener())(cx, path);
+}
+
 use crate::app_actions::{
     ActivateNextTab, ActivatePrevTab, CancelActiveModal, CloseTab, ConfirmTabSwitcher, CopyPath,
     CopyVersionInfo, DeleteSelection, DownloadSelection, FilterPane, FocusLocalPane,

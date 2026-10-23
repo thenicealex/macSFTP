@@ -7,6 +7,9 @@ based on Keep a Changelog, and releases use semantic versioning.
 
 ### Added
 
+- Double-clicking (or pressing Enter on, or right-click Open for) a local file
+  now hands it to its default application, matching Finder. Remote files keep
+  the existing edit-in-temp-copy flow.
 - Dragging a row that is part of a multi-selection moves every selected file;
   dropping it on the other pane transfers the whole group in one plan.
 

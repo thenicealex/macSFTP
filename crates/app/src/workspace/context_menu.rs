@@ -46,23 +46,21 @@ pub(crate) fn file_context_menu(
                 .separator()
                 .menu_with_disabled("Refresh", !enabled, Box::new(RefreshPane))
         }
-        (PaneSide::Local, ContextMenuTarget::Entry(kind)) => {
-            let mut menu = NativeMenu::new();
-            // A link may point at a folder, so it gets the same open affordance
-            // as a folder; the click resolves the target before navigating.
-            if matches!(kind, FileKind::Directory | FileKind::Symlink) {
-                menu = menu.menu("Open", Box::new(OpenSelectedEntry)).separator();
-            }
-            menu.menu_with_disabled("Upload", !remote_ready, Box::new(UploadSelection))
-                .separator()
-                .menu("Rename…", Box::new(RenameEntry))
-                .menu("New Folder…", Box::new(NewFolder))
-                .separator()
-                .menu("Delete…", Box::new(DeleteSelection))
-                .separator()
-                .menu("Copy Path", Box::new(CopyPath))
-                .menu("Show in Finder", Box::new(ShowInFinder))
-        }
+        // Every local row opens: folders navigate, links resolve their target,
+        // and files go to their default application (the Finder convention for
+        // the user's own disk), so the entry kind no longer splits the menu.
+        (PaneSide::Local, ContextMenuTarget::Entry(_)) => NativeMenu::new()
+            .menu("Open", Box::new(OpenSelectedEntry))
+            .separator()
+            .menu_with_disabled("Upload", !remote_ready, Box::new(UploadSelection))
+            .separator()
+            .menu("Rename…", Box::new(RenameEntry))
+            .menu("New Folder…", Box::new(NewFolder))
+            .separator()
+            .menu("Delete…", Box::new(DeleteSelection))
+            .separator()
+            .menu("Copy Path", Box::new(CopyPath))
+            .menu("Show in Finder", Box::new(ShowInFinder)),
         (PaneSide::Remote, ContextMenuTarget::Entry(kind)) => {
             let open_label = match kind {
                 FileKind::Directory | FileKind::Symlink => "Open",
@@ -189,20 +187,17 @@ mod tests {
         assert_action::<ShowInFinder>(&menu, "Show in Finder");
     }
 
+    /// A local file opens in its default application, so the menu leads with
+    /// Open exactly like a folder or link does.
     #[test]
-    fn local_file_menu_has_no_open_command() {
+    fn local_file_menu_leads_with_open() {
         let menu = file_context_menu(
             PaneSide::Local,
             ContextMenuTarget::Entry(FileKind::File),
             true,
         );
-        assert!(
-            layout(&menu)
-                .iter()
-                .all(|(label, _)| *label != Some("Open")),
-            "opening a local file with its default app is not an app command yet"
-        );
-        assert_eq!(layout(&menu)[0], (Some("Upload"), false));
+        assert_eq!(layout(&menu)[0], (Some("Open"), false));
+        assert_action::<OpenSelectedEntry>(&menu, "Open");
         assert_action::<UploadSelection>(&menu, "Upload");
     }
 
@@ -261,7 +256,9 @@ mod tests {
             ContextMenuTarget::Entry(FileKind::File),
             false,
         );
-        assert_eq!(layout(&disconnected)[0], (Some("Upload"), true));
+        // Open stays available offline: a local file needs no session.
+        assert_eq!(layout(&disconnected)[0], (Some("Open"), false));
+        assert_eq!(layout(&disconnected)[2], (Some("Upload"), true));
     }
 
     #[test]

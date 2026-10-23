@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::Instant;
 
 use gpui_kit::{
@@ -344,7 +345,16 @@ impl crate::workspace::Workspace {
                         let path = entry.path.clone();
                         self.open_local_symlink(path, window, cx);
                     }
-                    _ => {}
+                    // A local file is the user's own data on their own disk, so
+                    // the Finder convention applies: opening it hands it to its
+                    // default application. Remote files never take this path —
+                    // they are edited in a temp copy instead (see below), because
+                    // a download preserves the remote exec bit and opening it
+                    // would run attacker-controlled content.
+                    _ => {
+                        let path = entry.path.clone();
+                        open_local_path(cx, Path::new(path.as_str()));
+                    }
                 }
             }
             PaneSide::Remote => {
