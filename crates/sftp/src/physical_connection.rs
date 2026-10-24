@@ -557,7 +557,7 @@ fn client_config() -> client::Config {
     let mut config = client::Config {
         keepalive_interval: Some(Duration::from_secs(15)),
         keepalive_max: 3,
-        window_size: 4 * 1024 * 1024,
+        window_size: 8 * 1024 * 1024,
         ..client::Config::default()
     };
     // The local russh patch verifies RSA-SHA2 host signatures with AWS-LC.

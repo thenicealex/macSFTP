@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -681,7 +681,7 @@ impl RemoteSessionActor {
                 transfer_queue.policy_for(queued_transfer.plan_id, &job.conflict_policy);
             let transfer_session =
                 match open_transfer_session(&self.shared_connection.handle, job.direction).await {
-                    Ok(session) => session,
+                    Ok(session) => Arc::new(TransferSessionSlot::new(session)),
                     Err(error) => {
                         if self
                             .event_tx
@@ -871,6 +871,75 @@ pub(crate) enum TransferSession {
 impl From<SftpSession> for TransferSession {
     fn from(sftp: SftpSession) -> Self {
         Self::Standard(sftp)
+    }
+}
+
+/// A transfer session plus what jobs running on it have already proven about
+/// the remote side.
+///
+/// Opening an SFTP channel costs several round trips (channel open, subsystem,
+/// protocol init, limits), which dominates a transfer made of many small files
+/// if every file pays it. Jobs within one plan therefore hand a session back
+/// and forth through [`TransferSessionSlot`] instead of opening a channel per
+/// file, and the facts a job learns — this directory exists, the server
+/// accepts the atomic hardlink commit here — spare the next file from
+/// rediscovering them.
+pub(crate) struct TransferSessionSlot {
+    session: TransferSession,
+    verified_directories: Mutex<HashSet<String>>,
+    /// Destination directories where the atomic hardlink commit has already
+    /// been proven. Tracked per directory, not per session: a plan can write
+    /// into a subdirectory that is a different mount, where hardlinks may be
+    /// unsupported.
+    hardlink_commit_directories: Mutex<HashSet<String>>,
+}
+
+impl TransferSessionSlot {
+    pub(crate) fn new(session: TransferSession) -> Self {
+        Self {
+            session,
+            verified_directories: Mutex::new(HashSet::new()),
+            hardlink_commit_directories: Mutex::new(HashSet::new()),
+        }
+    }
+
+    pub(crate) fn session(&self) -> &TransferSession {
+        &self.session
+    }
+
+    pub(crate) fn direction(&self) -> TransferDirection {
+        match self.session {
+            TransferSession::Standard(_) => TransferDirection::Upload,
+            TransferSession::Raw { .. } => TransferDirection::Download,
+        }
+    }
+
+    fn directory_verified(&self, path: &str) -> bool {
+        self.verified_directories
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(path)
+    }
+
+    fn mark_directory_verified(&self, path: String) {
+        self.verified_directories
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(path);
+    }
+
+    fn hardlink_commit_confirmed(&self, directory: &str) -> bool {
+        self.hardlink_commit_directories
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(directory)
+    }
+
+    fn confirm_hardlink_commit(&self, directory: String) {
+        self.hardlink_commit_directories
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(directory);
     }
 }
 
@@ -1224,7 +1293,7 @@ pub(crate) enum TransferJobOutcome {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_transfer_job(
-    transfer_session: TransferSession,
+    transfer_session: Arc<TransferSessionSlot>,
     mut job: TransferJob,
     plan_id: TransferPlanId,
     event_tx: flume::Sender<AppEvent>,
@@ -1234,7 +1303,7 @@ pub(crate) async fn run_transfer_job(
     may_clear_destination: bool,
 ) -> TransferJobOutcome {
     let result = match resolve_transfer_conflict(
-        &transfer_session,
+        transfer_session.session(),
         &mut job,
         plan_id,
         &event_tx,
@@ -1243,9 +1312,17 @@ pub(crate) async fn run_transfer_job(
     )
     .await
     {
-        Ok(()) => match (job.direction, transfer_session) {
+        Ok(()) => match (job.direction, transfer_session.session()) {
             (macsftp_core::TransferDirection::Upload, TransferSession::Standard(sftp)) => {
-                upload_transfer(&sftp, &job, &event_tx, &cancel, &connection_key).await
+                upload_transfer(
+                    &transfer_session,
+                    sftp,
+                    &job,
+                    &event_tx,
+                    &cancel,
+                    &connection_key,
+                )
+                .await
             }
             (
                 macsftp_core::TransferDirection::Download,
@@ -1255,8 +1332,8 @@ pub(crate) async fn run_transfer_job(
                 },
             ) => {
                 download_single_file_pipelined(
-                    &session,
-                    chunk_size,
+                    session,
+                    *chunk_size,
                     &job,
                     &event_tx,
                     &cancel,
@@ -1267,7 +1344,7 @@ pub(crate) async fn run_transfer_job(
             }
             (macsftp_core::TransferDirection::Download, TransferSession::Standard(sftp)) => {
                 download_single_file(
-                    &sftp,
+                    sftp,
                     &job,
                     &event_tx,
                     &cancel,
@@ -1612,6 +1689,7 @@ fn copy_name_for_destination(destination: &TransferEndpoint) -> String {
 }
 
 async fn upload_transfer(
+    transfer_session: &TransferSessionSlot,
     sftp: &SftpSession,
     job: &TransferJob,
     event_tx: &flume::Sender<AppEvent>,
@@ -1631,11 +1709,11 @@ async fn upload_transfer(
         .await
         .map_err(|error| local_transfer_error("Upload Item Unavailable", &error))?;
     if metadata.file_type().is_symlink() {
-        return upload_symlink(sftp, job, event_tx, cancel).await;
+        return upload_symlink(transfer_session, sftp, job, event_tx, cancel).await;
     }
     if metadata.is_dir() {
         emit_transfer_running(event_tx, job, Some(0)).await?;
-        create_remote_directory(sftp, destination, cancel).await?;
+        create_remote_directory(transfer_session, sftp, destination, cancel).await?;
         preserve_upload_metadata(sftp, job, &metadata, event_tx).await;
         return Ok(());
     }
@@ -1649,7 +1727,7 @@ async fn upload_transfer(
     let bytes_total = Some(metadata.len());
     emit_transfer_running(event_tx, job, bytes_total).await?;
 
-    ensure_remote_parent_directory(sftp, destination, cancel).await?;
+    ensure_remote_parent_directory(transfer_session, sftp, destination, cancel).await?;
     let temporary_destination = remote_temporary_path(destination, job.id);
     emit_residual_temp_created(
         event_tx,
@@ -1697,7 +1775,18 @@ async fn upload_transfer(
         return Err(error);
     }
     if matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
-        verify_remote_hardlink(sftp, &temporary_destination, event_tx, job.id).await?;
+        // Proving the server accepts the atomic hardlink commit costs three
+        // round trips; one success is enough for every later file this session
+        // commits into the same directory.
+        let commit_directory = destination
+            .as_str()
+            .rsplit_once('/')
+            .map(|(parent, _)| parent)
+            .unwrap_or("");
+        if !transfer_session.hardlink_commit_confirmed(commit_directory) {
+            verify_remote_hardlink(sftp, &temporary_destination, event_tx, job.id).await?;
+            transfer_session.confirm_hardlink_commit(commit_directory.to_string());
+        }
         remove_remote_destination(sftp, destination).await?;
     }
     if let Err(error) = commit_remote_temp(sftp, &temporary_destination, destination).await {
@@ -1900,6 +1989,7 @@ async fn verify_local_hardlink(
 }
 
 async fn ensure_remote_parent_directory(
+    transfer_session: &TransferSessionSlot,
     sftp: &SftpSession,
     destination: &macsftp_core::RemotePath,
     cancel: &CancellationToken,
@@ -1914,14 +2004,35 @@ async fn ensure_remote_parent_directory(
     if parent.is_empty() {
         return Ok(());
     }
-    create_remote_directory(sftp, &macsftp_core::RemotePath::new(parent), cancel).await
+    create_remote_directory(
+        transfer_session,
+        sftp,
+        &macsftp_core::RemotePath::new(parent),
+        cancel,
+    )
+    .await
 }
 
 async fn create_remote_directory(
+    transfer_session: &TransferSessionSlot,
     sftp: &SftpSession,
     directory: &macsftp_core::RemotePath,
     cancel: &CancellationToken,
 ) -> Result<(), UserFacingError> {
+    if transfer_session.directory_verified(directory.as_str()) {
+        return Ok(());
+    }
+    // Every file in a plan asks for a parent the previous files already
+    // created. One stat on the full path settles that, where the walk below
+    // would stat each component. On a miss the walk still runs unchanged, so
+    // the extra failure-path round trip only lands on the first file.
+    if !cancel.is_cancelled()
+        && let Ok(metadata) = sftp.metadata(directory.as_str()).await
+        && metadata.file_type() == SftpFileType::Dir
+    {
+        transfer_session.mark_directory_verified(directory.as_str().to_string());
+        return Ok(());
+    }
     let mut current = if directory.as_str().starts_with('/') {
         "/".to_string()
     } else {
@@ -1940,10 +2051,16 @@ async fn create_remote_directory(
             return Err(cancelled_transfer_error());
         }
         match sftp.metadata(current.clone()).await {
-            Ok(_) => {}
+            Ok(metadata) => {
+                if metadata.file_type() == SftpFileType::Dir {
+                    transfer_session.mark_directory_verified(current.clone());
+                }
+            }
             Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => {
                 match sftp.create_dir(current.clone()).await {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        transfer_session.mark_directory_verified(current.clone());
+                    }
                     Err(SftpError::Status(status)) if status.status_code == StatusCode::Failure => {
                         sftp.metadata(current.clone()).await.map(|_| ()).map_err(|error| {
                             transfer_error(
@@ -2303,6 +2420,7 @@ async fn download_directory(
 }
 
 async fn upload_symlink(
+    transfer_session: &TransferSessionSlot,
     sftp: &SftpSession,
     job: &TransferJob,
     event_tx: &flume::Sender<AppEvent>,
@@ -2324,7 +2442,7 @@ async fn upload_symlink(
     let target = tokio::fs::read_link(source.as_str())
         .await
         .map_err(|error| local_transfer_error("Link Destination Unavailable", &error))?;
-    ensure_remote_parent_directory(sftp, destination, cancel).await?;
+    ensure_remote_parent_directory(transfer_session, sftp, destination, cancel).await?;
     if matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
         remove_remote_destination(sftp, destination).await?;
     }

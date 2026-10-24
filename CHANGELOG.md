@@ -60,6 +60,13 @@ based on Keep a Changelog, and releases use semantic versioning.
 
 ### Changed
 
+- Transfers reuse one SFTP session per plan instead of opening a channel per
+  file, open channels in parallel instead of one after another, and keep more
+  files in flight (8 per plan, capped per connection so default OpenSSH
+  `MaxSessions` still fits). A folder of small files now moves several times
+  faster, especially over a high-latency link, and downloads advertise a larger
+  SSH window so a single large file is no longer capped at roughly 30 MiB/s on
+  a 50 ms link.
 - Status-bar messages now expire after six seconds instead of lingering until
   the next action happens to overwrite them.
 - Finishing an upload or download now re-reads the pane that received the
