@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use macsftp_core::{AppEvent, ErrorCode, TransferId, TransferProgress, UserFacingError};
+use macsftp_core::{
+    AppEvent, ErrorCode, TransferDirection, TransferId, TransferProgress, UserFacingError,
+};
 use russh_sftp::client::RawSftpSession;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
@@ -75,6 +77,7 @@ async fn emit_transfer_progress(
 
 pub(crate) async fn open_raw_sftp_session(
     channel: russh::Channel<russh::client::Msg>,
+    direction: TransferDirection,
 ) -> Result<(Arc<RawSftpSession>, u32), UserFacingError> {
     let sftp_config = russh_sftp::client::Config {
         max_packet_len: 262144,
@@ -112,8 +115,12 @@ pub(crate) async fn open_raw_sftp_session(
                 "The server limits could not be read.",
             )
         })?;
-        if extension.max_read_len > 0 {
-            chunk_size = extension.max_read_len.min(DEFAULT_CHUNK_SIZE as u64) as u32;
+        let limit = match direction {
+            TransferDirection::Download => extension.max_read_len,
+            TransferDirection::Upload => extension.max_write_len,
+        };
+        if limit > 0 {
+            chunk_size = limit.min(DEFAULT_CHUNK_SIZE as u64) as u32;
         }
         raw.set_limits(russh_sftp::client::rawsession::Limits::from(extension));
     }
@@ -122,6 +129,7 @@ pub(crate) async fn open_raw_sftp_session(
 
 pub(crate) async fn open_transfer_raw_sftp(
     handle: &russh::client::Handle<crate::physical_connection::ClientHandler>,
+    direction: TransferDirection,
 ) -> Result<(Arc<RawSftpSession>, u32), UserFacingError> {
     let channel = handle.channel_open_session().await.map_err(|error| {
         warn!(
@@ -152,7 +160,7 @@ pub(crate) async fn open_transfer_raw_sftp(
                 "The server rejected the SFTP subsystem.",
             )
         })?;
-    open_raw_sftp_session(channel).await
+    open_raw_sftp_session(channel, direction).await
 }
 
 struct ReadChunkResult {

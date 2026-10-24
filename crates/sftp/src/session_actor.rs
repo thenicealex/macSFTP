@@ -865,6 +865,7 @@ pub(crate) enum TransferSession {
     Raw {
         session: Arc<RawSftpSession>,
         chunk_size: u32,
+        direction: TransferDirection,
     },
 }
 
@@ -908,9 +909,9 @@ impl TransferSessionSlot {
     }
 
     pub(crate) fn direction(&self) -> TransferDirection {
-        match self.session {
+        match &self.session {
             TransferSession::Standard(_) => TransferDirection::Upload,
-            TransferSession::Raw { .. } => TransferDirection::Download,
+            TransferSession::Raw { direction, .. } => *direction,
         }
     }
 
@@ -976,18 +977,13 @@ pub(crate) async fn open_transfer_session(
     handle: &client::Handle<crate::physical_connection::ClientHandler>,
     direction: macsftp_core::TransferDirection,
 ) -> Result<TransferSession, UserFacingError> {
-    match direction {
-        macsftp_core::TransferDirection::Upload => open_transfer_sftp(handle)
-            .await
-            .map(TransferSession::Standard),
-        macsftp_core::TransferDirection::Download => {
-            let (raw, chunk_size) = crate::pipelined_reader::open_transfer_raw_sftp(handle).await?;
-            Ok(TransferSession::Raw {
-                session: raw,
-                chunk_size,
-            })
-        }
-    }
+    let (raw, chunk_size) =
+        crate::pipelined_reader::open_transfer_raw_sftp(handle, direction).await?;
+    Ok(TransferSession::Raw {
+        session: raw,
+        chunk_size,
+        direction,
+    })
 }
 
 /// Stream a remote download plan from a dedicated SFTP channel. Planning
@@ -1313,6 +1309,25 @@ pub(crate) async fn run_transfer_job(
     .await
     {
         Ok(()) => match (job.direction, transfer_session.session()) {
+            (
+                macsftp_core::TransferDirection::Upload,
+                TransferSession::Raw {
+                    session,
+                    chunk_size,
+                    ..
+                },
+            ) => {
+                upload_single_file_pipelined(
+                    &transfer_session,
+                    session,
+                    *chunk_size,
+                    &job,
+                    &event_tx,
+                    &cancel,
+                    &connection_key,
+                )
+                .await
+            }
             (macsftp_core::TransferDirection::Upload, TransferSession::Standard(sftp)) => {
                 upload_transfer(
                     &transfer_session,
@@ -1329,6 +1344,7 @@ pub(crate) async fn run_transfer_job(
                 TransferSession::Raw {
                     session,
                     chunk_size,
+                    ..
                 },
             ) => {
                 download_single_file_pipelined(
@@ -1352,13 +1368,6 @@ pub(crate) async fn run_transfer_job(
                     may_clear_destination,
                 )
                 .await
-            }
-            (macsftp_core::TransferDirection::Upload, TransferSession::Raw { .. }) => {
-                Err(UserFacingError::new(
-                    ErrorCode::Unknown,
-                    "Invalid transfer session",
-                    "Expected standard SFTP session for upload.",
-                ))
             }
         },
         Err(error) => Err(error),
@@ -2094,6 +2103,415 @@ async fn create_remote_directory(
     Ok(())
 }
 
+async fn ensure_remote_parent_directory_raw(
+    transfer_session: &TransferSessionSlot,
+    raw: &RawSftpSession,
+    destination: &macsftp_core::RemotePath,
+    cancel: &CancellationToken,
+) -> Result<(), UserFacingError> {
+    let Some(parent) = destination
+        .as_str()
+        .rsplit_once('/')
+        .map(|(parent, _)| parent)
+    else {
+        return Ok(());
+    };
+    if parent.is_empty() {
+        return Ok(());
+    }
+    create_remote_directory_raw(
+        transfer_session,
+        raw,
+        &macsftp_core::RemotePath::new(parent),
+        cancel,
+    )
+    .await
+}
+
+async fn create_remote_directory_raw(
+    transfer_session: &TransferSessionSlot,
+    raw: &RawSftpSession,
+    directory: &macsftp_core::RemotePath,
+    cancel: &CancellationToken,
+) -> Result<(), UserFacingError> {
+    if transfer_session.directory_verified(directory.as_str()) {
+        return Ok(());
+    }
+    let mut current = String::new();
+    let components = directory
+        .as_str()
+        .split('/')
+        .filter(|component| !component.is_empty());
+    for component in components {
+        if cancel.is_cancelled() {
+            return Err(cancelled_transfer_error());
+        }
+        if !current.is_empty() && current != "/" {
+            current.push('/');
+        }
+        if current.is_empty() && directory.as_str().starts_with('/') {
+            current.push('/');
+        }
+        current.push_str(component);
+        if transfer_session.directory_verified(&current) {
+            continue;
+        }
+        if cancel.is_cancelled() {
+            return Err(cancelled_transfer_error());
+        }
+        match raw.stat(current.clone()).await {
+            Ok(attrs) => {
+                if attrs.attrs.file_type() == SftpFileType::Dir {
+                    transfer_session.mark_directory_verified(current.clone());
+                }
+            }
+            Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => {
+                match raw.mkdir(current.clone(), FileAttributes::empty()).await {
+                    Ok(_) => {
+                        transfer_session.mark_directory_verified(current.clone());
+                    }
+                    Err(SftpError::Status(status)) if status.status_code == StatusCode::Failure => {
+                        raw.stat(current.clone()).await.map(|_| ()).map_err(|error| {
+                            transfer_error(
+                                ErrorCode::Unknown,
+                                "Server Folder Creation Failed",
+                                "The remote directory could not be created. Check permissions and try again.",
+                                sftp_status_guidance(&error),
+                            )
+                        })?;
+                        transfer_session.mark_directory_verified(current.clone());
+                    }
+                    Err(error) => {
+                        return Err(transfer_error(
+                            ErrorCode::Unknown,
+                            "Server Folder Creation Failed",
+                            "The remote directory could not be created. Check permissions and try again.",
+                            sftp_status_guidance(&error),
+                        ));
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(transfer_error(
+                    ErrorCode::Unknown,
+                    "Server Folder Unavailable",
+                    "The remote destination could not be checked. Try again.",
+                    sftp_status_guidance(&error),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn cleanup_remote_temp_raw(
+    raw: &RawSftpSession,
+    temporary: &RemotePath,
+    event_tx: &flume::Sender<AppEvent>,
+    transfer_id: TransferId,
+    residual_transfer_id: Option<TransferId>,
+) -> bool {
+    let cleaned = match raw.remove(temporary.as_str()).await {
+        Ok(_) => true,
+        Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => true,
+        Err(error) => {
+            emit_temporary_file_warning(
+                event_tx,
+                transfer_id,
+                format!(
+                    "Remote temporary file remains at {}: {error}",
+                    temporary.as_str()
+                ),
+            )
+            .await;
+            false
+        }
+    };
+    if cleaned && let Some(id) = residual_transfer_id {
+        emit_residual_temp_cleared(event_tx, id, temporary.as_str()).await;
+    }
+    cleaned
+}
+
+async fn commit_remote_temp_raw(
+    raw: &RawSftpSession,
+    temporary: &RemotePath,
+    destination: &RemotePath,
+) -> Result<(), UserFacingError> {
+    match raw.hardlink(temporary.as_str(), destination.as_str()).await {
+        Ok(_) => Ok(()),
+        Err(SftpError::Status(status)) if status.status_code == StatusCode::OpUnsupported => {
+            Err(UserFacingError::new(
+                ErrorCode::Unknown,
+                "Atomic upload is not supported",
+                "This server does not support the required atomic upload commit. Try another server or reconnect.",
+            )
+            .with_retryable(true))
+        }
+        Err(error) => Err(remote_destination_create_error(error)),
+    }
+}
+
+async fn verify_remote_hardlink_raw(
+    raw: &RawSftpSession,
+    temporary: &RemotePath,
+    event_tx: &flume::Sender<AppEvent>,
+    transfer_id: TransferId,
+) -> Result<(), UserFacingError> {
+    let probe = RemotePath::new(format!("{}.commit-probe", temporary.as_str()));
+    if !cleanup_remote_temp_raw(raw, &probe, event_tx, transfer_id, None).await {
+        return Err(UserFacingError::new(
+            ErrorCode::Unknown,
+            "Upload Preparation Failed",
+            "A previous temporary upload file could not be removed. Retry the transfer.",
+        )
+        .with_retryable(true));
+    }
+    match raw.hardlink(temporary.as_str(), probe.as_str()).await {
+        Ok(_) => {
+            if cleanup_remote_temp_raw(raw, &probe, event_tx, transfer_id, None).await {
+                Ok(())
+            } else {
+                Err(UserFacingError::new(
+                    ErrorCode::Unknown,
+                    "Upload Preparation Failed",
+                    "A temporary upload file could not be cleaned up. Retry the transfer.",
+                )
+                .with_retryable(true))
+            }
+        }
+        Err(SftpError::Status(status)) if status.status_code == StatusCode::OpUnsupported => {
+            Err(UserFacingError::new(
+                ErrorCode::Unknown,
+                "Atomic upload is not supported",
+                "This server does not support the required atomic upload commit. Try another server or reconnect.",
+            )
+            .with_retryable(true))
+        }
+        Err(error) => Err(transfer_error(
+            ErrorCode::Unknown,
+            "Atomic upload is not supported",
+            "The server could not verify the required atomic upload commit. Try again.",
+            sftp_status_guidance(&error),
+        )),
+    }
+}
+
+async fn remove_remote_destination_raw(
+    raw: &RawSftpSession,
+    destination: &RemotePath,
+) -> Result<(), UserFacingError> {
+    match raw.remove(destination.as_str()).await {
+        Ok(_) => Ok(()),
+        Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => Ok(()),
+        Err(error) => Err(transfer_error(
+            ErrorCode::Unknown,
+            "Server File Replacement Failed",
+            "The existing remote file could not be removed. Check permissions and try again.",
+            sftp_status_guidance(&error),
+        )),
+    }
+}
+
+async fn preserve_upload_metadata_raw(
+    raw: &RawSftpSession,
+    job: &TransferJob,
+    source_metadata: &std::fs::Metadata,
+    event_tx: &flume::Sender<AppEvent>,
+) {
+    let TransferEndpoint::Remote(destination) = &job.destination else {
+        return;
+    };
+    let mut attributes = FileAttributes::empty();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        if job.metadata_policy.preserve_permissions {
+            attributes.permissions = Some(source_metadata.mode());
+        }
+    }
+    if job.metadata_policy.preserve_mtime {
+        attributes.mtime = source_metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|duration| u32::try_from(duration.as_secs()).ok());
+    }
+    if attributes.permissions.is_none() && attributes.mtime.is_none() {
+        return;
+    }
+    if let Err(error) = raw.setstat(destination.as_str(), attributes).await {
+        emit_metadata_warning(event_tx, job.id, error.to_string()).await;
+    }
+}
+
+async fn upload_symlink_raw(
+    transfer_session: &TransferSessionSlot,
+    raw: &RawSftpSession,
+    job: &TransferJob,
+    event_tx: &flume::Sender<AppEvent>,
+    cancel: &CancellationToken,
+) -> Result<(), UserFacingError> {
+    let (TransferEndpoint::Local(source), TransferEndpoint::Remote(destination)) =
+        (&job.source, &job.destination)
+    else {
+        return Err(UserFacingError::new(
+            ErrorCode::UnsupportedSymlink,
+            "Invalid symlink upload",
+            "The symlink source or remote destination is invalid.",
+        ));
+    };
+    emit_transfer_running(event_tx, job, Some(0)).await?;
+    if cancel.is_cancelled() {
+        return Err(cancelled_transfer_error());
+    }
+    let target = tokio::fs::read_link(source.as_str())
+        .await
+        .map_err(|error| local_transfer_error("Link Destination Unavailable", &error))?;
+    ensure_remote_parent_directory_raw(transfer_session, raw, destination, cancel).await?;
+    if matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
+        remove_remote_destination_raw(raw, destination).await?;
+    }
+    raw.symlink(target.display().to_string(), destination.as_str())
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            transfer_error(
+                ErrorCode::UnsupportedSymlink,
+                "Server Link Creation Failed",
+                "The remote symlink could not be created. Check server support and try again.",
+                sftp_status_guidance(&error),
+            )
+        })
+}
+
+async fn upload_single_file_pipelined(
+    transfer_session: &TransferSessionSlot,
+    raw: &Arc<RawSftpSession>,
+    chunk_size: u32,
+    job: &TransferJob,
+    event_tx: &flume::Sender<AppEvent>,
+    cancel: &CancellationToken,
+    connection_key: &str,
+) -> Result<(), UserFacingError> {
+    let (TransferEndpoint::Local(source), TransferEndpoint::Remote(destination)) =
+        (&job.source, &job.destination)
+    else {
+        return Err(UserFacingError::new(
+            ErrorCode::Unknown,
+            "Invalid upload job",
+            "The upload source or destination is invalid.",
+        ));
+    };
+    let metadata = tokio::fs::symlink_metadata(source.as_str())
+        .await
+        .map_err(|error| local_transfer_error("Upload Item Unavailable", &error))?;
+    if metadata.file_type().is_symlink() {
+        return upload_symlink_raw(transfer_session, raw, job, event_tx, cancel).await;
+    }
+    if metadata.is_dir() {
+        emit_transfer_running(event_tx, job, Some(0)).await?;
+        create_remote_directory_raw(transfer_session, raw, destination, cancel).await?;
+        preserve_upload_metadata_raw(raw, job, &metadata, event_tx).await;
+        return Ok(());
+    }
+    if !metadata.is_file() {
+        return Err(UserFacingError::new(
+            ErrorCode::Unknown,
+            "Upload source is not a file",
+            "Choose a regular file or directory to upload.",
+        ));
+    }
+    let bytes_total = Some(metadata.len());
+    emit_transfer_running(event_tx, job, bytes_total).await?;
+
+    ensure_remote_parent_directory_raw(transfer_session, raw, destination, cancel).await?;
+    let temporary_destination = remote_temporary_path(destination, job.id);
+    emit_residual_temp_created(
+        event_tx,
+        ResidualTempRecord {
+            connection_key: connection_key.to_string(),
+            direction: job.direction,
+            transfer_id: job.id,
+            path: temporary_destination.as_str().to_string(),
+            created_at: Timestamp::from_system_time(std::time::SystemTime::now()),
+        },
+    )
+    .await;
+    if !cleanup_remote_temp_raw(raw, &temporary_destination, event_tx, job.id, Some(job.id)).await {
+        return Err(UserFacingError::new(
+            ErrorCode::Unknown,
+            "Upload Preparation Failed",
+            "A previous temporary upload file could not be removed. Retry the transfer.",
+        )
+        .with_retryable(true));
+    }
+    let copy_result = async {
+        let mut source_file = tokio::fs::File::open(source.as_str())
+            .await
+            .map_err(|error| local_transfer_error("Upload Item Unavailable", &error))?;
+        let handle_packet = raw
+            .open(
+                temporary_destination.as_str(),
+                OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
+                FileAttributes::empty(),
+            )
+            .await
+            .map_err(remote_destination_create_error)?;
+        let handle = handle_packet.handle;
+
+        let writer = crate::pipelined_writer::PipelinedUploadWriter::new(
+            raw.clone(),
+            handle.clone(),
+            bytes_total,
+        )
+        .with_chunk_size(chunk_size)
+        .with_window_capacity(crate::pipelined_writer::DEFAULT_WINDOW_CAPACITY);
+
+        let upload_result = writer
+            .upload_from(&mut source_file, job.id, event_tx, cancel)
+            .await;
+
+        if let Err(close_error) = raw.close(handle).await {
+            warn!(error = %close_error, "failed to close remote file handle after upload");
+            if upload_result.is_ok() {
+                return Err(transfer_error(
+                    ErrorCode::Unknown,
+                    "Transfer Write Failed",
+                    "The remote file could not be closed after writing.",
+                    sftp_status_guidance(&close_error),
+                ));
+            }
+        }
+        upload_result.map(|_| ())
+    }
+    .await;
+    if let Err(error) = copy_result {
+        cleanup_remote_temp_raw(raw, &temporary_destination, event_tx, job.id, Some(job.id)).await;
+        return Err(error);
+    }
+    if matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
+        let commit_directory = destination
+            .as_str()
+            .rsplit_once('/')
+            .map(|(parent, _)| parent)
+            .unwrap_or("");
+        if !transfer_session.hardlink_commit_confirmed(commit_directory) {
+            verify_remote_hardlink_raw(raw, &temporary_destination, event_tx, job.id).await?;
+            transfer_session.confirm_hardlink_commit(commit_directory.to_string());
+        }
+        remove_remote_destination_raw(raw, destination).await?;
+    }
+    if let Err(error) = commit_remote_temp_raw(raw, &temporary_destination, destination).await {
+        cleanup_remote_temp_raw(raw, &temporary_destination, event_tx, job.id, Some(job.id)).await;
+        return Err(error);
+    }
+    cleanup_remote_temp_raw(raw, &temporary_destination, event_tx, job.id, Some(job.id)).await;
+    preserve_upload_metadata_raw(raw, job, &metadata, event_tx).await;
+    Ok(())
+}
+
 async fn download_symlink_raw(
     raw: &Arc<RawSftpSession>,
     job: &TransferJob,
@@ -2116,6 +2534,7 @@ async fn download_symlink_raw(
     let session = TransferSession::Raw {
         session: Arc::clone(raw),
         chunk_size: 0,
+        direction: TransferDirection::Download,
     };
     let target = session.read_link(source.as_str()).await.map_err(|error| {
         transfer_error(

@@ -4,6 +4,7 @@ mod known_hosts;
 mod mock_actor;
 mod physical_connection;
 pub(crate) mod pipelined_reader;
+pub(crate) mod pipelined_writer;
 pub mod pool;
 mod runtime;
 mod session_actor;

@@ -119,7 +119,7 @@ route 支持 Direct、单跳 saved-profile JumpHost（jump profile 自身必须 
 
 传输 session 按 plan + 方向复用，不为每个文件新开 channel。channel open、subsystem、SFTP INIT 和 limits 协商要 4 个 RTT，在大量小文件的目录传输里比数据本身更贵：`TransferManager` 在 plan 内保留 idle 的 `TransferSessionSlot`，job 正常完成才归还，plan 没有 pending/running/retry 时立即丢弃（server 端的 sftp 进程随之退出）。session 必须在 job task 内打开，禁止在调度循环里 await——否则每个 start 串行付出 4 个 RTT，小文件吞吐会被钉在一组 RTT 一个文件。
 
-复用的 session 同时携带本 plan 已确认的远端事实，只减少 RTT、不改变冲突与失败语义：已验证存在的目录（后续文件用一次完整路径 stat 代替逐段 stat）和已证明支持 atomic hardlink commit 的目标目录（按目录而非按 session 记录，因为子目录可能是另一个 mount）。session 数量受三条上限约束：单 plan 8 个 job、全局 12 个、每条物理连接 9 条 channel（OpenSSH 默认 `MaxSessions=10`，browsing session 占一条）。下载的 SSH receive window 为 8 MiB、读取管道 16 × 256 KiB；upload 的在途窗口由服务端限制决定。
+复用的 session 同时携带本 plan 已确认的远端事实，只减少 RTT、不改变冲突与失败语义：已验证存在的目录（后续文件用一次完整路径 stat 代替逐段 stat）和已证明支持 atomic hardlink commit 的目标目录（按目录而非按 session 记录，因为子目录可能是另一个 mount）。session 数量受三条上限约束：单 plan 8 个 job、全局 12 个、每条物理连接 9 条 channel（OpenSSH 默认 `MaxSessions=10`，browsing session 占一条）。下载的 SSH receive window 为 8 MiB、读取管道 16 × 256 KiB；upload 使用 `PipelinedUploadWriter` 保持滑动窗口并发写入（16 个在途 `SSH_FXP_WRITE`，分块根据 OpenSSH `limits@openssh.com` 的 `max_write_len` 协商，默认 256 KiB），高延迟网络下免于逐包 RTT 串行等待。
 
 传输状态归约必须与 job 数量线性：`finalize_plan_for_job` 和「plan 是否结束」都用 id 集合 + 单次遍历，禁止按 child id 逐个线性查找 job——目录传输的完成事件数等于文件数，按次扫描会让 UI 线程在整个传输期间冻结（2000 个 child 时实测超过两分钟）。plan 的终态转换由 reducer 记录在 `TransferStore::just_finished_plan`（每个 event 开头清空），UI 直接读这一位，不要自己再推导一次。
 

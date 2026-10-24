@@ -857,6 +857,58 @@ async fn overwrite_uses_temporary_files_without_leaving_residue() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn pipelined_upload_large_file_transfers_intact() {
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    let fixture = spawn_actor(
+        &server,
+        client_key_auth(&server),
+        Some(&server.host_public_key),
+    );
+    let _ = next_event(&fixture, "TabConnected").await;
+
+    // 1 MiB payload to span multiple negotiated SFTP write chunks and pipeline window slots
+    let payload: Vec<u8> = (0..1_048_576).map(|i| (i % 251) as u8).collect();
+    let upload_source = server.fixture_dir.join("pipelined-upload-large-source.bin");
+    let upload_destination = server.fixture_dir.join("pipelined-upload-large-dest.bin");
+    std::fs::write(&upload_source, &payload).expect("write large upload source");
+
+    let upload = transfer_job(
+        105,
+        TransferDirection::Upload,
+        TransferEndpoint::Local(macsftp_core::LocalPath::new(
+            upload_source.display().to_string(),
+        )),
+        TransferEndpoint::Remote(RemotePath::new(upload_destination.display().to_string())),
+    );
+    fixture
+        .requests
+        .send_async(RemoteSessionRequest::RunTransferJobs {
+            plan_id: macsftp_core::TransferPlanId(9),
+            jobs: vec![upload],
+        })
+        .await
+        .expect("pipelined upload request should reach actor");
+    wait_for_transfer_completion(&fixture, TransferId(105)).await;
+
+    assert_eq!(
+        std::fs::read(&upload_destination).expect("read uploaded large file"),
+        payload
+    );
+    assert!(
+        !upload_destination
+            .parent()
+            .expect("upload destination has parent")
+            .join(".pipelined-upload-large-dest.bin.macsftp-part-105")
+            .exists(),
+        "successful pipelined upload must remove its remote temporary file"
+    );
+
+    fixture.cancel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn conflict_decision_pauses_job_and_applies_skip_to_later_plan_jobs() {
     let Some(server) = SshTestServer::spawn() else {
         return;
