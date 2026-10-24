@@ -1463,11 +1463,7 @@ impl TransferStore {
         ) {
             return false;
         }
-        // One pass over the jobs with the plan's ids in an IdMatcher.
-        // Reverse iteration hits any unfinished queued/running child job early
-        // and aborts before doing unnecessary work.
-        let matcher = IdMatcher::new(&self.plans[plan_index].child_jobs);
-        let wanted_len = matcher.len();
+        let wanted_len = self.plans[plan_index].child_jobs.len();
         let mut any_failed = false;
         let mut finished = 0usize;
 
@@ -1487,6 +1483,7 @@ impl TransferStore {
                 }
             }
         } else {
+            let matcher = IdMatcher::new(&self.plans[plan_index].child_jobs);
             for job in self.jobs.iter().rev() {
                 if !matcher.contains(job.id) {
                     continue;
