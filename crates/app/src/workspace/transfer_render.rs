@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::base::motion::{Transition, transition};
@@ -7,7 +7,8 @@ use gpui_kit::{
     MouseDownEvent, ParentElement, Pixels, Role, SharedString, Styled, Window, div, prelude::*, px,
 };
 use macsftp_core::{
-    EditPhase, EntryPath, TransferId, TransferJob, TransferPlanState, TransferState, TransferStore,
+    EditPhase, EntryPath, IdMatcher, TransferId, TransferJob, TransferPlanState, TransferState,
+    TransferStore,
 };
 use macsftp_ui::{
     ActiveTheme, IconName, connection_status, format_size, icon, icon_button,
@@ -43,31 +44,8 @@ pub(crate) fn painted_progress(
 }
 
 pub(crate) fn visible_transfer_jobs(store: &TransferStore) -> Vec<&TransferJob> {
-    let mut hidden_job_ids = HashSet::new();
-
-    // Only inspect individual job states if there's any Failed plan with children
-    // that needs disambiguation between preparation failure and execution failure.
-    let needs_terminal_check = store.plans.iter().any(|plan| {
-        matches!(plan.state, TransferPlanState::Failed { .. }) && !plan.child_jobs.is_empty()
-    });
-
-    let job_is_terminal: HashMap<TransferId, bool> = if needs_terminal_check {
-        store
-            .jobs
-            .iter()
-            .map(|job| {
-                let is_terminal = matches!(
-                    job.state,
-                    TransferState::Completed
-                        | TransferState::Skipped
-                        | TransferState::Failed { .. }
-                );
-                (job.id, is_terminal)
-            })
-            .collect()
-    } else {
-        HashMap::new()
-    };
+    let mut hidden_roots = HashSet::new();
+    let mut hidden_matchers = Vec::new();
 
     for plan in &store.plans {
         let show_root = if plan.child_jobs.is_empty()
@@ -77,7 +55,14 @@ pub(crate) fn visible_transfer_jobs(store: &TransferStore) -> Vec<&TransferJob> 
             true
         } else if matches!(plan.state, TransferPlanState::Failed { .. }) {
             let children_are_terminal = plan.child_jobs.iter().all(|child_id| {
-                job_is_terminal.get(child_id).copied().unwrap_or(false)
+                store.find_job(*child_id).is_some_and(|job| {
+                    matches!(
+                        job.state,
+                        TransferState::Completed
+                            | TransferState::Skipped
+                            | TransferState::Failed { .. }
+                    )
+                })
             });
             !children_are_terminal
         } else {
@@ -85,16 +70,21 @@ pub(crate) fn visible_transfer_jobs(store: &TransferStore) -> Vec<&TransferJob> 
         };
 
         if show_root {
-            hidden_job_ids.extend(plan.child_jobs.iter().copied());
+            hidden_matchers.push(IdMatcher::new(&plan.child_jobs));
         } else {
-            hidden_job_ids.insert(plan.root_job_id);
+            hidden_roots.insert(plan.root_job_id);
         }
     }
 
     store
         .jobs
         .iter()
-        .filter(|job| !hidden_job_ids.contains(&job.id))
+        .filter(|job| {
+            !hidden_roots.contains(&job.id)
+                && !hidden_matchers
+                    .iter()
+                    .any(|matcher| matcher.contains(job.id))
+        })
         .collect()
 }
 
@@ -227,10 +217,7 @@ impl crate::workspace::Workspace {
         let agg_label = {
             let mut s = format!(
                 "{} active · {} queued · {} done · {} failed",
-                in_progress.total,
-                waiting.total,
-                completed.total,
-                failed.total
+                in_progress.total, waiting.total, completed.total, failed.total
             );
             if let Some(bps) = agg.speed_bps {
                 s.push_str(&format!(
@@ -435,15 +422,11 @@ impl crate::workspace::Workspace {
                 TransferSection::InProgress => {
                     ("In Progress", &mut in_progress, false, "toggle-in-progress")
                 }
-                TransferSection::Waiting => {
-                    ("Waiting", &mut waiting, false, "toggle-waiting")
-                }
+                TransferSection::Waiting => ("Waiting", &mut waiting, false, "toggle-waiting"),
                 TransferSection::Completed => {
                     ("Complete", &mut completed, true, "toggle-completed")
                 }
-                TransferSection::Failed => {
-                    ("Failed", &mut failed, true, "toggle-failed")
-                }
+                TransferSection::Failed => ("Failed", &mut failed, true, "toggle-failed"),
             };
             if section_data.total == 0 {
                 continue;
@@ -1069,6 +1052,44 @@ mod tests {
         let visible = visible_transfer_jobs(&store);
         assert_eq!(visible.len(), child_count as usize);
         assert_eq!(visible[0].id, TransferId(2));
+    }
+
+    #[test]
+    fn large_planning_plan_visible_jobs_hides_children_with_id_matcher() {
+        let child_count = 10_000;
+        let child_ids: Vec<TransferId> = (2..=child_count + 1).map(TransferId).collect();
+        let mut jobs = Vec::with_capacity(child_count as usize + 1);
+        jobs.push(job(1, TransferState::Planning));
+        for &id in &child_ids {
+            jobs.push(job(id.0, TransferState::Queued));
+        }
+
+        let store = TransferStore {
+            just_finished_plan: None,
+            plans: vec![TransferPlan {
+                id: TransferPlanId(1),
+                root_job_id: TransferId(1),
+                source_root: TransferEndpoint::Local(LocalPath::new("/tmp/dir")),
+                destination_root: TransferEndpoint::Remote(RemotePath::new("/srv/dir")),
+                state: TransferPlanState::Planning,
+                planned_count: child_count as usize,
+                total_bytes: Some(100_000),
+                child_jobs: child_ids,
+                conflict_policy: ConflictPolicy::default(),
+            }],
+            jobs,
+            pending_conflicts: Vec::new(),
+        };
+
+        let start = std::time::Instant::now();
+        let visible = visible_transfer_jobs(&store);
+        let elapsed = start.elapsed();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].id, TransferId(1));
+        assert!(
+            elapsed.as_millis() < 50,
+            "visible_transfer_jobs took too long: {elapsed:?}"
+        );
     }
 
     #[test]

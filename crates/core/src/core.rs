@@ -13,7 +13,9 @@ pub struct WindowSessionId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct SessionId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 pub struct TransferId(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -859,7 +861,7 @@ impl TabStore {
 }
 
 #[derive(Debug)]
-pub(crate) enum IdMatcher<'a> {
+pub enum IdMatcher<'a> {
     Empty,
     Contiguous(u64, u64),
     Sorted(&'a [TransferId]),
@@ -867,7 +869,7 @@ pub(crate) enum IdMatcher<'a> {
 }
 
 impl<'a> IdMatcher<'a> {
-    pub(crate) fn new(ids: &'a [TransferId]) -> Self {
+    pub fn new(ids: &'a [TransferId]) -> Self {
         if ids.is_empty() {
             return IdMatcher::Empty;
         }
@@ -888,7 +890,7 @@ impl<'a> IdMatcher<'a> {
     }
 
     #[inline]
-    pub(crate) fn contains(&self, id: TransferId) -> bool {
+    pub fn contains(&self, id: TransferId) -> bool {
         match self {
             IdMatcher::Empty => false,
             IdMatcher::Contiguous(first, last) => id.0 >= *first && id.0 <= *last,
@@ -898,7 +900,12 @@ impl<'a> IdMatcher<'a> {
     }
 
     #[inline]
-    pub(crate) fn len(&self) -> usize {
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
         match self {
             IdMatcher::Empty => 0,
             IdMatcher::Contiguous(first, last) => (*last - *first + 1) as usize,
@@ -946,8 +953,24 @@ impl TransferStore {
         self.plans.iter().find(|plan| plan.id == plan_id)
     }
 
+    pub fn find_job_index(&self, transfer_id: TransferId) -> Option<usize> {
+        if let Ok(index) = self.jobs.binary_search_by_key(&transfer_id, |job| job.id)
+            && self
+                .jobs
+                .get(index)
+                .is_some_and(|job| job.id == transfer_id)
+        {
+            return Some(index);
+        }
+        self.jobs.iter().position(|job| job.id == transfer_id)
+    }
+
     pub fn find_job(&self, transfer_id: TransferId) -> Option<&TransferJob> {
-        self.jobs.iter().find(|job| job.id == transfer_id)
+        self.find_job_index(transfer_id).map(|i| &self.jobs[i])
+    }
+
+    pub fn find_job_mut(&mut self, transfer_id: TransferId) -> Option<&mut TransferJob> {
+        self.find_job_index(transfer_id).map(|i| &mut self.jobs[i])
     }
 
     /// The plan a job belongs to: either its root or one of its published
@@ -1000,11 +1023,12 @@ impl TransferStore {
                         plan.total_bytes = progress.total_bytes;
                         changed = true;
                     }
-                    let is_monotonically_ascending = match (plan.child_jobs.last(), progress.child_jobs.first()) {
-                        (Some(last_id), Some(first_new)) => first_new.id > *last_id,
-                        (None, Some(_)) => true,
-                        _ => false,
-                    };
+                    let is_monotonically_ascending =
+                        match (plan.child_jobs.last(), progress.child_jobs.first()) {
+                            (Some(last_id), Some(first_new)) => first_new.id > *last_id,
+                            (None, Some(_)) => true,
+                            _ => false,
+                        };
                     if is_monotonically_ascending {
                         plan.child_jobs.reserve(progress.child_jobs.len());
                         for child_job in &progress.child_jobs {
@@ -1026,11 +1050,12 @@ impl TransferStore {
                         }
                     }
                 }
-                let is_monotonically_ascending_jobs = match (self.jobs.last(), progress.child_jobs.first()) {
-                    (Some(last_job), Some(first_new)) => first_new.id > last_job.id,
-                    (None, Some(_)) => true,
-                    _ => false,
-                };
+                let is_monotonically_ascending_jobs =
+                    match (self.jobs.last(), progress.child_jobs.first()) {
+                        (Some(last_job), Some(first_new)) => first_new.id > last_job.id,
+                        (None, Some(_)) => true,
+                        _ => false,
+                    };
                 if is_monotonically_ascending_jobs {
                     if !progress.child_jobs.is_empty() {
                         self.jobs.reserve(progress.child_jobs.len());
@@ -1075,11 +1100,12 @@ impl TransferStore {
                     plan.state = plan_state;
                     changed = true;
                 }
-                if let Some(root_job) = self.jobs.iter_mut().find(|job| job.id == root_job_id)
-                    && root_job.state != root_state
-                {
-                    root_job.state = root_state;
-                    changed = true;
+                if let Some(index) = self.find_job_index(root_job_id) {
+                    let root_job = &mut self.jobs[index];
+                    if root_job.state != root_state {
+                        root_job.state = root_state;
+                        changed = true;
+                    }
                 }
                 changed
             }
@@ -1115,13 +1141,10 @@ impl TransferStore {
                 waiting | self.upsert_conflict(conflict)
             }
             AppEvent::TransferProgress(progress) => {
-                let Some(job) = self
-                    .jobs
-                    .iter_mut()
-                    .find(|job| job.id == progress.transfer_id)
-                else {
+                let Some(job_index) = self.find_job_index(progress.transfer_id) else {
                     return false;
                 };
+                let job = &mut self.jobs[job_index];
                 if matches!(
                     job.state,
                     TransferState::Cancelling
@@ -1148,13 +1171,10 @@ impl TransferStore {
                 }
             }
             AppEvent::TransferWarning(warning) => {
-                let Some(job) = self
-                    .jobs
-                    .iter_mut()
-                    .find(|job| job.id == warning.transfer_id)
-                else {
+                let Some(job_index) = self.find_job_index(warning.transfer_id) else {
                     return false;
                 };
+                let job = &mut self.jobs[job_index];
                 if job.warnings.contains(warning) {
                     false
                 } else {
@@ -1180,9 +1200,10 @@ impl TransferStore {
     }
 
     pub fn mark_cancelling(&mut self, transfer_id: TransferId) -> bool {
-        let Some(job) = self.jobs.iter_mut().find(|job| job.id == transfer_id) else {
+        let Some(job_index) = self.find_job_index(transfer_id) else {
             return false;
         };
+        let job = &mut self.jobs[job_index];
         if matches!(
             job.state,
             TransferState::Queued | TransferState::Running { .. }
@@ -1211,7 +1232,7 @@ impl TransferStore {
     }
 
     fn insert_job(&mut self, job: TransferJob) -> bool {
-        if self.jobs.iter().any(|existing| existing.id == job.id) {
+        if self.find_job_index(job.id).is_some() {
             false
         } else {
             self.jobs.push(job);
@@ -1220,7 +1241,8 @@ impl TransferStore {
     }
 
     fn upsert_job(&mut self, job: TransferJob) -> bool {
-        if let Some(existing) = self.jobs.iter_mut().find(|existing| existing.id == job.id) {
+        if let Some(existing_index) = self.find_job_index(job.id) {
+            let existing = &mut self.jobs[existing_index];
             if *existing == job {
                 false
             } else {
@@ -1252,9 +1274,10 @@ impl TransferStore {
     }
 
     fn set_job_state(&mut self, transfer_id: TransferId, state: TransferState) -> bool {
-        let Some(job) = self.jobs.iter_mut().find(|job| job.id == transfer_id) else {
+        let Some(job_index) = self.find_job_index(transfer_id) else {
             return false;
         };
+        let job = &mut self.jobs[job_index];
         if job.state == state {
             false
         } else {
@@ -1347,9 +1370,10 @@ impl TransferStore {
     }
 
     fn cancel_job_if_unfinished(&mut self, transfer_id: TransferId) -> bool {
-        let Some(job) = self.jobs.iter_mut().find(|job| job.id == transfer_id) else {
+        let Some(job_index) = self.find_job_index(transfer_id) else {
             return false;
         };
+        let job = &mut self.jobs[job_index];
         if matches!(
             job.state,
             TransferState::Completed | TransferState::Skipped | TransferState::Failed { .. }
@@ -1407,17 +1431,50 @@ impl TransferStore {
         let wanted_len = matcher.len();
         let mut any_failed = false;
         let mut finished = 0usize;
-        for job in self.jobs.iter().rev() {
-            if !matcher.contains(job.id) {
-                continue;
-            }
-            match job.state {
-                TransferState::Completed | TransferState::Skipped => finished += 1,
-                TransferState::Failed { .. } => {
-                    any_failed = true;
-                    finished += 1;
+
+        let child_slice: Option<&[TransferJob]> = if let (Some(&first_id), Some(&last_id)) = (
+            self.plans[plan_index].child_jobs.first(),
+            self.plans[plan_index].child_jobs.last(),
+        ) {
+            if let (Some(first_idx), Some(last_idx)) =
+                (self.find_job_index(first_id), self.find_job_index(last_id))
+            {
+                if last_idx >= first_idx && (last_idx - first_idx + 1) == wanted_len {
+                    Some(&self.jobs[first_idx..=last_idx])
+                } else {
+                    None
                 }
-                _ => return false,
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(slice) = child_slice {
+            for job in slice.iter().rev() {
+                match job.state {
+                    TransferState::Completed | TransferState::Skipped => finished += 1,
+                    TransferState::Failed { .. } => {
+                        any_failed = true;
+                        finished += 1;
+                    }
+                    _ => return false,
+                }
+            }
+        } else {
+            for job in self.jobs.iter().rev() {
+                if !matcher.contains(job.id) {
+                    continue;
+                }
+                match job.state {
+                    TransferState::Completed | TransferState::Skipped => finished += 1,
+                    TransferState::Failed { .. } => {
+                        any_failed = true;
+                        finished += 1;
+                    }
+                    _ => return false,
+                }
             }
         }
         // A child that vanished from the store cannot be accounted for, so the
@@ -4241,7 +4298,10 @@ mod tests {
             now,
         );
         let elapsed_first = start.elapsed();
-        assert!(elapsed_first.as_millis() < 50, "first child completion took too long: {elapsed_first:?}");
+        assert!(
+            elapsed_first.as_millis() < 50,
+            "first child completion took too long: {elapsed_first:?}"
+        );
         assert_eq!(store.plans[0].state, super::TransferPlanState::Planning);
         assert_eq!(store.just_finished_plan, None);
 
@@ -4266,6 +4326,141 @@ mod tests {
         assert_eq!(store.plans[0].state, super::TransferPlanState::Completed);
         assert_eq!(store.just_finished_plan, Some(plan_id));
         assert_eq!(store.jobs[0].state, super::TransferState::Completed);
+    }
+
+    #[test]
+    fn multiple_plans_binary_search_and_sliced_finalization() {
+        let now = Timestamp::from_secs_since_epoch(1);
+        let mut store = TransferStore::default();
+
+        let plan_1_id = TransferPlanId(1);
+        let root_1 = super::TransferJob {
+            id: TransferId(1),
+            direction: TransferDirection::Upload,
+            source: TransferEndpoint::Local(LocalPath::new("/tmp/dir1")),
+            destination: TransferEndpoint::Remote(RemotePath::new("/srv/dir1")),
+            state: super::TransferState::Planning,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        store.apply_event(
+            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
+                plan: super::TransferPlan {
+                    id: plan_1_id,
+                    root_job_id: root_1.id,
+                    source_root: root_1.source.clone(),
+                    destination_root: root_1.destination.clone(),
+                    state: super::TransferPlanState::Planning,
+                    planned_count: 1000,
+                    total_bytes: Some(1000),
+                    child_jobs: Vec::new(),
+                    conflict_policy: super::ConflictPolicy::default(),
+                },
+                root_job: root_1.clone(),
+            })),
+            now,
+        );
+
+        let batch_1: Vec<_> = (2..=1001)
+            .map(|id| super::TransferJob {
+                id: TransferId(id),
+                state: super::TransferState::Queued,
+                ..root_1.clone()
+            })
+            .collect();
+        store.apply_event(
+            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+                plan_id: plan_1_id,
+                child_jobs: batch_1,
+                planned_count: 1000,
+                total_bytes: Some(1000),
+            }),
+            now,
+        );
+
+        let plan_2_id = TransferPlanId(2);
+        let root_2 = super::TransferJob {
+            id: TransferId(1002),
+            direction: TransferDirection::Download,
+            source: TransferEndpoint::Remote(RemotePath::new("/srv/dir2")),
+            destination: TransferEndpoint::Local(LocalPath::new("/tmp/dir2")),
+            state: super::TransferState::Planning,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        store.apply_event(
+            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
+                plan: super::TransferPlan {
+                    id: plan_2_id,
+                    root_job_id: root_2.id,
+                    source_root: root_2.source.clone(),
+                    destination_root: root_2.destination.clone(),
+                    state: super::TransferPlanState::Planning,
+                    planned_count: 1000,
+                    total_bytes: Some(1000),
+                    child_jobs: Vec::new(),
+                    conflict_policy: super::ConflictPolicy::default(),
+                },
+                root_job: root_2.clone(),
+            })),
+            now,
+        );
+
+        let batch_2: Vec<_> = (1003..=2002)
+            .map(|id| super::TransferJob {
+                id: TransferId(id),
+                state: super::TransferState::Queued,
+                ..root_2.clone()
+            })
+            .collect();
+        store.apply_event(
+            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+                plan_id: plan_2_id,
+                child_jobs: batch_2,
+                planned_count: 1000,
+                total_bytes: Some(1000),
+            }),
+            now,
+        );
+
+        assert_eq!(store.jobs.len(), 2002);
+        assert_eq!(store.find_job_index(TransferId(500)), Some(499));
+        assert_eq!(store.find_job_index(TransferId(1500)), Some(1499));
+        assert_eq!(
+            store.find_job(TransferId(500)).map(|j| j.id),
+            Some(TransferId(500))
+        );
+
+        // Complete Plan 1's children; Plan 2 must remain unfinished
+        for id in 2..=1001 {
+            store.apply_event(
+                &AppEvent::TransferCompleted {
+                    transfer_id: TransferId(id),
+                },
+                now,
+            );
+        }
+
+        assert_eq!(store.plans[0].state, super::TransferPlanState::Completed);
+        assert_eq!(store.just_finished_plan, Some(plan_1_id));
+        assert_eq!(store.plans[1].state, super::TransferPlanState::Planning);
+
+        // Complete Plan 2's children
+        for id in 1003..=2002 {
+            store.apply_event(
+                &AppEvent::TransferCompleted {
+                    transfer_id: TransferId(id),
+                },
+                now,
+            );
+        }
+
+        assert_eq!(store.plans[1].state, super::TransferPlanState::Completed);
+        assert_eq!(store.just_finished_plan, Some(plan_2_id));
     }
 
     #[test]
