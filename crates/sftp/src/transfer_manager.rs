@@ -12,8 +12,8 @@ use tracing::warn;
 
 use crate::pool::{ConnectionManager, SharedConnection};
 use crate::session_actor::{
-    ConflictWaiter, TransferConflictContext, TransferJobOutcome, TransferSessionSlot,
-    open_transfer_session, run_transfer_job,
+    ConflictWaiter, PlanTransferFacts, TransferConflictContext, TransferJobOutcome,
+    TransferSessionSlot, open_transfer_session, run_transfer_job,
 };
 
 pub(crate) const MAX_CONCURRENT_TRANSFERS: usize = 12;
@@ -121,6 +121,9 @@ pub(crate) struct TransferManager {
     /// Sessions a plan has finished with, available to its queued jobs.
     /// Dropped as soon as the plan has no work left.
     idle_sessions: HashMap<TransferPlanId, Vec<Arc<TransferSessionSlot>>>,
+    /// Verified directories and confirmed atomic hardlink support shared
+    /// across concurrent workers of the same plan to eliminate redundant RTTs.
+    plan_facts: HashMap<TransferPlanId, PlanTransferFacts>,
     plan_policies: Arc<Mutex<HashMap<TransferPlanId, ConflictPolicy>>>,
     conflict_waiters: Arc<Mutex<HashMap<ConflictRequestId, ConflictWaiter>>>,
 }
@@ -144,6 +147,7 @@ impl TransferManager {
             pending_cancel_order: VecDeque::new(),
             retry_routes: HashMap::new(),
             idle_sessions: HashMap::new(),
+            plan_facts: HashMap::new(),
             plan_policies: Arc::new(Mutex::new(HashMap::new())),
             conflict_waiters: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -455,6 +459,7 @@ impl TransferManager {
         }
         self.plan_root_jobs.remove(&plan_id);
         self.plan_children_started.remove(&plan_id);
+        self.plan_facts.remove(&plan_id);
         self.cleanup_plan_if_idle(plan_id);
     }
 
@@ -527,6 +532,7 @@ impl TransferManager {
             // Idle transfer sessions are only worth their server-side process
             // while the plan still has jobs to run.
             self.idle_sessions.remove(&plan_id);
+            self.plan_facts.remove(&plan_id);
             // An idle plan can no longer be enqueued, so a tombstone recorded
             // for one of its finished jobs can never be consumed.
             self.forget_cancellations_for_plan(plan_id);
@@ -651,6 +657,7 @@ impl TransferManager {
             let retry_job = job.clone();
             let plan_id = queued.plan_id;
             let idle_session = self.take_idle_session(plan_id, job.direction);
+            let facts = self.plan_facts.entry(plan_id).or_default().clone();
             connection.active_channels.fetch_add(1, Ordering::Relaxed);
             std::mem::drop(tokio::spawn(async move {
                 // Opening a transfer channel costs several round trips (channel
@@ -663,7 +670,7 @@ impl TransferManager {
                 let transfer_session = match idle_session {
                     Some(session) => session,
                     None => match open_transfer_session(&connection.handle, job.direction).await {
-                        Ok(session) => Arc::new(TransferSessionSlot::new(session)),
+                        Ok(session) => Arc::new(TransferSessionSlot::with_facts(session, facts)),
                         Err(error) => {
                             let retryable = error.retryable;
                             if let Err(send_error) = event_tx

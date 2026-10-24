@@ -885,23 +885,28 @@ impl From<SftpSession> for TransferSession {
 /// file, and the facts a job learns — this directory exists, the server
 /// accepts the atomic hardlink commit here — spare the next file from
 /// rediscovering them.
-pub(crate) struct TransferSessionSlot {
-    session: TransferSession,
-    verified_directories: Mutex<HashSet<String>>,
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PlanTransferFacts {
+    pub(crate) verified_directories: Arc<Mutex<HashSet<String>>>,
     /// Destination directories where the atomic hardlink commit has already
     /// been proven. Tracked per directory, not per session: a plan can write
     /// into a subdirectory that is a different mount, where hardlinks may be
     /// unsupported.
-    hardlink_commit_directories: Mutex<HashSet<String>>,
+    pub(crate) hardlink_commit_directories: Arc<Mutex<HashSet<String>>>,
+}
+
+pub(crate) struct TransferSessionSlot {
+    session: TransferSession,
+    facts: PlanTransferFacts,
 }
 
 impl TransferSessionSlot {
     pub(crate) fn new(session: TransferSession) -> Self {
-        Self {
-            session,
-            verified_directories: Mutex::new(HashSet::new()),
-            hardlink_commit_directories: Mutex::new(HashSet::new()),
-        }
+        Self::with_facts(session, PlanTransferFacts::default())
+    }
+
+    pub(crate) fn with_facts(session: TransferSession, facts: PlanTransferFacts) -> Self {
+        Self { session, facts }
     }
 
     pub(crate) fn session(&self) -> &TransferSession {
@@ -915,29 +920,33 @@ impl TransferSessionSlot {
         }
     }
 
-    fn directory_verified(&self, path: &str) -> bool {
-        self.verified_directories
+    pub(crate) fn directory_verified(&self, path: &str) -> bool {
+        self.facts
+            .verified_directories
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .contains(path)
     }
 
-    fn mark_directory_verified(&self, path: String) {
-        self.verified_directories
+    pub(crate) fn mark_directory_verified(&self, path: String) {
+        self.facts
+            .verified_directories
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(path);
     }
 
-    fn hardlink_commit_confirmed(&self, directory: &str) -> bool {
-        self.hardlink_commit_directories
+    pub(crate) fn hardlink_commit_confirmed(&self, directory: &str) -> bool {
+        self.facts
+            .hardlink_commit_directories
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .contains(directory)
     }
 
-    fn confirm_hardlink_commit(&self, directory: String) {
-        self.hardlink_commit_directories
+    pub(crate) fn confirm_hardlink_commit(&self, directory: String) {
+        self.facts
+            .hardlink_commit_directories
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(directory);
@@ -2040,6 +2049,18 @@ async fn create_remote_directory(
         && metadata.file_type() == SftpFileType::Dir
     {
         transfer_session.mark_directory_verified(directory.as_str().to_string());
+        let mut ancestor = if directory.as_str().starts_with('/') {
+            "/".to_string()
+        } else {
+            String::new()
+        };
+        for component in directory.as_str().split('/').filter(|c| !c.is_empty()) {
+            if !ancestor.is_empty() && !ancestor.ends_with('/') {
+                ancestor.push('/');
+            }
+            ancestor.push_str(component);
+            transfer_session.mark_directory_verified(ancestor.clone());
+        }
         return Ok(());
     }
     let mut current = if directory.as_str().starts_with('/') {
@@ -2137,7 +2158,34 @@ async fn create_remote_directory_raw(
     if transfer_session.directory_verified(directory.as_str()) {
         return Ok(());
     }
-    let mut current = String::new();
+    // Every file in a plan asks for a parent the previous files already
+    // created. One stat on the full path settles that, where the walk below
+    // would stat each component. On a miss the walk still runs unchanged, so
+    // the extra failure-path round trip only lands on the first file.
+    if !cancel.is_cancelled()
+        && let Ok(attrs) = raw.stat(directory.as_str().to_string()).await
+        && attrs.attrs.file_type() == SftpFileType::Dir
+    {
+        transfer_session.mark_directory_verified(directory.as_str().to_string());
+        let mut ancestor = if directory.as_str().starts_with('/') {
+            "/".to_string()
+        } else {
+            String::new()
+        };
+        for component in directory.as_str().split('/').filter(|c| !c.is_empty()) {
+            if !ancestor.is_empty() && !ancestor.ends_with('/') {
+                ancestor.push('/');
+            }
+            ancestor.push_str(component);
+            transfer_session.mark_directory_verified(ancestor.clone());
+        }
+        return Ok(());
+    }
+    let mut current = if directory.as_str().starts_with('/') {
+        "/".to_string()
+    } else {
+        String::new()
+    };
     let components = directory
         .as_str()
         .split('/')
@@ -2146,10 +2194,7 @@ async fn create_remote_directory_raw(
         if cancel.is_cancelled() {
             return Err(cancelled_transfer_error());
         }
-        if !current.is_empty() && current != "/" {
-            current.push('/');
-        }
-        if current.is_empty() && directory.as_str().starts_with('/') {
+        if !current.is_empty() && !current.ends_with('/') {
             current.push('/');
         }
         current.push_str(component);

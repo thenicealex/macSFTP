@@ -13,7 +13,7 @@ pub struct WindowSessionId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct SessionId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
 pub struct TransferId(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -858,6 +858,72 @@ impl TabStore {
     }
 }
 
+#[derive(Debug)]
+pub(crate) enum IdMatcher<'a> {
+    Empty,
+    Contiguous(u64, u64),
+    Sorted(&'a [TransferId]),
+    Set(std::collections::HashSet<TransferId>),
+}
+
+impl<'a> IdMatcher<'a> {
+    pub(crate) fn new(ids: &'a [TransferId]) -> Self {
+        if ids.is_empty() {
+            return IdMatcher::Empty;
+        }
+        let first = ids[0].0;
+        let last = ids[ids.len() - 1].0;
+        let len = ids.len();
+        if last >= first
+            && (last - first) as usize == len - 1
+            && (len <= 2 || ids.windows(2).all(|w| w[0].0 + 1 == w[1].0))
+        {
+            return IdMatcher::Contiguous(first, last);
+        }
+        if ids.windows(2).all(|w| w[0] <= w[1]) {
+            IdMatcher::Sorted(ids)
+        } else {
+            IdMatcher::Set(ids.iter().copied().collect())
+        }
+    }
+
+    #[inline]
+    pub(crate) fn contains(&self, id: TransferId) -> bool {
+        match self {
+            IdMatcher::Empty => false,
+            IdMatcher::Contiguous(first, last) => id.0 >= *first && id.0 <= *last,
+            IdMatcher::Sorted(slice) => slice.binary_search(&id).is_ok(),
+            IdMatcher::Set(set) => set.contains(&id),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            IdMatcher::Empty => 0,
+            IdMatcher::Contiguous(first, last) => (*last - *first + 1) as usize,
+            IdMatcher::Sorted(slice) => slice.len(),
+            IdMatcher::Set(set) => set.len(),
+        }
+    }
+}
+
+fn plan_has_child(plan: &TransferPlan, transfer_id: TransferId) -> bool {
+    if plan.child_jobs.is_empty() {
+        return false;
+    }
+    let first = plan.child_jobs[0];
+    let last = plan.child_jobs[plan.child_jobs.len() - 1];
+    if first <= last
+        && transfer_id >= first
+        && transfer_id <= last
+        && plan.child_jobs.binary_search(&transfer_id).is_ok()
+    {
+        return true;
+    }
+    plan.child_jobs.contains(&transfer_id)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TransferStore {
     pub plans: Vec<TransferPlan>,
@@ -890,7 +956,7 @@ impl TransferStore {
     pub fn plan_id_for_job(&self, transfer_id: TransferId) -> Option<TransferPlanId> {
         self.plans
             .iter()
-            .find(|plan| plan.root_job_id == transfer_id || plan.child_jobs.contains(&transfer_id))
+            .find(|plan| plan.root_job_id == transfer_id || plan_has_child(plan, transfer_id))
             .map(|plan| plan.id)
     }
 
@@ -934,15 +1000,49 @@ impl TransferStore {
                         plan.total_bytes = progress.total_bytes;
                         changed = true;
                     }
-                    for child_job in &progress.child_jobs {
-                        if !plan.child_jobs.contains(&child_job.id) {
+                    let is_monotonically_ascending = match (plan.child_jobs.last(), progress.child_jobs.first()) {
+                        (Some(last_id), Some(first_new)) => first_new.id > *last_id,
+                        (None, Some(_)) => true,
+                        _ => false,
+                    };
+                    if is_monotonically_ascending {
+                        plan.child_jobs.reserve(progress.child_jobs.len());
+                        for child_job in &progress.child_jobs {
                             plan.child_jobs.push(child_job.id);
+                        }
+                        changed = true;
+                    } else {
+                        let to_add: Vec<TransferId> = {
+                            let matcher = IdMatcher::new(&plan.child_jobs);
+                            progress
+                                .child_jobs
+                                .iter()
+                                .filter_map(|job| (!matcher.contains(job.id)).then_some(job.id))
+                                .collect()
+                        };
+                        if !to_add.is_empty() {
+                            plan.child_jobs.extend(to_add);
                             changed = true;
                         }
                     }
                 }
-                for child_job in &progress.child_jobs {
-                    changed |= self.insert_job(child_job.clone());
+                let is_monotonically_ascending_jobs = match (self.jobs.last(), progress.child_jobs.first()) {
+                    (Some(last_job), Some(first_new)) => first_new.id > last_job.id,
+                    (None, Some(_)) => true,
+                    _ => false,
+                };
+                if is_monotonically_ascending_jobs {
+                    if !progress.child_jobs.is_empty() {
+                        self.jobs.reserve(progress.child_jobs.len());
+                        for child_job in &progress.child_jobs {
+                            self.jobs.push(child_job.clone());
+                        }
+                        changed = true;
+                    }
+                } else {
+                    for child_job in &progress.child_jobs {
+                        changed |= self.insert_job(child_job.clone());
+                    }
                 }
                 changed
             }
@@ -1181,12 +1281,9 @@ impl TransferStore {
         if self.plans[plan_index].child_jobs.is_empty() {
             changed |= self.set_job_state(root_job_id, job_state);
         } else {
-            let mut target_ids: std::collections::HashSet<TransferId> =
-                self.plans[plan_index].child_jobs.iter().copied().collect();
-            target_ids.insert(root_job_id);
-
+            let matcher = IdMatcher::new(&self.plans[plan_index].child_jobs);
             for job in &mut self.jobs {
-                if target_ids.contains(&job.id) && job.state != job_state {
+                if (job.id == root_job_id || matcher.contains(job.id)) && job.state != job_state {
                     job.state = job_state.clone();
                     changed = true;
                 }
@@ -1223,12 +1320,9 @@ impl TransferStore {
         if self.plans[plan_index].child_jobs.is_empty() {
             changed |= self.cancel_job_if_unfinished(root_job_id);
         } else {
-            let mut target_ids: std::collections::HashSet<TransferId> =
-                self.plans[plan_index].child_jobs.iter().copied().collect();
-            target_ids.insert(root_job_id);
-
+            let matcher = IdMatcher::new(&self.plans[plan_index].child_jobs);
             for job in &mut self.jobs {
-                if target_ids.contains(&job.id)
+                if (job.id == root_job_id || matcher.contains(job.id))
                     && !matches!(
                         job.state,
                         TransferState::Completed
@@ -1284,7 +1378,7 @@ impl TransferStore {
         let Some(plan_index) = self
             .plans
             .iter()
-            .position(|plan| plan.child_jobs.contains(&transfer_id))
+            .position(|plan| plan_has_child(plan, transfer_id))
         else {
             // A plan that published no children has no child to finalize: its
             // root job finishing is the whole story, so record that instead of
@@ -1306,16 +1400,15 @@ impl TransferStore {
         ) {
             return false;
         }
-        // One pass over the jobs with the plan's ids in a set. Looking each
-        // child up by scanning the job list would be quadratic, and this runs
-        // on every completion — a directory transfer has thousands of them, so
-        // the scan would dominate the UI thread.
-        let wanted: std::collections::HashSet<TransferId> =
-            self.plans[plan_index].child_jobs.iter().copied().collect();
+        // One pass over the jobs with the plan's ids in an IdMatcher.
+        // Reverse iteration hits any unfinished queued/running child job early
+        // and aborts before doing unnecessary work.
+        let matcher = IdMatcher::new(&self.plans[plan_index].child_jobs);
+        let wanted_len = matcher.len();
         let mut any_failed = false;
         let mut finished = 0usize;
-        for job in &self.jobs {
-            if !wanted.contains(&job.id) {
+        for job in self.jobs.iter().rev() {
+            if !matcher.contains(job.id) {
                 continue;
             }
             match job.state {
@@ -1329,7 +1422,7 @@ impl TransferStore {
         }
         // A child that vanished from the store cannot be accounted for, so the
         // plan stays unfinished rather than claiming a completion it cannot see.
-        if finished != wanted.len() {
+        if finished != wanted_len {
             return false;
         }
 
@@ -4037,6 +4130,142 @@ mod tests {
                 assert_eq!(job.state, super::TransferState::Completed);
             }
         }
+    }
+
+    #[test]
+    fn id_matcher_correctness() {
+        use super::IdMatcher;
+
+        // Empty
+        let empty_matcher = IdMatcher::new(&[]);
+        assert!(!empty_matcher.contains(TransferId(1)));
+        assert_eq!(empty_matcher.len(), 0);
+
+        // Contiguous
+        let contiguous_ids: Vec<TransferId> = (10..=20).map(TransferId).collect();
+        let contig_matcher = IdMatcher::new(&contiguous_ids);
+        assert!(matches!(contig_matcher, IdMatcher::Contiguous(10, 20)));
+        assert!(contig_matcher.contains(TransferId(10)));
+        assert!(contig_matcher.contains(TransferId(15)));
+        assert!(contig_matcher.contains(TransferId(20)));
+        assert!(!contig_matcher.contains(TransferId(9)));
+        assert!(!contig_matcher.contains(TransferId(21)));
+        assert_eq!(contig_matcher.len(), 11);
+
+        // Sorted with gaps
+        let sorted_ids = vec![TransferId(2), TransferId(5), TransferId(8), TransferId(10)];
+        let sorted_matcher = IdMatcher::new(&sorted_ids);
+        assert!(matches!(sorted_matcher, IdMatcher::Sorted(_)));
+        assert!(sorted_matcher.contains(TransferId(5)));
+        assert!(sorted_matcher.contains(TransferId(8)));
+        assert!(!sorted_matcher.contains(TransferId(6)));
+        assert_eq!(sorted_matcher.len(), 4);
+
+        // Unsorted
+        let unsorted_ids = vec![TransferId(10), TransferId(2), TransferId(8)];
+        let set_matcher = IdMatcher::new(&unsorted_ids);
+        assert!(matches!(set_matcher, IdMatcher::Set(_)));
+        assert!(set_matcher.contains(TransferId(2)));
+        assert!(set_matcher.contains(TransferId(8)));
+        assert!(set_matcher.contains(TransferId(10)));
+        assert!(!set_matcher.contains(TransferId(5)));
+        assert_eq!(set_matcher.len(), 3);
+    }
+
+    #[test]
+    fn transfer_store_fast_finalize_with_ten_thousand_jobs() {
+        let now = Timestamp::from_secs_since_epoch(10);
+        let plan_id = TransferPlanId(42);
+        let root_job = super::TransferJob {
+            id: TransferId(1),
+            direction: TransferDirection::Upload,
+            source: TransferEndpoint::Local(LocalPath::new("/tmp/src")),
+            destination: TransferEndpoint::Remote(RemotePath::new("/srv/dest")),
+            state: super::TransferState::Planning,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        let plan = super::TransferPlan {
+            id: plan_id,
+            root_job_id: root_job.id,
+            source_root: root_job.source.clone(),
+            destination_root: root_job.destination.clone(),
+            state: super::TransferPlanState::Planning,
+            planned_count: 5_000,
+            total_bytes: Some(5_000),
+            child_jobs: Vec::new(),
+            conflict_policy: super::ConflictPolicy::default(),
+        };
+
+        let mut store = TransferStore::default();
+        store.apply_event(
+            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
+                plan,
+                root_job: root_job.clone(),
+            })),
+            now,
+        );
+
+        // Stream 5,000 jobs in batches of 250
+        for batch_idx in 0..20 {
+            let start = 2 + batch_idx * 250;
+            let end = start + 250;
+            let batch: Vec<_> = (start..end)
+                .map(|id| super::TransferJob {
+                    id: TransferId(id),
+                    state: super::TransferState::Queued,
+                    ..root_job.clone()
+                })
+                .collect();
+            store.apply_event(
+                &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+                    plan_id,
+                    child_jobs: batch,
+                    planned_count: 5_000,
+                    total_bytes: Some(5_000),
+                }),
+                now,
+            );
+        }
+        assert_eq!(store.plans[0].child_jobs.len(), 5_000);
+        assert_eq!(store.jobs.len(), 5_001);
+
+        // Completing the first child should fast-reject without scanning all 5,000 jobs
+        let start = std::time::Instant::now();
+        store.apply_event(
+            &AppEvent::TransferCompleted {
+                transfer_id: TransferId(2),
+            },
+            now,
+        );
+        let elapsed_first = start.elapsed();
+        assert!(elapsed_first.as_millis() < 50, "first child completion took too long: {elapsed_first:?}");
+        assert_eq!(store.plans[0].state, super::TransferPlanState::Planning);
+        assert_eq!(store.just_finished_plan, None);
+
+        // Complete all remaining children except the last one
+        for id in 3..=5000 {
+            store.apply_event(
+                &AppEvent::TransferCompleted {
+                    transfer_id: TransferId(id),
+                },
+                now,
+            );
+        }
+        assert_eq!(store.plans[0].state, super::TransferPlanState::Planning);
+
+        // Completing the final child (5001) transitions the plan to Completed
+        store.apply_event(
+            &AppEvent::TransferCompleted {
+                transfer_id: TransferId(5001),
+            },
+            now,
+        );
+        assert_eq!(store.plans[0].state, super::TransferPlanState::Completed);
+        assert_eq!(store.just_finished_plan, Some(plan_id));
+        assert_eq!(store.jobs[0].state, super::TransferState::Completed);
     }
 
     #[test]
