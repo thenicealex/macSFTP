@@ -909,6 +909,28 @@ impl TransferSessionSlot {
         Self { session, facts }
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        let (client_io, _server_io) = tokio::io::duplex(1);
+        let sftp_config = russh_sftp::client::Config {
+            max_packet_len: 262144,
+            max_concurrent_writes: 16,
+            request_timeout_secs: 1,
+        };
+        let raw = Arc::new(russh_sftp::client::RawSftpSession::new_with_config(
+            client_io,
+            sftp_config,
+        ));
+        Self {
+            session: TransferSession::Raw {
+                session: raw,
+                chunk_size: 256 * 1024,
+                direction: TransferDirection::Download,
+            },
+            facts: PlanTransferFacts::default(),
+        }
+    }
+
     pub(crate) fn session(&self) -> &TransferSession {
         &self.session
     }
@@ -1421,6 +1443,7 @@ pub(crate) async fn run_transfer_job(
                 },
             ) => {
                 download_single_file_pipelined(
+                    &transfer_session,
                     session,
                     *chunk_size,
                     &job,
@@ -1431,7 +1454,15 @@ pub(crate) async fn run_transfer_job(
                 .await
             }
             (macsftp_core::TransferDirection::Download, TransferSession::Standard(sftp)) => {
-                download_single_file(sftp, &job, &event_tx, &cancel, may_clear_destination).await
+                download_single_file(
+                    &transfer_session,
+                    sftp,
+                    &job,
+                    &event_tx,
+                    &cancel,
+                    may_clear_destination,
+                )
+                .await
             }
         },
         Err(error) => Err(error),
@@ -2673,6 +2704,7 @@ async fn download_symlink_raw(
 }
 
 async fn download_single_file_pipelined(
+    transfer_session: &TransferSessionSlot,
     raw: &Arc<RawSftpSession>,
     chunk_size: u32,
     job: &TransferJob,
@@ -2786,7 +2818,14 @@ async fn download_single_file_pipelined(
         cleanup_local_temp(&temporary_destination, event_tx, job.id, Some(job.id)).await;
         return Err(error);
     }
-    prepare_download_destination(job, destination, &temporary_destination, event_tx).await?;
+    prepare_download_destination(
+        transfer_session,
+        job,
+        destination,
+        &temporary_destination,
+        event_tx,
+    )
+    .await?;
     if let Err(error) = commit_local_temp(&temporary_destination, destination).await {
         cleanup_local_temp(&temporary_destination, event_tx, job.id, Some(job.id)).await;
         return Err(error);
@@ -2797,6 +2836,7 @@ async fn download_single_file_pipelined(
 }
 
 async fn download_single_file(
+    transfer_session: &TransferSessionSlot,
     sftp: &SftpSession,
     job: &TransferJob,
     event_tx: &flume::Sender<AppEvent>,
@@ -2897,7 +2937,14 @@ async fn download_single_file(
         cleanup_local_temp(&temporary_destination, event_tx, job.id, Some(job.id)).await;
         return Err(error);
     }
-    prepare_download_destination(job, destination, &temporary_destination, event_tx).await?;
+    prepare_download_destination(
+        transfer_session,
+        job,
+        destination,
+        &temporary_destination,
+        event_tx,
+    )
+    .await?;
     if let Err(error) = commit_local_temp(&temporary_destination, destination).await {
         cleanup_local_temp(&temporary_destination, event_tx, job.id, Some(job.id)).await;
         return Err(error);
@@ -2916,6 +2963,7 @@ async fn download_single_file(
 /// also updates the residual-temp record, so the failed job leaves nothing
 /// behind.
 async fn prepare_download_destination(
+    transfer_session: &TransferSessionSlot,
     job: &TransferJob,
     destination: &LocalPath,
     temporary_destination: &LocalPath,
@@ -2924,9 +2972,16 @@ async fn prepare_download_destination(
     if !matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
         return Ok(());
     }
-    if let Err(error) = verify_local_hardlink(temporary_destination, event_tx, job.id).await {
-        cleanup_local_temp(temporary_destination, event_tx, job.id, Some(job.id)).await;
-        return Err(error);
+    let commit_directory = std::path::Path::new(destination.as_str())
+        .parent()
+        .and_then(|parent| parent.to_str())
+        .unwrap_or("");
+    if !transfer_session.hardlink_commit_confirmed(commit_directory) {
+        if let Err(error) = verify_local_hardlink(temporary_destination, event_tx, job.id).await {
+            cleanup_local_temp(temporary_destination, event_tx, job.id, Some(job.id)).await;
+            return Err(error);
+        }
+        transfer_session.confirm_hardlink_commit(commit_directory.to_string());
     }
     if let Err(error) = remove_downloaded_file_destination(destination.as_str()).await {
         cleanup_local_temp(temporary_destination, event_tx, job.id, Some(job.id)).await;
@@ -3853,7 +3908,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        TransferQueue, local_download_destination, local_temporary_path,
+        TransferQueue, TransferSessionSlot, local_download_destination, local_temporary_path,
         prepare_download_destination, read_directory_error, remote_fs_error, remote_planning_error,
         remote_temporary_path, rename_destination, target_escapes_through_parent,
         validate_download_symlink_target, write_through_start,
@@ -4260,8 +4315,10 @@ mod tests {
             created_at: Timestamp::from_secs_since_epoch(0),
         };
         let (event_tx, _event_rx) = flume::bounded(8);
+        let transfer_session = TransferSessionSlot::for_test();
 
         let error = prepare_download_destination(
+            &transfer_session,
             &job,
             &LocalPath::new(destination.to_string_lossy().to_string()),
             &LocalPath::new(temporary.to_string_lossy().to_string()),
@@ -4279,6 +4336,76 @@ mod tests {
             destination.is_dir(),
             "the existing directory must be untouched"
         );
+    }
+
+    #[tokio::test]
+    async fn download_destination_confirms_hardlink_once_per_directory() {
+        let dir = unique_test_dir("hardlink-confirm-dir");
+        let dest1 = dir.join("file1.txt");
+        let dest2 = dir.join("file2.txt");
+        std::fs::write(&dest1, b"old 1").expect("file1 created");
+        std::fs::write(&dest2, b"old 2").expect("file2 created");
+
+        let temp1 = dir.join(".file1.txt.macsftp-part-10");
+        let temp2 = dir.join(".file2.txt.macsftp-part-11");
+        std::fs::write(&temp1, b"new 1").expect("temp1 written");
+        std::fs::write(&temp2, b"new 2").expect("temp2 written");
+
+        let job1 = TransferJob {
+            id: TransferId(10),
+            direction: TransferDirection::Download,
+            source: TransferEndpoint::Remote(RemotePath::new("/remote/file1.txt")),
+            destination: TransferEndpoint::Local(LocalPath::new(
+                dest1.to_string_lossy().to_string(),
+            )),
+            state: TransferState::Queued,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: ConflictPolicy::OverwriteAll,
+            warnings: Vec::new(),
+            created_at: Timestamp::from_secs_since_epoch(0),
+        };
+        let job2 = TransferJob {
+            id: TransferId(11),
+            direction: TransferDirection::Download,
+            source: TransferEndpoint::Remote(RemotePath::new("/remote/file2.txt")),
+            destination: TransferEndpoint::Local(LocalPath::new(
+                dest2.to_string_lossy().to_string(),
+            )),
+            state: TransferState::Queued,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: ConflictPolicy::OverwriteAll,
+            warnings: Vec::new(),
+            created_at: Timestamp::from_secs_since_epoch(0),
+        };
+        let (event_tx, _event_rx) = flume::bounded(8);
+        let transfer_session = TransferSessionSlot::for_test();
+
+        let parent_dir = dir.to_string_lossy().to_string();
+        assert!(!transfer_session.hardlink_commit_confirmed(&parent_dir));
+
+        prepare_download_destination(
+            &transfer_session,
+            &job1,
+            &LocalPath::new(dest1.to_string_lossy().to_string()),
+            &LocalPath::new(temp1.to_string_lossy().to_string()),
+            &event_tx,
+        )
+        .await
+        .expect("prepare for job1 should succeed");
+
+        assert!(transfer_session.hardlink_commit_confirmed(&parent_dir));
+
+        prepare_download_destination(
+            &transfer_session,
+            &job2,
+            &LocalPath::new(dest2.to_string_lossy().to_string()),
+            &LocalPath::new(temp2.to_string_lossy().to_string()),
+            &event_tx,
+        )
+        .await
+        .expect("prepare for job2 should succeed");
+
+        assert!(transfer_session.hardlink_commit_confirmed(&parent_dir));
     }
 
     #[tokio::test]
