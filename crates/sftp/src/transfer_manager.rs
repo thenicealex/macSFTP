@@ -66,7 +66,7 @@ pub(crate) enum TransferManagerRequest {
     },
 }
 
-struct QueuedTransfer {
+pub(crate) struct QueuedTransfer {
     connection: Arc<SharedConnection>,
     plan_id: TransferPlanId,
     job: TransferJob,
@@ -97,6 +97,8 @@ pub(crate) struct TransferManager {
     connection_manager: Arc<ConnectionManager>,
     next_conflict_id: Arc<AtomicU64>,
     pending: VecDeque<QueuedTransfer>,
+    pending_per_plan: HashMap<TransferPlanId, usize>,
+    pending_roots: HashSet<TransferId>,
     running: HashMap<TransferId, RunningTransfer>,
     running_per_plan: HashMap<TransferPlanId, usize>,
     /// First job a planner emitted for a plan. For folder transfers this is the
@@ -139,6 +141,8 @@ impl TransferManager {
             connection_manager,
             next_conflict_id,
             pending: VecDeque::new(),
+            pending_per_plan: HashMap::new(),
+            pending_roots: HashSet::new(),
             running: HashMap::new(),
             running_per_plan: HashMap::new(),
             plan_root_jobs: HashMap::new(),
@@ -205,7 +209,7 @@ impl TransferManager {
                     .iter()
                     .position(|transfer| transfer.job.id == transfer_id)
                 {
-                    let plan_id = self.pending.remove(position).map(|queued| queued.plan_id);
+                    let plan_id = self.remove_pending(position).map(|queued| queued.plan_id);
                     if let Err(error) = self
                         .event_tx
                         .send_async(AppEvent::TransferSkipped { transfer_id })
@@ -330,7 +334,7 @@ impl TransferManager {
                 skipped.push(job.id);
                 continue;
             }
-            self.pending.push_back(QueuedTransfer {
+            self.push_pending(QueuedTransfer {
                 connection: connection.clone(),
                 plan_id,
                 job,
@@ -430,7 +434,7 @@ impl TransferManager {
             .filter(|queued| queued.plan_id == plan_id)
             .map(|queued| queued.job.id)
             .collect();
-        self.pending.retain(|queued| queued.plan_id != plan_id);
+        self.retain_pending_not_plan(plan_id);
         let cancelled_running: Vec<TransferId> = self
             .running
             .iter()
@@ -512,13 +516,55 @@ impl TransferManager {
         }
     }
 
+    pub(crate) fn push_pending(&mut self, queued: QueuedTransfer) {
+        *self.pending_per_plan.entry(queued.plan_id).or_insert(0) += 1;
+        if self.plan_root_jobs.get(&queued.plan_id) == Some(&queued.job.id) {
+            self.pending_roots.insert(queued.job.id);
+        }
+        self.pending.push_back(queued);
+    }
+
+    pub(crate) fn remove_pending(&mut self, position: usize) -> Option<QueuedTransfer> {
+        let queued = self.pending.remove(position)?;
+        if let Some(count) = self.pending_per_plan.get_mut(&queued.plan_id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.pending_per_plan.remove(&queued.plan_id);
+            }
+        }
+        self.pending_roots.remove(&queued.job.id);
+        Some(queued)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_pending(&mut self) {
+        self.pending.clear();
+        self.pending_per_plan.clear();
+        self.pending_roots.clear();
+    }
+
+    fn retain_pending_not_plan(&mut self, plan_id: TransferPlanId) {
+        self.pending.retain(|queued| queued.plan_id != plan_id);
+        self.pending_per_plan.remove(&plan_id);
+        if let Some(root_id) = self.plan_root_jobs.get(&plan_id) {
+            self.pending_roots.remove(root_id);
+        }
+    }
+
     fn cleanup_plan_if_idle(&mut self, plan_id: TransferPlanId) {
-        let has_pending = self.pending.iter().any(|queued| queued.plan_id == plan_id);
+        let has_pending = self.pending_per_plan.contains_key(&plan_id);
+        debug_assert_eq!(
+            has_pending,
+            self.pending.iter().any(|queued| queued.plan_id == plan_id)
+        );
         let has_running = self.running_per_plan.contains_key(&plan_id);
-        let has_retry = self
-            .retry_routes
-            .values()
-            .any(|route| route.plan_id == plan_id);
+        let has_retry = if has_pending || has_running {
+            false
+        } else {
+            self.retry_routes
+                .values()
+                .any(|route| route.plan_id == plan_id)
+        };
         if !has_pending
             && !has_running
             && !has_retry
@@ -552,11 +598,7 @@ impl TransferManager {
         if running >= MAX_CONCURRENT_PER_PLAN {
             return false;
         }
-        if queued
-            .connection
-            .active_channels
-            .load(Ordering::Relaxed)
-            >= MAX_CHANNELS_PER_CONNECTION
+        if queued.connection.active_channels.load(Ordering::Relaxed) >= MAX_CHANNELS_PER_CONNECTION
         {
             return false;
         }
@@ -569,10 +611,13 @@ impl TransferManager {
         if queued.job.id == *root_id {
             return running == 0;
         }
-        let root_pending = self
-            .pending
-            .iter()
-            .any(|other| other.plan_id == queued.plan_id && other.job.id == *root_id);
+        let root_pending = self.pending_roots.contains(root_id);
+        debug_assert_eq!(
+            root_pending,
+            self.pending
+                .iter()
+                .any(|other| other.plan_id == queued.plan_id && other.job.id == *root_id)
+        );
         !root_pending && !self.running.contains_key(root_id)
     }
 
@@ -599,21 +644,32 @@ impl TransferManager {
     fn next_queued_position(&self) -> Option<usize> {
         // Two phases keep planning fair: prefer a plan with nothing running,
         // then fill remaining slots up to the per-plan cap.
-        self.pending
-            .iter()
-            .position(|queued| {
-                self.running_per_plan
-                    .get(&queued.plan_id)
-                    .copied()
-                    .unwrap_or(0)
-                    == 0
-                    && self.is_eligible(queued)
-            })
-            .or_else(|| {
-                self.pending
-                    .iter()
-                    .position(|queued| self.is_eligible(queued))
-            })
+        let has_idle_plan = self
+            .pending_per_plan
+            .keys()
+            .any(|plan_id| self.running_per_plan.get(plan_id).copied().unwrap_or(0) == 0);
+
+        if has_idle_plan {
+            self.pending
+                .iter()
+                .position(|queued| {
+                    self.running_per_plan
+                        .get(&queued.plan_id)
+                        .copied()
+                        .unwrap_or(0)
+                        == 0
+                        && self.is_eligible(queued)
+                })
+                .or_else(|| {
+                    self.pending
+                        .iter()
+                        .position(|queued| self.is_eligible(queued))
+                })
+        } else {
+            self.pending
+                .iter()
+                .position(|queued| self.is_eligible(queued))
+        }
     }
 
     async fn start_queued(&mut self, complete_tx: &flume::Sender<CompletedTransfer>) {
@@ -621,7 +677,7 @@ impl TransferManager {
             let Some(position) = self.next_queued_position() else {
                 return;
             };
-            let Some(queued) = self.pending.remove(position) else {
+            let Some(queued) = self.remove_pending(position) else {
                 return;
             };
             let mut job = queued.job;
@@ -734,8 +790,8 @@ impl TransferManager {
                 // Only a job that ran to completion leaves the session in a
                 // state worth reusing: a cancelled or failed job may have
                 // aborted requests still in flight.
-                let reusable_session = matches!(outcome, TransferJobOutcome::Completed)
-                    .then_some(transfer_session);
+                let reusable_session =
+                    matches!(outcome, TransferJobOutcome::Completed).then_some(transfer_session);
                 if let Err(error) = complete_tx
                     .send_async(CompletedTransfer {
                         transfer_id,
@@ -864,7 +920,7 @@ mod tests {
         assert_eq!(manager.next_queued_position(), Some(0));
 
         // Simulate starting plan 1's root (job 1): it leaves the queue.
-        let Some(root_1) = manager.pending.remove(0) else {
+        let Some(root_1) = manager.remove_pending(0) else {
             panic!("plan 1 root must be queued");
         };
         manager.running.insert(
@@ -884,7 +940,7 @@ mod tests {
         // The root finished; one of its children is now the running job.
         manager.running.remove(&TransferId(1));
         // Plan 2's root starts running as well.
-        let Some(root_2) = manager.pending.remove(3) else {
+        let Some(root_2) = manager.remove_pending(3) else {
             panic!("plan 2 root must be queued");
         };
         manager.running.insert(
@@ -922,7 +978,7 @@ mod tests {
         // A folder plan's first job removes the destination tree; it must run
         // alone before any child starts.
         assert_eq!(manager.next_queued_position(), Some(0));
-        let Some(root) = manager.pending.remove(0) else {
+        let Some(root) = manager.remove_pending(0) else {
             panic!("root job must be queued");
         };
         manager.running.insert(
@@ -1604,7 +1660,9 @@ mod tests {
 
         let other_plan = TransferPlanId(2);
         assert!(
-            manager.take_idle_session(other_plan, TransferDirection::Upload).is_none(),
+            manager
+                .take_idle_session(other_plan, TransferDirection::Upload)
+                .is_none(),
             "a plan must not see another plan's sessions"
         );
 
@@ -1622,7 +1680,7 @@ mod tests {
 
         // A plan that still has queued work keeps its session.
         manager.return_idle_session(plan_id, taken.clone());
-        manager.pending.push_back(QueuedTransfer {
+        manager.push_pending(QueuedTransfer {
             connection: connection.clone(),
             plan_id,
             job: dummy_job(7, TransferDirection::Upload),
@@ -1633,7 +1691,7 @@ mod tests {
             "a plan with pending jobs must keep its idle sessions"
         );
 
-        manager.pending.clear();
+        manager.clear_pending();
         manager.cleanup_plan_if_idle(plan_id);
         assert!(
             manager.idle_sessions.is_empty(),
@@ -1680,5 +1738,93 @@ mod tests {
             manager.is_eligible(queued),
             "a connection below the cap may start another job"
         );
+    }
+
+    #[tokio::test]
+    async fn large_queue_dispatch_is_constant_time_and_tracks_plan_state() {
+        let Some(server) = SshTestServer::spawn() else {
+            eprintln!("skipping test: sshd not available");
+            return;
+        };
+        let connection = connect_test_server(&server).await;
+        let (event_tx, _event_rx) = flume::bounded(64);
+        let next_conflict_id = Arc::new(AtomicU64::new(1));
+        let cm = Arc::new(ConnectionManager::new());
+        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
+
+        let plan_download = TransferPlanId(10);
+        let jobs: Vec<TransferJob> = (1..=3000)
+            .map(|id| dummy_job(id, TransferDirection::Download))
+            .collect();
+        manager
+            .enqueue(connection.clone(), plan_download, jobs, true)
+            .await;
+
+        assert_eq!(manager.pending.len(), 3000);
+        assert_eq!(manager.pending_per_plan.get(&plan_download), Some(&3000));
+        assert!(manager.pending_roots.contains(&TransferId(1)));
+
+        // First position must be the root (id 1)
+        assert_eq!(manager.next_queued_position(), Some(0));
+
+        // Start the root
+        let root = manager.remove_pending(0).expect("root should be present");
+        assert_eq!(root.job.id, TransferId(1));
+        assert!(!manager.pending_roots.contains(&TransferId(1)));
+        assert_eq!(manager.pending_per_plan.get(&plan_download), Some(&2999));
+
+        manager.running.insert(
+            TransferId(1),
+            RunningTransfer {
+                plan_id: plan_download,
+                cancel: CancellationToken::new(),
+            },
+        );
+        manager.running_per_plan.insert(plan_download, 1);
+
+        // While root is running, children must be blocked
+        assert_eq!(manager.next_queued_position(), None);
+
+        // Root finishes
+        manager.running.remove(&TransferId(1));
+        manager.running_per_plan.insert(plan_download, 0);
+
+        // Children can now start
+        for i in 0..MAX_CONCURRENT_PER_PLAN {
+            assert_eq!(
+                manager.next_queued_position(),
+                Some(0),
+                "child {i} should be immediately dispatched from the front"
+            );
+            let child = manager.remove_pending(0).expect("child should be queued");
+            manager.running.insert(
+                child.job.id,
+                RunningTransfer {
+                    plan_id: plan_download,
+                    cancel: CancellationToken::new(),
+                },
+            );
+            *manager.running_per_plan.entry(plan_download).or_insert(0) += 1;
+        }
+
+        // Plan 1 is now at MAX_CONCURRENT_PER_PLAN cap
+        assert_eq!(manager.next_queued_position(), None);
+
+        // Enqueue Plan 2 (upload with 500 files)
+        let plan_upload = TransferPlanId(20);
+        let upload_jobs: Vec<TransferJob> = (4000..4500)
+            .map(|id| dummy_job(id, TransferDirection::Upload))
+            .collect();
+        manager
+            .enqueue(connection.clone(), plan_upload, upload_jobs, true)
+            .await;
+
+        // Plan 2 has 0 running jobs and is prioritized by Phase 1
+        let pos_plan_2 = manager
+            .next_queued_position()
+            .expect("idle plan 2 should be scheduled");
+        let item_plan_2 = &manager.pending[pos_plan_2];
+        assert_eq!(item_plan_2.plan_id, plan_upload);
+        assert_eq!(item_plan_2.job.id, TransferId(4000));
     }
 }
