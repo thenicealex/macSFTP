@@ -1475,6 +1475,9 @@ async fn resolve_transfer_conflict(
     cancel: &CancellationToken,
     conflict_context: TransferConflictContext,
 ) -> Result<(), UserFacingError> {
+    if matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
+        return Ok(());
+    }
     if !destination_exists(session, job).await? {
         return Ok(());
     }
@@ -4422,5 +4425,63 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn conflict_resolution_overwrite_all_bypasses_remote_stat_roundtrips() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicU64;
+
+        let (client_io, _server_io) = tokio::io::duplex(1024);
+        let sftp_config = russh_sftp::client::Config {
+            max_packet_len: 262144,
+            max_concurrent_writes: 16,
+            request_timeout_secs: 1,
+        };
+        // Raw session without a server running — any network round-trip would hang or fail
+        let raw = Arc::new(russh_sftp::client::RawSftpSession::new_with_config(
+            client_io,
+            sftp_config,
+        ));
+        let session = super::TransferSession::Raw {
+            session: raw,
+            chunk_size: 256 * 1024,
+            direction: TransferDirection::Upload,
+        };
+        let mut job = TransferJob {
+            id: TransferId(101),
+            direction: TransferDirection::Upload,
+            source: TransferEndpoint::Local(LocalPath::new("/tmp/source.bin")),
+            destination: TransferEndpoint::Remote(RemotePath::new("/srv/dest.bin")),
+            state: TransferState::Queued,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: ConflictPolicy::OverwriteAll,
+            warnings: Vec::new(),
+            created_at: Timestamp::from_secs_since_epoch(1),
+        };
+        let (event_tx, _event_rx) = flume::bounded(10);
+        let cancel = CancellationToken::new();
+        let conflict_context = super::TransferConflictContext {
+            next_id: Arc::new(AtomicU64::new(1)),
+            waiters: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            plan_policies: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        };
+
+        // Must succeed immediately without blocking on network I/O
+        let result = super::resolve_transfer_conflict(
+            &session,
+            &mut job,
+            TransferPlanId(1),
+            &event_tx,
+            &cancel,
+            conflict_context,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "OverwriteAll must bypass destination checks and succeed without round-trips"
+        );
     }
 }
