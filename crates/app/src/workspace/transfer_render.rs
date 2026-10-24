@@ -52,16 +52,39 @@ pub(crate) fn visible_transfer_jobs(store: &TransferStore) -> Vec<&TransferJob> 
         {
             true
         } else if matches!(plan.state, TransferPlanState::Failed { .. }) {
-            let children_are_terminal = plan.child_jobs.iter().all(|child_id| {
-                store.find_job(*child_id).is_some_and(|job| {
-                    matches!(
-                        job.state,
-                        TransferState::Completed
-                            | TransferState::Skipped
-                            | TransferState::Failed { .. }
-                    )
-                })
-            });
+            let children_are_terminal = if let (Some(&first_id), Some(&last_id)) =
+                (plan.child_jobs.first(), plan.child_jobs.last())
+            {
+                if let (Some(first_idx), Some(last_idx)) =
+                    (store.find_job_index(first_id), store.find_job_index(last_id))
+                {
+                    if last_idx >= first_idx && (last_idx - first_idx + 1) == plan.child_jobs.len() {
+                        store.jobs[first_idx..=last_idx].iter().all(|job| {
+                            matches!(
+                                job.state,
+                                TransferState::Completed
+                                    | TransferState::Skipped
+                                    | TransferState::Failed { .. }
+                            )
+                        })
+                    } else {
+                        plan.child_jobs.iter().all(|child_id| {
+                            store.find_job(*child_id).is_some_and(|job| {
+                                matches!(
+                                    job.state,
+                                    TransferState::Completed
+                                        | TransferState::Skipped
+                                        | TransferState::Failed { .. }
+                                )
+                            })
+                        })
+                    }
+                } else {
+                    false
+                }
+            } else {
+                true
+            };
             !children_are_terminal
         } else {
             false

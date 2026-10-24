@@ -2785,6 +2785,13 @@ async fn download_single_file_pipelined(
         },
     )
     .await;
+    if let Some(total) = bytes_total
+        && total > 0
+        && let Err(error) = destination_file.set_len(total).await
+    {
+        cleanup_local_temp(&temporary_destination, event_tx, job.id, Some(job.id)).await;
+        return Err(local_transfer_error("Download Preparation Failed", &error));
+    }
     let copy_result = async {
         let handle_packet = raw
             .open(source.as_str(), OpenFlags::READ, FileAttributes::empty())
@@ -2913,6 +2920,13 @@ async fn download_single_file(
         },
     )
     .await;
+    if let Some(total) = bytes_total
+        && total > 0
+        && let Err(error) = destination_file.set_len(total).await
+    {
+        cleanup_local_temp(&temporary_destination, event_tx, job.id, Some(job.id)).await;
+        return Err(local_transfer_error("Download Preparation Failed", &error));
+    }
     let copy_result = async {
         let mut source_file = sftp.open(source.as_str()).await.map_err(|error| {
             transfer_error(

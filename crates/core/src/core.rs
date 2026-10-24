@@ -954,12 +954,7 @@ impl TransferStore {
     }
 
     pub fn find_job_index(&self, transfer_id: TransferId) -> Option<usize> {
-        if let Ok(index) = self.jobs.binary_search_by_key(&transfer_id, |job| job.id)
-            && self
-                .jobs
-                .get(index)
-                .is_some_and(|job| job.id == transfer_id)
-        {
+        if let Ok(index) = self.jobs.binary_search_by_key(&transfer_id, |job| job.id) {
             return Some(index);
         }
         self.jobs.iter().position(|job| job.id == transfer_id)
@@ -1232,26 +1227,30 @@ impl TransferStore {
     }
 
     fn insert_job(&mut self, job: TransferJob) -> bool {
-        if self.find_job_index(job.id).is_some() {
-            false
-        } else {
-            self.jobs.push(job);
-            true
+        match self.jobs.binary_search_by_key(&job.id, |j| j.id) {
+            Ok(_) => false,
+            Err(pos) => {
+                self.jobs.insert(pos, job);
+                true
+            }
         }
     }
 
     fn upsert_job(&mut self, job: TransferJob) -> bool {
-        if let Some(existing_index) = self.find_job_index(job.id) {
-            let existing = &mut self.jobs[existing_index];
-            if *existing == job {
-                false
-            } else {
-                *existing = job;
+        match self.jobs.binary_search_by_key(&job.id, |j| j.id) {
+            Ok(existing_index) => {
+                let existing = &mut self.jobs[existing_index];
+                if *existing == job {
+                    false
+                } else {
+                    *existing = job;
+                    true
+                }
+            }
+            Err(pos) => {
+                self.jobs.insert(pos, job);
                 true
             }
-        } else {
-            self.jobs.push(job);
-            true
         }
     }
 
@@ -4461,6 +4460,105 @@ mod tests {
 
         assert_eq!(store.plans[1].state, super::TransferPlanState::Completed);
         assert_eq!(store.just_finished_plan, Some(plan_2_id));
+    }
+
+    #[test]
+    fn interleaved_plan_jobs_maintain_sorted_job_indices() {
+        let mut store = super::TransferStore::default();
+        let now = Timestamp::from_secs_since_epoch(10);
+
+        let plan_1_id = TransferPlanId(1);
+        let root_1 = super::TransferJob {
+            id: TransferId(10),
+            direction: super::TransferDirection::Download,
+            source: TransferEndpoint::Remote(RemotePath::new("/remote/one")),
+            destination: TransferEndpoint::Local(LocalPath::new("/tmp/one")),
+            state: super::TransferState::Planning,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        store.apply_event(
+            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
+                plan: super::TransferPlan {
+                    id: plan_1_id,
+                    root_job_id: root_1.id,
+                    source_root: root_1.source.clone(),
+                    destination_root: root_1.destination.clone(),
+                    state: super::TransferPlanState::Planning,
+                    planned_count: 2,
+                    total_bytes: Some(200),
+                    child_jobs: Vec::new(),
+                    conflict_policy: super::ConflictPolicy::default(),
+                },
+                root_job: root_1.clone(),
+            })),
+            now,
+        );
+
+        // Later job arrives first (e.g. from plan 2)
+        let plan_2_id = TransferPlanId(2);
+        let root_2 = super::TransferJob {
+            id: TransferId(20),
+            direction: super::TransferDirection::Download,
+            source: TransferEndpoint::Remote(RemotePath::new("/remote/two")),
+            destination: TransferEndpoint::Local(LocalPath::new("/tmp/two")),
+            state: super::TransferState::Planning,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        store.apply_event(
+            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
+                plan: super::TransferPlan {
+                    id: plan_2_id,
+                    root_job_id: root_2.id,
+                    source_root: root_2.source.clone(),
+                    destination_root: root_2.destination.clone(),
+                    state: super::TransferPlanState::Planning,
+                    planned_count: 1,
+                    total_bytes: Some(100),
+                    child_jobs: Vec::new(),
+                    conflict_policy: super::ConflictPolicy::default(),
+                },
+                root_job: root_2.clone(),
+            })),
+            now,
+        );
+
+        // Now interleaved child jobs arrive for plan 1 with IDs smaller than root_2
+        let child_1 = super::TransferJob {
+            id: TransferId(11),
+            state: super::TransferState::Queued,
+            ..root_1.clone()
+        };
+        let child_2 = super::TransferJob {
+            id: TransferId(12),
+            state: super::TransferState::Queued,
+            ..root_1.clone()
+        };
+        store.apply_event(
+            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+                plan_id: plan_1_id,
+                child_jobs: vec![child_1, child_2],
+                planned_count: 2,
+                total_bytes: Some(200),
+            }),
+            now,
+        );
+
+        // All jobs in store.jobs must be strictly ascending by ID
+        let ids: Vec<_> = store.jobs.iter().map(|j| j.id.0).collect();
+        assert_eq!(ids, vec![10, 11, 12, 20]);
+
+        // Binary search find_job_index works in O(log N)
+        assert_eq!(store.find_job_index(TransferId(10)), Some(0));
+        assert_eq!(store.find_job_index(TransferId(11)), Some(1));
+        assert_eq!(store.find_job_index(TransferId(12)), Some(2));
+        assert_eq!(store.find_job_index(TransferId(20)), Some(3));
+        assert_eq!(store.find_job_index(TransferId(99)), None);
     }
 
     #[test]
