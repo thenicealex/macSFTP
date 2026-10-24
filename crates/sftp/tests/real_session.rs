@@ -1791,6 +1791,133 @@ async fn runtime_streams_and_executes_directory_download() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn runtime_downloads_multi_directory_tree_with_pipelined_planning() {
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    let source_root = server.fixture_dir.join("multi-dir-download-source");
+    std::fs::create_dir(&source_root).expect("create download source");
+    std::fs::write(source_root.join("root.txt"), b"root content").expect("write root file");
+
+    for i in 1..=5 {
+        let sub = source_root.join(format!("dir{i}"));
+        std::fs::create_dir(&sub).expect("create subdir");
+        std::fs::write(
+            sub.join(format!("file{i}.txt")),
+            format!("content {i}").as_bytes(),
+        )
+        .expect("write sub file");
+    }
+
+    let deep1 = source_root.join("dir1").join("nested1");
+    std::fs::create_dir(&deep1).expect("create deep1");
+    std::fs::write(deep1.join("deep1.txt"), b"deep content 1").expect("write deep1 file");
+
+    let deep2 = source_root.join("dir2").join("nested2");
+    std::fs::create_dir(&deep2).expect("create deep2");
+    std::fs::write(deep2.join("deep2.txt"), b"deep content 2").expect("write deep2 file");
+
+    let destination_root = server.fixture_dir.join("multi-dir-download-destination");
+
+    let known_hosts_path = server.fixture_dir.join("multi_dir_download_known_hosts");
+    std::fs::write(
+        &known_hosts_path,
+        format!("[127.0.0.1]:{} {}\n", server.port, server.host_public_key),
+    )
+    .expect("prefill known_hosts");
+    let mut controller = RuntimeController::start(
+        RuntimeBridgeConfig::default(),
+        HostTrustConfig::new(known_hosts_path, None),
+    );
+    let client = controller.client();
+    let mut events = controller
+        .take_event_receiver()
+        .expect("event receiver should be available once");
+
+    client
+        .try_send(AppCommand::ConnectTab(ConnectCommand {
+            tab_id: TAB,
+            session_id: SESSION,
+            session_epoch: EPOCH,
+            profile_id: ProfileId(1),
+            pool_identity: ConnectionPoolIdentity::Ephemeral(SESSION),
+            settings: ConnectionSettings {
+                host: "127.0.0.1".to_string(),
+                port: server.port,
+                username: server.username.clone(),
+                auth: client_key_auth(&server),
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
+            },
+        }))
+        .expect("connect command should send");
+    let _ = next_runtime_event(&mut events, "TabConnecting").await;
+    let _ = next_runtime_event(&mut events, "TabConnected").await;
+
+    client
+        .try_send(AppCommand::StartTransfer(
+            macsftp_core::StartTransferCommand {
+                tab_id: TAB,
+                session_epoch: EPOCH,
+                profile_id: ProfileId(1),
+                direction: TransferDirection::Download,
+                sources: vec![TransferEndpoint::Remote(RemotePath::new(
+                    source_root.display().to_string(),
+                ))],
+                destination: TransferEndpoint::Local(macsftp_core::LocalPath::new(
+                    destination_root.display().to_string(),
+                )),
+                metadata_policy: macsftp_core::MetadataPolicy::default(),
+                conflict_policy: macsftp_core::ConflictPolicy::default(),
+            },
+        ))
+        .expect("directory download command should send");
+
+    let mut planned_jobs = 0;
+    let mut completed_jobs = 0;
+    while completed_jobs < 16 {
+        match next_runtime_event(&mut events, "multi-directory download event").await {
+            AppEvent::TransferPlanStarted(_) | AppEvent::TransferPlanCompleted { .. } => {}
+            AppEvent::TransferPlanProgress(progress) => {
+                planned_jobs += progress.child_jobs.len();
+            }
+            AppEvent::TransferRunning(_) | AppEvent::TransferProgress(_) => {}
+            AppEvent::TransferCompleted { .. } => completed_jobs += 1,
+            AppEvent::TransferFailed(failure) => {
+                panic!("multi-directory download failed: {:?}", failure.error)
+            }
+            AppEvent::ResidualTempCreated(_) | AppEvent::ResidualTempCleared { .. } => {}
+            other => panic!("unexpected multi-directory download event: {other:?}"),
+        }
+    }
+    assert_eq!(
+        planned_jobs, 16,
+        "pipelined directory planner must emit root, 7 nested dirs, and 8 files"
+    );
+    assert_eq!(
+        std::fs::read(destination_root.join("root.txt")).expect("read root"),
+        b"root content"
+    );
+    for i in 1..=5 {
+        assert_eq!(
+            std::fs::read(destination_root.join(format!("dir{i}/file{i}.txt"))).expect("read sub"),
+            format!("content {i}").as_bytes()
+        );
+    }
+    assert_eq!(
+        std::fs::read(destination_root.join("dir1/nested1/deep1.txt")).expect("read deep1"),
+        b"deep content 1"
+    );
+    assert_eq!(
+        std::fs::read(destination_root.join("dir2/nested2/deep2.txt")).expect("read deep2"),
+        b"deep content 2"
+    );
+
+    std::thread::spawn(move || controller.shutdown())
+        .join()
+        .expect("runtime shutdown thread should finish");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn remote_download_failure_after_progress_emits_plan_failure() {
     let Some(server) = SshTestServer::spawn() else {
         return;

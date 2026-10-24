@@ -1007,6 +1007,7 @@ pub(crate) async fn plan_remote_download(
     event_tx: flume::Sender<AppEvent>,
     cancel: CancellationToken,
 ) -> Option<Vec<TransferJob>> {
+    let sftp = Arc::new(sftp);
     let mut planner = RemoteDownloadPlanner {
         command,
         plan_id,
@@ -1030,6 +1031,8 @@ pub(crate) async fn plan_remote_download(
     }
 }
 
+const MAX_CONCURRENT_DIR_SCANS: usize = 4;
+
 struct RemoteDownloadPlanner {
     command: StartTransferCommand,
     plan_id: TransferPlanId,
@@ -1044,7 +1047,7 @@ struct RemoteDownloadPlanner {
 }
 
 impl RemoteDownloadPlanner {
-    async fn plan(&mut self, sftp: &SftpSession) -> Result<(), UserFacingError> {
+    async fn plan(&mut self, sftp: &Arc<SftpSession>) -> Result<(), UserFacingError> {
         self.ensure_not_cancelled()?;
         if self.command.direction != TransferDirection::Download {
             return Err(UserFacingError::new(
@@ -1086,46 +1089,102 @@ impl RemoteDownloadPlanner {
 
     async fn plan_directory(
         &mut self,
-        sftp: &SftpSession,
+        sftp: &Arc<SftpSession>,
         root: &RemotePath,
         destination_root: &LocalPath,
     ) -> Result<(), UserFacingError> {
         let mut pending_directories = vec![root.clone()];
-        while let Some(current) = pending_directories.pop() {
+        let mut in_flight = tokio::task::JoinSet::new();
+
+        loop {
             self.ensure_not_cancelled()?;
-            let entries = tokio::select! {
-                _ = self.cancel.cancelled() => return Err(cancelled_transfer_error()),
-                result = sftp.read_dir(current.as_str()) => result.map_err(|error| {
-                    remote_planning_error("Server Folder Unavailable", &error)
-                })?,
-            };
-            for entry in entries {
-                self.ensure_not_cancelled()?;
-                let path = RemotePath::new(entry.path());
-                let relative = path
-                    .as_str()
-                    .strip_prefix(root.as_str())
-                    .map(|relative| relative.trim_start_matches('/'))
-                    .filter(|relative| !relative.is_empty())
-                    .ok_or_else(|| {
-                        UserFacingError::new(
-                            ErrorCode::Unknown,
-                            "Download Preparation Failed",
-                            "The remote directory changed while it was being scanned. Try again.",
-                        )
-                    })?;
-                let destination = local_download_destination(destination_root, relative)?;
-                let is_dir = entry.file_type() == SftpFileType::Dir;
-                let size = if is_dir {
-                    Some(0)
-                } else {
-                    entry.metadata().size
+
+            while in_flight.len() < MAX_CONCURRENT_DIR_SCANS {
+                let Some(current) = pending_directories.pop() else {
+                    break;
                 };
-                if is_dir {
-                    self.emit_child(path.clone(), destination, size).await?;
-                    pending_directories.push(path);
-                } else {
-                    self.emit_child(path, destination, size).await?;
+                let sftp = Arc::clone(sftp);
+                in_flight.spawn(async move {
+                    let result = sftp.read_dir(current.as_str()).await;
+                    (current, result)
+                });
+            }
+
+            if in_flight.is_empty() {
+                break;
+            }
+
+            tokio::select! {
+                _ = self.cancel.cancelled() => {
+                    in_flight.abort_all();
+                    return Err(cancelled_transfer_error());
+                }
+                next = in_flight.join_next() => {
+                    let Some(join_res) = next else {
+                        break;
+                    };
+                    let (_current, read_res) = match join_res {
+                        Ok(res) => res,
+                        Err(join_err) => {
+                            if join_err.is_cancelled() {
+                                return Err(cancelled_transfer_error());
+                            }
+                            return Err(UserFacingError::new(
+                                ErrorCode::Unknown,
+                                "Download Preparation Failed",
+                                "The directory listing task failed.",
+                            ));
+                        }
+                    };
+
+                    let entries = match read_res {
+                        Ok(entries) => entries,
+                        Err(error) => {
+                            in_flight.abort_all();
+                            return Err(remote_planning_error("Server Folder Unavailable", &error));
+                        }
+                    };
+
+                    for entry in entries {
+                        self.ensure_not_cancelled()?;
+                        let path = RemotePath::new(entry.path());
+                        let relative = path
+                            .as_str()
+                            .strip_prefix(root.as_str())
+                            .map(|relative| relative.trim_start_matches('/'))
+                            .filter(|relative| !relative.is_empty())
+                            .ok_or_else(|| {
+                                in_flight.abort_all();
+                                UserFacingError::new(
+                                    ErrorCode::Unknown,
+                                    "Download Preparation Failed",
+                                    "The remote directory changed while it was being scanned. Try again.",
+                                )
+                            })?;
+                        let destination = match local_download_destination(destination_root, relative) {
+                            Ok(dest) => dest,
+                            Err(error) => {
+                                in_flight.abort_all();
+                                return Err(error);
+                            }
+                        };
+                        let is_dir = entry.file_type() == SftpFileType::Dir;
+                        let size = if is_dir {
+                            Some(0)
+                        } else {
+                            entry.metadata().size
+                        };
+                        if is_dir {
+                            if let Err(error) = self.emit_child(path.clone(), destination, size).await {
+                                in_flight.abort_all();
+                                return Err(error);
+                            }
+                            pending_directories.push(path);
+                        } else if let Err(error) = self.emit_child(path, destination, size).await {
+                            in_flight.abort_all();
+                            return Err(error);
+                        }
+                    }
                 }
             }
         }
