@@ -42,7 +42,19 @@ impl ResidualTempFile {
                         supported: Self::CURRENT_VERSION,
                     });
                 }
-                Ok(parsed)
+                let mut valid_records = Vec::with_capacity(parsed.records.len());
+                for record in parsed.records {
+                    if record.path.contains(".macsftp-part-")
+                        && !record.path.contains('\0')
+                        && !record.path.chars().any(macsftp_core::is_bidi_or_control)
+                    {
+                        valid_records.push(record);
+                    }
+                }
+                Ok(Self {
+                    version: parsed.version,
+                    records: valid_records,
+                })
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 Ok(ResidualTempFile::new())
@@ -269,6 +281,24 @@ mod tests {
 
         let reopened = ResidualTempStore::open_or_empty(path);
         assert_eq!(reopened.records().len(), 2);
+    }
+
+    #[test]
+    fn load_filters_unsafe_residual_paths() {
+        let path = temp_path();
+        let valid = sample(false, 1, "/tmp/.valid.txt.macsftp-part-1");
+        let non_part = sample(false, 2, "/etc/passwd");
+        let bidi = sample(false, 3, "/tmp/.evil\u{202E}part.txt.macsftp-part-2");
+        let null = sample(false, 4, "/tmp/.null\0.txt.macsftp-part-3");
+        let file = ResidualTempFile {
+            version: 1,
+            records: vec![valid, non_part, bidi, null],
+        };
+        file.save(&path).expect("save file");
+
+        let store = ResidualTempStore::open(path).expect("open store");
+        assert_eq!(store.records().len(), 1);
+        assert_eq!(store.records()[0].path, "/tmp/.valid.txt.macsftp-part-1");
     }
 
     /// A residual file written by a NEWER release must not be silently read

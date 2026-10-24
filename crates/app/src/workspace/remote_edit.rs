@@ -5,6 +5,7 @@ use macsftp_core::{
     AppCommand, CheckRemoteEditSnapshotCommand, ConflictPolicy, ConnectionKey, EditPhase,
     EditSession, EditSessionId, EntryPath, LocalPath, MetadataPolicy, ProfileId, RemotePath,
     RemoteSnapshot, StartTransferCommand, TabId, Timestamp, TransferDirection, TransferEndpoint,
+    is_bidi_or_control,
 };
 use macsftp_ui::{ActiveTheme, format_size, text_button};
 use tracing::warn;
@@ -22,7 +23,9 @@ pub(crate) fn conflict_remote_path(local_temp_path: &LocalPath) -> LocalPath {
     let parent = path.parent().unwrap_or(path);
     let ext = path.extension().and_then(|e| e.to_str());
     let file_name = match ext {
-        Some(e) if !e.is_empty() => format!("conflict-remote.{}", e),
+        Some(e) if !e.is_empty() && !e.chars().any(is_bidi_or_control) => {
+            format!("conflict-remote.{}", e)
+        }
         _ => "conflict-remote".to_string(),
     };
     // Keep the snapshot in a subdirectory. Sharing the session directory would
@@ -217,6 +220,40 @@ impl Workspace {
             return;
         };
         let tab_id = tab.id;
+        let Some(file_name) = std::path::Path::new(remote_path.as_str())
+            .file_name()
+            .and_then(|name| name.to_str())
+        else {
+            self.show_status("The selected file has no usable name.".into(), cx);
+            cx.notify();
+            return;
+        };
+        if file_name.is_empty() || file_name.chars().any(is_bidi_or_control) {
+            self.show_status(
+                "The selected file has a name that cannot be saved safely.".into(),
+                cx,
+            );
+            cx.notify();
+            return;
+        }
+        if remote_path != io_path {
+            let Some(io_name) = std::path::Path::new(io_path.as_str())
+                .file_name()
+                .and_then(|name| name.to_str())
+            else {
+                self.show_status("The selected file has no usable name.".into(), cx);
+                cx.notify();
+                return;
+            };
+            if io_name.is_empty() || io_name.chars().any(is_bidi_or_control) {
+                self.show_status(
+                    "The selected file has a name that cannot be saved safely.".into(),
+                    cx,
+                );
+                cx.notify();
+                return;
+            }
+        }
         // A link that was re-pointed after its session was created would
         // otherwise produce two live sessions sharing one `remote_path`, and
         // the pane lookup could select either. Bind edit sessions to the target
@@ -333,6 +370,18 @@ impl Workspace {
     }
 
     pub(crate) fn start_edit_download(&mut self, pending: PendingEdit, cx: &mut Context<Self>) {
+        let Some(file_name) = std::path::Path::new(pending.remote_path.as_str())
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty() && !name.chars().any(is_bidi_or_control))
+        else {
+            self.show_status(
+                "The selected file has a name that cannot be saved safely.".into(),
+                cx,
+            );
+            cx.notify();
+            return;
+        };
         // StartTransferCommand carries the profile id as metadata only —
         // runtime routing keys transfers by (tab_id, session_epoch); only
         // edit dedup uses `connection_key`. Read it from the live tab so a
@@ -346,10 +395,6 @@ impl Workspace {
         let edits_dir = cx.resources().app_paths.edits_dir.clone();
         let edit_run_id = cx.resources().edit_run_id.clone();
         let id = cx.resources_mut().edit_sessions.next_id();
-        let file_name = std::path::Path::new(pending.remote_path.as_str())
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "file".to_string());
         let local_temp_path = LocalPath::new(format!(
             "{}/{}/{}/{}",
             edits_dir.as_str(),

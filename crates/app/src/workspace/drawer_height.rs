@@ -47,6 +47,9 @@ impl Render for ResizeDragGhost {
 /// (viewport minus approximate chrome). When unknown, callers may pass
 /// `viewport_height - APPROX_CHROME_HEIGHT` (floored at min).
 pub(crate) fn clamp_drawer_height(height: Pixels, content_area_height: Pixels) -> Pixels {
+    if f32::from(height).is_nan() || f32::from(content_area_height).is_nan() {
+        return DEFAULT_DRAWER_HEIGHT;
+    }
     let max_from_ratio = content_area_height * MAX_DRAWER_HEIGHT_RATIO;
     let mut max_height = if max_from_ratio < MAX_DRAWER_HEIGHT_ABS {
         max_from_ratio
@@ -67,6 +70,9 @@ pub(crate) fn clamp_drawer_height(height: Pixels, content_area_height: Pixels) -
 
 /// Content area height from window viewport (best-effort for render-time clamp).
 pub(crate) fn content_area_height_from_viewport(viewport_height: Pixels) -> Pixels {
+    if f32::from(viewport_height).is_nan() {
+        return MIN_DRAWER_HEIGHT;
+    }
     let raw = viewport_height - APPROX_CHROME_HEIGHT;
     if raw < MIN_DRAWER_HEIGHT {
         MIN_DRAWER_HEIGHT
@@ -110,5 +116,21 @@ mod tests {
     #[test]
     fn content_area_from_viewport_subtracts_chrome() {
         assert_eq!(content_area_height_from_viewport(px(864.0)), px(800.0));
+    }
+
+    #[test]
+    fn clamp_drawer_height_handles_nan() {
+        assert_eq!(
+            clamp_drawer_height(px(f32::NAN), px(800.0)),
+            DEFAULT_DRAWER_HEIGHT
+        );
+        assert_eq!(
+            clamp_drawer_height(px(200.0), px(f32::NAN)),
+            DEFAULT_DRAWER_HEIGHT
+        );
+        assert_eq!(
+            content_area_height_from_viewport(px(f32::NAN)),
+            MIN_DRAWER_HEIGHT
+        );
     }
 }

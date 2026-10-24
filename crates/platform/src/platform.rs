@@ -2,7 +2,7 @@ mod diagnostics;
 
 pub use diagnostics::{prune_log_files, write_crash_marker};
 
-use macsftp_core::{FileKind, LocalEntry, LocalPath, Timestamp};
+use macsftp_core::{FileKind, LocalEntry, LocalPath, Timestamp, is_bidi_or_control};
 
 use notify::Watcher;
 use std::os::unix::fs::PermissionsExt;
@@ -209,6 +209,18 @@ fn trim_trailing_slashes(path: &str) -> &str {
 /// Delete a local file or directory. Directories use recursive
 /// `remove_dir_all` (phase 1: confirm-then-execute).
 pub fn delete_entry(path: &LocalPath, is_dir: bool) -> std::io::Result<()> {
+    let std_path = std::path::Path::new(path.as_str());
+    if path.as_str().is_empty()
+        || path.as_str() == "/"
+        || path.as_str() == "."
+        || path.as_str() == ".."
+        || std_path.parent().is_none()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cannot delete filesystem root or empty path",
+        ));
+    }
     if is_dir {
         std::fs::remove_dir_all(path.as_str())
     } else {
@@ -218,20 +230,44 @@ pub fn delete_entry(path: &LocalPath, is_dir: bool) -> std::io::Result<()> {
 
 /// Rename or move a local path.
 pub fn rename_entry(from: &LocalPath, to: &LocalPath) -> std::io::Result<()> {
+    let from_path = std::path::Path::new(from.as_str());
+    let to_path = std::path::Path::new(to.as_str());
+    if from.as_str().is_empty()
+        || from.as_str() == "/"
+        || from_path.parent().is_none()
+        || to.as_str().is_empty()
+        || to.as_str() == "/"
+        || to_path.parent().is_none()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cannot rename root or empty path",
+        ));
+    }
     std::fs::rename(from.as_str(), to.as_str())
 }
 
 /// The LaunchServices attribute that makes macOS ask before opening a file.
 const QUARANTINE_ATTR: &str = "com.apple.quarantine";
 
-/// Whether `path` is a regular file carrying any executable bit.
-///
-/// Directories have execute bits too (they mean "traversable"), so only
-/// regular files count here.
+/// Whether `path` is a regular file carrying any executable bit, or a macOS
+/// app bundle directory (`.app`, `.workflow`, `.action`).
 pub fn is_executable_file(path: &LocalPath) -> bool {
-    match std::fs::symlink_metadata(path.as_str()) {
+    let std_path = std::path::Path::new(path.as_str());
+    match std::fs::symlink_metadata(std_path) {
         Ok(metadata) => {
-            metadata.file_type().is_file() && metadata.permissions().mode() & 0o111 != 0
+            if metadata.file_type().is_dir() {
+                if let Some(ext) = std_path.extension().and_then(|e| e.to_str()) {
+                    return ext.eq_ignore_ascii_case("app")
+                        || ext.eq_ignore_ascii_case("workflow")
+                        || ext.eq_ignore_ascii_case("action");
+                }
+                false
+            } else if metadata.file_type().is_file() {
+                metadata.permissions().mode() & 0o111 != 0
+            } else {
+                false
+            }
         }
         Err(_) => false,
     }
@@ -308,6 +344,18 @@ fn build_quarantine_command(path: &str) -> std::process::Command {
 
 /// Create a single directory under `parent` named `name` (not recursive).
 pub fn create_directory(parent: &LocalPath, name: &str) -> std::io::Result<LocalPath> {
+    if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains('/')
+        || name.contains('\0')
+        || name.chars().any(is_bidi_or_control)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid directory name",
+        ));
+    }
     let path = parent.join(name);
     std::fs::create_dir(path.as_str())?;
     Ok(path)
@@ -317,6 +365,18 @@ pub fn create_directory(parent: &LocalPath, name: &str) -> std::io::Result<Local
 /// to discard edit sessions from the previous run (sessions do not persist
 /// across launches). NotFound is treated as success.
 pub fn clear_edits_dir(edits_dir: &LocalPath) -> std::io::Result<()> {
+    let p = std::path::Path::new(edits_dir.as_str());
+    if edits_dir.as_str().is_empty()
+        || p.parent().is_none()
+        || edits_dir.as_str() == "/"
+        || p.components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid edits directory path",
+        ));
+    }
     match std::fs::remove_dir_all(edits_dir.as_str()) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -331,6 +391,18 @@ pub fn clear_edits_dir(edits_dir: &LocalPath) -> std::io::Result<()> {
 /// distinguishing "already gone" from a real error. Any other failure is
 /// returned so the caller can log or record a residual (audit APP-EDIT-003).
 pub fn cleanup_edit_session_dir(session_dir: &LocalPath) -> std::io::Result<()> {
+    let p = std::path::Path::new(session_dir.as_str());
+    if session_dir.as_str().is_empty()
+        || p.parent().is_none()
+        || session_dir.as_str() == "/"
+        || p.components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid session directory path",
+        ));
+    }
     match std::fs::remove_dir_all(session_dir.as_str()) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -377,7 +449,16 @@ pub fn local_fs_error(title: &str, error: &std::io::Error) -> macsftp_core::User
 /// Extracted for unit testing argument wiring without spawning.
 pub fn build_open_command(temp: &LocalPath, editor: Option<&str>) -> std::process::Command {
     let mut cmd = std::process::Command::new("/usr/bin/open");
-    match editor {
+    let safe_editor = editor.and_then(|app| {
+        let trimmed = app.trim();
+        if trimmed.is_empty() || trimmed.starts_with('-') || trimmed.chars().any(is_bidi_or_control)
+        {
+            None
+        } else {
+            Some(app)
+        }
+    });
+    match safe_editor {
         None => {
             cmd.args(["-t", temp.as_str()]);
         }
@@ -552,7 +633,10 @@ fn parse_edit_event_path_under(
     if components.next().is_some() {
         return None;
     }
-    if is_temp_artifact(file_component) {
+    if is_temp_artifact(file_component)
+        || file_component.contains('\0')
+        || file_component.chars().any(is_bidi_or_control)
+    {
         return None;
     }
     let session_num: u64 = session_component.parse().ok()?;
@@ -925,6 +1009,10 @@ mod tests {
 
         let created = create_directory(&base, "folder").expect("create dir");
         assert!(std::path::Path::new(created.as_str()).is_dir());
+
+        assert!(create_directory(&base, "..").is_err());
+        assert!(create_directory(&base, "sub/folder").is_err());
+        assert!(create_directory(&base, "bad\u{202E}dir").is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -932,6 +1020,20 @@ mod tests {
     fn delete_missing_path_returns_error() {
         let result = delete_entry(&LocalPath::new("/nonexistent/macsftp/delete-me"), false);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn delete_and_rename_reject_root_or_empty_path() {
+        assert!(delete_entry(&LocalPath::new("/"), true).is_err());
+        assert!(delete_entry(&LocalPath::new(""), true).is_err());
+        assert!(delete_entry(&LocalPath::new("."), true).is_err());
+        assert!(delete_entry(&LocalPath::new(".."), true).is_err());
+
+        assert!(rename_entry(&LocalPath::new("/"), &LocalPath::new("/tmp/test")).is_err());
+        assert!(rename_entry(&LocalPath::new("/tmp/test"), &LocalPath::new("/")).is_err());
+        assert!(rename_entry(&LocalPath::new(""), &LocalPath::new("/tmp/test")).is_err());
+        assert!(super::clear_edits_dir(&LocalPath::new("/")).is_err());
+        assert!(super::cleanup_edit_session_dir(&LocalPath::new("/")).is_err());
     }
 
     #[test]
@@ -1005,6 +1107,25 @@ mod tests {
             .map(|a| a.to_string_lossy().to_string())
             .collect();
         assert_eq!(args, vec!["-a", "Visual Studio Code", "/tmp/edits/1/a.txt"]);
+    }
+
+    #[test]
+    fn build_open_command_rejects_unsafe_editor() {
+        for unsafe_editor in ["-a", "--help", "   ", "evil\0app", "app\u{202E}name"] {
+            let cmd = super::build_open_command(
+                &LocalPath::new("/tmp/edits/1/a.txt"),
+                Some(unsafe_editor),
+            );
+            let args: Vec<_> = cmd
+                .get_args()
+                .map(|a| a.to_string_lossy().to_string())
+                .collect();
+            assert_eq!(
+                args,
+                vec!["-t", "/tmp/edits/1/a.txt"],
+                "editor {unsafe_editor:?} should fall back to -t"
+            );
+        }
     }
 
     #[test]

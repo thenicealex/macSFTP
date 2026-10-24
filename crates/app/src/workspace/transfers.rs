@@ -1,8 +1,9 @@
 use gpui_kit::Context;
 use macsftp_core::{
     AppCommand, EntryPath, FileKind, LocalPath, RemotePath, TabId, TransferEndpoint, TransferId,
-    TransferState,
+    TransferState, is_bidi_or_control,
 };
+use tracing::warn;
 
 use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::helpers::*;
@@ -228,6 +229,16 @@ impl crate::workspace::Workspace {
             .cloned()
             .collect();
         for record in pending {
+            if !record.path.contains(".macsftp-part-")
+                || record.path.contains('\0')
+                || record.path.chars().any(is_bidi_or_control)
+            {
+                warn!(
+                    path = %record.path,
+                    "skipping remote residual temp file that does not match .macsftp-part- pattern or contains forbidden characters"
+                );
+                continue;
+            }
             self.send_command(
                 AppCommand::RemoveRemoteTempFile {
                     tab_id,

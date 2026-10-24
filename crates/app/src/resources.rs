@@ -292,6 +292,17 @@ impl ActiveTransfers for App {
 fn reconcile_local_residual_temps(mut store: ResidualTempStore) -> ResidualTempStore {
     let local: Vec<_> = store.local_records().cloned().collect();
     for record in local {
+        if !record.path.contains(".macsftp-part-")
+            || record.path.contains('\0')
+            || record.path.chars().any(macsftp_core::is_bidi_or_control)
+        {
+            warn!(
+                path = %record.path,
+                "skipping local residual temp file that does not match .macsftp-part- pattern or contains forbidden characters"
+            );
+            store.remove(record.transfer_id, &record.path);
+            continue;
+        }
         match std::fs::remove_file(&record.path) {
             Ok(()) => {
                 store.remove(record.transfer_id, &record.path);

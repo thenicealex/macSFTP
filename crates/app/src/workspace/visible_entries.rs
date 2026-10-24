@@ -144,11 +144,7 @@ pub(crate) fn visible_remote_indices(
 }
 
 /// Count of entries that should appear in the local file list without allocating.
-pub(crate) fn count_visible_local(
-    entries: &[LocalEntry],
-    show_hidden: bool,
-    query: &str,
-) -> usize {
+pub(crate) fn count_visible_local(entries: &[LocalEntry], show_hidden: bool, query: &str) -> usize {
     count_visible(
         entries.len(),
         entries.iter().map(|entry| entry.name.as_str()),
@@ -459,7 +455,11 @@ mod tests {
             for query in ["", "read", "z", "e", "nonexistent"] {
                 let full = visible_local_indices(&entries, show_hidden, query);
                 let count = count_visible_local(&entries, show_hidden, query);
-                assert_eq!(full.len(), count, "count mismatch for query '{query}', show_hidden {show_hidden}");
+                assert_eq!(
+                    full.len(),
+                    count,
+                    "count mismatch for query '{query}', show_hidden {show_hidden}"
+                );
 
                 for (visible_idx, &expected_real) in full.iter().enumerate() {
                     let real = real_local_index_at(&entries, visible_idx, show_hidden, query);
@@ -476,11 +476,7 @@ mod tests {
             }
         }
 
-        let remote_entries = vec![
-            remote(".hidden"),
-            remote("file1.dat"),
-            remote("file2.dat"),
-        ];
+        let remote_entries = vec![remote(".hidden"), remote("file1.dat"), remote("file2.dat")];
         assert_eq!(count_visible_remote(&remote_entries, false, ""), 2);
         assert_eq!(count_visible_remote(&remote_entries, true, ""), 3);
         assert_eq!(real_remote_index_at(&remote_entries, 0, false, ""), Some(1));

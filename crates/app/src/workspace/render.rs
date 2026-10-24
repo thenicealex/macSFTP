@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use crate::workspace::TextInputTarget;
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::{
@@ -11,6 +10,7 @@ use macsftp_ui::{
     file_table_header, format_size_label, format_timestamp, icon, icon_button, loading_state, tab,
     text_button, text_tooltip,
 };
+use std::collections::HashSet;
 
 use crate::palette_commands::labeled_shortcut;
 use crate::resources::ActiveResources;

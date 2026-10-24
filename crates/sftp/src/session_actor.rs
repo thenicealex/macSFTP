@@ -547,6 +547,16 @@ impl RemoteSessionActor {
                 }
             }
             RemoteSessionRequest::RemoveRemoteTempFile { transfer_id, path } => {
+                if !path.as_str().contains(".macsftp-part-")
+                    || path.as_str().contains('\0')
+                    || path.as_str().chars().any(is_bidi_or_control)
+                {
+                    warn!(
+                        path = path.as_str(),
+                        "refusing to remove remote temp file that does not match .macsftp-part- pattern or contains forbidden characters"
+                    );
+                    return;
+                }
                 match self.sftp.remove_file(path.as_str()).await {
                     Ok(()) => {
                         let _ = self
@@ -1993,6 +2003,13 @@ async fn cleanup_remote_temp(
     transfer_id: TransferId,
     residual_transfer_id: Option<TransferId>,
 ) -> bool {
+    if !temporary.as_str().contains(".macsftp-part-") {
+        warn!(
+            path = temporary.as_str(),
+            "refusing to remove remote temp file that does not match .macsftp-part- pattern"
+        );
+        return false;
+    }
     let cleaned = match sftp.remove_file(temporary.as_str()).await {
         Ok(()) => true,
         Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => true,
@@ -2036,6 +2053,13 @@ async fn cleanup_local_temp(
     transfer_id: TransferId,
     residual_transfer_id: Option<TransferId>,
 ) -> bool {
+    if !temporary.as_str().contains(".macsftp-part-") {
+        warn!(
+            path = temporary.as_str(),
+            "refusing to remove local temp file that does not match .macsftp-part- pattern"
+        );
+        return false;
+    }
     let cleaned = match tokio::fs::remove_file(temporary.as_str()).await {
         Ok(()) => true,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
@@ -3598,11 +3622,40 @@ async fn execute_remote_fs_op(sftp: &SftpSession, op: &FsOp) -> Result<(), UserF
         FsOp::Rename { from, to } => {
             let from = require_remote_path(from, "rename source")?;
             let to = require_remote_path(to, "rename destination")?;
+            if from.as_str().trim_matches('/').is_empty()
+                || to.as_str().trim_matches('/').is_empty()
+            {
+                return Err(UserFacingError::new(
+                    ErrorCode::Unknown,
+                    "Invalid Path",
+                    "The root directory cannot be renamed.",
+                ));
+            }
+            if to.as_str().contains('\0') || to.as_str().chars().any(is_bidi_or_control) {
+                return Err(UserFacingError::new(
+                    ErrorCode::Unknown,
+                    "Invalid Name",
+                    "The destination name is invalid or contains forbidden characters.",
+                ));
+            }
             sftp.rename(from.as_str(), to.as_str())
                 .await
                 .map_err(|error| remote_fs_error("The item couldn’t be renamed.", &error))
         }
         FsOp::CreateDirectory { parent, name } => {
+            if name.is_empty()
+                || name == "."
+                || name == ".."
+                || name.contains('/')
+                || name.contains('\0')
+                || name.chars().any(is_bidi_or_control)
+            {
+                return Err(UserFacingError::new(
+                    ErrorCode::Unknown,
+                    "Invalid Folder Name",
+                    "The folder name is invalid or contains forbidden characters.",
+                ));
+            }
             let parent = require_remote_path(parent, "create directory parent")?;
             let path = parent.join(name);
             sftp.create_dir(path.as_str())
@@ -3612,6 +3665,14 @@ async fn execute_remote_fs_op(sftp: &SftpSession, op: &FsOp) -> Result<(), UserF
         FsOp::Delete { entries } => {
             for entry in entries {
                 let path = require_remote_path(&entry.path, "delete path")?;
+                let trimmed = path.as_str().trim_matches('/');
+                if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+                    return Err(UserFacingError::new(
+                        ErrorCode::Unknown,
+                        "Invalid Path",
+                        "The root directory cannot be deleted.",
+                    ));
+                }
                 if entry.is_dir {
                     remove_remote_dir_recursive(sftp, path).await?;
                 } else {
@@ -3643,6 +3704,14 @@ async fn remove_remote_dir_recursive(
     sftp: &SftpSession,
     path: &RemotePath,
 ) -> Result<(), UserFacingError> {
+    let trimmed = path.as_str().trim_matches('/');
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        return Err(UserFacingError::new(
+            ErrorCode::Unknown,
+            "Invalid Path",
+            "The root directory cannot be deleted.",
+        ));
+    }
     let read_dir = sftp
         .read_dir(path.as_str())
         .await
@@ -3870,7 +3939,11 @@ pub(crate) async fn resolve_remote_entry(
                 return unresolved(remote_planning_error("Server Link Unavailable", &error));
             }
         };
-        if target_escapes_through_parent(&target_text) {
+        if target_text.is_empty()
+            || target_text.contains('\0')
+            || target_text.chars().any(is_bidi_or_control)
+            || target_escapes_through_parent(&target_text)
+        {
             return unresolved(unresolvable_link_error());
         }
         current = current.resolve_link_target(&target_text);
@@ -3893,11 +3966,26 @@ fn write_through_start(
     target: Option<&str>,
 ) -> Option<RemotePath> {
     match (canonical, target) {
-        (Some(canonical), _) => canonical
-            .starts_with('/')
-            .then(|| RemotePath::new(canonical)),
+        (Some(canonical), _) => {
+            if !canonical.starts_with('/')
+                || canonical.contains('\0')
+                || canonical.chars().any(is_bidi_or_control)
+            {
+                None
+            } else {
+                Some(RemotePath::new(canonical))
+            }
+        }
         (None, Some(target)) => {
-            (!target_escapes_through_parent(target)).then(|| path.resolve_link_target(target))
+            if target.is_empty()
+                || target.contains('\0')
+                || target.chars().any(is_bidi_or_control)
+                || target_escapes_through_parent(target)
+            {
+                None
+            } else {
+                Some(path.resolve_link_target(target))
+            }
         }
         (None, None) => None,
     }
@@ -3912,10 +4000,17 @@ fn target_escapes_through_parent(target: &str) -> bool {
 }
 
 fn validate_download_symlink_target(target: &str) -> Result<(), UserFacingError> {
+    let is_windows_drive_prefix = target.len() >= 2
+        && target.as_bytes()[1] == b':'
+        && target.as_bytes()[0].is_ascii_alphabetic();
+
     if target.is_empty()
         || target.starts_with('/')
         || target.starts_with('\\')
+        || target.starts_with('~')
         || target.contains('\\')
+        || is_windows_drive_prefix
+        || target.chars().any(is_bidi_or_control)
         || target_escapes_through_parent(target)
     {
         return Err(UserFacingError::new(
@@ -4017,6 +4112,25 @@ mod tests {
     }
 
     #[test]
+    fn write_through_start_rejects_bidi_and_null() {
+        let path = RemotePath::new("/srv/app/latest.conf");
+        assert_eq!(
+            write_through_start(&path, Some("/srv/app/\0evil.conf"), None),
+            None
+        );
+        assert_eq!(
+            write_through_start(&path, Some("/srv/app/\u{202E}evil.conf"), None),
+            None
+        );
+        assert_eq!(write_through_start(&path, None, Some("app\0.conf")), None);
+        assert_eq!(
+            write_through_start(&path, None, Some("app\u{202E}.conf")),
+            None
+        );
+        assert_eq!(write_through_start(&path, None, Some("")), None);
+    }
+
+    #[test]
     fn target_traversal_detection_covers_absolute_and_relative_targets() {
         assert!(target_escapes_through_parent("../shared/app.conf"));
         assert!(target_escapes_through_parent("/opt/../etc/app.conf"));
@@ -4034,6 +4148,11 @@ mod tests {
         assert!(validate_download_symlink_target("../outside").is_err());
         assert!(validate_download_symlink_target("sub/../../secret").is_err());
         assert!(validate_download_symlink_target(r"C:\Windows\System32").is_err());
+        assert!(validate_download_symlink_target("C:Windows").is_err());
+        assert!(validate_download_symlink_target("~/secret").is_err());
+        assert!(validate_download_symlink_target("evil\u{202E}txt.exe").is_err());
+        assert!(validate_download_symlink_target("evil\x00file").is_err());
+        assert!(validate_download_symlink_target("evil\x1b[31mfile").is_err());
         assert!(validate_download_symlink_target(r"sub\..\secret").is_err());
 
         let err = validate_download_symlink_target("/etc/passwd")

@@ -1385,6 +1385,19 @@ fn spawn_proxy_command(
     command: &str,
     settings: &ConnectionSettings,
 ) -> Result<ProxyCommandStream, ConnectFailure> {
+    if command.trim().is_empty()
+        || command.contains('\0')
+        || command.chars().any(macsftp_core::is_bidi_or_control)
+    {
+        return Err(ConnectFailure::Connection(
+            UserFacingError::new(
+                ErrorCode::Unknown,
+                "Invalid Connection Command",
+                "The configured connection command contains invalid characters or is empty.",
+            )
+            .with_retryable(false),
+        ));
+    }
     let expanded = expand_proxy_command(command, settings);
     let mut child = Command::new("/bin/sh")
         .arg("-c")
@@ -1599,6 +1612,38 @@ pub async fn establish_physical_connection(
     connection_lost: CancellationToken,
     disconnect_cause: Arc<Mutex<Option<PhysicalDisconnectCause>>>,
 ) -> Result<client::Handle<ClientHandler>, ConnectFailure> {
+    if settings.port == 0
+        || settings.host.is_empty()
+        || settings
+            .host
+            .chars()
+            .any(|c| c.is_whitespace() || macsftp_core::is_bidi_or_control(c))
+    {
+        return Err(ConnectFailure::Connection(
+            UserFacingError::new(
+                ErrorCode::Unknown,
+                "Invalid Server Address",
+                "The server address or port is invalid.",
+            )
+            .with_retryable(false),
+        ));
+    }
+    if settings.username.is_empty()
+        || settings
+            .username
+            .chars()
+            .any(|c| c.is_whitespace() || macsftp_core::is_bidi_or_control(c))
+    {
+        return Err(ConnectFailure::Connection(
+            UserFacingError::new(
+                ErrorCode::Unknown,
+                "Invalid Username",
+                "The username is invalid.",
+            )
+            .with_retryable(false),
+        ));
+    }
+
     match &settings.route {
         ResolvedConnectionRoute::Direct => {
             let stream = connect_tcp_stream(settings, trust_config.handshake_timeout).await?;

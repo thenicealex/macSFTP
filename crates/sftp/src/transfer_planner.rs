@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use macsftp_core::{
     AppEvent, ErrorCode, LocalPath, RemotePath, StartTransferCommand, Timestamp, TransferDirection,
     TransferEndpoint, TransferId, TransferJob, TransferPlan, TransferPlanId, TransferPlanProgress,
-    TransferPlanState, TransferState, UserFacingError,
+    TransferPlanState, TransferState, UserFacingError, is_bidi_or_control,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -200,11 +200,27 @@ impl LocalUploadPlanner {
                     "Choose a folder with a valid name and try again.",
                 )
             })?;
+            if name.to_string_lossy().chars().any(is_bidi_or_control) {
+                return Err(UserFacingError::new(
+                    ErrorCode::Unknown,
+                    "Unsafe Folder Name",
+                    "The folder has an unsafe name that cannot be uploaded safely.",
+                ));
+            }
             let directory_destination = join_remote_child(destination_root, name);
             self.emit_child(source_path.clone(), directory_destination.clone(), 0)?;
             self.plan_directory(&source_path, &directory_destination)
         } else {
             let destination = if self.command.sources.len() == 1 {
+                if let Some(name) = source_path.file_name()
+                    && name.to_string_lossy().chars().any(is_bidi_or_control)
+                {
+                    return Err(UserFacingError::new(
+                        ErrorCode::Unknown,
+                        "Unsafe File Name",
+                        "The file has an unsafe name that cannot be uploaded safely.",
+                    ));
+                }
                 destination_root.clone()
             } else {
                 let name = source_path.file_name().ok_or_else(|| {
@@ -214,6 +230,13 @@ impl LocalUploadPlanner {
                         "Choose a file or folder with a valid name and try again.",
                     )
                 })?;
+                if name.to_string_lossy().chars().any(is_bidi_or_control) {
+                    return Err(UserFacingError::new(
+                        ErrorCode::Unknown,
+                        "Unsafe Item Name",
+                        "The item has an unsafe name that cannot be uploaded safely.",
+                    ));
+                }
                 join_remote_child(destination_root, name)
             };
             let size = if metadata.file_type().is_symlink() {
@@ -244,6 +267,13 @@ impl LocalUploadPlanner {
                 let entry =
                     entry.map_err(|error| planning_io_error("Item Couldn’t Be Read", &error))?;
                 let file_name = entry.file_name();
+                if file_name.to_string_lossy().chars().any(is_bidi_or_control) {
+                    return Err(UserFacingError::new(
+                        ErrorCode::Unknown,
+                        "Unsafe File Name",
+                        "The folder contains an item with an unsafe name that cannot be uploaded safely.",
+                    ));
+                }
                 let destination = join_remote_child(&current_destination, &file_name);
                 let path = entry.path();
 
@@ -266,8 +296,9 @@ impl LocalUploadPlanner {
                 } else {
                     let metadata = match entry.metadata() {
                         Ok(m) => m,
-                        Err(_) => fs::symlink_metadata(&path)
-                            .map_err(|error| planning_io_error("Item Couldn’t Be Checked", &error))?,
+                        Err(_) => fs::symlink_metadata(&path).map_err(|error| {
+                            planning_io_error("Item Couldn’t Be Checked", &error)
+                        })?,
                     };
                     self.emit_child(path, destination, metadata.len())?;
                 }
@@ -395,13 +426,8 @@ impl LocalUploadPlanner {
 }
 
 fn join_remote_child(parent: &RemotePath, file_name: &std::ffi::OsStr) -> RemotePath {
-    let parent_str = parent.as_str().trim_end_matches('/');
     let name_str = file_name.to_string_lossy();
-    let mut path = String::with_capacity(parent_str.len() + 1 + name_str.len());
-    path.push_str(parent_str);
-    path.push('/');
-    path.push_str(&name_str);
-    RemotePath::new(path)
+    parent.join(&name_str)
 }
 
 fn planning_io_error(title: &str, error: &std::io::Error) -> UserFacingError {
@@ -843,11 +869,8 @@ mod tests {
         std::fs::write(fixture_root.join("alpha.txt"), b"regular content")
             .expect("write regular file");
         symlink("alpha.txt", fixture_root.join("valid_link.txt")).expect("create valid symlink");
-        symlink(
-            "nonexistent_file.txt",
-            fixture_root.join("broken_link.txt"),
-        )
-        .expect("create broken symlink");
+        symlink("nonexistent_file.txt", fixture_root.join("broken_link.txt"))
+            .expect("create broken symlink");
 
         let command = command(
             LocalPath::new(fixture_root.display().to_string()),
@@ -949,6 +972,58 @@ mod tests {
 
         // root + 30 subdirectories + 1 deep file = 32 items
         assert_eq!(planned.len(), 32);
+
+        std::fs::remove_dir_all(&fixture_root).expect("remove fixture directory");
+    }
+
+    #[test]
+    fn directory_planning_rejects_unsafe_names_with_bidi_or_control() {
+        let fixture_root = std::env::temp_dir().join(format!(
+            "macsftp-transfer-plan-unsafe-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&fixture_root).expect("create fixture directory");
+        // Create a file containing a bidi override character (RLO: \u{202E})
+        let unsafe_filename = format!("safe_{}\u{202E}txt.exe", "test");
+        std::fs::write(fixture_root.join(&unsafe_filename), b"payload").expect("write unsafe file");
+
+        let command = command(
+            LocalPath::new(fixture_root.display().to_string()),
+            "/uploads",
+        );
+        let (plan, root_job) = new_plan(
+            &command,
+            TransferPlanId(30),
+            TransferId(30),
+            macsftp_core::Timestamp::from_secs_since_epoch(1),
+        );
+        let (event_tx, event_rx) = flume::bounded(16);
+        let planned = plan_local_upload(
+            command,
+            plan.id,
+            root_job,
+            std::sync::Arc::new(AtomicU64::new(31)),
+            event_tx,
+            CancellationToken::new(),
+        );
+        assert!(
+            planned.is_none(),
+            "planning must fail on unsafe bidi filename"
+        );
+
+        let mut seen_failed = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if let AppEvent::TransferPlanFailed { plan_id, error } = event {
+                assert_eq!(plan_id, TransferPlanId(30));
+                assert_eq!(error.title, "Unsafe File Name");
+                seen_failed = true;
+            }
+        }
+        assert!(seen_failed, "TransferPlanFailed event must be emitted");
 
         std::fs::remove_dir_all(&fixture_root).expect("remove fixture directory");
     }

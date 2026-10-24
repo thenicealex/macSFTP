@@ -2,7 +2,7 @@ use gpui_kit::base::input::InputEvent;
 use gpui_kit::{App, Context, KeyDownEvent, SharedString, Window};
 use macsftp_core::{
     AuthCredential, AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionSettings, ProfileId,
-    ResolvedConnectionRoute,
+    ResolvedConnectionRoute, is_bidi_or_control,
 };
 use macsftp_storage::ProfileMutationError;
 use macsftp_ui::{InputKeyResult, InputState, PlainInput, SecretInputState};
@@ -257,6 +257,12 @@ impl ConnectForm {
         if host.is_empty() {
             return Err("Enter a server address.".into());
         }
+        if host
+            .chars()
+            .any(|c| c.is_whitespace() || is_bidi_or_control(c))
+        {
+            return Err("Server address contains invalid characters.".into());
+        }
         let port_text = self.port.value().trim();
         let port: u16 = if port_text.is_empty() {
             22
@@ -270,6 +276,12 @@ impl ConnectForm {
         if username.is_empty() {
             return Err("Enter a username.".into());
         }
+        if username
+            .chars()
+            .any(|c| c.is_whitespace() || is_bidi_or_control(c))
+        {
+            return Err("Username contains invalid characters.".into());
+        }
 
         let auth = match self.auth_method {
             AuthMethodKind::Password => AuthCredential::Password {
@@ -279,6 +291,9 @@ impl ConnectForm {
                 let key_path = expand_home(self.key_path.value().trim());
                 if key_path.is_empty() {
                     return Err("Enter the full path to your key file.".into());
+                }
+                if key_path.chars().any(is_bidi_or_control) {
+                    return Err("Key path contains invalid characters.".into());
                 }
                 let passphrase = self.passphrase.value();
                 AuthCredential::PrivateKey {
@@ -294,6 +309,9 @@ impl ConnectForm {
             AuthMethodKind::SshAgent => AuthCredential::SshAgent {
                 socket_path: {
                     let path = expand_home(self.agent_socket.value().trim());
+                    if path.chars().any(is_bidi_or_control) {
+                        return Err("Agent socket path contains invalid characters.".into());
+                    }
                     (!path.is_empty()).then_some(path)
                 },
             },

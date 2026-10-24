@@ -9,6 +9,7 @@ use macsftp_core::{
     AppCommand, AppState, CommandDispatchError, ConnectCommand, ConnectionKey,
     ConnectionPoolIdentity, ConnectionSettings, ConnectionState, EntryPath, LocalPath, ProfileId,
     RemoteEventScope, RemotePath, RemoteSnapshot, TabId, TabState, WindowSessionId,
+    is_bidi_or_control,
 };
 use macsftp_sftp::RuntimeClient;
 use macsftp_storage::{
@@ -369,10 +370,19 @@ impl Workspace {
         let mut restored_ids = Vec::new();
         for snap in &snapshot.tabs {
             let tab_id = cx.resources().next_tab_id();
-            let title = if snap.title.is_empty() {
-                snap.host.clone()
+            let raw_title = if snap.title.is_empty() {
+                &snap.host
             } else {
-                snap.title.clone()
+                &snap.title
+            };
+            let title: String = raw_title
+                .chars()
+                .filter(|c| !is_bidi_or_control(*c))
+                .collect();
+            let title = if title.is_empty() {
+                "Untitled".to_string()
+            } else {
+                title
             };
             let mut tab = TabState::new(tab_id, title);
             tab.profile_id = snap.profile_id.map(ProfileId);

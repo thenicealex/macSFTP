@@ -37,6 +37,27 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub const CURRENT_VERSION: u32 = 1;
+
+    pub fn sanitize(&mut self) {
+        self.external_editor = self.external_editor.take().and_then(|e| {
+            let t = e.trim();
+            if t.is_empty() || t.starts_with('-') || t.chars().any(macsftp_core::is_bidi_or_control)
+            {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        });
+        self.editor_rules.retain(|rule| {
+            let pattern = rule.pattern.trim();
+            let app = rule.app_name.trim();
+            !pattern.is_empty()
+                && !pattern.chars().any(macsftp_core::is_bidi_or_control)
+                && !app.is_empty()
+                && !app.starts_with('-')
+                && !app.chars().any(macsftp_core::is_bidi_or_control)
+        });
+    }
 }
 
 impl Default for AppConfig {
@@ -121,6 +142,8 @@ impl ConfigStore {
                 supported: AppConfig::CURRENT_VERSION,
             });
         }
+        let mut config = config;
+        config.sanitize();
         Ok(config)
     }
 
@@ -182,6 +205,7 @@ impl ConfigStore {
             })?;
         self.config = Self::load_from_disk(&self.path)?;
         apply(&mut self.config);
+        self.config.sanitize();
         self.save()
     }
 

@@ -52,7 +52,8 @@ pub(crate) fn visible_transfer_jobs(store: &TransferStore) -> Vec<&TransferJob> 
         {
             true
         } else if matches!(plan.state, TransferPlanState::Failed { .. }) {
-            let children_are_terminal = if let Some(range) = store.child_jobs_slice_range(plan_idx) {
+            let children_are_terminal = if let Some(range) = store.child_jobs_slice_range(plan_idx)
+            {
                 store.jobs[range].iter().all(|job| {
                     matches!(
                         job.state,
