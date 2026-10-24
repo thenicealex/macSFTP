@@ -1426,21 +1426,12 @@ pub(crate) async fn run_transfer_job(
                     &job,
                     &event_tx,
                     &cancel,
-                    &connection_key,
                     may_clear_destination,
                 )
                 .await
             }
             (macsftp_core::TransferDirection::Download, TransferSession::Standard(sftp)) => {
-                download_single_file(
-                    sftp,
-                    &job,
-                    &event_tx,
-                    &cancel,
-                    &connection_key,
-                    may_clear_destination,
-                )
-                .await
+                download_single_file(sftp, &job, &event_tx, &cancel, may_clear_destination).await
             }
         },
         Err(error) => Err(error),
@@ -2684,7 +2675,6 @@ async fn download_single_file_pipelined(
     job: &TransferJob,
     event_tx: &flume::Sender<AppEvent>,
     cancel: &CancellationToken,
-    connection_key: &str,
     may_clear_destination: bool,
 ) -> Result<(), UserFacingError> {
     let (TransferEndpoint::Remote(source), TransferEndpoint::Local(destination)) =
@@ -2752,7 +2742,7 @@ async fn download_single_file_pipelined(
     emit_residual_temp_created(
         event_tx,
         ResidualTempRecord {
-            connection_key: connection_key.to_string(),
+            connection_key: "local".to_string(),
             direction: job.direction,
             transfer_id: job.id,
             path: temporary_destination.as_str().to_string(),
@@ -2808,7 +2798,6 @@ async fn download_single_file(
     job: &TransferJob,
     event_tx: &flume::Sender<AppEvent>,
     cancel: &CancellationToken,
-    connection_key: &str,
     may_clear_destination: bool,
 ) -> Result<(), UserFacingError> {
     let (TransferEndpoint::Remote(source), TransferEndpoint::Local(destination)) =
@@ -2873,7 +2862,7 @@ async fn download_single_file(
     emit_residual_temp_created(
         event_tx,
         ResidualTempRecord {
-            connection_key: connection_key.to_string(),
+            connection_key: "local".to_string(),
             direction: job.direction,
             transfer_id: job.id,
             path: temporary_destination.as_str().to_string(),

@@ -367,4 +367,83 @@ mod edit_tests {
         assert_ne!(second, third);
         assert_ne!(first, third);
     }
+
+    #[test]
+    fn reconcile_local_residual_temps_removes_existing_files_and_cleans_store() {
+        use macsftp_core::{
+            LocalPath, ResidualTempRecord, Timestamp, TransferDirection, TransferId,
+        };
+        use macsftp_storage::ResidualTempStore;
+
+        let dir = std::env::temp_dir().join(format!(
+            "macsftp-res-reconcile-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create test dir");
+
+        let store_path = dir.join("residual_temps.json");
+        let store_local_path = LocalPath::new(store_path.display().to_string());
+        let mut store = ResidualTempStore::open_or_empty(store_local_path.clone());
+
+        let existing_local_file = dir.join(".download.txt.macsftp-part-1");
+        std::fs::write(&existing_local_file, b"partial download").expect("write local temp file");
+
+        let missing_local_file = dir.join(".download.txt.macsftp-part-2");
+
+        // Local record with existing file
+        store.add(ResidualTempRecord {
+            connection_key: "server:22".to_string(),
+            direction: TransferDirection::Download,
+            transfer_id: TransferId(1),
+            path: existing_local_file.display().to_string(),
+            created_at: Timestamp::from_secs_since_epoch(100),
+        });
+
+        // Local record with missing file
+        store.add(ResidualTempRecord {
+            connection_key: "server:22".to_string(),
+            direction: TransferDirection::Download,
+            transfer_id: TransferId(2),
+            path: missing_local_file.display().to_string(),
+            created_at: Timestamp::from_secs_since_epoch(101),
+        });
+
+        // Remote record (must NOT be removed by local reconciliation)
+        store.add(ResidualTempRecord {
+            connection_key: "server:22".to_string(),
+            direction: TransferDirection::Upload,
+            transfer_id: TransferId(3),
+            path: "/remote/path/.upload.txt.macsftp-part-3".to_string(),
+            created_at: Timestamp::from_secs_since_epoch(102),
+        });
+        store.save().expect("save initial store");
+
+        let reconciled = super::reconcile_local_residual_temps(store);
+
+        assert!(
+            !existing_local_file.exists(),
+            "local temp file must be deleted during reconciliation"
+        );
+        assert_eq!(
+            reconciled.local_records().count(),
+            0,
+            "all local records should be cleared"
+        );
+        assert_eq!(
+            reconciled.remote_records_for("server:22").count(),
+            1,
+            "remote records must be preserved"
+        );
+
+        // Verify persisted state matches
+        let reloaded = ResidualTempStore::open_or_empty(store_local_path);
+        assert_eq!(reloaded.local_records().count(), 0);
+        assert_eq!(reloaded.remote_records_for("server:22").count(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

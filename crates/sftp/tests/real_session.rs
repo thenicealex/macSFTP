@@ -2139,6 +2139,95 @@ async fn runtime_routes_read_dir_to_real_actor() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn runtime_routes_remove_remote_temp_file_and_emits_cleared() {
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    let residual_file = server
+        .fixture_dir
+        .join(".runtime_residual.txt.macsftp-part-88");
+    std::fs::write(&residual_file, b"residual payload").expect("write residual file");
+
+    let known_hosts_path = server.fixture_dir.join("runtime_residual_known_hosts");
+    std::fs::write(
+        &known_hosts_path,
+        format!("[127.0.0.1]:{} {}\n", server.port, server.host_public_key),
+    )
+    .expect("prefill known_hosts");
+    let mut controller = RuntimeController::start(
+        RuntimeBridgeConfig::default(),
+        HostTrustConfig::new(known_hosts_path, None),
+    );
+    let client = controller.client();
+    let mut events = controller
+        .take_event_receiver()
+        .expect("event receiver should be available once");
+
+    client
+        .try_send(AppCommand::ConnectTab(ConnectCommand {
+            tab_id: TAB,
+            session_id: SESSION,
+            session_epoch: EPOCH,
+            profile_id: ProfileId(1),
+            pool_identity: ConnectionPoolIdentity::Ephemeral(SESSION),
+            settings: ConnectionSettings {
+                host: "127.0.0.1".to_string(),
+                port: server.port,
+                username: server.username.clone(),
+                auth: client_key_auth(&server),
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
+            },
+        }))
+        .expect("connect command should send");
+    let _ = next_runtime_event(&mut events, "TabConnecting").await;
+    let _ = next_runtime_event(&mut events, "TabConnected").await;
+
+    let path_str = residual_file.display().to_string();
+    client
+        .try_send(AppCommand::RemoveRemoteTempFile {
+            tab_id: TAB,
+            transfer_id: TransferId(88),
+            path: RemotePath::new(&path_str),
+        })
+        .expect("remove remote temp command should send");
+
+    let cleared = next_runtime_event(&mut events, "ResidualTempCleared").await;
+    match cleared {
+        AppEvent::ResidualTempCleared { transfer_id, path } => {
+            assert_eq!(transfer_id, TransferId(88));
+            assert_eq!(path, path_str);
+        }
+        other => panic!("expected ResidualTempCleared, got {other:?}"),
+    }
+    assert!(
+        !residual_file.exists(),
+        "remote residual temp file must be deleted"
+    );
+
+    // Second removal of the now-absent file must also emit ResidualTempCleared (idempotent).
+    client
+        .try_send(AppCommand::RemoveRemoteTempFile {
+            tab_id: TAB,
+            transfer_id: TransferId(88),
+            path: RemotePath::new(&path_str),
+        })
+        .expect("second remove remote temp command should send");
+
+    let cleared_again = next_runtime_event(&mut events, "ResidualTempCleared").await;
+    match cleared_again {
+        AppEvent::ResidualTempCleared { transfer_id, path } => {
+            assert_eq!(transfer_id, TransferId(88));
+            assert_eq!(path, path_str);
+        }
+        other => panic!("expected second ResidualTempCleared, got {other:?}"),
+    }
+
+    std::thread::spawn(move || controller.shutdown())
+        .join()
+        .expect("runtime shutdown thread should finish");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn tabs_browse_independently_after_another_tab_disconnects() {
     let Some(server) = SshTestServer::spawn() else {
         return;

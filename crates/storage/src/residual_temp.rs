@@ -124,11 +124,12 @@ impl ResidualTempStore {
     }
 
     /// All local residual records (cleaned at launch without a connection).
-    /// Local records use the `"local"` connection-key sentinel.
+    /// Local records use the `"local"` connection-key sentinel or have download direction.
     pub fn local_records(&self) -> impl Iterator<Item = &ResidualTempRecord> {
-        self.records
-            .iter()
-            .filter(|record| record.connection_key == "local")
+        self.records.iter().filter(|record| {
+            record.connection_key == "local"
+                || record.direction == macsftp_core::TransferDirection::Download
+        })
     }
 
     /// All remote residual records for a given `host:port` connection key.
