@@ -1172,18 +1172,25 @@ impl TransferStore {
         let Some(plan_index) = self.plans.iter().position(|plan| plan.id == plan_id) else {
             return false;
         };
-        let root_job_id = self.plans[plan_index].root_job_id;
-        // Clone the child ids first so the borrow checker lets us mutate jobs
-        // while the plan stays borrowed by index below.
-        let child_job_ids = self.plans[plan_index].child_jobs.clone();
         let mut changed = false;
         if self.plans[plan_index].state != plan_state {
             self.plans[plan_index].state = plan_state;
             changed = true;
         }
-        changed |= self.set_job_state(root_job_id, job_state.clone());
-        for child_job_id in child_job_ids {
-            changed |= self.set_job_state(child_job_id, job_state.clone());
+        let root_job_id = self.plans[plan_index].root_job_id;
+        if self.plans[plan_index].child_jobs.is_empty() {
+            changed |= self.set_job_state(root_job_id, job_state);
+        } else {
+            let mut target_ids: std::collections::HashSet<TransferId> =
+                self.plans[plan_index].child_jobs.iter().copied().collect();
+            target_ids.insert(root_job_id);
+
+            for job in &mut self.jobs {
+                if target_ids.contains(&job.id) && job.state != job_state {
+                    job.state = job_state.clone();
+                    changed = true;
+                }
+            }
         }
         if changed {
             self.just_finished_plan = Some(plan_id);
@@ -1212,11 +1219,27 @@ impl TransferStore {
             return false;
         }
         let root_job_id = self.plans[plan_index].root_job_id;
-        let child_job_ids = self.plans[plan_index].child_jobs.clone();
         let mut changed = false;
-        changed |= self.cancel_job_if_unfinished(root_job_id);
-        for child_job_id in child_job_ids {
-            changed |= self.cancel_job_if_unfinished(child_job_id);
+        if self.plans[plan_index].child_jobs.is_empty() {
+            changed |= self.cancel_job_if_unfinished(root_job_id);
+        } else {
+            let mut target_ids: std::collections::HashSet<TransferId> =
+                self.plans[plan_index].child_jobs.iter().copied().collect();
+            target_ids.insert(root_job_id);
+
+            for job in &mut self.jobs {
+                if target_ids.contains(&job.id)
+                    && !matches!(
+                        job.state,
+                        TransferState::Completed
+                            | TransferState::Skipped
+                            | TransferState::Failed { .. }
+                    )
+                {
+                    job.state = TransferState::Skipped;
+                    changed = true;
+                }
+            }
         }
         if !changed {
             return false;
@@ -1287,8 +1310,8 @@ impl TransferStore {
         // child up by scanning the job list would be quadratic, and this runs
         // on every completion — a directory transfer has thousands of them, so
         // the scan would dominate the UI thread.
-        let child_jobs = self.plans[plan_index].child_jobs.clone();
-        let wanted: std::collections::HashSet<TransferId> = child_jobs.iter().copied().collect();
+        let wanted: std::collections::HashSet<TransferId> =
+            self.plans[plan_index].child_jobs.iter().copied().collect();
         let mut any_failed = false;
         let mut finished = 0usize;
         for job in &self.jobs {
@@ -1834,9 +1857,9 @@ fn compare_names(a: &str, b: &str) -> std::cmp::Ordering {
         let b_iter = b.bytes().map(|b| b.to_ascii_lowercase());
         a_iter.cmp(b_iter).then_with(|| a.cmp(b))
     } else {
-        let a_lower = a.to_lowercase();
-        let b_lower = b.to_lowercase();
-        a_lower.cmp(&b_lower).then_with(|| a.cmp(b))
+        let a_iter = a.chars().flat_map(char::to_lowercase);
+        let b_iter = b.chars().flat_map(char::to_lowercase);
+        a_iter.cmp(b_iter).then_with(|| a.cmp(b))
     }
 }
 
@@ -3944,6 +3967,76 @@ mod tests {
         );
         assert_eq!(store.jobs[1].state, super::TransferState::Skipped);
         assert_eq!(store.plans[0].state, super::TransferPlanState::Cancelled);
+    }
+
+    #[test]
+    fn transfer_store_handles_ten_thousand_child_jobs_on_terminal_and_cancel() {
+        let now = Timestamp::from_secs_since_epoch(10);
+        let plan_id = TransferPlanId(1);
+        let root_job = super::TransferJob {
+            id: TransferId(1),
+            direction: TransferDirection::Upload,
+            source: TransferEndpoint::Local(LocalPath::new("/tmp/source")),
+            destination: TransferEndpoint::Remote(RemotePath::new("/srv/source")),
+            state: super::TransferState::Planning,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        let child_jobs: Vec<_> = (2..=10_001)
+            .map(|i| super::TransferJob {
+                id: TransferId(i),
+                state: if i % 2 == 0 {
+                    super::TransferState::Queued
+                } else {
+                    super::TransferState::Completed
+                },
+                ..root_job.clone()
+            })
+            .collect();
+        let plan = super::TransferPlan {
+            id: plan_id,
+            root_job_id: root_job.id,
+            source_root: root_job.source.clone(),
+            destination_root: root_job.destination.clone(),
+            state: super::TransferPlanState::Planning,
+            planned_count: 10_000,
+            total_bytes: Some(10_000),
+            child_jobs: (2..=10_001).map(TransferId).collect(),
+            conflict_policy: super::ConflictPolicy::default(),
+        };
+
+        let mut store = TransferStore::default();
+        store.apply_event(
+            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
+                plan,
+                root_job,
+            })),
+            now,
+        );
+        for chunk in child_jobs.chunks(1000) {
+            store.apply_event(
+                &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+                    plan_id,
+                    child_jobs: chunk.to_vec(),
+                    planned_count: 10_000,
+                    total_bytes: Some(10_000),
+                }),
+                now,
+            );
+        }
+
+        // Cancelling skips all non-terminal children in a single O(N) pass.
+        assert!(store.apply_event(&AppEvent::TransferPlanCancelled { plan_id }, now));
+        assert_eq!(store.plans[0].state, super::TransferPlanState::Cancelled);
+        for job in &store.jobs {
+            if job.id == TransferId(1) || job.id.0 % 2 == 0 {
+                assert_eq!(job.state, super::TransferState::Skipped);
+            } else {
+                assert_eq!(job.state, super::TransferState::Completed);
+            }
+        }
     }
 
     #[test]

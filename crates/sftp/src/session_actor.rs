@@ -1411,10 +1411,10 @@ async fn resolve_transfer_conflict(
     cancel: &CancellationToken,
     conflict_context: TransferConflictContext,
 ) -> Result<(), UserFacingError> {
-    if directories_can_merge(session, job).await? {
+    if !destination_exists(session, job).await? {
         return Ok(());
     }
-    if !destination_exists(session, job).await? {
+    if directories_can_merge(session, job).await? {
         return Ok(());
     }
     match job.conflict_policy.clone() {

@@ -143,6 +143,109 @@ pub(crate) fn visible_remote_indices(
     )
 }
 
+/// Count of entries that should appear in the local file list without allocating.
+pub(crate) fn count_visible_local(
+    entries: &[LocalEntry],
+    show_hidden: bool,
+    query: &str,
+) -> usize {
+    count_visible(
+        entries.len(),
+        entries.iter().map(|entry| entry.name.as_str()),
+        show_hidden,
+        query,
+    )
+}
+
+/// Count of entries that should appear in the remote file list without allocating.
+pub(crate) fn count_visible_remote(
+    entries: &[RemoteEntry],
+    show_hidden: bool,
+    query: &str,
+) -> usize {
+    count_visible(
+        entries.len(),
+        entries.iter().map(|entry| entry.name.as_str()),
+        show_hidden,
+        query,
+    )
+}
+
+fn count_visible<'a>(
+    total_count: usize,
+    names: impl Iterator<Item = &'a str>,
+    show_hidden: bool,
+    query: &str,
+) -> usize {
+    let matcher = QueryMatcher::new(query);
+    if matcher.is_empty() {
+        if show_hidden {
+            return total_count;
+        }
+        return names.filter(|name| !is_dotfile(name)).count();
+    }
+    names
+        .filter(|name| (show_hidden || !is_dotfile(name)) && matcher.matches(name))
+        .count()
+}
+
+/// Stored entry index at `visible_index` in the local list without allocating a vector.
+pub(crate) fn real_local_index_at(
+    entries: &[LocalEntry],
+    visible_index: usize,
+    show_hidden: bool,
+    query: &str,
+) -> Option<usize> {
+    real_index_at(
+        entries.len(),
+        entries.iter().map(|entry| entry.name.as_str()),
+        visible_index,
+        show_hidden,
+        query,
+    )
+}
+
+/// Stored entry index at `visible_index` in the remote list without allocating a vector.
+pub(crate) fn real_remote_index_at(
+    entries: &[RemoteEntry],
+    visible_index: usize,
+    show_hidden: bool,
+    query: &str,
+) -> Option<usize> {
+    real_index_at(
+        entries.len(),
+        entries.iter().map(|entry| entry.name.as_str()),
+        visible_index,
+        show_hidden,
+        query,
+    )
+}
+
+fn real_index_at<'a>(
+    total_count: usize,
+    names: impl Iterator<Item = &'a str>,
+    visible_index: usize,
+    show_hidden: bool,
+    query: &str,
+) -> Option<usize> {
+    let matcher = QueryMatcher::new(query);
+    if matcher.is_empty() {
+        if show_hidden {
+            return (visible_index < total_count).then_some(visible_index);
+        }
+        return names
+            .enumerate()
+            .filter(|(_, name)| !is_dotfile(name))
+            .map(|(index, _)| index)
+            .nth(visible_index);
+    }
+    names
+        .enumerate()
+        .filter(|(_, name)| (show_hidden || !is_dotfile(name)) && matcher.matches(name))
+        .map(|(index, _)| index)
+        .nth(visible_index)
+}
+
 fn visible_indices<'a>(
     total_count: usize,
     names: impl Iterator<Item = &'a str>,
@@ -336,5 +439,52 @@ mod tests {
         let shown = visible_remote_indices(&entries, false, "");
         assert_eq!(shown.len(), 10_000 - (10_000 / 50));
         let _ = visible_remote_indices(&entries, true, "entry-1");
+    }
+
+    #[test]
+    fn count_and_real_index_at_match_visible_indices() {
+        use super::{
+            count_visible_local, count_visible_remote, real_local_index_at, real_remote_index_at,
+        };
+
+        let entries = vec![
+            local(".secret"),
+            local("alpha.txt"),
+            local("ReadMe.md"),
+            local(".config"),
+            local("zebra.txt"),
+        ];
+
+        for show_hidden in [false, true] {
+            for query in ["", "read", "z", "e", "nonexistent"] {
+                let full = visible_local_indices(&entries, show_hidden, query);
+                let count = count_visible_local(&entries, show_hidden, query);
+                assert_eq!(full.len(), count, "count mismatch for query '{query}', show_hidden {show_hidden}");
+
+                for (visible_idx, &expected_real) in full.iter().enumerate() {
+                    let real = real_local_index_at(&entries, visible_idx, show_hidden, query);
+                    assert_eq!(
+                        real,
+                        Some(expected_real),
+                        "real index mismatch at visible {visible_idx} for query '{query}'"
+                    );
+                }
+                assert_eq!(
+                    real_local_index_at(&entries, full.len(), show_hidden, query),
+                    None
+                );
+            }
+        }
+
+        let remote_entries = vec![
+            remote(".hidden"),
+            remote("file1.dat"),
+            remote("file2.dat"),
+        ];
+        assert_eq!(count_visible_remote(&remote_entries, false, ""), 2);
+        assert_eq!(count_visible_remote(&remote_entries, true, ""), 3);
+        assert_eq!(real_remote_index_at(&remote_entries, 0, false, ""), Some(1));
+        assert_eq!(real_remote_index_at(&remote_entries, 1, false, ""), Some(2));
+        assert_eq!(real_remote_index_at(&remote_entries, 2, false, ""), None);
     }
 }

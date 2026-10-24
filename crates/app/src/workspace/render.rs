@@ -1232,11 +1232,22 @@ impl crate::workspace::Workspace {
                             EntryPath::Remote(remote_path) => remote_path.as_str(),
                         })
                         .collect();
-                    let real_indices = workspace_view.visible_indices(side, cx);
+                    let show_hidden = cx.resources().config.config().show_hidden_files;
+                    let query = workspace_view.filter_query(side);
+                    let is_identity = query.is_empty() && show_hidden;
+                    let real_indices = if is_identity {
+                        Vec::new()
+                    } else {
+                        workspace_view.visible_indices(side, cx)
+                    };
 
                     visible_range
                         .filter_map(|visible_index| {
-                            let real_index = *real_indices.get(visible_index)?;
+                            let real_index = if is_identity {
+                                visible_index
+                            } else {
+                                *real_indices.get(visible_index)?
+                            };
                             let (model, drag_item) = match side {
                                 PaneSide::Local => {
                                     let entry = tab.local.entries.get(real_index)?;

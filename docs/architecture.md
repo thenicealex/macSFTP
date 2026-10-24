@@ -121,7 +121,7 @@ route 支持 Direct、单跳 saved-profile JumpHost（jump profile 自身必须 
 
 复用的 session 同时携带本 plan 已确认的远端事实，只减少 RTT、不改变冲突与失败语义：已验证存在的目录（后续文件用一次完整路径 stat 代替逐段 stat）和已证明支持 atomic hardlink commit 的目标目录（按目录而非按 session 记录，因为子目录可能是另一个 mount）。session 数量受三条上限约束：单 plan 8 个 job、全局 12 个、每条物理连接 9 条 channel（OpenSSH 默认 `MaxSessions=10`，browsing session 占一条）。下载的 SSH receive window 为 8 MiB、读取管道 16 × 256 KiB；upload 使用 `PipelinedUploadWriter` 保持滑动窗口并发写入（16 个在途 `SSH_FXP_WRITE`，分块根据 OpenSSH `limits@openssh.com` 的 `max_write_len` 协商，默认 256 KiB），高延迟网络下免于逐包 RTT 串行等待。
 
-传输状态归约必须与 job 数量线性：`finalize_plan_for_job` 和「plan 是否结束」都用 id 集合 + 单次遍历，禁止按 child id 逐个线性查找 job——目录传输的完成事件数等于文件数，按次扫描会让 UI 线程在整个传输期间冻结（2000 个 child 时实测超过两分钟）。plan 的终态转换由 reducer 记录在 `TransferStore::just_finished_plan`（每个 event 开头清空），UI 直接读这一位，不要自己再推导一次。
+传输状态归约必须与 job 数量线性：`finalize_plan_for_job`、`set_plan_terminal_state` 与 `set_plan_cancelled` 都用 id 集合 + 单次遍历，禁止按 child id 逐个线性查找 job——目录传输的完成事件数等于文件数，按次扫描会让 UI 线程在整个传输期间冻结（2000 个 child 时实测超过两分钟）。plan 的终态转换由 reducer 记录在 `TransferStore::just_finished_plan`（每个 event 开头清空），UI 直接读这一位，不要自己再推导一次。冲突判定优先检查目标是否存在（`!destination_exists` 早期短路退出），避免无冲突传输中多余的网络 RTT 与并发子文件父目录创建导致的虚假冲突；文件列表索引映射提供针对空过滤+显示隐藏文件的恒等零分配快路，在万级目录长按键盘导航与平滑滚动时完全避免逐帧分配万级索引缓冲。
 
 传输完成后必须让文件列表跟上磁盘事实：一个 plan 进入终态（completed / failed / cancelled，单文件 plan 由 `TransferCompleted` 触发）时，`AppEventCoordinator::reload_panes_for_finished_plan` 取该 plan 根 job 与全部 child job 的目标路径的父目录，重读**所有 tab**（不只是活动 tab）中仍显示在那些目录的 pane——后台 tab 保留旧列表会让用户切回来时看到过期内容；不匹配的 tab 只付出一次路径比较。重读走 `reload_local_directory` / `reload_remote_directory`，与用户主动导航的区别是保留 selection、scroll 与状态文案，且不推送导航历史。禁止用 `request_local_directory` / `request_remote_directory` 直接做这件事——它们会清空 selection 并重置滚动位置，用户刚看到结果就丢了上下文。pane 显示其它目录时不得被拉回文件落地的目录。
 
