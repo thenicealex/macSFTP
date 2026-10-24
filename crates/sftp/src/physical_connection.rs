@@ -1555,7 +1555,18 @@ async fn connect_tcp_stream(
     )
     .await
     {
-        Ok(stream) => Ok(stream),
+        Ok(stream) => {
+            if let Err(error) = stream.set_nodelay(true) {
+                warn!(
+                    target: "macsftp_sftp::connection",
+                    host = settings.host.as_str(),
+                    port = settings.port,
+                    error = %error,
+                    "failed to set TCP_NODELAY on socket"
+                );
+            }
+            Ok(stream)
+        }
         Err(HandshakePhaseError::Failed(error)) => Err(ConnectFailure::Connection(
             connection_error(&settings.host, settings.port, &russh::Error::IO(error)),
         )),
@@ -1803,13 +1814,16 @@ mod tests {
     use super::{
         AppEvent, ClientHandler, HandshakePhaseError, HostKeyMismatchDetails, MidSessionDisconnect,
         PhysicalDisconnectCause, TransportFailureKind, bounded_handshake_with_trust_prompt,
-        classify_mid_session_disconnect, client_config, connection_error, expand_proxy_command,
-        host_key_mismatch_event, legacy_rsa_host_key_bits, private_key_file_name,
-        sftp_connection_error,
+        classify_mid_session_disconnect, client_config, connect_tcp_stream, connection_error,
+        expand_proxy_command, host_key_mismatch_event, legacy_rsa_host_key_bits,
+        private_key_file_name, sftp_connection_error,
     };
     use crate::session_actor::HostTrustConfig;
     use crate::trust::TrustRegistry;
-    use macsftp_core::{ErrorCode, RemoteEventScope, SessionId, TabId, TrustRequestId};
+    use macsftp_core::{
+        AuthCredential, ConnectionSettings, ErrorCode, RemoteEventScope, ResolvedConnectionRoute,
+        SessionId, TabId, TrustRequestId,
+    };
     use russh::client;
     #[allow(unused_imports)]
     use russh::client::Handler as _;
@@ -1914,6 +1928,29 @@ mod tests {
         assert_eq!(config.window_size, 8 * 1024 * 1024);
         assert!(config.nodelay);
         assert_eq!(config.channel_buffer_size, 512);
+    }
+
+    #[tokio::test]
+    async fn connect_tcp_stream_enables_nodelay_on_socket() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let port = listener.local_addr().expect("local addr").port();
+        let settings = ConnectionSettings {
+            host: "127.0.0.1".to_string(),
+            port,
+            username: "test".to_string(),
+            auth: AuthCredential::Password {
+                password: "secret".to_string(),
+            },
+            route: ResolvedConnectionRoute::Direct,
+        };
+
+        let stream = connect_tcp_stream(&settings, Duration::from_secs(5))
+            .await
+            .expect("tcp stream connects");
+
+        assert!(stream.nodelay().expect("query nodelay status"));
     }
 
     #[test]
