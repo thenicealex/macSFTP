@@ -219,6 +219,64 @@ impl PipelinedDownloadReader {
         self
     }
 
+    fn spawn_read_requests(
+        &self,
+        in_flight: &mut tokio::task::JoinSet<ReadChunkResult>,
+        retry_ranges: &mut std::collections::VecDeque<(u64, u32)>,
+        next_request_offset: &mut u64,
+        eof_reached: bool,
+    ) {
+        while in_flight.len() < self.window_capacity {
+            let (offset, read_len) = if let Some((offset, len)) = retry_ranges.pop_front() {
+                // Retried tails stay eligible even after an empty read
+                // marked EOF: with an unknown file size, EOF can arrive
+                // while a short read is still missing bytes.
+                (offset, len)
+            } else if eof_reached {
+                break;
+            } else if let Some(total) = self.bytes_total {
+                if *next_request_offset >= total {
+                    break;
+                }
+                // Clamp in u64 space: `(total - offset) as u32` wraps once
+                // more than 4 GiB remain and would end the transfer early.
+                let remaining = total - *next_request_offset;
+                let len = next_chunk_len(remaining, self.chunk_size);
+                let offset = *next_request_offset;
+                *next_request_offset += u64::from(len);
+                (offset, len)
+            } else {
+                let offset = *next_request_offset;
+                *next_request_offset += u64::from(self.chunk_size);
+                (offset, self.chunk_size)
+            };
+
+            let raw = self.raw.clone();
+            let handle = self.file_handle.clone();
+            in_flight.spawn(async move {
+                let result = raw.read(handle, offset, read_len).await;
+                ReadChunkResult {
+                    offset,
+                    requested_len: read_len,
+                    result: match result {
+                        Ok(data) => Ok(data.data),
+                        Err(russh_sftp::client::error::Error::Status(status))
+                            if status.status_code == russh_sftp::protocol::StatusCode::Eof =>
+                        {
+                            Ok(Vec::new())
+                        }
+                        Err(error) => Err(transfer_error(
+                            ErrorCode::Unknown,
+                            "Transfer Read Failed",
+                            "The remote file could not be read.",
+                            crate::session_actor::sftp_status_guidance(&error),
+                        )),
+                    },
+                }
+            });
+        }
+    }
+
     pub async fn download_to<W>(
         self,
         destination: &mut W,
@@ -261,55 +319,12 @@ impl PipelinedDownloadReader {
                 return Err(cancelled_transfer_error());
             }
 
-            while in_flight.len() < self.window_capacity {
-                let (offset, read_len) = if let Some((offset, len)) = retry_ranges.pop_front() {
-                    // Retried tails stay eligible even after an empty read
-                    // marked EOF: with an unknown file size, EOF can arrive
-                    // while a short read is still missing bytes.
-                    (offset, len)
-                } else if eof_reached {
-                    break;
-                } else if let Some(total) = self.bytes_total {
-                    if next_request_offset >= total {
-                        break;
-                    }
-                    // Clamp in u64 space: `(total - offset) as u32` wraps once
-                    // more than 4 GiB remain and would end the transfer early.
-                    let remaining = total - next_request_offset;
-                    let len = next_chunk_len(remaining, self.chunk_size);
-                    let offset = next_request_offset;
-                    next_request_offset += u64::from(len);
-                    (offset, len)
-                } else {
-                    let offset = next_request_offset;
-                    next_request_offset += u64::from(self.chunk_size);
-                    (offset, self.chunk_size)
-                };
-
-                let raw = self.raw.clone();
-                let handle = self.file_handle.clone();
-                in_flight.spawn(async move {
-                    let result = raw.read(handle, offset, read_len).await;
-                    ReadChunkResult {
-                        offset,
-                        requested_len: read_len,
-                        result: match result {
-                            Ok(data) => Ok(data.data),
-                            Err(russh_sftp::client::error::Error::Status(status))
-                                if status.status_code == russh_sftp::protocol::StatusCode::Eof =>
-                            {
-                                Ok(Vec::new())
-                            }
-                            Err(error) => Err(transfer_error(
-                                ErrorCode::Unknown,
-                                "Transfer Read Failed",
-                                "The remote file could not be read.",
-                                crate::session_actor::sftp_status_guidance(&error),
-                            )),
-                        },
-                    }
-                });
-            }
+            self.spawn_read_requests(
+                &mut in_flight,
+                &mut retry_ranges,
+                &mut next_request_offset,
+                eof_reached,
+            );
 
             if in_flight.is_empty() {
                 break;
@@ -380,6 +395,16 @@ impl PipelinedDownloadReader {
                     retry_ranges.push_back((received_end, (missing_end - received_end) as u32));
                 }
             }
+
+            // Immediately replenish the in-flight pipeline before waiting for local disk writes.
+            // This overlaps network RTT with disk I/O, preventing the 8 MiB pipeline from
+            // stalling on local filesystem latency.
+            self.spawn_read_requests(
+                &mut in_flight,
+                &mut retry_ranges,
+                &mut next_request_offset,
+                eof_reached,
+            );
 
             if !data.is_empty() {
                 if current_offset != Some(chunk.offset) {
@@ -876,6 +901,27 @@ mod tests {
 
     /// Regression guard for the >4 GiB arithmetic: clamping the remaining
     /// length after casting to `u32` wraps and ends large transfers early.
+    #[tokio::test]
+    async fn test_pipelined_download_pipeline_replenishes_immediately() {
+        let payload: Vec<u8> = (0..16_384).map(|i| (i % 251) as u8).collect();
+        let raw = spawn_mock_raw_session(payload.clone(), false).await;
+        let (event_tx, _event_rx) = flume::bounded(100);
+        let cancel = CancellationToken::new();
+        let mut destination = Cursor::new(vec![0u8; payload.len()]);
+
+        let reader = PipelinedDownloadReader::new(raw, "mock-handle", Some(payload.len() as u64))
+            .with_chunk_size(1024)
+            .with_window_capacity(4);
+
+        let transferred = reader
+            .download_to(&mut destination, TransferId(43), &event_tx, &cancel)
+            .await
+            .expect("download with immediate replenishment must complete successfully");
+
+        assert_eq!(transferred, payload.len() as u64);
+        assert_eq!(destination.into_inner(), payload);
+    }
+
     #[test]
     fn next_chunk_len_does_not_wrap_past_four_gib() {
         let chunk = DEFAULT_CHUNK_SIZE;

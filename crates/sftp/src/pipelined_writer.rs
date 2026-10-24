@@ -122,6 +122,88 @@ impl PipelinedUploadWriter {
         self
     }
 
+    async fn spawn_write_requests<R>(
+        &self,
+        source: &mut R,
+        in_flight: &mut tokio::task::JoinSet<WriteChunkResult>,
+        current_offset: &mut u64,
+        eof_reached: &mut bool,
+        cancel: &CancellationToken,
+    ) -> Result<(), UserFacingError>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+    {
+        while in_flight.len() < self.window_capacity && !*eof_reached {
+            let to_read = if let Some(total) = self.bytes_total {
+                if *current_offset >= total {
+                    *eof_reached = true;
+                    break;
+                }
+                let remaining = total - *current_offset;
+                next_chunk_len(remaining, self.chunk_size) as usize
+            } else {
+                self.chunk_size as usize
+            };
+
+            let mut buffer = Vec::with_capacity(to_read);
+            while buffer.len() < to_read {
+                let n = tokio::select! {
+                    _ = cancel.cancelled() => {
+                        in_flight.abort_all();
+                        return Err(cancelled_transfer_error());
+                    }
+                    result = source.read_buf(&mut buffer) => {
+                        result.map_err(|error| {
+                            local_transfer_error("Transfer Read Failed", &error)
+                        })?
+                    }
+                };
+                if n == 0 {
+                    *eof_reached = true;
+                    break;
+                }
+            }
+
+            if buffer.is_empty() {
+                *eof_reached = true;
+                break;
+            }
+
+            let offset = *current_offset;
+            let len = buffer.len() as u32;
+            *current_offset += u64::from(len);
+
+            let raw = self.raw.clone();
+            let handle = self.file_handle.clone();
+            in_flight.spawn(async move {
+                let result = raw.write(handle, offset, buffer).await;
+                WriteChunkResult {
+                    len,
+                    result: match result {
+                        Ok(status)
+                            if status.status_code == russh_sftp::protocol::StatusCode::Ok =>
+                        {
+                            Ok(())
+                        }
+                        Ok(status) => Err(transfer_error(
+                            ErrorCode::Unknown,
+                            "Transfer Write Failed",
+                            "The remote file could not be written.",
+                            format!("Server status code: {:?}", status.status_code),
+                        )),
+                        Err(error) => Err(transfer_error(
+                            ErrorCode::Unknown,
+                            "Transfer Write Failed",
+                            "The remote file could not be written.",
+                            crate::session_actor::sftp_status_guidance(&error),
+                        )),
+                    },
+                }
+            });
+        }
+        Ok(())
+    }
+
     pub async fn upload_from<R>(
         self,
         source: &mut R,
@@ -152,74 +234,14 @@ impl PipelinedUploadWriter {
                 return Err(cancelled_transfer_error());
             }
 
-            while in_flight.len() < self.window_capacity && !eof_reached {
-                let to_read = if let Some(total) = self.bytes_total {
-                    if current_offset >= total {
-                        eof_reached = true;
-                        break;
-                    }
-                    let remaining = total - current_offset;
-                    next_chunk_len(remaining, self.chunk_size) as usize
-                } else {
-                    self.chunk_size as usize
-                };
-
-                let mut buffer = Vec::with_capacity(to_read);
-                while buffer.len() < to_read {
-                    let n = tokio::select! {
-                        _ = cancel.cancelled() => {
-                            in_flight.abort_all();
-                            return Err(cancelled_transfer_error());
-                        }
-                        result = source.read_buf(&mut buffer) => {
-                            result.map_err(|error| {
-                                local_transfer_error("Transfer Read Failed", &error)
-                            })?
-                        }
-                    };
-                    if n == 0 {
-                        eof_reached = true;
-                        break;
-                    }
-                }
-
-                if buffer.is_empty() {
-                    eof_reached = true;
-                    break;
-                }
-
-                let offset = current_offset;
-                let len = buffer.len() as u32;
-                current_offset += u64::from(len);
-
-                let raw = self.raw.clone();
-                let handle = self.file_handle.clone();
-                in_flight.spawn(async move {
-                    let result = raw.write(handle, offset, buffer).await;
-                    WriteChunkResult {
-                        len,
-                        result: match result {
-                            Ok(status)
-                                if status.status_code == russh_sftp::protocol::StatusCode::Ok =>
-                            {
-                                Ok(())
-                            }
-                            Ok(status) => Err(transfer_error(
-                                ErrorCode::Unknown,
-                                "Transfer Write Failed",
-                                "The remote file could not be written.",
-                                format!("Server status code: {:?}", status.status_code),
-                            )),
-                            Err(error) => Err(transfer_error(
-                                ErrorCode::Unknown,
-                                "Transfer Write Failed",
-                                "The remote file could not be written.",
-                                crate::session_actor::sftp_status_guidance(&error),
-                            )),
-                        },
-                    }
-                });
-            }
+            self.spawn_write_requests(
+                source,
+                &mut in_flight,
+                &mut current_offset,
+                &mut eof_reached,
+                cancel,
+            )
+            .await?;
 
             if in_flight.is_empty() {
                 break;
@@ -259,6 +281,19 @@ impl PipelinedUploadWriter {
             }
 
             bytes_done += u64::from(chunk.len);
+
+            // Immediately replenish the in-flight pipeline before waiting for progress events.
+            // This ensures network writes stay pipelined across the SSH channel without
+            // waiting for UI event dispatch.
+            self.spawn_write_requests(
+                source,
+                &mut in_flight,
+                &mut current_offset,
+                &mut eof_reached,
+                cancel,
+            )
+            .await?;
+
             if throttle.should_send(std::time::Instant::now()) {
                 emit_transfer_progress(event_tx, transfer_id, bytes_done, self.bytes_total).await?;
             }
@@ -555,6 +590,29 @@ mod tests {
 
         let error = result.expect_err("incomplete file should error");
         assert_eq!(error.title, "Transfer Incomplete");
+    }
+
+    #[tokio::test]
+    async fn test_pipelined_upload_pipeline_replenishes_immediately() {
+        let payload: Vec<u8> = (0..16_384).map(|i| (i % 239) as u8).collect();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let raw = spawn_mock_raw_upload_session(received.clone(), MockOptions::default()).await;
+        let (event_tx, _event_rx) = flume::bounded(100);
+        let cancel = CancellationToken::new();
+
+        let writer =
+            PipelinedUploadWriter::new(raw, "mock-upload-handle", Some(payload.len() as u64))
+                .with_chunk_size(1024)
+                .with_window_capacity(4);
+
+        let mut source = std::io::Cursor::new(payload.clone());
+        let transferred = writer
+            .upload_from(&mut source, TransferId(44), &event_tx, &cancel)
+            .await
+            .expect("upload with immediate replenishment must complete successfully");
+
+        assert_eq!(transferred, payload.len() as u64);
+        assert_eq!(*received.lock().expect("lock buffer"), payload);
     }
 
     #[test]
