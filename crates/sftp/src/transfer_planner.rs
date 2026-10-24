@@ -216,39 +216,65 @@ impl LocalUploadPlanner {
                 })?;
                 join_remote_child(destination_root, name)
             };
-            self.emit_child(source_path, destination, metadata.len())
+            let size = if metadata.file_type().is_symlink() {
+                0
+            } else {
+                metadata.len()
+            };
+            self.emit_child(source_path, destination, size)
         }
     }
 
     fn plan_directory(
         &mut self,
-        current: &Path,
-        current_destination: &RemotePath,
+        root_path: &Path,
+        root_destination: &RemotePath,
     ) -> Result<(), UserFacingError> {
-        let entries = fs::read_dir(current)
-            .map_err(|error| planning_io_error("Folder Couldn’t Be Read", &error))?;
-        for entry in entries {
+        let mut dir_stack = vec![(root_path.to_path_buf(), root_destination.clone())];
+
+        while let Some((current_dir, current_destination)) = dir_stack.pop() {
             self.ensure_not_cancelled()?;
-            let entry =
-                entry.map_err(|error| planning_io_error("Item Couldn’t Be Read", &error))?;
-            let file_name = entry.file_name();
-            let destination = join_remote_child(current_destination, &file_name);
-            let path = entry.path();
-            let is_dir = match entry.file_type() {
-                Ok(ft) => ft.is_dir(),
-                Err(_) => fs::symlink_metadata(&path)
-                    .map_err(|error| planning_io_error("Item Couldn’t Be Checked", &error))?
-                    .file_type()
-                    .is_dir(),
-            };
-            if is_dir {
-                self.emit_child(path.clone(), destination.clone(), 0)?;
-                self.plan_directory(&path, &destination)?;
-            } else {
-                let metadata = entry
-                    .metadata()
+            let entries = fs::read_dir(&current_dir)
+                .map_err(|error| planning_io_error("Folder Couldn’t Be Read", &error))?;
+
+            let mut subdirectories = Vec::new();
+
+            for entry in entries {
+                self.ensure_not_cancelled()?;
+                let entry =
+                    entry.map_err(|error| planning_io_error("Item Couldn’t Be Read", &error))?;
+                let file_name = entry.file_name();
+                let destination = join_remote_child(&current_destination, &file_name);
+                let path = entry.path();
+
+                let file_type = match entry.file_type() {
+                    Ok(ft) => Ok(ft),
+                    Err(_) => fs::symlink_metadata(&path).map(|m| m.file_type()),
+                };
+
+                let file_type = file_type
                     .map_err(|error| planning_io_error("Item Couldn’t Be Checked", &error))?;
-                self.emit_child(path, destination, metadata.len())?;
+
+                if file_type.is_dir() {
+                    self.emit_child(path.clone(), destination.clone(), 0)?;
+                    subdirectories.push((path, destination));
+                } else if file_type.is_symlink() {
+                    // Symlinks are transferred as symlinks without following them.
+                    // This prevents broken symlinks from failing planning and avoids
+                    // counting the dereferenced target file size.
+                    self.emit_child(path, destination, 0)?;
+                } else {
+                    let metadata = fs::symlink_metadata(&path)
+                        .map_err(|error| planning_io_error("Item Couldn’t Be Checked", &error))?;
+                    self.emit_child(path, destination, metadata.len())?;
+                }
+            }
+
+            // Push subdirectories in reverse order so the first subdirectory
+            // is popped and traversed next, matching depth-first order without
+            // holding multiple directory handles or recursive stack frames.
+            for sub_dir in subdirectories.into_iter().rev() {
+                dir_stack.push(sub_dir);
             }
         }
         Ok(())
@@ -794,6 +820,132 @@ mod tests {
             !seen_completed,
             "a cancelled plan must not be marked completed"
         );
+
+        std::fs::remove_dir_all(&fixture_root).expect("remove fixture directory");
+    }
+
+    #[test]
+    fn directory_planning_handles_broken_and_valid_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let fixture_root = std::env::temp_dir().join(format!(
+            "macsftp-transfer-plan-symlinks-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&fixture_root).expect("create fixture directory");
+        std::fs::write(fixture_root.join("alpha.txt"), b"regular content")
+            .expect("write regular file");
+        symlink("alpha.txt", fixture_root.join("valid_link.txt")).expect("create valid symlink");
+        symlink(
+            "nonexistent_file.txt",
+            fixture_root.join("broken_link.txt"),
+        )
+        .expect("create broken symlink");
+
+        let command = command(
+            LocalPath::new(fixture_root.display().to_string()),
+            "/uploads",
+        );
+        let (plan, root_job) = new_plan(
+            &command,
+            TransferPlanId(10),
+            TransferId(10),
+            macsftp_core::Timestamp::from_secs_since_epoch(1),
+        );
+        let (event_tx, _event_rx) = flume::bounded(16);
+        let planned = plan_local_upload(
+            command,
+            plan.id,
+            root_job,
+            std::sync::Arc::new(AtomicU64::new(11)),
+            event_tx,
+            CancellationToken::new(),
+        )
+        .expect("planning should succeed even with broken symlinks");
+
+        let root_name = fixture_root
+            .file_name()
+            .expect("fixture root name")
+            .to_string_lossy();
+        assert_eq!(planned.len(), 4); // root dir + alpha.txt + valid_link.txt + broken_link.txt
+
+        let valid_link_job = planned
+            .iter()
+            .find(|job| {
+                job.destination
+                    == TransferEndpoint::Remote(macsftp_core::RemotePath::new(format!(
+                        "/uploads/{root_name}/valid_link.txt"
+                    )))
+            })
+            .expect("valid symlink must be planned");
+        assert_eq!(
+            valid_link_job.state,
+            macsftp_core::TransferState::Queued,
+            "symlink must be queued"
+        );
+
+        let broken_link_job = planned
+            .iter()
+            .find(|job| {
+                job.destination
+                    == TransferEndpoint::Remote(macsftp_core::RemotePath::new(format!(
+                        "/uploads/{root_name}/broken_link.txt"
+                    )))
+            })
+            .expect("broken symlink must be planned without failing the directory walk");
+        assert_eq!(
+            broken_link_job.state,
+            macsftp_core::TransferState::Queued,
+            "broken symlink must be queued"
+        );
+
+        std::fs::remove_dir_all(&fixture_root).expect("remove fixture directory");
+    }
+
+    #[test]
+    fn directory_planning_iterative_handles_deeply_nested_directories() {
+        let fixture_root = std::env::temp_dir().join(format!(
+            "macsftp-transfer-plan-deep-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let mut current = fixture_root.clone();
+        for level in 0..30 {
+            current = current.join(format!("level-{level:02}"));
+        }
+        std::fs::create_dir_all(&current).expect("create deeply nested directory");
+        std::fs::write(current.join("deep.txt"), b"deep content").expect("write deep file");
+
+        let command = command(
+            LocalPath::new(fixture_root.display().to_string()),
+            "/uploads",
+        );
+        let (plan, root_job) = new_plan(
+            &command,
+            TransferPlanId(20),
+            TransferId(20),
+            macsftp_core::Timestamp::from_secs_since_epoch(1),
+        );
+        let (event_tx, _event_rx) = flume::bounded(64);
+        let planned = plan_local_upload(
+            command,
+            plan.id,
+            root_job,
+            std::sync::Arc::new(AtomicU64::new(21)),
+            event_tx,
+            CancellationToken::new(),
+        )
+        .expect("deeply nested directory planning must succeed");
+
+        // root + 30 subdirectories + 1 deep file = 32 items
+        assert_eq!(planned.len(), 32);
 
         std::fs::remove_dir_all(&fixture_root).expect("remove fixture directory");
     }

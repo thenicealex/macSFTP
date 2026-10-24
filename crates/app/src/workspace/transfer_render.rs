@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::base::motion::{Transition, transition};
 use gpui_kit::{
@@ -44,8 +42,8 @@ pub(crate) fn painted_progress(
 }
 
 pub(crate) fn visible_transfer_jobs(store: &TransferStore) -> Vec<&TransferJob> {
-    let mut hidden_roots = HashSet::new();
-    let mut hidden_matchers = Vec::new();
+    let mut hidden_roots = Vec::with_capacity(store.plans.len());
+    let mut hidden_matchers = Vec::with_capacity(store.plans.len());
 
     for plan in &store.plans {
         let show_root = if plan.child_jobs.is_empty()
@@ -72,7 +70,7 @@ pub(crate) fn visible_transfer_jobs(store: &TransferStore) -> Vec<&TransferJob> 
         if show_root {
             hidden_matchers.push(IdMatcher::new(&plan.child_jobs));
         } else {
-            hidden_roots.insert(plan.root_job_id);
+            hidden_roots.push(plan.root_job_id);
         }
     }
 

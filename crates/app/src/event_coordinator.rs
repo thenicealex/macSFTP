@@ -61,11 +61,25 @@ pub struct AppEventCoordinator {
 
 impl Global for AppEventCoordinator {}
 
+const EVENT_BATCH_DRAIN_LIMIT: usize = 64;
+
 impl AppEventCoordinator {
     pub fn start(mut event_receiver: EventReceiver, cx: &mut App) -> Self {
         let event_drain = cx.spawn(async move |cx| {
+            let mut batch = Vec::with_capacity(EVENT_BATCH_DRAIN_LIMIT);
             while let Some(event) = event_receiver.recv().await {
-                cx.update(|cx| dispatch_event(event, cx));
+                batch.push(event);
+                while batch.len() < EVENT_BATCH_DRAIN_LIMIT {
+                    match event_receiver.try_recv() {
+                        Some(event) => batch.push(event),
+                        None => break,
+                    }
+                }
+                cx.update(|cx| {
+                    for event in batch.drain(..) {
+                        dispatch_event(event, cx);
+                    }
+                });
             }
         });
 
@@ -91,8 +105,20 @@ impl AppEventCoordinator {
             };
 
         let local_event_drain = cx.spawn(async move |cx| {
+            let mut batch = Vec::with_capacity(EVENT_BATCH_DRAIN_LIMIT);
             while let Some(event) = local_rx.recv().await {
-                cx.update(|cx| dispatch_event(event, cx));
+                batch.push(event);
+                while batch.len() < EVENT_BATCH_DRAIN_LIMIT {
+                    match local_rx.try_recv() {
+                        Ok(event) => batch.push(event),
+                        Err(_) => break,
+                    }
+                }
+                cx.update(|cx| {
+                    for event in batch.drain(..) {
+                        dispatch_event(event, cx);
+                    }
+                });
             }
         });
 
