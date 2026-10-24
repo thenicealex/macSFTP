@@ -559,6 +559,7 @@ fn client_config() -> client::Config {
         keepalive_max: 3,
         window_size: 8 * 1024 * 1024,
         nodelay: true,
+        channel_buffer_size: 512,
         ..client::Config::default()
     };
     // The local russh patch verifies RSA-SHA2 host signatures with AWS-LC.
@@ -1904,6 +1905,15 @@ mod tests {
                 .iter()
                 .all(|algorithm| !matches!(algorithm, Algorithm::Rsa { hash: None }))
         );
+    }
+
+    #[test]
+    fn client_config_enables_high_throughput_network_settings() {
+        let config = client_config();
+
+        assert_eq!(config.window_size, 8 * 1024 * 1024);
+        assert!(config.nodelay);
+        assert_eq!(config.channel_buffer_size, 512);
     }
 
     #[test]
