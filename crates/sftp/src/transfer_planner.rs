@@ -264,8 +264,11 @@ impl LocalUploadPlanner {
                     // counting the dereferenced target file size.
                     self.emit_child(path, destination, 0)?;
                 } else {
-                    let metadata = fs::symlink_metadata(&path)
-                        .map_err(|error| planning_io_error("Item Couldn’t Be Checked", &error))?;
+                    let metadata = match entry.metadata() {
+                        Ok(m) => m,
+                        Err(_) => fs::symlink_metadata(&path)
+                            .map_err(|error| planning_io_error("Item Couldn’t Be Checked", &error))?,
+                    };
                     self.emit_child(path, destination, metadata.len())?;
                 }
             }

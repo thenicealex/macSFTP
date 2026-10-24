@@ -1053,7 +1053,7 @@ pub(crate) async fn plan_remote_download(
     }
 }
 
-const MAX_CONCURRENT_DIR_SCANS: usize = 4;
+const MAX_CONCURRENT_DIR_SCANS: usize = 8;
 
 struct RemoteDownloadPlanner {
     command: StartTransferCommand,
@@ -2662,6 +2662,7 @@ async fn upload_single_file_pipelined(
 }
 
 async fn download_symlink_raw(
+    transfer_session: &TransferSessionSlot,
     raw: &Arc<RawSftpSession>,
     job: &TransferJob,
     event_tx: &flume::Sender<AppEvent>,
@@ -2697,7 +2698,7 @@ async fn download_symlink_raw(
     if matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
         remove_downloaded_file_destination(destination.as_str()).await?;
     }
-    ensure_local_parent_directory(destination, cancel).await?;
+    ensure_local_parent_directory(transfer_session, destination, cancel).await?;
     tokio::fs::symlink(target, destination.as_str())
         .await
         .map_err(|error| local_transfer_error("Local Link Creation Failed", &error))
@@ -2734,10 +2735,11 @@ async fn download_single_file_pipelined(
             )
         })?;
     if source_metadata.file_type() == SftpFileType::Symlink {
-        return download_symlink_raw(raw, job, event_tx, cancel).await;
+        return download_symlink_raw(transfer_session, raw, job, event_tx, cancel).await;
     }
     if source_metadata.file_type() == SftpFileType::Dir {
         return download_directory(
+            transfer_session,
             job,
             &source_metadata,
             event_tx,
@@ -2749,7 +2751,7 @@ async fn download_single_file_pipelined(
     let bytes_total = source_metadata.size;
     emit_transfer_running(event_tx, job, bytes_total).await?;
 
-    ensure_local_parent_directory(destination, cancel).await?;
+    ensure_local_parent_directory(transfer_session, destination, cancel).await?;
     let temporary_destination = local_temporary_path(destination, job.id);
     let mut destination_file = match tokio::fs::OpenOptions::new()
         .write(true)
@@ -2871,10 +2873,11 @@ async fn download_single_file(
             )
         })?;
     if source_metadata.file_type() == SftpFileType::Symlink {
-        return download_symlink(sftp, job, event_tx, cancel).await;
+        return download_symlink(transfer_session, sftp, job, event_tx, cancel).await;
     }
     if source_metadata.file_type() == SftpFileType::Dir {
         return download_directory(
+            transfer_session,
             job,
             &source_metadata,
             event_tx,
@@ -2886,7 +2889,7 @@ async fn download_single_file(
     let bytes_total = source_metadata.size;
     emit_transfer_running(event_tx, job, bytes_total).await?;
 
-    ensure_local_parent_directory(destination, cancel).await?;
+    ensure_local_parent_directory(transfer_session, destination, cancel).await?;
     let temporary_destination = local_temporary_path(destination, job.id);
     let mut destination_file = match tokio::fs::OpenOptions::new()
         .write(true)
@@ -3005,6 +3008,7 @@ async fn prepare_download_destination(
 }
 
 async fn download_directory(
+    transfer_session: &TransferSessionSlot,
     job: &TransferJob,
     source_metadata: &FileAttributes,
     event_tx: &flume::Sender<AppEvent>,
@@ -3029,11 +3033,26 @@ async fn download_directory(
     if may_clear_destination && matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
         remove_local_destination(destination.as_str()).await?;
     }
-    tokio::select! {
-        _ = cancel.cancelled() => return Err(cancelled_transfer_error()),
-        result = tokio::fs::create_dir_all(destination.as_str()) => result.map_err(|error| {
-            local_transfer_error("Download Folder Creation Failed", &error)
-        })?,
+    if !transfer_session.directory_verified(destination.as_str()) {
+        tokio::select! {
+            _ = cancel.cancelled() => return Err(cancelled_transfer_error()),
+            result = tokio::fs::create_dir_all(destination.as_str()) => result.map_err(|error| {
+                local_transfer_error("Download Folder Creation Failed", &error)
+            })?,
+        }
+        let dest_path = std::path::Path::new(destination.as_str());
+        let mut curr: &std::path::Path = dest_path;
+        while !curr.as_os_str().is_empty() {
+            let curr_str = curr.to_string_lossy();
+            if transfer_session.directory_verified(&curr_str) {
+                break;
+            }
+            transfer_session.mark_directory_verified(curr_str.to_string());
+            match curr.parent() {
+                Some(p) => curr = p,
+                None => break,
+            }
+        }
     }
     preserve_download_metadata(job, source_metadata, event_tx).await;
     Ok(())
@@ -3085,6 +3104,7 @@ async fn upload_symlink(
 }
 
 async fn download_symlink(
+    transfer_session: &TransferSessionSlot,
     sftp: &SftpSession,
     job: &TransferJob,
     event_tx: &flume::Sender<AppEvent>,
@@ -3115,7 +3135,7 @@ async fn download_symlink(
     if matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
         remove_downloaded_file_destination(destination.as_str()).await?;
     }
-    ensure_local_parent_directory(destination, cancel).await?;
+    ensure_local_parent_directory(transfer_session, destination, cancel).await?;
     tokio::fs::symlink(target, destination.as_str())
         .await
         .map_err(|error| local_transfer_error("Local Link Creation Failed", &error))
@@ -3232,6 +3252,7 @@ async fn remove_local_destination(destination: &str) -> Result<(), UserFacingErr
 }
 
 async fn ensure_local_parent_directory(
+    transfer_session: &TransferSessionSlot,
     destination: &LocalPath,
     cancel: &CancellationToken,
 ) -> Result<(), UserFacingError> {
@@ -3241,11 +3262,30 @@ async fn ensure_local_parent_directory(
     if parent.as_os_str().is_empty() {
         return Ok(());
     }
+    let parent_str = parent.to_string_lossy();
+    if transfer_session.directory_verified(&parent_str) {
+        return Ok(());
+    }
     tokio::select! {
         _ = cancel.cancelled() => Err(cancelled_transfer_error()),
-        result = tokio::fs::create_dir_all(parent) => result.map_err(|error| {
-            local_transfer_error("Download Folder Creation Failed", &error)
-        }),
+        result = tokio::fs::create_dir_all(parent) => {
+            result.map_err(|error| {
+                local_transfer_error("Download Folder Creation Failed", &error)
+            })?;
+            let mut curr = parent;
+            while !curr.as_os_str().is_empty() {
+                let curr_str = curr.to_string_lossy();
+                if transfer_session.directory_verified(&curr_str) {
+                    break;
+                }
+                transfer_session.mark_directory_verified(curr_str.to_string());
+                match curr.parent() {
+                    Some(p) => curr = p,
+                    None => break,
+                }
+            }
+            Ok(())
+        }
     }
 }
 
