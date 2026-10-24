@@ -408,10 +408,12 @@ impl ProfileStore {
         match self.commit_transaction(TransactionKind::Save {
             profile: Box::new(profile),
         }) {
-            Ok(TransactionOutcome::Committed { .. }) => Ok(self
+            Ok(TransactionOutcome::Committed { .. }) => self
                 .find_profile(profile_id)
-                .expect("just-saved profile is present")
-                .clone()),
+                .cloned()
+                .ok_or_else(|| StorageError::Corrupt {
+                    message: "just-saved profile is missing from memory".to_string(),
+                }),
             Ok(TransactionOutcome::Unchanged) => {
                 unreachable!("save transactions always produce a saved profile")
             }
@@ -675,8 +677,8 @@ impl ProfileStore {
                 // credentials permanently inconsistent.
                 let committed_profile = self
                     .find_profile(request.profile_id)
-                    .expect("just-committed profile is present")
-                    .clone();
+                    .cloned()
+                    .ok_or(ProfileMutationError::ProfileNotFound(request.profile_id))?;
                 (committed_profile, warnings)
             }
             Ok(TransactionOutcome::Unchanged) => {
