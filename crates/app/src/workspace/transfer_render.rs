@@ -45,45 +45,33 @@ pub(crate) fn visible_transfer_jobs(store: &TransferStore) -> Vec<&TransferJob> 
     let mut hidden_roots = Vec::with_capacity(store.plans.len());
     let mut hidden_matchers = Vec::with_capacity(store.plans.len());
 
-    for plan in &store.plans {
+    for (plan_idx, plan) in store.plans.iter().enumerate() {
         let show_root = if plan.child_jobs.is_empty()
             || matches!(plan.state, TransferPlanState::Planning)
             || matches!(plan.state, TransferPlanState::Cancelled)
         {
             true
         } else if matches!(plan.state, TransferPlanState::Failed { .. }) {
-            let children_are_terminal = if let (Some(&first_id), Some(&last_id)) =
-                (plan.child_jobs.first(), plan.child_jobs.last())
-            {
-                if let (Some(first_idx), Some(last_idx)) =
-                    (store.find_job_index(first_id), store.find_job_index(last_id))
-                {
-                    if last_idx >= first_idx && (last_idx - first_idx + 1) == plan.child_jobs.len() {
-                        store.jobs[first_idx..=last_idx].iter().all(|job| {
-                            matches!(
-                                job.state,
-                                TransferState::Completed
-                                    | TransferState::Skipped
-                                    | TransferState::Failed { .. }
-                            )
-                        })
-                    } else {
-                        plan.child_jobs.iter().all(|child_id| {
-                            store.find_job(*child_id).is_some_and(|job| {
-                                matches!(
-                                    job.state,
-                                    TransferState::Completed
-                                        | TransferState::Skipped
-                                        | TransferState::Failed { .. }
-                                )
-                            })
-                        })
-                    }
-                } else {
-                    false
-                }
+            let children_are_terminal = if let Some(range) = store.child_jobs_slice_range(plan_idx) {
+                store.jobs[range].iter().all(|job| {
+                    matches!(
+                        job.state,
+                        TransferState::Completed
+                            | TransferState::Skipped
+                            | TransferState::Failed { .. }
+                    )
+                })
             } else {
-                true
+                plan.child_jobs.iter().all(|child_id| {
+                    store.find_job(*child_id).is_some_and(|job| {
+                        matches!(
+                            job.state,
+                            TransferState::Completed
+                                | TransferState::Skipped
+                                | TransferState::Failed { .. }
+                        )
+                    })
+                })
             };
             !children_are_terminal
         } else {

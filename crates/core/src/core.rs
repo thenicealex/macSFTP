@@ -1285,6 +1285,25 @@ impl TransferStore {
         }
     }
 
+    pub fn child_jobs_slice_range(
+        &self,
+        plan_index: usize,
+    ) -> Option<std::ops::RangeInclusive<usize>> {
+        let plan = self.plans.get(plan_index)?;
+        let wanted_len = plan.child_jobs.len();
+        if wanted_len == 0 {
+            return None;
+        }
+        let (first_id, last_id) = (plan.child_jobs.first()?, plan.child_jobs.last()?);
+        let first_idx = self.find_job_index(*first_id)?;
+        let last_idx = self.find_job_index(*last_id)?;
+        if last_idx >= first_idx && (last_idx - first_idx + 1) == wanted_len {
+            Some(first_idx..=last_idx)
+        } else {
+            None
+        }
+    }
+
     fn set_plan_terminal_state(
         &mut self,
         plan_id: TransferPlanId,
@@ -1302,6 +1321,14 @@ impl TransferStore {
         let root_job_id = self.plans[plan_index].root_job_id;
         if self.plans[plan_index].child_jobs.is_empty() {
             changed |= self.set_job_state(root_job_id, job_state);
+        } else if let Some(range) = self.child_jobs_slice_range(plan_index) {
+            changed |= self.set_job_state(root_job_id, job_state.clone());
+            for job in &mut self.jobs[range] {
+                if job.state != job_state {
+                    job.state = job_state.clone();
+                    changed = true;
+                }
+            }
         } else {
             let matcher = IdMatcher::new(&self.plans[plan_index].child_jobs);
             for job in &mut self.jobs {
@@ -1341,6 +1368,19 @@ impl TransferStore {
         let mut changed = false;
         if self.plans[plan_index].child_jobs.is_empty() {
             changed |= self.cancel_job_if_unfinished(root_job_id);
+        } else if let Some(range) = self.child_jobs_slice_range(plan_index) {
+            changed |= self.cancel_job_if_unfinished(root_job_id);
+            for job in &mut self.jobs[range] {
+                if !matches!(
+                    job.state,
+                    TransferState::Completed
+                        | TransferState::Skipped
+                        | TransferState::Failed { .. }
+                ) {
+                    job.state = TransferState::Skipped;
+                    changed = true;
+                }
+            }
         } else {
             let matcher = IdMatcher::new(&self.plans[plan_index].child_jobs);
             for job in &mut self.jobs {
@@ -1431,24 +1471,9 @@ impl TransferStore {
         let mut any_failed = false;
         let mut finished = 0usize;
 
-        let child_slice: Option<&[TransferJob]> = if let (Some(&first_id), Some(&last_id)) = (
-            self.plans[plan_index].child_jobs.first(),
-            self.plans[plan_index].child_jobs.last(),
-        ) {
-            if let (Some(first_idx), Some(last_idx)) =
-                (self.find_job_index(first_id), self.find_job_index(last_id))
-            {
-                if last_idx >= first_idx && (last_idx - first_idx + 1) == wanted_len {
-                    Some(&self.jobs[first_idx..=last_idx])
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let child_slice: Option<&[TransferJob]> = self
+            .child_jobs_slice_range(plan_index)
+            .map(|range| &self.jobs[range]);
 
         if let Some(slice) = child_slice {
             for job in slice.iter().rev() {
@@ -6072,5 +6097,54 @@ mod tests {
             elapsed < std::time::Duration::from_secs(5),
             "finishing {CHILDREN} children took {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn child_jobs_slice_range_and_fast_cancel_and_failure() {
+        let now = Timestamp::from_system_time(std::time::SystemTime::UNIX_EPOCH);
+        let plan_id = TransferPlanId(1);
+        const CHILDREN: u64 = 1000;
+
+        let job = |id: u64, state: super::TransferState| super::TransferJob {
+            id: TransferId(id),
+            direction: super::TransferDirection::Upload,
+            source: TransferEndpoint::Local(LocalPath::new("/tmp/test")),
+            destination: TransferEndpoint::Remote(RemotePath::new("/srv/test")),
+            state,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+
+        let mut store = super::TransferStore::default();
+        store.plans.push(super::TransferPlan {
+            id: plan_id,
+            root_job_id: TransferId(1),
+            source_root: TransferEndpoint::Local(LocalPath::new("/tmp")),
+            destination_root: TransferEndpoint::Remote(RemotePath::new("/srv")),
+            state: super::TransferPlanState::Queued,
+            planned_count: CHILDREN as usize,
+            total_bytes: None,
+            child_jobs: (0..CHILDREN).map(|index| TransferId(index + 2)).collect(),
+            conflict_policy: super::ConflictPolicy::default(),
+        });
+        store.jobs.push(job(1, super::TransferState::Queued));
+        for index in 0..CHILDREN {
+            store.jobs.push(job(index + 2, super::TransferState::Queued));
+        }
+
+        let range = store.child_jobs_slice_range(0).expect("slice range exists");
+        assert_eq!(range, 1..=CHILDREN as usize);
+
+        // Cancel the plan and ensure all children become Skipped quickly
+        let started = std::time::Instant::now();
+        store.apply_event(&AppEvent::TransferPlanCancelled { plan_id }, now);
+        let elapsed = started.elapsed();
+
+        assert_eq!(store.plans[0].state, super::TransferPlanState::Cancelled);
+        assert_eq!(store.jobs[0].state, super::TransferState::Skipped);
+        assert!(store.jobs[1..].iter().all(|j| j.state == super::TransferState::Skipped));
+        assert!(elapsed < std::time::Duration::from_millis(500), "cancelling {CHILDREN} children took {elapsed:?}");
     }
 }
