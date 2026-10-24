@@ -841,7 +841,7 @@ pub(crate) async fn open_transfer_sftp(
     })?;
     let sftp_config = russh_sftp::client::Config {
         max_packet_len: 262144,
-        max_concurrent_writes: 16,
+        max_concurrent_writes: 128,
         request_timeout_secs: 30,
     };
     SftpSession::new_with_config(channel.into_stream(), sftp_config)
@@ -2582,7 +2582,7 @@ async fn upload_single_file_pipelined(
             bytes_total,
         )
         .with_chunk_size(chunk_size)
-        .with_window_capacity(crate::pipelined_writer::DEFAULT_WINDOW_CAPACITY);
+        .with_window_capacity(crate::pipelined_writer::optimal_window_capacity(chunk_size));
 
         let upload_result = writer
             .upload_from(&mut source_file, job.id, event_tx, cancel)
@@ -2769,7 +2769,7 @@ async fn download_single_file_pipelined(
             bytes_total,
         )
         .with_chunk_size(chunk_size)
-        .with_window_capacity(crate::pipelined_reader::DEFAULT_WINDOW_CAPACITY);
+        .with_window_capacity(crate::pipelined_reader::optimal_window_capacity(chunk_size));
         let result = reader
             .download_to(&mut destination_file, job.id, event_tx, cancel)
             .await;

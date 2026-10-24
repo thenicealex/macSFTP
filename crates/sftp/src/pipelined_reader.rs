@@ -10,8 +10,22 @@ use tracing::warn;
 
 use crate::runtime::ProgressThrottle;
 
-pub const DEFAULT_WINDOW_CAPACITY: usize = 16;
+pub const TARGET_PIPELINE_WINDOW_BYTES: u64 = 8 * 1024 * 1024;
+pub const DEFAULT_WINDOW_CAPACITY: usize = 32;
 pub const DEFAULT_CHUNK_SIZE: u32 = 256 * 1024;
+
+/// Calculates the optimal sliding window capacity (number of concurrent in-flight chunks)
+/// to saturate the 8 MiB SSH transport channel window across high-latency networks.
+///
+/// Bounded between 16 (for 512 KiB+ chunks or default) and 128 (for small 32 KiB chunks)
+/// to avoid excessive async task spawning while maintaining a full pipeline.
+pub fn optimal_window_capacity(chunk_size: u32) -> usize {
+    if chunk_size == 0 {
+        return DEFAULT_WINDOW_CAPACITY;
+    }
+    let capacity = (TARGET_PIPELINE_WINDOW_BYTES / u64::from(chunk_size)) as usize;
+    capacity.clamp(16, 128)
+}
 
 /// Bytes to request for a chunk of `remaining` bytes. Clamping has to happen in
 /// `u64` before the cast: a `(remaining as u32).min(chunk)` would wrap past
@@ -81,7 +95,7 @@ pub(crate) async fn open_raw_sftp_session(
 ) -> Result<(Arc<RawSftpSession>, u32), UserFacingError> {
     let sftp_config = russh_sftp::client::Config {
         max_packet_len: 262144,
-        max_concurrent_writes: 16,
+        max_concurrent_writes: 128,
         request_timeout_secs: 30,
     };
     let mut raw = RawSftpSession::new_with_config(channel.into_stream(), sftp_config);
@@ -872,5 +886,20 @@ mod tests {
         assert_eq!(next_chunk_len(8 * 1024 * 1024 * 1024, chunk), chunk);
         assert_eq!(next_chunk_len(1234, chunk), 1234);
         assert_eq!(next_chunk_len(0, chunk), 0);
+    }
+
+    #[test]
+    fn test_optimal_window_capacity_calculation() {
+        assert_eq!(optimal_window_capacity(0), DEFAULT_WINDOW_CAPACITY);
+        // 256 KiB chunks: 8 MiB / 256 KiB = 32 chunks
+        assert_eq!(optimal_window_capacity(256 * 1024), 32);
+        // 128 KiB chunks: 8 MiB / 128 KiB = 64 chunks
+        assert_eq!(optimal_window_capacity(128 * 1024), 64);
+        // 64 KiB chunks: 8 MiB / 64 KiB = 128 chunks
+        assert_eq!(optimal_window_capacity(64 * 1024), 128);
+        // 32 KiB chunks: clamped to upper bound of 128 chunks (4 MiB)
+        assert_eq!(optimal_window_capacity(32 * 1024), 128);
+        // Large chunks (e.g. 1 MiB): clamped to lower bound of 16 chunks
+        assert_eq!(optimal_window_capacity(1024 * 1024), 16);
     }
 }

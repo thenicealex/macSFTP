@@ -8,8 +8,22 @@ use tracing::warn;
 
 use crate::runtime::ProgressThrottle;
 
-pub const DEFAULT_WINDOW_CAPACITY: usize = 16;
+pub const TARGET_PIPELINE_WINDOW_BYTES: u64 = 8 * 1024 * 1024;
+pub const DEFAULT_WINDOW_CAPACITY: usize = 32;
 pub const DEFAULT_CHUNK_SIZE: u32 = 256 * 1024;
+
+/// Calculates the optimal sliding window capacity (number of concurrent in-flight chunks)
+/// to saturate the 8 MiB SSH transport channel window across high-latency networks.
+///
+/// Bounded between 16 (for 512 KiB+ chunks or default) and 128 (for small 32 KiB chunks)
+/// to avoid excessive async task spawning while maintaining a full pipeline.
+pub fn optimal_window_capacity(chunk_size: u32) -> usize {
+    if chunk_size == 0 {
+        return DEFAULT_WINDOW_CAPACITY;
+    }
+    let capacity = (TARGET_PIPELINE_WINDOW_BYTES / u64::from(chunk_size)) as usize;
+    capacity.clamp(16, 128)
+}
 
 fn next_chunk_len(remaining: u64, chunk_size: u32) -> u32 {
     remaining.min(u64::from(chunk_size)) as u32
@@ -407,14 +421,14 @@ mod tests {
     async fn test_pipelined_upload_roundtrip() {
         let payload: Vec<u8> = (0..65_536).map(|i| (i % 251) as u8).collect();
         let received = Arc::new(Mutex::new(Vec::new()));
-        let raw =
-            spawn_mock_raw_upload_session(received.clone(), MockOptions::default()).await;
+        let raw = spawn_mock_raw_upload_session(received.clone(), MockOptions::default()).await;
         let (event_tx, event_rx) = flume::bounded(100);
         let cancel = CancellationToken::new();
 
-        let writer = PipelinedUploadWriter::new(raw, "mock-upload-handle", Some(payload.len() as u64))
-            .with_chunk_size(4096)
-            .with_window_capacity(4);
+        let writer =
+            PipelinedUploadWriter::new(raw, "mock-upload-handle", Some(payload.len() as u64))
+                .with_chunk_size(4096)
+                .with_window_capacity(4);
 
         let mut source = std::io::Cursor::new(payload.clone());
         let written = writer
@@ -433,8 +447,7 @@ mod tests {
     #[tokio::test]
     async fn test_pipelined_upload_zero_byte_file() {
         let received = Arc::new(Mutex::new(Vec::new()));
-        let raw =
-            spawn_mock_raw_upload_session(received.clone(), MockOptions::default()).await;
+        let raw = spawn_mock_raw_upload_session(received.clone(), MockOptions::default()).await;
         let (event_tx, event_rx) = flume::bounded(10);
         let cancel = CancellationToken::new();
 
@@ -474,9 +487,10 @@ mod tests {
         let (event_tx, _event_rx) = flume::bounded(100);
         let cancel = CancellationToken::new();
 
-        let writer = PipelinedUploadWriter::new(raw, "mock-upload-handle", Some(payload.len() as u64))
-            .with_chunk_size(4096)
-            .with_window_capacity(4);
+        let writer =
+            PipelinedUploadWriter::new(raw, "mock-upload-handle", Some(payload.len() as u64))
+                .with_chunk_size(4096)
+                .with_window_capacity(4);
 
         let cancel_clone = cancel.clone();
         tokio::spawn(async move {
@@ -508,9 +522,10 @@ mod tests {
         let (event_tx, _event_rx) = flume::bounded(100);
         let cancel = CancellationToken::new();
 
-        let writer = PipelinedUploadWriter::new(raw, "mock-upload-handle", Some(payload.len() as u64))
-            .with_chunk_size(4096)
-            .with_window_capacity(4);
+        let writer =
+            PipelinedUploadWriter::new(raw, "mock-upload-handle", Some(payload.len() as u64))
+                .with_chunk_size(4096)
+                .with_window_capacity(4);
 
         let mut source = std::io::Cursor::new(payload);
         let result = writer
@@ -525,14 +540,13 @@ mod tests {
     async fn test_pipelined_upload_incomplete_fails() {
         let payload: Vec<u8> = vec![1; 1000];
         let received = Arc::new(Mutex::new(Vec::new()));
-        let raw =
-            spawn_mock_raw_upload_session(received.clone(), MockOptions::default()).await;
+        let raw = spawn_mock_raw_upload_session(received.clone(), MockOptions::default()).await;
         let (event_tx, _event_rx) = flume::bounded(100);
         let cancel = CancellationToken::new();
 
         // Stated size is 2000, but cursor only has 1000 bytes
-        let writer = PipelinedUploadWriter::new(raw, "mock-upload-handle", Some(2000))
-            .with_chunk_size(500);
+        let writer =
+            PipelinedUploadWriter::new(raw, "mock-upload-handle", Some(2000)).with_chunk_size(500);
 
         let mut source = std::io::Cursor::new(payload);
         let result = writer
@@ -541,5 +555,20 @@ mod tests {
 
         let error = result.expect_err("incomplete file should error");
         assert_eq!(error.title, "Transfer Incomplete");
+    }
+
+    #[test]
+    fn test_optimal_window_capacity_calculation() {
+        assert_eq!(optimal_window_capacity(0), DEFAULT_WINDOW_CAPACITY);
+        // 256 KiB chunks: 8 MiB / 256 KiB = 32 chunks
+        assert_eq!(optimal_window_capacity(256 * 1024), 32);
+        // 128 KiB chunks: 8 MiB / 128 KiB = 64 chunks
+        assert_eq!(optimal_window_capacity(128 * 1024), 64);
+        // 64 KiB chunks: 8 MiB / 64 KiB = 128 chunks
+        assert_eq!(optimal_window_capacity(64 * 1024), 128);
+        // 32 KiB chunks: clamped to upper bound of 128 chunks (4 MiB)
+        assert_eq!(optimal_window_capacity(32 * 1024), 128);
+        // Large chunks (e.g. 1 MiB): clamped to lower bound of 16 chunks
+        assert_eq!(optimal_window_capacity(1024 * 1024), 16);
     }
 }
