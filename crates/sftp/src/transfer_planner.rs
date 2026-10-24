@@ -200,9 +200,9 @@ impl LocalUploadPlanner {
                     "Choose a folder with a valid name and try again.",
                 )
             })?;
-            let directory_destination = join_remote_path(destination_root, Path::new(name));
+            let directory_destination = join_remote_child(destination_root, name);
             self.emit_child(source_path.clone(), directory_destination.clone(), 0)?;
-            self.plan_directory(&source_path, &source_path, &directory_destination)
+            self.plan_directory(&source_path, &directory_destination)
         } else {
             let destination = if self.command.sources.len() == 1 {
                 destination_root.clone()
@@ -214,7 +214,7 @@ impl LocalUploadPlanner {
                         "Choose a file or folder with a valid name and try again.",
                     )
                 })?;
-                join_remote_path(destination_root, Path::new(name))
+                join_remote_child(destination_root, name)
             };
             self.emit_child(source_path, destination, metadata.len())
         }
@@ -222,9 +222,8 @@ impl LocalUploadPlanner {
 
     fn plan_directory(
         &mut self,
-        root: &Path,
         current: &Path,
-        destination_root: &RemotePath,
+        current_destination: &RemotePath,
     ) -> Result<(), UserFacingError> {
         let entries = fs::read_dir(current)
             .map_err(|error| planning_io_error("Folder Couldn’t Be Read", &error))?;
@@ -232,21 +231,23 @@ impl LocalUploadPlanner {
             self.ensure_not_cancelled()?;
             let entry =
                 entry.map_err(|error| planning_io_error("Item Couldn’t Be Read", &error))?;
+            let file_name = entry.file_name();
+            let destination = join_remote_child(current_destination, &file_name);
             let path = entry.path();
-            let metadata = fs::symlink_metadata(&path)
-                .map_err(|error| planning_io_error("Item Couldn’t Be Checked", &error))?;
-            let relative_path = path.strip_prefix(root).map_err(|_| {
-                UserFacingError::new(
-                    ErrorCode::Unknown,
-                    "Upload Preparation Failed",
-                    "The upload item changed during preparation. Try again.",
-                )
-            })?;
-            let destination = join_remote_path(destination_root, relative_path);
-            if metadata.file_type().is_dir() {
-                self.emit_child(path.clone(), destination, 0)?;
-                self.plan_directory(root, &path, destination_root)?;
+            let is_dir = match entry.file_type() {
+                Ok(ft) => ft.is_dir(),
+                Err(_) => fs::symlink_metadata(&path)
+                    .map_err(|error| planning_io_error("Item Couldn’t Be Checked", &error))?
+                    .file_type()
+                    .is_dir(),
+            };
+            if is_dir {
+                self.emit_child(path.clone(), destination.clone(), 0)?;
+                self.plan_directory(&path, &destination)?;
             } else {
+                let metadata = entry
+                    .metadata()
+                    .map_err(|error| planning_io_error("Item Couldn’t Be Checked", &error))?;
                 self.emit_child(path, destination, metadata.len())?;
             }
         }
@@ -364,15 +365,13 @@ impl LocalUploadPlanner {
     }
 }
 
-fn join_remote_path(root: &RemotePath, relative_path: &Path) -> RemotePath {
-    let mut path = root.as_str().trim_end_matches('/').to_string();
-    for component in relative_path.components() {
-        let component = component.as_os_str().to_string_lossy();
-        if !component.is_empty() {
-            path.push('/');
-            path.push_str(&component);
-        }
-    }
+fn join_remote_child(parent: &RemotePath, file_name: &std::ffi::OsStr) -> RemotePath {
+    let parent_str = parent.as_str().trim_end_matches('/');
+    let name_str = file_name.to_string_lossy();
+    let mut path = String::with_capacity(parent_str.len() + 1 + name_str.len());
+    path.push_str(parent_str);
+    path.push('/');
+    path.push_str(&name_str);
     RemotePath::new(path)
 }
 

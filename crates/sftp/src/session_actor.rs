@@ -1115,12 +1115,13 @@ impl RemoteDownloadPlanner {
                         )
                     })?;
                 let destination = local_download_destination(destination_root, relative)?;
-                let metadata = entry.metadata().clone();
-                if entry.file_type() == SftpFileType::Dir {
-                    self.emit_child(path.clone(), destination, Some(0)).await?;
+                let is_dir = entry.file_type() == SftpFileType::Dir;
+                let size = if is_dir { Some(0) } else { entry.metadata().size };
+                if is_dir {
+                    self.emit_child(path.clone(), destination, size).await?;
                     pending_directories.push(path);
                 } else {
-                    self.emit_child(path, destination, metadata.size).await?;
+                    self.emit_child(path, destination, size).await?;
                 }
             }
         }

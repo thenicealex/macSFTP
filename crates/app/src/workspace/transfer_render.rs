@@ -130,63 +130,107 @@ impl crate::workspace::Workspace {
         // Reclamp after window shrink so stored height never exceeds max.
         self.reclamp_drawer_height(window.viewport_size().height);
 
+        use crate::workspace::view_state::TransferSection;
+
         let theme = cx.theme().clone();
         let workspace_entity = cx.entity();
-        // Cloned (not borrowed) so the shared transfer store isn't held
-        // borrowed across the `render_transfer_job(job, cx)` calls below.
-        let jobs: Vec<_> = visible_transfer_jobs(cx.transfers())
-            .into_iter()
-            .cloned()
-            .collect();
-        let jobs = &jobs;
 
-        let now = std::time::Instant::now();
-        let running: Vec<(TransferId, u64, Option<u64>)> = jobs
-            .iter()
-            .filter_map(|job| match &job.state {
+        struct DrawerSection {
+            total: usize,
+            rendered: Vec<TransferJob>,
+        }
+
+        let max_in_progress = self
+            .transfer_drawer
+            .visible_rows(TransferSection::InProgress, usize::MAX)
+            .0;
+        let max_waiting = self
+            .transfer_drawer
+            .visible_rows(TransferSection::Waiting, usize::MAX)
+            .0;
+        let max_completed = self
+            .transfer_drawer
+            .visible_rows(TransferSection::Completed, usize::MAX)
+            .0;
+        let max_failed = self
+            .transfer_drawer
+            .visible_rows(TransferSection::Failed, usize::MAX)
+            .0;
+
+        let mut in_progress = DrawerSection {
+            total: 0,
+            rendered: Vec::new(),
+        };
+        let mut waiting = DrawerSection {
+            total: 0,
+            rendered: Vec::new(),
+        };
+        let mut completed = DrawerSection {
+            total: 0,
+            rendered: Vec::new(),
+        };
+        let mut failed = DrawerSection {
+            total: 0,
+            rendered: Vec::new(),
+        };
+        let mut running = Vec::new();
+
+        let visible_jobs = visible_transfer_jobs(cx.transfers());
+        let total_visible_jobs = visible_jobs.len();
+
+        for job in visible_jobs {
+            match &job.state {
                 TransferState::Running {
                     bytes_done,
                     bytes_total,
                     ..
-                } => Some((job.id, *bytes_done, *bytes_total)),
-                _ => None,
-            })
-            .collect();
-        let agg = cx.rates().aggregate(&running, now);
+                } => {
+                    running.push((job.id, *bytes_done, *bytes_total));
+                    in_progress.total += 1;
+                    if in_progress.rendered.len() < max_in_progress {
+                        in_progress.rendered.push(job.clone());
+                    }
+                }
+                TransferState::Planning
+                | TransferState::Cancelling
+                | TransferState::WaitingForConflictDecision { .. } => {
+                    in_progress.total += 1;
+                    if in_progress.rendered.len() < max_in_progress {
+                        in_progress.rendered.push(job.clone());
+                    }
+                }
+                TransferState::Queued => {
+                    waiting.total += 1;
+                    if waiting.rendered.len() < max_waiting {
+                        waiting.rendered.push(job.clone());
+                    }
+                }
+                TransferState::Completed | TransferState::Skipped => {
+                    completed.total += 1;
+                    if completed.rendered.len() < max_completed {
+                        completed.rendered.push(job.clone());
+                    }
+                }
+                TransferState::Failed { .. } => {
+                    failed.total += 1;
+                    if failed.rendered.len() < max_failed {
+                        failed.rendered.push(job.clone());
+                    }
+                }
+            }
+        }
 
-        let active_jobs: Vec<&TransferJob> = jobs
-            .iter()
-            .filter(|job| {
-                matches!(
-                    job.state,
-                    TransferState::Running { .. }
-                        | TransferState::Planning
-                        | TransferState::Cancelling
-                        | TransferState::WaitingForConflictDecision { .. }
-                )
-            })
-            .collect();
-        let queued_jobs: Vec<&TransferJob> = jobs
-            .iter()
-            .filter(|job| matches!(job.state, TransferState::Queued))
-            .collect();
-        let completed_jobs: Vec<&TransferJob> = jobs
-            .iter()
-            .filter(|job| matches!(job.state, TransferState::Completed | TransferState::Skipped))
-            .collect();
-        let failed_jobs: Vec<&TransferJob> = jobs
-            .iter()
-            .filter(|job| matches!(job.state, TransferState::Failed { .. }))
-            .collect();
+        let now = std::time::Instant::now();
+        let agg = cx.rates().aggregate(&running, now);
 
         // Drawer chrome: counts plus aggregate speed/ETA for running jobs.
         let agg_label = {
             let mut s = format!(
                 "{} active · {} queued · {} done · {} failed",
-                active_jobs.len(),
-                queued_jobs.len(),
-                completed_jobs.len(),
-                failed_jobs.len()
+                in_progress.total,
+                waiting.total,
+                completed.total,
+                failed.total
             );
             if let Some(bps) = agg.speed_bps {
                 s.push_str(&format!(
@@ -299,7 +343,7 @@ impl crate::workspace::Workspace {
                 .text_color(theme.colors.text_muted)
                 .child(icon(IconName::Transfers, theme.colors.text_muted))
                 .child(div().flex_none().child("Transfers"))
-                .when(active_jobs.len() + queued_jobs.len() > 0, |header| {
+                .when(in_progress.total + waiting.total > 0, |header| {
                     let workspace = workspace_entity.clone();
                     header.child(
                         icon_button(
@@ -315,7 +359,7 @@ impl crate::workspace::Workspace {
                         }),
                     )
                 })
-                .when(completed_jobs.len() + failed_jobs.len() > 0, |header| {
+                .when(completed.total + failed.total > 0, |header| {
                     let workspace = workspace_entity.clone();
                     header.child(
                         icon_button("clear-transfer-records", IconName::Trash, "Clear History")
@@ -356,7 +400,7 @@ impl crate::workspace::Workspace {
 
         let mut content = div().flex().flex_col();
 
-        if jobs.is_empty() {
+        if total_visible_jobs == 0 {
             return drawer.child(
                 div()
                     .debug_selector(|| "empty-transfer-queue".into())
@@ -386,22 +430,22 @@ impl crate::workspace::Workspace {
         // frame: a section therefore renders a bounded page of rows and offers
         // the rest behind a control rather than building hundreds of rows that
         // are mostly scrolled out of sight.
-        for section in crate::workspace::view_state::TransferSection::ALL {
-            let (label, section_jobs, collapsible, toggle_id) = match section {
-                crate::workspace::view_state::TransferSection::InProgress => {
-                    ("In Progress", &active_jobs, false, "toggle-in-progress")
+        for section in TransferSection::ALL {
+            let (label, section_data, collapsible, toggle_id) = match section {
+                TransferSection::InProgress => {
+                    ("In Progress", &mut in_progress, false, "toggle-in-progress")
                 }
-                crate::workspace::view_state::TransferSection::Waiting => {
-                    ("Waiting", &queued_jobs, false, "toggle-waiting")
+                TransferSection::Waiting => {
+                    ("Waiting", &mut waiting, false, "toggle-waiting")
                 }
-                crate::workspace::view_state::TransferSection::Completed => {
-                    ("Complete", &completed_jobs, true, "toggle-completed")
+                TransferSection::Completed => {
+                    ("Complete", &mut completed, true, "toggle-completed")
                 }
-                crate::workspace::view_state::TransferSection::Failed => {
-                    ("Failed", &failed_jobs, true, "toggle-failed")
+                TransferSection::Failed => {
+                    ("Failed", &mut failed, true, "toggle-failed")
                 }
             };
-            if section_jobs.is_empty() {
+            if section_data.total == 0 {
                 continue;
             }
             let expanded = self.transfer_drawer.is_expanded(section);
@@ -432,25 +476,26 @@ impl crate::workspace::Workspace {
                             },
                             theme.colors.text_muted,
                         ))
-                        .child(format!("{label} ({})", section_jobs.len())),
+                        .child(format!("{label} ({})", section_data.total)),
                 );
                 if !expanded {
                     continue;
                 }
             } else {
-                content = content.child(section_header_static(label, section_jobs.len(), &theme));
+                content = content.child(section_header_static(label, section_data.total, &theme));
             }
 
             let (visible, hidden) = self
                 .transfer_drawer
-                .visible_rows(section, section_jobs.len());
-            content = content.children(section_jobs.iter().take(visible).map(|job| {
+                .visible_rows(section, section_data.total);
+            let rendered = std::mem::take(&mut section_data.rendered);
+            content = content.children(rendered.into_iter().take(visible).map(|job| {
                 // An id per row lets a test see what the section actually
                 // built, which is the point of the page size.
                 div()
                     .id(("transfer-row", job.id.0))
                     .test_support()
-                    .child(self.render_transfer_job(job, window, cx))
+                    .child(self.render_transfer_job(&job, window, cx))
             }));
             if hidden > 0 {
                 content = content.child(

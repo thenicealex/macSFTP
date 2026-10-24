@@ -150,15 +150,14 @@ impl PipelinedUploadWriter {
                     self.chunk_size as usize
                 };
 
-                let mut buffer = vec![0u8; to_read];
-                let mut filled = 0;
-                while filled < to_read {
+                let mut buffer = Vec::with_capacity(to_read);
+                while buffer.len() < to_read {
                     let n = tokio::select! {
                         _ = cancel.cancelled() => {
                             in_flight.abort_all();
                             return Err(cancelled_transfer_error());
                         }
-                        result = source.read(&mut buffer[filled..to_read]) => {
+                        result = source.read_buf(&mut buffer) => {
                             result.map_err(|error| {
                                 local_transfer_error("Transfer Read Failed", &error)
                             })?
@@ -168,10 +167,8 @@ impl PipelinedUploadWriter {
                         eof_reached = true;
                         break;
                     }
-                    filled += n;
                 }
 
-                buffer.truncate(filled);
                 if buffer.is_empty() {
                     eof_reached = true;
                     break;
