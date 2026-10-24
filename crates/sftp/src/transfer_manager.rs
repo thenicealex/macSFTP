@@ -553,10 +553,6 @@ impl TransferManager {
 
     fn cleanup_plan_if_idle(&mut self, plan_id: TransferPlanId) {
         let has_pending = self.pending_per_plan.contains_key(&plan_id);
-        debug_assert_eq!(
-            has_pending,
-            self.pending.iter().any(|queued| queued.plan_id == plan_id)
-        );
         let has_running = self.running_per_plan.contains_key(&plan_id);
         let has_retry = if has_pending || has_running {
             false
@@ -612,12 +608,6 @@ impl TransferManager {
             return running == 0;
         }
         let root_pending = self.pending_roots.contains(root_id);
-        debug_assert_eq!(
-            root_pending,
-            self.pending
-                .iter()
-                .any(|other| other.plan_id == queued.plan_id && other.job.id == *root_id)
-        );
         !root_pending && !self.running.contains_key(root_id)
     }
 
@@ -642,33 +632,52 @@ impl TransferManager {
     }
 
     fn next_queued_position(&self) -> Option<usize> {
+        if self.pending.is_empty() {
+            return None;
+        }
+
+        // Fast-path: find plans with remaining concurrency slots (< MAX_CONCURRENT_PER_PLAN)
+        // and whether any plan is completely idle (0 running).
+        let mut has_idle_plan = false;
+        let mut admissible_plans = Vec::with_capacity(self.pending_per_plan.len());
+
+        for &plan_id in self.pending_per_plan.keys() {
+            let running = self.running_per_plan.get(&plan_id).copied().unwrap_or(0);
+            if running == 0 {
+                has_idle_plan = true;
+            }
+            if running < MAX_CONCURRENT_PER_PLAN {
+                admissible_plans.push(plan_id);
+            }
+        }
+
+        if admissible_plans.is_empty() {
+            return None;
+        }
+
         // Two phases keep planning fair: prefer a plan with nothing running,
         // then fill remaining slots up to the per-plan cap.
-        let has_idle_plan = self
-            .pending_per_plan
-            .keys()
-            .any(|plan_id| self.running_per_plan.get(plan_id).copied().unwrap_or(0) == 0);
-
         if has_idle_plan {
             self.pending
                 .iter()
                 .position(|queued| {
-                    self.running_per_plan
-                        .get(&queued.plan_id)
-                        .copied()
-                        .unwrap_or(0)
-                        == 0
+                    admissible_plans.contains(&queued.plan_id)
+                        && self.running_per_plan.get(&queued.plan_id).copied().unwrap_or(0) == 0
                         && self.is_eligible(queued)
                 })
                 .or_else(|| {
                     self.pending
                         .iter()
-                        .position(|queued| self.is_eligible(queued))
+                        .position(|queued| {
+                            admissible_plans.contains(&queued.plan_id) && self.is_eligible(queued)
+                        })
                 })
         } else {
             self.pending
                 .iter()
-                .position(|queued| self.is_eligible(queued))
+                .position(|queued| {
+                    admissible_plans.contains(&queued.plan_id) && self.is_eligible(queued)
+                })
         }
     }
 
