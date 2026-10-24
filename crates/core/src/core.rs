@@ -1825,10 +1825,19 @@ fn compare_entries<E: FileEntryFields>(a: &E, b: &E, sort: &FileSort) -> std::cm
 
 /// Case-insensitive name comparison with a case-sensitive fallback so
 /// `README` and `readme` still order deterministically.
+///
+/// Has an ASCII fast path to avoid heap allocations on the common case
+/// where filenames are pure ASCII.
 fn compare_names(a: &str, b: &str) -> std::cmp::Ordering {
-    let a_lower = a.to_lowercase();
-    let b_lower = b.to_lowercase();
-    a_lower.cmp(&b_lower).then_with(|| a.cmp(b))
+    if a.is_ascii() && b.is_ascii() {
+        let a_iter = a.bytes().map(|b| b.to_ascii_lowercase());
+        let b_iter = b.bytes().map(|b| b.to_ascii_lowercase());
+        a_iter.cmp(b_iter).then_with(|| a.cmp(b))
+    } else {
+        let a_lower = a.to_lowercase();
+        let b_lower = b.to_lowercase();
+        a_lower.cmp(&b_lower).then_with(|| a.cmp(b))
+    }
 }
 
 fn kind_rank(kind: FileKind) -> u8 {
@@ -4355,6 +4364,54 @@ mod tests {
 
         assert_eq!(entries[0].path.as_str(), "/srv/a/same.txt");
         assert_eq!(entries[1].path.as_str(), "/srv/b/same.txt");
+    }
+
+    #[test]
+    fn sort_entries_handles_ten_thousand_entries() {
+        use super::FileKind;
+
+        let mut entries: Vec<super::LocalEntry> = (0..10_000)
+            .rev()
+            .map(|i| super::LocalEntry {
+                name: format!("file-{i:05}.txt"),
+                path: LocalPath::new(format!("/tmp/file-{i:05}.txt")),
+                kind: if i % 10 == 0 {
+                    FileKind::Directory
+                } else {
+                    FileKind::File
+                },
+                size: Some(i as u64),
+                permissions: None,
+                modified_at: None,
+                link_target: None,
+            })
+            .collect();
+
+        super::sort_entries(&mut entries, &super::FileSort::default());
+
+        // Directories first, then files sorted ascending
+        assert_eq!(entries[0].kind, FileKind::Directory);
+        assert_eq!(entries[0].name, "file-00000.txt");
+        assert_eq!(entries[999].kind, FileKind::Directory);
+        assert_eq!(entries[999].name, "file-09990.txt");
+        assert_eq!(entries[1000].kind, FileKind::File);
+        assert_eq!(entries[1000].name, "file-00001.txt");
+        assert_eq!(entries[9999].name, "file-09999.txt");
+    }
+
+    #[test]
+    fn sort_entries_handles_unicode_names() {
+        use super::FileKind;
+
+        let mut entries = vec![
+            remote_entry("文档.txt", FileKind::File, None),
+            remote_entry("alpha.txt", FileKind::File, None),
+            remote_entry("中文.txt", FileKind::File, None),
+            remote_entry("Alpha.txt", FileKind::File, None),
+        ];
+        super::sort_entries(&mut entries, &super::FileSort::default());
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, ["Alpha.txt", "alpha.txt", "中文.txt", "文档.txt"]);
     }
 
     #[test]

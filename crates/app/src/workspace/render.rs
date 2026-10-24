@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use crate::workspace::TextInputTarget;
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::{
@@ -1224,6 +1225,13 @@ impl crate::workspace::Workspace {
                         return Vec::new();
                     };
                     let selected_paths = &tab.selection.selected_paths;
+                    let selected_set: HashSet<&str> = selected_paths
+                        .iter()
+                        .map(|path| match path {
+                            EntryPath::Local(local_path) => local_path.as_str(),
+                            EntryPath::Remote(remote_path) => remote_path.as_str(),
+                        })
+                        .collect();
                     let real_indices = workspace_view.visible_indices(side, cx);
 
                     visible_range
@@ -1237,8 +1245,7 @@ impl crate::workspace::Workspace {
                                             name: entry.name.clone().into(),
                                             kind: entry.kind,
                                             is_hidden: entry.name.starts_with('.'),
-                                            selected: selected_paths
-                                                .contains(&EntryPath::Local(entry.path.clone())),
+                                            selected: selected_set.contains(entry.path.as_str()),
                                             size_label: format_size_label(entry.kind, entry.size),
                                             modified_label: format_timestamp(entry.modified_at),
                                         },
@@ -1264,8 +1271,7 @@ impl crate::workspace::Workspace {
                                             name: display_name.into(),
                                             kind: entry.kind,
                                             is_hidden: entry.name.starts_with('.'),
-                                            selected: selected_paths
-                                                .contains(&EntryPath::Remote(entry.path.clone())),
+                                            selected: selected_set.contains(entry.path.as_str()),
                                             size_label: format_size_label(entry.kind, entry.size),
                                             modified_label: format_timestamp(entry.modified_at),
                                         },

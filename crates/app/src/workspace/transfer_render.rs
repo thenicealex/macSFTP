@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::base::motion::{Transition, transition};
@@ -45,22 +45,44 @@ pub(crate) fn painted_progress(
 pub(crate) fn visible_transfer_jobs(store: &TransferStore) -> Vec<&TransferJob> {
     let mut hidden_job_ids = HashSet::new();
 
+    // Only inspect individual job states if there's any Failed plan with children
+    // that needs disambiguation between preparation failure and execution failure.
+    let needs_terminal_check = store.plans.iter().any(|plan| {
+        matches!(plan.state, TransferPlanState::Failed { .. }) && !plan.child_jobs.is_empty()
+    });
+
+    let job_is_terminal: HashMap<TransferId, bool> = if needs_terminal_check {
+        store
+            .jobs
+            .iter()
+            .map(|job| {
+                let is_terminal = matches!(
+                    job.state,
+                    TransferState::Completed
+                        | TransferState::Skipped
+                        | TransferState::Failed { .. }
+                );
+                (job.id, is_terminal)
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
+
     for plan in &store.plans {
-        let children_are_terminal = !plan.child_jobs.is_empty()
-            && plan.child_jobs.iter().all(|child_id| {
-                store.find_job(*child_id).is_some_and(|job| {
-                    matches!(
-                        job.state,
-                        TransferState::Completed
-                            | TransferState::Skipped
-                            | TransferState::Failed { .. }
-                    )
-                })
-            });
-        let show_root = plan.child_jobs.is_empty()
+        let show_root = if plan.child_jobs.is_empty()
             || matches!(plan.state, TransferPlanState::Planning)
             || matches!(plan.state, TransferPlanState::Cancelled)
-            || (matches!(plan.state, TransferPlanState::Failed { .. }) && !children_are_terminal);
+        {
+            true
+        } else if matches!(plan.state, TransferPlanState::Failed { .. }) {
+            let children_are_terminal = plan.child_jobs.iter().all(|child_id| {
+                job_is_terminal.get(child_id).copied().unwrap_or(false)
+            });
+            !children_are_terminal
+        } else {
+            false
+        };
 
         if show_root {
             hidden_job_ids.extend(plan.child_jobs.iter().copied());
@@ -970,6 +992,38 @@ mod tests {
         );
 
         assert_eq!(visible_ids(&store), vec![TransferId(2)]);
+    }
+
+    #[test]
+    fn large_plan_visible_jobs_is_linear() {
+        let child_count = 5_000;
+        let child_ids: Vec<TransferId> = (2..=child_count + 1).map(TransferId).collect();
+        let mut jobs = Vec::with_capacity(child_count as usize + 1);
+        jobs.push(job(1, TransferState::Completed));
+        for &id in &child_ids {
+            jobs.push(job(id.0, TransferState::Completed));
+        }
+
+        let store = TransferStore {
+            just_finished_plan: None,
+            plans: vec![TransferPlan {
+                id: TransferPlanId(1),
+                root_job_id: TransferId(1),
+                source_root: TransferEndpoint::Local(LocalPath::new("/tmp/dir")),
+                destination_root: TransferEndpoint::Remote(RemotePath::new("/srv/dir")),
+                state: TransferPlanState::Completed,
+                planned_count: child_count as usize,
+                total_bytes: Some(100_000),
+                child_jobs: child_ids.clone(),
+                conflict_policy: ConflictPolicy::default(),
+            }],
+            jobs,
+            pending_conflicts: Vec::new(),
+        };
+
+        let visible = visible_transfer_jobs(&store);
+        assert_eq!(visible.len(), child_count as usize);
+        assert_eq!(visible[0].id, TransferId(2));
     }
 
     #[test]
