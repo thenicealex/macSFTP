@@ -12,14 +12,94 @@ pub(crate) fn is_dotfile(name: &str) -> bool {
     name.starts_with('.')
 }
 
-/// Case-insensitive basename substring match; empty query matches everything.
-pub(crate) fn name_matches(name: &str, query: &str) -> bool {
-    query.is_empty() || name.to_lowercase().contains(&query.to_lowercase())
+/// Case-insensitive query matcher for file names with an ASCII fast path
+/// to avoid heap allocations when both the query and file name are ASCII.
+pub(crate) struct QueryMatcher<'a> {
+    query: &'a str,
+    needle: &'a [u8],
+    is_ascii: bool,
+    lower_query: String,
 }
 
-/// Case-insensitive `starts_with` used by type-select jumps.
+impl<'a> QueryMatcher<'a> {
+    pub(crate) fn new(query: &'a str) -> Self {
+        Self {
+            query,
+            needle: query.as_bytes(),
+            is_ascii: query.is_ascii(),
+            lower_query: query.to_lowercase(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.query.is_empty()
+    }
+
+    #[inline]
+    pub(crate) fn matches(&self, name: &str) -> bool {
+        if self.is_empty() {
+            return true;
+        }
+        if self.is_ascii && name.is_ascii() {
+            if name.len() < self.needle.len() {
+                return false;
+            }
+            return name
+                .as_bytes()
+                .windows(self.needle.len())
+                .any(|w| w.eq_ignore_ascii_case(self.needle));
+        }
+        name.to_lowercase().contains(&self.lower_query)
+    }
+}
+
+/// Case-insensitive basename substring match; empty query matches everything.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn name_matches(name: &str, query: &str) -> bool {
+    QueryMatcher::new(query).matches(name)
+}
+
+/// Case-insensitive prefix matcher for type-select jumps with an ASCII fast path.
+pub(crate) struct PrefixMatcher<'a> {
+    prefix: &'a str,
+    needle: &'a [u8],
+    lower_prefix: String,
+}
+
+impl<'a> PrefixMatcher<'a> {
+    pub(crate) fn new(prefix: &'a str) -> Self {
+        Self {
+            prefix,
+            needle: prefix.as_bytes(),
+            lower_prefix: prefix.to_lowercase(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.prefix.is_empty()
+    }
+
+    #[inline]
+    pub(crate) fn matches(&self, name: &str) -> bool {
+        if self.is_empty() {
+            return false;
+        }
+        if self.prefix.is_ascii() && name.is_ascii() {
+            if name.len() < self.needle.len() {
+                return false;
+            }
+            return name.as_bytes()[..self.needle.len()].eq_ignore_ascii_case(self.needle);
+        }
+        name.to_lowercase().starts_with(&self.lower_prefix)
+    }
+}
+
+/// Case-insensitive starts_with with the same ASCII fast path.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn name_has_prefix(name: &str, prefix: &str) -> bool {
-    !prefix.is_empty() && name.to_lowercase().starts_with(&prefix.to_lowercase())
+    PrefixMatcher::new(prefix).matches(name)
 }
 
 /// Visible index of the first name starting with `prefix`, scanning from
@@ -28,10 +108,11 @@ pub(crate) fn first_prefix_match(names: &[&str], from: usize, prefix: &str) -> O
     if names.is_empty() || prefix.is_empty() {
         return None;
     }
+    let matcher = PrefixMatcher::new(prefix);
     let start = from % names.len();
     (0..names.len())
         .map(|offset| (start + offset) % names.len())
-        .find(|&index| name_has_prefix(names[index], prefix))
+        .find(|&index| matcher.matches(names[index]))
 }
 
 /// Indices into `entries` that should appear in the local file list.
@@ -41,6 +122,7 @@ pub(crate) fn visible_local_indices(
     query: &str,
 ) -> Vec<usize> {
     visible_indices(
+        entries.len(),
         entries.iter().map(|entry| entry.name.as_str()),
         show_hidden,
         query,
@@ -54,6 +136,7 @@ pub(crate) fn visible_remote_indices(
     query: &str,
 ) -> Vec<usize> {
     visible_indices(
+        entries.len(),
         entries.iter().map(|entry| entry.name.as_str()),
         show_hidden,
         query,
@@ -61,16 +144,35 @@ pub(crate) fn visible_remote_indices(
 }
 
 fn visible_indices<'a>(
+    total_count: usize,
     names: impl Iterator<Item = &'a str>,
     show_hidden: bool,
     query: &str,
 ) -> Vec<usize> {
-    names
-        .enumerate()
-        .filter(|(_, name)| show_hidden || !is_dotfile(name))
-        .filter(|(_, name)| name_matches(name, query))
-        .map(|(index, _)| index)
-        .collect()
+    let matcher = QueryMatcher::new(query);
+    if matcher.is_empty() {
+        if show_hidden {
+            return (0..total_count).collect();
+        }
+        let mut result = Vec::with_capacity(total_count);
+        for (index, name) in names.enumerate() {
+            if !is_dotfile(name) {
+                result.push(index);
+            }
+        }
+        return result;
+    }
+
+    let mut result = Vec::new();
+    for (index, name) in names.enumerate() {
+        if !show_hidden && is_dotfile(name) {
+            continue;
+        }
+        if matcher.matches(name) {
+            result.push(index);
+        }
+    }
+    result
 }
 
 #[cfg(test)]

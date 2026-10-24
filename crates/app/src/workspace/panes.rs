@@ -16,7 +16,7 @@ use tracing::warn;
 use crate::resources::ActiveResources;
 use crate::workspace::helpers::connected_transfer_session;
 use crate::workspace::visible_entries::{
-    first_prefix_match, visible_local_indices, visible_remote_indices,
+    first_prefix_match, is_dotfile, visible_local_indices, visible_remote_indices,
 };
 use crate::workspace::*;
 use macsftp_core::HistoryOp;
@@ -127,16 +127,36 @@ impl crate::workspace::Workspace {
         let show_hidden = cx.resources().config.config().show_hidden_files;
         match (self.active_tab(), side) {
             (Some(tab), PaneSide::Local) => {
-                visible_local_indices(&tab.local.entries, show_hidden, "").len()
+                if show_hidden {
+                    tab.local.entries.len()
+                } else {
+                    tab.local
+                        .entries
+                        .iter()
+                        .filter(|entry| !is_dotfile(&entry.name))
+                        .count()
+                }
             }
             (Some(tab), PaneSide::Remote) => {
-                visible_remote_indices(&tab.remote.entries, show_hidden, "").len()
+                if show_hidden {
+                    tab.remote.entries.len()
+                } else {
+                    tab.remote
+                        .entries
+                        .iter()
+                        .filter(|entry| !is_dotfile(&entry.name))
+                        .count()
+                }
             }
             (None, _) => 0,
         }
     }
 
     pub(crate) fn entry_count(&self, side: PaneSide, cx: &App) -> usize {
+        let query = self.filter_query(side);
+        if query.is_empty() {
+            return self.count_after_hidden(side, cx);
+        }
         self.visible_indices(side, cx).len()
     }
 
