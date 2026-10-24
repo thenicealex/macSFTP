@@ -238,6 +238,7 @@ impl PipelinedDownloadReader {
         let mut eof_reached = false;
         let mut in_flight = tokio::task::JoinSet::new();
         let mut bytes_done: u64 = 0;
+        let mut current_offset: Option<u64> = None;
         let mut throttle = ProgressThrottle::new(10);
 
         loop {
@@ -367,15 +368,17 @@ impl PipelinedDownloadReader {
             }
 
             if !data.is_empty() {
-                tokio::select! {
-                    _ = cancel.cancelled() => {
-                        in_flight.abort_all();
-                        return Err(cancelled_transfer_error());
-                    }
-                    seek_res = destination.seek(std::io::SeekFrom::Start(chunk.offset)) => {
-                        if let Err(error) = seek_res {
+                if current_offset != Some(chunk.offset) {
+                    tokio::select! {
+                        _ = cancel.cancelled() => {
                             in_flight.abort_all();
-                            return Err(local_transfer_error("Transfer Write Failed", &error));
+                            return Err(cancelled_transfer_error());
+                        }
+                        seek_res = destination.seek(std::io::SeekFrom::Start(chunk.offset)) => {
+                            if let Err(error) = seek_res {
+                                in_flight.abort_all();
+                                return Err(local_transfer_error("Transfer Write Failed", &error));
+                            }
                         }
                     }
                 }
@@ -393,6 +396,7 @@ impl PipelinedDownloadReader {
                     }
                 }
 
+                current_offset = Some(chunk.offset + received);
                 bytes_done += received;
                 if throttle.should_send(std::time::Instant::now()) {
                     emit_transfer_progress(event_tx, transfer_id, bytes_done, self.bytes_total)

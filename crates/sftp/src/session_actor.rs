@@ -1116,7 +1116,11 @@ impl RemoteDownloadPlanner {
                     })?;
                 let destination = local_download_destination(destination_root, relative)?;
                 let is_dir = entry.file_type() == SftpFileType::Dir;
-                let size = if is_dir { Some(0) } else { entry.metadata().size };
+                let size = if is_dir {
+                    Some(0)
+                } else {
+                    entry.metadata().size
+                };
                 if is_dir {
                     self.emit_child(path.clone(), destination, size).await?;
                     pending_directories.push(path);
@@ -1748,6 +1752,27 @@ async fn upload_transfer(
 
     ensure_remote_parent_directory(transfer_session, sftp, destination, cancel).await?;
     let temporary_destination = remote_temporary_path(destination, job.id);
+    let mut destination_file = match sftp
+        .open_with_flags(
+            temporary_destination.as_str(),
+            OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
+        )
+        .await
+    {
+        Ok(file) => Ok(file),
+        Err(open_err) => {
+            if cleanup_remote_temp(sftp, &temporary_destination, event_tx, job.id, None).await {
+                sftp.open_with_flags(
+                    temporary_destination.as_str(),
+                    OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
+                )
+                .await
+                .map_err(remote_destination_create_error)
+            } else {
+                Err(remote_destination_create_error(open_err))
+            }
+        }
+    }?;
     emit_residual_temp_created(
         event_tx,
         ResidualTempRecord {
@@ -1759,25 +1784,10 @@ async fn upload_transfer(
         },
     )
     .await;
-    if !cleanup_remote_temp(sftp, &temporary_destination, event_tx, job.id, Some(job.id)).await {
-        return Err(UserFacingError::new(
-            ErrorCode::Unknown,
-            "Upload Preparation Failed",
-            "A previous temporary upload file could not be removed. Retry the transfer.",
-        )
-        .with_retryable(true));
-    }
     let copy_result = async {
         let mut source_file = tokio::fs::File::open(source.as_str())
             .await
             .map_err(|error| local_transfer_error("Upload Item Unavailable", &error))?;
-        let mut destination_file = sftp
-            .open_with_flags(
-                temporary_destination.as_str(),
-                OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
-            )
-            .await
-            .map_err(remote_destination_create_error)?;
         copy_file_chunks(
             &mut source_file,
             &mut destination_file,
@@ -2474,6 +2484,32 @@ async fn upload_single_file_pipelined(
 
     ensure_remote_parent_directory_raw(transfer_session, raw, destination, cancel).await?;
     let temporary_destination = remote_temporary_path(destination, job.id);
+    let handle_packet = match raw
+        .open(
+            temporary_destination.as_str(),
+            OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
+            FileAttributes::empty(),
+        )
+        .await
+    {
+        Ok(packet) => Ok(packet),
+        Err(open_err) => {
+            // A previous attempt of this job may have left a temporary file.
+            // Clean it up and retry opening.
+            if cleanup_remote_temp_raw(raw, &temporary_destination, event_tx, job.id, None).await {
+                raw.open(
+                    temporary_destination.as_str(),
+                    OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
+                    FileAttributes::empty(),
+                )
+                .await
+                .map_err(remote_destination_create_error)
+            } else {
+                Err(remote_destination_create_error(open_err))
+            }
+        }
+    }?;
+    let handle = handle_packet.handle;
     emit_residual_temp_created(
         event_tx,
         ResidualTempRecord {
@@ -2485,27 +2521,10 @@ async fn upload_single_file_pipelined(
         },
     )
     .await;
-    if !cleanup_remote_temp_raw(raw, &temporary_destination, event_tx, job.id, Some(job.id)).await {
-        return Err(UserFacingError::new(
-            ErrorCode::Unknown,
-            "Upload Preparation Failed",
-            "A previous temporary upload file could not be removed. Retry the transfer.",
-        )
-        .with_retryable(true));
-    }
     let copy_result = async {
         let mut source_file = tokio::fs::File::open(source.as_str())
             .await
             .map_err(|error| local_transfer_error("Upload Item Unavailable", &error))?;
-        let handle_packet = raw
-            .open(
-                temporary_destination.as_str(),
-                OpenFlags::CREATE | OpenFlags::EXCLUDE | OpenFlags::WRITE,
-                FileAttributes::empty(),
-            )
-            .await
-            .map_err(remote_destination_create_error)?;
-        let handle = handle_packet.handle;
 
         let writer = crate::pipelined_writer::PipelinedUploadWriter::new(
             raw.clone(),
@@ -2648,6 +2667,29 @@ async fn download_single_file_pipelined(
 
     ensure_local_parent_directory(destination, cancel).await?;
     let temporary_destination = local_temporary_path(destination, job.id);
+    let mut destination_file = match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temporary_destination.as_str())
+        .await
+    {
+        Ok(file) => Ok(file),
+        Err(open_err) if open_err.kind() == std::io::ErrorKind::AlreadyExists => {
+            // A previous attempt of this job may have left a temporary file.
+            // Clean it up and retry opening.
+            if cleanup_local_temp(&temporary_destination, event_tx, job.id, None).await {
+                tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(temporary_destination.as_str())
+                    .await
+                    .map_err(local_destination_create_error)
+            } else {
+                Err(local_destination_create_error(open_err))
+            }
+        }
+        Err(open_err) => Err(local_destination_create_error(open_err)),
+    }?;
     emit_residual_temp_created(
         event_tx,
         ResidualTempRecord {
@@ -2659,14 +2701,6 @@ async fn download_single_file_pipelined(
         },
     )
     .await;
-    if !cleanup_local_temp(&temporary_destination, event_tx, job.id, Some(job.id)).await {
-        return Err(UserFacingError::new(
-            ErrorCode::Unknown,
-            "Download Preparation Failed",
-            "A previous temporary download file could not be removed. Retry the transfer.",
-        )
-        .with_retryable(true));
-    }
     let copy_result = async {
         let handle_packet = raw
             .open(source.as_str(), OpenFlags::READ, FileAttributes::empty())
@@ -2680,12 +2714,6 @@ async fn download_single_file_pipelined(
                 )
             })?;
         let handle = handle_packet.handle;
-        let mut destination_file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(temporary_destination.as_str())
-            .await
-            .map_err(local_destination_create_error)?;
         let reader = crate::pipelined_reader::PipelinedDownloadReader::new(
             raw.clone(),
             handle.clone(),
@@ -2762,6 +2790,27 @@ async fn download_single_file(
 
     ensure_local_parent_directory(destination, cancel).await?;
     let temporary_destination = local_temporary_path(destination, job.id);
+    let mut destination_file = match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temporary_destination.as_str())
+        .await
+    {
+        Ok(file) => Ok(file),
+        Err(open_err) if open_err.kind() == std::io::ErrorKind::AlreadyExists => {
+            if cleanup_local_temp(&temporary_destination, event_tx, job.id, None).await {
+                tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(temporary_destination.as_str())
+                    .await
+                    .map_err(local_destination_create_error)
+            } else {
+                Err(local_destination_create_error(open_err))
+            }
+        }
+        Err(open_err) => Err(local_destination_create_error(open_err)),
+    }?;
     emit_residual_temp_created(
         event_tx,
         ResidualTempRecord {
@@ -2773,14 +2822,6 @@ async fn download_single_file(
         },
     )
     .await;
-    if !cleanup_local_temp(&temporary_destination, event_tx, job.id, Some(job.id)).await {
-        return Err(UserFacingError::new(
-            ErrorCode::Unknown,
-            "Download Preparation Failed",
-            "A previous temporary download file could not be removed. Retry the transfer.",
-        )
-        .with_retryable(true));
-    }
     let copy_result = async {
         let mut source_file = sftp.open(source.as_str()).await.map_err(|error| {
             transfer_error(
@@ -2790,12 +2831,6 @@ async fn download_single_file(
                 sftp_status_guidance(&error),
             )
         })?;
-        let mut destination_file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(temporary_destination.as_str())
-            .await
-            .map_err(local_destination_create_error)?;
         copy_file_chunks(
             &mut source_file,
             &mut destination_file,
