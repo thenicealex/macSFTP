@@ -1,6 +1,6 @@
 use gpui_kit::{
-    App, ClickEvent, ElementId, Hsla, IntoElement, ParentElement, RenderOnce, SharedString, Styled,
-    Window, div, prelude::*, px,
+    App, ClickEvent, ElementId, FontWeight, Hsla, IntoElement, ParentElement, RenderOnce,
+    SharedString, Styled, Window, div, prelude::*, px,
 };
 
 use crate::components::{icon_button, text_tooltip};
@@ -77,7 +77,12 @@ impl RenderOnce for Tab {
         let background = if self.active {
             theme.colors.background
         } else {
-            theme.colors.surface
+            gpui_kit::hsla(0.0, 0.0, 0.0, 0.0)
+        };
+        let border_color = if self.active {
+            theme.colors.border
+        } else {
+            gpui_kit::hsla(0.0, 0.0, 0.0, 0.0)
         };
         let text_color = if self.active {
             theme.colors.text
@@ -91,7 +96,14 @@ impl RenderOnce for Tab {
         // `Visibility::Hidden` until the pointer is on the tab: a hidden element
         // takes no clicks, so a click aimed at the tab body can never land on a
         // close button the user has not seen.
-        let mut close_slot = div().flex_none().debug_selector(|| "tab-close".into());
+        let mut close_slot = div()
+            .flex_none()
+            .w(theme.sizes.icon_button_width)
+            .h(theme.sizes.icon_button_height)
+            .flex()
+            .items_center()
+            .justify_center()
+            .debug_selector(|| "tab-close".into());
         if !self.active {
             close_slot = close_slot
                 .invisible()
@@ -104,19 +116,26 @@ impl RenderOnce for Tab {
             .flex_none()
             .items_center()
             .gap_2()
-            .h_full()
+            .h(theme.sizes.button_height)
             .pl_3()
             .pr_1()
             .max_w(px(220.0))
             .bg(background)
-            .border_r_1()
-            .border_color(theme.colors.border)
+            .border_1()
+            .border_color(border_color)
+            .rounded(theme.sizes.button_radius)
+            .when(self.active, |element| element.shadow(theme.shadow_chip()))
             .group(self.hover_group.clone())
             .text_size(px(13.0))
             .text_color(text_color)
             .font_family(theme.fonts.ui_family.clone())
+            .font_weight(if self.active {
+                FontWeight::MEDIUM
+            } else {
+                FontWeight::NORMAL
+            })
             .when(!self.active, |element| {
-                element.hover(move |style| style.bg(hover_background))
+                element.hover(move |style| style.bg(hover_background).text_color(theme.colors.text))
             })
             .when_some(self.on_activate, |element, handler| {
                 element.on_click(move |event, window, cx| handler(event, window, cx))
@@ -131,17 +150,18 @@ impl RenderOnce for Tab {
                     .tooltip(text_tooltip(self.status_label)),
             )
             .child(div().min_w_0().truncate().child(self.title))
-            .child(close_slot.child(
-                icon_button(close_id, IconName::Close, "Close Tab").when_some(
-                    self.on_close,
-                    |button, handler| {
-                        button.on_click(move |event, window, cx| {
-                            cx.stop_propagation();
-                            handler(event, window, cx);
-                        })
-                    },
+            .child(
+                close_slot.child(
+                    icon_button(close_id, IconName::Close, "Close Tab")
+                        .circular(true)
+                        .when_some(self.on_close, |button, handler| {
+                            button.on_click(move |event, window, cx| {
+                                cx.stop_propagation();
+                                handler(event, window, cx);
+                            })
+                        }),
                 ),
-            ))
+            )
     }
 }
 

@@ -3,8 +3,8 @@ use std::time::UNIX_EPOCH;
 
 use gpui_kit::base::{ObservedElement, TestSupportExt as _};
 use gpui_kit::{
-    App, Div, ElementId, IntoElement, ParentElement, Pixels, Role, SharedString, Stateful, Styled,
-    Window, div, prelude::*, px,
+    App, Div, ElementId, FontWeight, IntoElement, ParentElement, Pixels, Role, SharedString,
+    Stateful, Styled, Window, div, prelude::*, px,
 };
 use macsftp_core::{FileKind, FileSort, FileSortField, SortDirection, Timestamp};
 
@@ -46,6 +46,11 @@ pub fn file_table_header(
             .flex()
             .items_center()
             .gap_1()
+            .font_weight(if active {
+                FontWeight::SEMIBOLD
+            } else {
+                FontWeight::MEDIUM
+            })
             .text_color(if active {
                 theme.colors.text
             } else {
@@ -53,7 +58,7 @@ pub fn file_table_header(
             })
             .child(label)
             .when(active, |column| {
-                column.child(icon_with_size(sort_icon, theme.colors.text_muted, px(10.0)))
+                column.child(icon_with_size(sort_icon, theme.colors.accent, px(10.0)))
             })
     };
     let a11y_label = |label: &str, field: FileSortField| -> SharedString {
@@ -87,13 +92,16 @@ pub fn file_table_header(
         .text_size(px(11.0))
         .text_color(theme.colors.text_muted)
         .font_family(theme.fonts.ui_family.clone())
+        .font_weight(FontWeight::MEDIUM)
         .child(
             div()
                 .id("sort-name")
                 .flex_1()
                 .pl(ICON_SIZE + px(8.0))
+                .py(px(2.0))
+                .rounded(theme.sizes.button_radius)
                 .cursor_pointer()
-                .hover(move |style| style.bg(hover_background))
+                .hover(move |style| style.bg(hover_background).text_color(theme.colors.text))
                 .on_click(move |_event, window, cx| {
                     name_handler(FileSortField::Name, window, cx);
                 })
@@ -110,8 +118,10 @@ pub fn file_table_header(
                 .flex_none()
                 .flex()
                 .justify_end()
+                .py(px(2.0))
+                .rounded(theme.sizes.button_radius)
                 .cursor_pointer()
-                .hover(move |style| style.bg(hover_background))
+                .hover(move |style| style.bg(hover_background).text_color(theme.colors.text))
                 .on_click(move |_event, window, cx| {
                     size_handler(FileSortField::Size, window, cx);
                 })
@@ -128,8 +138,10 @@ pub fn file_table_header(
                 .id("sort-modified")
                 .w(MODIFIED_COLUMN_WIDTH)
                 .flex_none()
+                .py(px(2.0))
+                .rounded(theme.sizes.button_radius)
                 .cursor_pointer()
-                .hover(move |style| style.bg(hover_background))
+                .hover(move |style| style.bg(hover_background).text_color(theme.colors.text))
                 .on_click(move |_event, window, cx| {
                     modified_handler(FileSortField::ModifiedAt, window, cx);
                 })
@@ -189,7 +201,7 @@ pub fn file_row(
             (IconName::File, theme.colors.text_muted)
         }
     };
-    let name_color = if model.is_hidden {
+    let name_color = if model.is_hidden && !model.selected {
         theme.colors.text_muted
     } else {
         theme.colors.text
@@ -208,8 +220,9 @@ pub fn file_row(
         .items_center()
         .w_full()
         .h(theme.sizes.file_row_height)
-        .px_2()
+        .px(px(4.0))
         .gap_2()
+        .rounded(theme.sizes.button_radius)
         .text_size(px(13.0))
         .font_family(theme.fonts.ui_family.clone())
         .when(model.selected, |row| row.bg(theme.colors.element_selected))
@@ -222,6 +235,11 @@ pub fn file_row(
                 .flex_1()
                 .min_w_0()
                 .truncate()
+                .font_weight(if model.selected {
+                    FontWeight::MEDIUM
+                } else {
+                    FontWeight::NORMAL
+                })
                 .text_color(name_color)
                 .child(model.name),
         )

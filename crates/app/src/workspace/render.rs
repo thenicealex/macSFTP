@@ -149,11 +149,14 @@ impl crate::workspace::Workspace {
                     .flex_1()
                     .min_w_0()
                     .h_full()
+                    .items_center()
+                    .gap_1()
+                    .px_1()
                     .overflow_x_scroll()
                     .children(tabs),
             )
             .child(
-                div().px_1().child(
+                div().px_1().flex_none().flex().items_center().child(
                     icon_button(
                         "new-tab",
                         IconName::Plus,
@@ -216,7 +219,7 @@ impl crate::workspace::Workspace {
                         .gap_2()
                         .px_2()
                         .py_1()
-                        .rounded_sm()
+                        .rounded(theme.sizes.button_radius)
                         .bg(background)
                         .when(!is_selected, |row| {
                             row.hover(move |style| style.bg(hover_background))
@@ -277,7 +280,7 @@ impl crate::workspace::Workspace {
                         .bg(theme.colors.elevated_surface)
                         .border_1()
                         .border_color(theme.colors.border)
-                        .rounded_md()
+                        .rounded(theme.sizes.modal_radius)
                         .shadow(theme.shadow_popover())
                         .font_family(theme.fonts.ui_family.clone())
                         .child(
@@ -653,12 +656,24 @@ impl crate::workspace::Workspace {
                                                 seg.flex_shrink(3.0).min_w(px(16.0))
                                             })
                                             .truncate()
-                                            .px(px(2.0))
-                                            .rounded_sm()
+                                            .px(px(3.0))
+                                            .py(px(1.0))
+                                            .rounded(theme.sizes.button_radius)
                                             .text_size(px(12.0))
-                                            .text_color(text_color)
+                                            .font_weight(if is_last {
+                                                FontWeight::MEDIUM
+                                            } else {
+                                                FontWeight::NORMAL
+                                            })
+                                            .text_color(if is_last {
+                                                text_color
+                                            } else {
+                                                muted_color
+                                            })
                                             .cursor_pointer()
-                                            .hover(|style| style.bg(hover_background))
+                                            .hover(|style| {
+                                                style.bg(hover_background).text_color(text_color)
+                                            })
                                             .active(|style| style.bg(active_background))
                                             .tooltip(text_tooltip(absolute.clone()))
                                             .on_click(cx.listener(
@@ -720,7 +735,7 @@ impl crate::workspace::Workspace {
                 } else {
                     labeled_shortcut("Show Hidden Files", "ToggleHiddenFiles")
                 };
-                let mut button = icon_button(
+                icon_button(
                     if side == PaneSide::Local {
                         "local-toggle-hidden"
                     } else {
@@ -729,13 +744,10 @@ impl crate::workspace::Workspace {
                     IconName::File,
                     hidden_tooltip,
                 )
+                .emphasis(show_hidden_files)
                 .on_click(cx.listener(move |workspace, _event, _window, cx| {
                     workspace.toggle_hidden_files(cx);
-                }));
-                if show_hidden_files {
-                    button = button.icon_color(theme.colors.accent);
-                }
-                button
+                }))
             })
             .child(
                 icon_button(
@@ -1055,7 +1067,7 @@ impl crate::workspace::Workspace {
                         .h(px(34.0))
                         .px_3()
                         .relative()
-                        .rounded_md()
+                        .rounded(theme.sizes.button_radius)
                         .border_1()
                         .border_color(if focused {
                             theme.colors.border_focused
@@ -1066,7 +1078,7 @@ impl crate::workspace::Workspace {
                         .cursor_pointer()
                         .bg(theme.colors.accent)
                         .text_size(px(13.0))
-                        .text_color(theme.colors.background)
+                        .text_color(theme.colors.text_on_accent)
                         .hover(|style| style.opacity(0.9))
                         .active(|style| style.opacity(0.8))
                         .when(focused, |button| {
@@ -1360,7 +1372,8 @@ impl crate::workspace::Workspace {
             )
             .track_scroll(self.scroll_handle(side))
             .h_full()
-            .w_full();
+            .w_full()
+            .px(px(4.0));
             list.style().scrollbar_width = Some(px(0.0).into());
             list.into_any_element()
         };
@@ -1641,7 +1654,7 @@ impl crate::workspace::Workspace {
 
         let mark = div()
             .size(px(72.0))
-            .rounded_md()
+            .rounded(px(16.0))
             .bg(theme.colors.surface)
             .border_1()
             .border_color(theme.colors.border)
@@ -1679,7 +1692,7 @@ impl crate::workspace::Workspace {
                         .flex_col()
                         .items_center()
                         .gap_3()
-                        .rounded_md()
+                        .rounded(theme.sizes.modal_radius)
                         .bg(theme.colors.elevated_surface)
                         .border_1()
                         .border_color(theme.colors.border)
