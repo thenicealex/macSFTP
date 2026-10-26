@@ -662,22 +662,23 @@ impl TransferManager {
                 .iter()
                 .position(|queued| {
                     admissible_plans.contains(&queued.plan_id)
-                        && self.running_per_plan.get(&queued.plan_id).copied().unwrap_or(0) == 0
+                        && self
+                            .running_per_plan
+                            .get(&queued.plan_id)
+                            .copied()
+                            .unwrap_or(0)
+                            == 0
                         && self.is_eligible(queued)
                 })
                 .or_else(|| {
-                    self.pending
-                        .iter()
-                        .position(|queued| {
-                            admissible_plans.contains(&queued.plan_id) && self.is_eligible(queued)
-                        })
+                    self.pending.iter().position(|queued| {
+                        admissible_plans.contains(&queued.plan_id) && self.is_eligible(queued)
+                    })
                 })
         } else {
-            self.pending
-                .iter()
-                .position(|queued| {
-                    admissible_plans.contains(&queued.plan_id) && self.is_eligible(queued)
-                })
+            self.pending.iter().position(|queued| {
+                admissible_plans.contains(&queued.plan_id) && self.is_eligible(queued)
+            })
         }
     }
 

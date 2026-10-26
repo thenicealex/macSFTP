@@ -6128,7 +6128,9 @@ mod tests {
         });
         store.jobs.push(job(1, super::TransferState::Queued));
         for index in 0..CHILDREN {
-            store.jobs.push(job(index + 2, super::TransferState::Queued));
+            store
+                .jobs
+                .push(job(index + 2, super::TransferState::Queued));
         }
 
         let range = store.child_jobs_slice_range(0).expect("slice range exists");
@@ -6141,7 +6143,14 @@ mod tests {
 
         assert_eq!(store.plans[0].state, super::TransferPlanState::Cancelled);
         assert_eq!(store.jobs[0].state, super::TransferState::Skipped);
-        assert!(store.jobs[1..].iter().all(|j| j.state == super::TransferState::Skipped));
-        assert!(elapsed < std::time::Duration::from_millis(500), "cancelling {CHILDREN} children took {elapsed:?}");
+        assert!(
+            store.jobs[1..]
+                .iter()
+                .all(|j| j.state == super::TransferState::Skipped)
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "cancelling {CHILDREN} children took {elapsed:?}"
+        );
     }
 }
