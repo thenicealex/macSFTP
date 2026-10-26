@@ -916,6 +916,11 @@ pub(crate) fn build_edit_upload_command(
         direction: TransferDirection::Upload,
         sources: vec![TransferEndpoint::Local(temp.clone())],
         destination: TransferEndpoint::Remote(remote_path.clone()),
+        // Keep the default policy (preserve mtime and permissions): remote-edit
+        // relies on preserving the local temp file's mtime to construct the
+        // baseline for `advance_uploading_back`. If mtime preservation were
+        // disabled per user preference, the server would assign its current time,
+        // causing subsequent refreshes to report a false conflict.
         metadata_policy: MetadataPolicy::default(),
         // The edit layer already ran its own (size, mtime) divergence check, or
         // the user explicitly chose "Replace Server File". The pipeline-level
