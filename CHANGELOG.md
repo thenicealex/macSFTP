@@ -5,6 +5,16 @@ based on Keep a Changelog, and releases use semantic versioning.
 
 ## [Unreleased]
 
+### Changed
+
+- **macOS Sonoma / Sequoia Apple Native HIG Modernization**:
+  - **Color & Theme System**: Adopted authentic macOS Sonoma/Sequoia dark (`#1e1e1e`/`#262626`/`#0a84ff`) and light (`#f5f5f7`/`#ffffff`/`#007aff`) theme palettes, refined contrast tokens, added `text_on_accent`, and aligned control corner radii (`5px` buttons and inputs, `10px` modal sheets).
+  - **Tab Bar**: Styled active tabs with Safari-style inset segmented pills (`rounded(5.0px)`, subtle 1px border, chip shadow), centered tabs with 4px gap and 6px padding, and added circular close button hover affordances (`.circular(true)`, 18×18px hit area).
+  - **Path Bar**: Highlighted current folder segment with `FontWeight::MEDIUM` and primary text color; ancestor segments rendered in muted text; added rounded hover chips and native `.emphasis(show_hidden_files)` state.
+  - **File List & Headers**: Replaced full-width row selection with macOS Finder-style inset rounded pills (`rounded(5.0px)` with 4px container inset); selected row filenames use `FontWeight::MEDIUM`; table headers updated to `FontWeight::MEDIUM` with system accent sort indicator arrows and column hover chips.
+  - **Modals & Dialog Sheets**: Standardized modal radius to 10px (`modal_radius`) across Connect, Host Key, Transfer Conflict, Delete Confirmation, Keyboard-Interactive, and Edit modals; elevated dialog titles to `FontWeight::SEMIBOLD` and simplified inner detail panels to 1px bordered surfaces.
+  - **Transfer Drawer & Status Bar**: Styled drawer header with `FontWeight::SEMIBOLD`, transfer rows with 5px rounded hover feedback, empty queue with Apple 2-line layout, connection status text with `FontWeight::MEDIUM`, and added an active capsule pill highlight to the Transfers status bar toggle button when open.
+
 ## [0.7.1] - 2026-10-26
 
 ### Fixed
