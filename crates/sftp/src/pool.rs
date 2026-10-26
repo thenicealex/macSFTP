@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use macsftp_core::{
-    AppEvent, ConnectionKey, ConnectionPoolIdentity, ConnectionSettings, RemoteEventScope,
-    TrustRequestId,
+    AppEvent, AuthCredential, ConnectionKey, ConnectionPoolIdentity, ConnectionSettings,
+    RemoteEventScope, ResolvedConnectionRoute, TrustRequestId,
 };
 use russh::client;
 use russh_sftp::client::SftpSession;
@@ -16,8 +16,8 @@ use tracing::{info, warn};
 use crate::keyboard_interactive::KeyboardInteractiveRegistry;
 use crate::known_hosts::KnownHostsStore;
 use crate::physical_connection::{
-    ClientHandler, ConnectFailure, PhysicalDisconnectCause, establish_physical_connection,
-    handshake_timeout_error, sftp_connection_error,
+    AttemptDeadline, ClientHandler, ConnectFailure, PhysicalDisconnectCause,
+    establish_physical_connection, handshake_timeout_error, sftp_connection_error,
 };
 use crate::session_actor::HostTrustConfig;
 use crate::trust::TrustRegistry;
@@ -53,11 +53,11 @@ impl std::fmt::Debug for SharedConnection {
 pub enum PoolEntry {
     Connecting {
         receiver: broadcast::Receiver<Result<Arc<SharedConnection>, ConnectFailure>>,
-        /// When this attempt started. A `Connecting` entry that outlives
-        /// every bounded handshake phase means its task died without
-        /// reporting (panic, abort, runtime teardown). Left in place it would
-        /// make every later attempt wait on a receiver that never fires.
+        /// When this attempt started.
         started_at: Instant,
+        /// Maximum allowable deadline for this attempt across all phases and
+        /// human trust/interactive prompts.
+        deadline: Arc<AttemptDeadline>,
         /// Identifies this attempt within the manager. A superseded attempt
         /// that finishes late must not overwrite or remove the entry a newer
         /// attempt installed for the same connection key.
@@ -66,23 +66,68 @@ pub enum PoolEntry {
     Connected(Arc<SharedConnection>),
 }
 
-/// How long a `Connecting` entry may live before a new attempt replaces it.
+/// Compute the real peer-phases deadline budget for an attempt based on its route and auth.
 ///
-/// Every peer-facing setup phase is separately bounded by `handshake_timeout`
-/// (TCP connect, key exchange, one authentication request, agent socket and
-/// key listing, channel open, subsystem request, SFTP init, remote home
-/// resolution), and a human trust prompt may add `trust_prompt_timeout` on top
-/// of the handshake that carries it.
-///
-/// The multiplier is a deliberately loose estimate, not a hard budget: a jump
-/// host adds a second full sequence, an agent can offer many identities, and
-/// two trust prompts can each use the full prompt timeout. It only ever reaps
-/// entries whose task died without reporting; evicting a live attempt is
-/// survivable (its waiters still receive the connection, and the newer attempt
-/// owns the pool entry), but it opens a second connection and can prompt
-/// twice, so the bound errs on the long side.
-pub(crate) fn stale_connecting_after(trust_config: &HostTrustConfig) -> Duration {
-    trust_config.handshake_timeout * 6 + trust_config.trust_prompt_timeout
+/// This accounts for every peer-facing step across all hops (TCP connect, SSH
+/// transport/handshake, authentication negotiation, SFTP subsystem setup, and
+/// intermediate jump-host steps). It does not include human-in-the-loop waits
+/// (trust prompts, keyboard-interactive answers); those extend the deadline
+/// dynamically when the prompt actually begins.
+pub fn compute_attempt_peer_budget(
+    settings: &ConnectionSettings,
+    handshake_timeout: Duration,
+) -> Duration {
+    fn auth_peer_phases(auth: &AuthCredential) -> u32 {
+        match auth {
+            AuthCredential::Password { .. } => 3, // password + possible kbd-interactive fallback
+            AuthCredential::PrivateKey { .. } => 4, // rsa negotiation + publickey + possible kbd fallback
+            AuthCredential::KeyboardInteractive => 4, // start + up to 3 prompt rounds
+            AuthCredential::SshAgent { .. } => 11,  // connect + list + rsa neg + up to 8 keys
+        }
+    }
+
+    let mut phases: u32 = 0;
+    match &settings.route {
+        ResolvedConnectionRoute::Direct => {
+            phases += 1; // TCP connect
+            phases += 1; // SSH transport / handshake
+            phases += auth_peer_phases(&settings.auth);
+        }
+        ResolvedConnectionRoute::ProxyCommand { .. } => {
+            phases += 1; // SSH transport / handshake
+            phases += auth_peer_phases(&settings.auth);
+        }
+        ResolvedConnectionRoute::JumpHost {
+            settings: jump_settings,
+        } => {
+            phases += 1; // Jump TCP connect
+            phases += 1; // Jump SSH transport / handshake
+            phases += auth_peer_phases(&jump_settings.auth);
+            phases += 1; // channel_open_direct_tcpip
+            phases += 1; // Target SSH transport / handshake
+            phases += auth_peer_phases(&settings.auth);
+        }
+    }
+
+    phases += 4; // open session channel, request subsystem, sftp init, remote home
+    handshake_timeout * phases
+}
+
+/// Drop guard that cleans up a `Connecting` entry if the attempt task terminates
+/// prematurely (panic, cancellation, abort, or error before marking connected).
+struct AttemptGuard {
+    manager: Arc<ConnectionManager>,
+    key: ConnectionKey,
+    attempt: u64,
+    completed: bool,
+}
+
+impl Drop for AttemptGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.manager.abandon_attempt(&self.key, self.attempt);
+        }
+    }
 }
 
 pub struct ConnectionManager {
@@ -143,19 +188,15 @@ impl ConnectionManager {
             pool.remove(&key);
         }
 
-        let stale_after = stale_connecting_after(&trust_config);
         if let Some(PoolEntry::Connecting {
-            receiver,
-            started_at,
-            ..
+            receiver, deadline, ..
         }) = pool.get(&key)
         {
-            if started_at.elapsed() >= stale_after {
+            if deadline.is_expired() {
                 warn!(
                     target: "macsftp_sftp::connection",
                     host = settings.host.as_str(),
                     port = settings.port,
-                    elapsed_secs = started_at.elapsed().as_secs(),
                     "discarding a stalled pooled connection attempt"
                 );
                 pool.remove(&key);
@@ -195,14 +236,35 @@ impl ConnectionManager {
         let attempt = self
             .next_attempt
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let peer_budget = compute_attempt_peer_budget(settings, trust_config.handshake_timeout);
+        let attempt_deadline = Arc::new(AttemptDeadline::new(Instant::now() + peer_budget));
+
         pool.insert(
             key.clone(),
             PoolEntry::Connecting {
                 receiver: rx.resubscribe(),
                 started_at: Instant::now(),
+                deadline: attempt_deadline.clone(),
                 attempt,
             },
         );
+
+        let watcher_manager = Arc::downgrade(self);
+        let watcher_key = key.clone();
+        let watcher_deadline = attempt_deadline.clone();
+        tokio::spawn(async move {
+            loop {
+                let deadline = watcher_deadline.get();
+                let now = Instant::now();
+                if now >= deadline {
+                    if let Some(manager) = watcher_manager.upgrade() {
+                        manager.reap_stale_attempt(&watcher_key, attempt);
+                    }
+                    break;
+                }
+                tokio::time::sleep(deadline - now).await;
+            }
+        });
 
         let settings = settings.clone();
         let scope = scope.clone();
@@ -218,7 +280,14 @@ impl ConnectionManager {
         let manager = self.clone();
         let key_clone = key.clone();
         let setup_timeout = trust_config.handshake_timeout;
+        let attempt_deadline_for_task = attempt_deadline.clone();
         tokio::spawn(async move {
+            let mut guard = AttemptGuard {
+                manager: manager.clone(),
+                key: key_clone.clone(),
+                attempt,
+                completed: false,
+            };
             let connection_lost = CancellationToken::new();
             let disconnect_cause = Arc::new(std::sync::Mutex::new(None));
             let result = async {
@@ -235,6 +304,7 @@ impl ConnectionManager {
                     event_tx,
                     connection_lost.clone(),
                     disconnect_cause.clone(),
+                    attempt_deadline_for_task,
                 )
                 .await?;
 
@@ -269,19 +339,18 @@ impl ConnectionManager {
             }
             .await;
 
-            match &result {
-                Ok(shared) => {
-                    if !manager.mark_connected(&key_clone, attempt, shared.clone()) {
-                        warn!(
-                            target: "macsftp_sftp::connection",
-                            host = settings.host.as_str(),
-                            port = settings.port,
-                            attempt,
-                            "discarding the result of a superseded connection attempt"
-                        );
-                    }
+            if let Ok(shared) = &result {
+                if manager.mark_connected(&key_clone, attempt, shared.clone()) {
+                    guard.completed = true;
+                } else {
+                    warn!(
+                        target: "macsftp_sftp::connection",
+                        host = settings.host.as_str(),
+                        port = settings.port,
+                        attempt,
+                        "discarding the result of a superseded connection attempt"
+                    );
                 }
-                Err(_) => manager.abandon_attempt(&key_clone, attempt),
             }
             let _ = tx.send(result);
         });
@@ -340,6 +409,35 @@ impl ConnectionManager {
         });
 
         true
+    }
+
+    /// Autonomous reaper check that drops a stalled attempt's `Connecting` entry
+    /// once its real phase deadline has expired, without waiting for another
+    /// connection attempt to arrive on the same key.
+    fn reap_stale_attempt(&self, key: &ConnectionKey, attempt: u64) {
+        let mut pool = self
+            .pool
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if is_current_attempt(&pool, key, attempt) {
+            warn!(
+                target: "macsftp_sftp::connection",
+                "autonomous reaper discarding stalled connecting entry"
+            );
+            pool.remove(key);
+        }
+    }
+
+    /// Reaps any expired `Connecting` entries or cancelled `Connected` entries.
+    pub fn reap_stale(&self) {
+        let mut pool = self
+            .pool
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        pool.retain(|_key, entry| match entry {
+            PoolEntry::Connecting { deadline, .. } => !deadline.is_expired(),
+            PoolEntry::Connected(shared) => !shared.connection_lost.is_cancelled(),
+        });
     }
 
     /// Drop this attempt's `Connecting` entry after a failure, unless a newer
@@ -485,8 +583,9 @@ mod tests {
     };
     use tokio::net::TcpListener;
 
-    use super::{ConnectionManager, PoolEntry, is_current_attempt, stale_connecting_after};
+    use super::{ConnectionManager, PoolEntry, compute_attempt_peer_budget, is_current_attempt};
     use crate::known_hosts::KnownHostsStore;
+    use crate::physical_connection::AttemptDeadline;
     use crate::session_actor::HostTrustConfig;
     use crate::trust::TrustRegistry;
 
@@ -579,8 +678,8 @@ mod tests {
     }
 
     /// Safety net for a task that never reports at all (panic, abort,
-    /// runtime teardown): a `Connecting` entry older than every bounded
-    /// phase is discarded instead of being reused forever.
+    /// runtime teardown): a `Connecting` entry older than its real phase
+    /// budget is discarded instead of being reused forever.
     #[tokio::test]
     async fn an_abandoned_connecting_entry_is_discarded() {
         let dir = unique_dir("abandoned");
@@ -590,6 +689,7 @@ mod tests {
         let identity = ConnectionPoolIdentity::Ephemeral(SessionId(7));
         let key = macsftp_core::ConnectionKey::new(&settings, identity.clone());
 
+        let peer_budget = compute_attempt_peer_budget(&settings, trust_config.handshake_timeout);
         {
             let (tx, rx) = tokio::sync::broadcast::channel(1);
             std::mem::forget(tx);
@@ -601,17 +701,18 @@ mod tests {
                 key.clone(),
                 PoolEntry::Connecting {
                     receiver: rx,
-                    started_at: std::time::Instant::now()
-                        - stale_connecting_after(&trust_config)
-                        - Duration::from_secs(1),
+                    started_at: std::time::Instant::now() - peer_budget - Duration::from_secs(1),
+                    deadline: std::sync::Arc::new(AttemptDeadline::new(
+                        std::time::Instant::now() - Duration::from_secs(1),
+                    )),
                     attempt: 0,
                 },
             );
         }
 
         assert!(
-            stale_connecting_after(&trust_config) > trust_config.trust_prompt_timeout,
-            "the bound must cover a live trust prompt plus every phase"
+            peer_budget >= trust_config.handshake_timeout * 6,
+            "the budget must cover all required peer phases"
         );
 
         let scope = RemoteEventScope::new(TabId(1), SessionId(7), 1);
@@ -661,6 +762,9 @@ mod tests {
             PoolEntry::Connecting {
                 receiver: rx,
                 started_at: std::time::Instant::now(),
+                deadline: std::sync::Arc::new(AttemptDeadline::new(
+                    std::time::Instant::now() + Duration::from_secs(60),
+                )),
                 attempt: 7,
             },
         );
@@ -669,6 +773,157 @@ mod tests {
         assert!(
             !is_current_attempt(&pool, &key, 6),
             "the replaced attempt must no longer own the entry"
+        );
+    }
+
+    #[test]
+    fn compute_attempt_peer_budget_covers_route_and_auth_variants() {
+        let handshake = Duration::from_secs(10);
+        let direct_pw = test_settings(22);
+        assert_eq!(
+            compute_attempt_peer_budget(&direct_pw, handshake),
+            Duration::from_secs(90) // 1 TCP + 1 SSH + 3 auth + 4 sftp = 9 * 10s
+        );
+
+        let mut direct_key = test_settings(22);
+        direct_key.auth = AuthCredential::PrivateKey {
+            key_path: "key".into(),
+            passphrase: None,
+        };
+        assert_eq!(
+            compute_attempt_peer_budget(&direct_key, handshake),
+            Duration::from_secs(100) // 1 TCP + 1 SSH + 4 auth + 4 sftp = 10 * 10s
+        );
+
+        let mut direct_agent = test_settings(22);
+        direct_agent.auth = AuthCredential::SshAgent { socket_path: None };
+        assert_eq!(
+            compute_attempt_peer_budget(&direct_agent, handshake),
+            Duration::from_secs(170) // 1 TCP + 1 SSH + 11 auth + 4 sftp = 17 * 10s
+        );
+
+        let mut jump_settings = test_settings(22);
+        jump_settings.route = ResolvedConnectionRoute::JumpHost {
+            settings: Box::new(test_settings(2222)),
+        };
+        assert_eq!(
+            compute_attempt_peer_budget(&jump_settings, handshake),
+            Duration::from_secs(140) // (1+1+3) jump + 1 direct_tcpip + (1+3) target + 4 sftp = 14 * 10s
+        );
+    }
+
+    #[tokio::test]
+    async fn connecting_entry_is_reaped_autonomously_when_deadline_expires() {
+        let manager = std::sync::Arc::new(ConnectionManager::new());
+        let settings = test_settings(22);
+        let identity = ConnectionPoolIdentity::Ephemeral(SessionId(1));
+        let key = macsftp_core::ConnectionKey::new(&settings, identity.clone());
+
+        let (_tx, rx) = tokio::sync::broadcast::channel(1);
+        let deadline = std::sync::Arc::new(AttemptDeadline::new(
+            std::time::Instant::now() + Duration::from_millis(50),
+        ));
+
+        {
+            let mut pool = manager
+                .pool
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            pool.insert(
+                key.clone(),
+                PoolEntry::Connecting {
+                    receiver: rx,
+                    started_at: std::time::Instant::now(),
+                    deadline: deadline.clone(),
+                    attempt: 1,
+                },
+            );
+        }
+
+        let watcher_manager = std::sync::Arc::downgrade(&manager);
+        let watcher_key = key.clone();
+        let watcher_deadline = deadline.clone();
+        tokio::spawn(async move {
+            loop {
+                let deadline = watcher_deadline.get();
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    if let Some(mgr) = watcher_manager.upgrade() {
+                        mgr.reap_stale_attempt(&watcher_key, 1);
+                    }
+                    break;
+                }
+                tokio::time::sleep(deadline - now).await;
+            }
+        });
+
+        // Verify that without any second connection call arriving, the entry is reaped autonomously!
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        let has_entry = manager
+            .pool
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(&key);
+        assert!(
+            !has_entry,
+            "stalled connecting entry must be reaped autonomously without a second connect call"
+        );
+    }
+
+    #[tokio::test]
+    async fn attempt_guard_cleans_up_on_task_abort() {
+        let manager = std::sync::Arc::new(ConnectionManager::new());
+        let settings = test_settings(22);
+        let identity = ConnectionPoolIdentity::Ephemeral(SessionId(1));
+        let key = macsftp_core::ConnectionKey::new(&settings, identity.clone());
+
+        let (_tx, rx) = tokio::sync::broadcast::channel(1);
+        let deadline = std::sync::Arc::new(AttemptDeadline::new(
+            std::time::Instant::now() + Duration::from_secs(60),
+        ));
+
+        {
+            let mut pool = manager
+                .pool
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            pool.insert(
+                key.clone(),
+                PoolEntry::Connecting {
+                    receiver: rx,
+                    started_at: std::time::Instant::now(),
+                    deadline,
+                    attempt: 42,
+                },
+            );
+        }
+
+        let mgr_clone = manager.clone();
+        let key_clone = key.clone();
+        let task = tokio::spawn(async move {
+            let _guard = super::AttemptGuard {
+                manager: mgr_clone,
+                key: key_clone,
+                attempt: 42,
+                completed: false,
+            };
+            futures_pending().await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Abort the task while it is in-flight
+        task.abort();
+        let _ = task.await;
+
+        let has_entry = manager
+            .pool
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(&key);
+        assert!(
+            !has_entry,
+            "aborted task must clean up its connecting entry via AttemptGuard"
         );
     }
 
