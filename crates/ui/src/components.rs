@@ -65,6 +65,7 @@ pub struct IconButton {
     icon_color: Option<Hsla>,
     emphasis: bool,
     disabled: bool,
+    circular: bool,
     on_click: Option<ClickHandler>,
 }
 
@@ -80,6 +81,7 @@ pub fn icon_button(
         icon_color: None,
         emphasis: false,
         disabled: false,
+        circular: false,
         on_click: None,
     }
 }
@@ -102,6 +104,12 @@ impl IconButton {
         self
     }
 
+    /// Circular button appearance (used for Safari-style tab close affordance).
+    pub fn circular(mut self, circular: bool) -> Self {
+        self.circular = circular;
+        self
+    }
+
     pub fn on_click(
         mut self,
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -120,9 +128,19 @@ impl RenderOnce for IconButton {
         } else {
             theme.colors.text
         });
-        button_base(self.id, None, self.disabled, window, cx)
-            .w(theme.sizes.icon_button_width)
-            .h(theme.sizes.icon_button_height)
+        let (width, height, icon_size, radius) = if self.circular {
+            (px(18.0), px(18.0), px(11.0), Some(px(9.0)))
+        } else {
+            (
+                theme.sizes.icon_button_width,
+                theme.sizes.icon_button_height,
+                ICON_BUTTON_ICON_SIZE,
+                None,
+            )
+        };
+        button_base(self.id, None, self.disabled, radius, window, cx)
+            .w(width)
+            .h(height)
             .bg(if emphasized {
                 theme.colors.element_selected
             } else {
@@ -145,7 +163,7 @@ impl RenderOnce for IconButton {
             .when_some(self.on_click, |button, handler| {
                 button.on_click(move |event, window, cx| handler(event, window, cx))
             })
-            .child(icon_with_size(self.icon, icon_color, ICON_BUTTON_ICON_SIZE))
+            .child(icon_with_size(self.icon, icon_color, icon_size))
     }
 }
 
@@ -200,18 +218,18 @@ impl RenderOnce for TextButton {
             (
                 theme.colors.error,
                 theme.colors.error,
-                theme.colors.background,
+                theme.colors.text_on_accent,
             )
         } else if self.primary {
             (
                 theme.colors.accent,
                 theme.colors.accent,
-                theme.colors.background,
+                theme.colors.text_on_accent,
             )
         } else {
             (theme.colors.surface, theme.colors.border, theme.colors.text)
         };
-        button_base(self.id, Some(border_color), false, window, cx)
+        button_base(self.id, Some(border_color), false, None, window, cx)
             .px(theme.sizes.button_padding_x)
             .h(theme.sizes.button_height)
             .min_w(theme.sizes.button_min_width)
@@ -268,6 +286,7 @@ fn button_base(
     id: ElementId,
     border_color: Option<Hsla>,
     disabled: bool,
+    radius: Option<gpui_kit::Pixels>,
     window: &mut Window,
     cx: &mut App,
 ) -> Button {
@@ -282,12 +301,13 @@ fn button_base(
     } else {
         px(0.0)
     };
+    let btn_radius = radius.unwrap_or(theme.sizes.button_radius);
     Button::new(id)
         .track_focus(&focus)
         .relative()
         .flex_shrink_0()
         .cursor_default()
-        .rounded(theme.sizes.button_radius)
+        .rounded(btn_radius)
         .line_height(relative(1.25))
         .when_some(border_color, |button, color| {
             button.border_color(if focused {
@@ -311,7 +331,7 @@ fn button_base(
                     .right(-theme.sizes.button_focus_ring - border)
                     .bottom(-theme.sizes.button_focus_ring - border)
                     .border(theme.sizes.button_focus_ring)
-                    .rounded(theme.sizes.button_radius + theme.sizes.button_focus_ring)
+                    .rounded(btn_radius + theme.sizes.button_focus_ring)
                     .border_color(gpui_kit::Hsla {
                         a: 0.5,
                         ..theme.colors.border_focused

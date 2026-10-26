@@ -224,12 +224,14 @@ Profile 更新由 `ProfileStore` 协调：校验请求和 route → 写入或读
 - Edit 菜单使用 `MenuItem::os_action` 走 AppKit 标准 selector（`cut:`/`copy:`/`paste:`/`selectAll:`/`undo:`/`redo:`），dispatch 的仍是 `gpui-base` input action，不得自造文本编辑 action（§12.14）。
 - 平台支持 `MenuItem::checked`，但菜单栏是应用级的一份，在启动时构建一次（`main.rs` 的 `set_menus(menu_bar())`），而排序状态属于每个 tab（两个 pane 共用），单个 checkmark 无法表达多 tab 下的当前状态——要显示它就必须在排序、tab 或窗口焦点变化时重建整个菜单栏，目前不做。有状态的命令因此写成显式取值（例如 Sort By ▸ Name (A→Z)/(Z→A)）；当前排序状态的显示位置只有文件列表表头（§12.3）。
 - command palette 不得暴露 runtime、channel、actor、crate 等内部实现细节；用户忘记快捷键时必须能用 command palette 完成同一操作。
-- path bar 必须支持复制当前路径，local 和 remote 都保留 back、up、refresh；路径过长从中间省略，loading 时不得消失，只增加局部 spinner 或 progress indicator。Copy Path 复制的是选中条目自身的完整路径（多选时每行一条），只有没有选中任何条目时才回落到当前目录路径——右键菜单会先选中指针下的行，因此右键某个文件再 Copy Path 得到的必须是该文件的路径，而不是它所在目录。
+- path bar 必须支持复制当前路径，local 和 remote 都保留 back、up、refresh；路径过长从中间省略，当前所在目录以加粗突出显示（MEDIUM 字重与主文本色），上级路径以次要文本色呈现；loading 时不得消失，只增加局部 spinner 或 progress indicator。Copy Path 复制的是选中条目自身的完整路径（多选时每行一条），只有没有选中任何条目时才回落到当前目录路径——右键菜单会先选中指针下的行，因此右键某个文件再 Copy Path 得到的必须是该文件的路径，而不是它所在目录。
 - Go to Folder（⌘⇧G）必须预填当前 pane 正在显示的路径并全选：改写一段即可到达兄弟目录，不必重打整条路径。全选只作用于新创建的输入框（`select_on_first_render`），输入即替换、方向键则保留可编辑。
 
 ### 12.3 文件列表与滚动
 
 - 文件列表必须虚拟化，10k entries 不创建长期 row entity；表头显示排序状态；selection 绑定稳定 id/path，禁止绑定 row index。
+- 表头遵循 macOS Sonoma / Sequoia 原生表格规范：表头标签采用 Medium 字重，当前排序列高亮突出（Semibold 字重与系统强调色排序指示箭头），各列支持圆角悬浮背景反馈。
+- 文件行遵循 macOS 原生列表规范：行选中与悬浮采用圆角嵌入式胶囊（inset pill，5px 圆角，内嵌 4px 边距与表头对齐线精确匹配），选中行采用系统强调色浅透明高亮背景且文件名呈现 Medium 字重，未选中行支持即时微弱圆角悬浮背景；文件大小与修改时间列采用等宽字体保持列内严格对齐。
 - 键盘导航覆盖上/下、page up/down、home/end、shift 多选和 enter 默认动作；directory、file、symlink 和 hidden row 有可区分但克制的 icon 或 marker；hover action 易于发现但不改变列宽或 row 高度。
 - 聚焦的 pane 里键入字母是 Finder 式 type-select：前缀累积约 1 秒（连续按键继续同一前缀；超时、导航、切 tab、Escape 后重置），跳到第一个匹配项并滚动到它，从当前 selection 之后扫描并在末尾回绕，所以重复按同一字母会依次跳过匹配项；前缀匹配不到时退回最后键入的字符、不改变 selection。列表不缩小、不出现筛选栏。筛选只保留显式入口：⌘F（Filter Files）、菜单/palette 命令或筛选字段本身，筛选栏出现后键入才进入筛选。
 - ⌘C / ⌘V 作用于文件，采用 Finder 语义：⌘C 记住当前 pane 的选区（同时把路径写入系统剪贴板，方便粘到终端），⌘V 在**另一侧** pane 粘贴即触发对应的上传或下载。同一个 pane 内粘贴不做任何搬动，只给出说明——同侧复制需要服务端 copy 能力，当前不提供，不能假装成功。
@@ -248,7 +250,7 @@ Profile 更新由 `ProfileStore` 协调：校验请求和 route → 写入或读
 
 ### 12.5 视觉系统
 
-- 支持 dark 和 light 两套 theme token，默认值分别采用 One Dark 和 One Light；界面以中性灰阶为主，强调色只用于焦点、主操作、连接成功、选中态和进度。
+- 支持 dark 和 light 两套 theme token，默认值分别采用 macOS Native Dark 和 macOS Native Light（遵循 macOS Sonoma / Sequoia HIG 规范，兼容 One Dark / One Light 别名）；界面以中性灰阶为主，强调色只用于焦点、主操作、连接成功、选中态和进度。
 - 错误、警告、成功和信息色具有固定语义，同一颜色不得表示无关含义；颜色不能作为唯一状态表达，状态还必须包含文本或图标。
 - 层级通过边线、背景、间距和文字权重表达，不依赖厚重阴影；面板之间用 1px 分隔线或相邻背景面区分；page section 内禁止嵌套卡片。
 - 阴影只能来自 theme 的 elevation scale，按浮层等级命名，不允许调用点自行拼 shadow；三个等级有固定顺序，低等级的浮层不得看起来比高等级的更远：
@@ -274,22 +276,26 @@ remote pane 必须覆盖：`Disconnected`（提供连接或重新连接）、`Co
 - tab 显示连接名称或 host，需要区分时可以附加路径上下文。
 - tab 显示连接状态：empty、connecting、awaiting host key、connected、disconnected、failed；错误 indicator 支持键盘 focus 并能打开详情。
 - 关闭 tab 的行为必须符合传输状态：会取消 transfer 时必须要求明确确认，transfer 独立继续时不得显示错误暗示。
-- 非活动 tab 的关闭钮只在指针位于该 tab 上时出现（Safari 习惯），隐藏时不可点击，避免误关；活动 tab 常显；26×22 的关闭钮槽位恒定占位，出现或消失不得引起标题位移。
+- 非活动 tab 的关闭钮只在指针位于该 tab 上时出现（Safari 习惯），隐藏时不可点击，避免误关；活动 tab 常显；26×22 的关闭钮槽位恒定占位，出现或消失不得引起标题位移；关闭按钮悬浮时呈圆形悬浮背景（Safari 风格）。
+- 活动 tab 采用现代 macOS 嵌入式分段胶囊（inset pill）外观（独立背景、微边框、chip 阴影与加粗字重）；非活动 tab 保持无缝平铺并在 hover 时显示微弱胶囊背景。
 - tab switcher 按最近使用时间排序，不能只按创建顺序。
 - 窗口标题跟随活动 tab 的标题（无 tab 时用 app 名）：标题栏透明不显示标题，但 Mission Control 和 Window 菜单用它命名窗口，不得留空标题或让非活动 tab 的名字覆盖它。
 
 ### 12.8 Transfer Drawer
 
 - transfer drawer 是传输任务的唯一主视图，不得在多个无关位置分别显示完整进度；active、queued、completed、failed 分组，completed/failed 默认可折叠。
-- 每个 transfer row 显示方向、源、目标、状态、进度、速度、ETA 和主操作；cancel 和 retry 使用 icon button 与 tooltip，危险操作要求确认或支持撤销。
+- 分组标题（In Progress, Waiting, Complete, Failed）与抽屉主标题采用加粗/中等字重，并遵循 macOS 抽屉/分节标题排版规范。
+- 每个 transfer row 显示方向、源、目标、状态、进度、速度、ETA 和主操作；cancel 和 retry 使用 icon button 与 tooltip，危险操作要求确认或支持撤销；行条目支持圆角悬浮高亮反馈。
 - progress 更新节流，视觉变化平滑，但不得用动画隐藏真实停滞；planning 阶段持续显示已发现数量和估算总字节。
 - conflict 不是错误；等待用户决策时 row 状态必须是 `WaitingForConflictDecision`，不能显示为 failed。
 - 面板默认展开 160px，保留手动调整、最小高度和全局队列所有权；面板内提供收起按钮，底部常驻 Transfers 入口，不改变传输执行或连接安全语义。
-- 空队列提示在可用空间居中；面板高度至少 90px 时显示上传/下载说明，更小高度隐藏说明并裁切内容，保留调整入口。
+- 空队列提示在可用空间居中，采用双行层级（ lead 提示与次级说明）；面板高度至少 90px 时显示上传/下载说明，更小高度隐藏说明并裁切内容，保留调整入口。
+- 底部状态栏（Status Bar）提供清晰的连接状态指示（MEDIUM 字重状态文字与语义圆点）、选中项计数，以及常驻的 Transfers 抽屉切换胶囊按钮（抽屉展开时以系统强调色高亮激活胶囊）。
 
 ### 12.9 Modal 与 Popover
 
 - modal 只用于 host key、credential、transfer conflict、destructive confirm 和 error details；必须有标题、简短说明、主操作、取消/关闭操作和 request 绑定。
+- modal 卡片统一采用 `theme.sizes.modal_radius`（10px）圆角与 `theme.shadow_modal()`，主标题采用 SEMIBOLD 字重突出视觉层级；卡片内部详情面板（指纹、比对详情等）采用 1px 微边框和小圆角区分，不在卡片内嵌套多层卡片。
 - 主操作位于固定位置，具有危险性时使用危险语义色。
 - transfer conflict modal 显示源、目标、大小、mtime、决策选项和 apply-to-all 作用域。
 - popover 用于简短选择或详情，不得包含必须完成的阻塞决策；普通错误、加载状态和传输进度不得使用 modal。

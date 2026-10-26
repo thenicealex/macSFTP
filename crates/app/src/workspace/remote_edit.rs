@@ -635,13 +635,13 @@ impl Workspace {
             .bg(theme.colors.elevated_surface)
             .border_1()
             .border_color(theme.colors.border)
-            .rounded_md()
+            .rounded(theme.sizes.modal_radius)
             .shadow(theme.shadow_modal())
             .font_family(theme.fonts.ui_family.clone())
             .child(
                 div()
                     .text_size(px(14.0))
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.colors.text)
                     .child("Edit Large File?"),
             )
@@ -731,13 +731,13 @@ impl Workspace {
             .bg(theme.colors.elevated_surface)
             .border_1()
             .border_color(theme.colors.border)
-            .rounded_md()
+            .rounded(theme.sizes.modal_radius)
             .shadow(theme.shadow_modal())
             .font_family(theme.fonts.ui_family.clone())
             .child(
                 div()
                     .text_size(px(14.0))
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.colors.text)
                     .child("Server File Changed"),
             )

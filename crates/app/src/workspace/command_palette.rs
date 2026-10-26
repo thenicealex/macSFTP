@@ -261,7 +261,7 @@ impl Workspace {
                 .gap_3()
                 .px_2()
                 .py_1()
-                .rounded_sm()
+                .rounded(theme.sizes.button_radius)
                 .bg(background)
                 .when(!is_selected, |row| {
                     row.hover(move |style| style.bg(hover_background))
@@ -274,6 +274,11 @@ impl Workspace {
                         .flex_1()
                         .min_w_0()
                         .text_size(px(13.0))
+                        .font_weight(if is_selected {
+                            FontWeight::MEDIUM
+                        } else {
+                            FontWeight::NORMAL
+                        })
                         .text_color(theme.colors.text)
                         .child(title),
                 )
@@ -335,7 +340,7 @@ impl Workspace {
                         .bg(theme.colors.elevated_surface)
                         .border_1()
                         .border_color(theme.colors.border)
-                        .rounded_md()
+                        .rounded(theme.sizes.modal_radius)
                         .shadow(theme.shadow_popover())
                         .font_family(theme.fonts.ui_family.clone())
                         .child(
@@ -346,7 +351,7 @@ impl Workspace {
                                 .child(
                                     div()
                                         .text_size(px(14.0))
-                                        .font_weight(FontWeight::MEDIUM)
+                                        .font_weight(FontWeight::SEMIBOLD)
                                         .text_color(theme.colors.text)
                                         .child("Find an Action"),
                                 )

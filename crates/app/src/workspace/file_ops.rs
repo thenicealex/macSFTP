@@ -511,7 +511,7 @@ impl crate::workspace::Workspace {
             .bg(theme.colors.elevated_surface)
             .border_1()
             .border_color(theme.colors.border)
-            .rounded_md()
+            .rounded(theme.sizes.modal_radius)
             .shadow(theme.shadow_modal())
             .font_family(theme.fonts.ui_family.clone())
             .child(
@@ -535,7 +535,7 @@ impl crate::workspace::Workspace {
                             .min_w_0()
                             .truncate()
                             .text_size(px(15.0))
-                            .font_weight(FontWeight::MEDIUM)
+                            .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.colors.text)
                             .child(presentation.title.clone()),
                     ),
