@@ -9,9 +9,9 @@ pub enum Appearance {
     Light,
 }
 
-/// Zed-style theme tokens: neutral surfaces, thin borders, one accent,
-/// and fixed-meaning semantic colors. Stored as a GPUI global so every
-/// view reads the same token set.
+/// Apple native theme tokens: neutral surfaces, thin hairline borders, system accent,
+/// and fixed-meaning semantic colors matching macOS HIG. Stored as a GPUI global so
+/// every view reads the same token set.
 #[derive(Debug, Clone)]
 pub struct Theme {
     pub appearance: Appearance,
@@ -38,6 +38,8 @@ pub struct ThemeColors {
     pub text: Hsla,
     pub text_muted: Hsla,
     pub text_disabled: Hsla,
+    /// Text on filled accent or destructive buttons/badges (white in both appearances).
+    pub text_on_accent: Hsla,
     // Preserve the Component 0.7.1 input palette while owning its presentation.
     pub input_placeholder: Hsla,
     pub input_caret: Hsla,
@@ -87,6 +89,7 @@ pub struct ThemeSizes {
     pub button_padding_x: Pixels,
     pub button_radius: Pixels,
     pub button_focus_ring: Pixels,
+    pub modal_radius: Pixels,
     pub icon_button_width: Pixels,
     pub icon_button_height: Pixels,
     pub input_height: Pixels,
@@ -184,7 +187,7 @@ impl Theme {
             surface: self.colors.elevated_surface,
             surface_foreground: self.colors.text,
             primary: self.colors.accent,
-            primary_foreground: self.colors.background,
+            primary_foreground: self.colors.text_on_accent,
             secondary: self.colors.surface,
             secondary_foreground: self.colors.text,
             muted: self.colors.surface,
@@ -192,7 +195,7 @@ impl Theme {
             accent: self.colors.element_hover,
             accent_foreground: self.colors.text,
             destructive: self.colors.error,
-            destructive_foreground: self.colors.background,
+            destructive_foreground: self.colors.text_on_accent,
             border: self.colors.border,
             input: self.colors.background,
             ring: self.colors.border_focused,
@@ -217,34 +220,35 @@ impl Theme {
         cx.refresh_windows();
     }
 
-    /// One Dark is the default palette for every dark appearance mode.
-    pub fn one_dark() -> Self {
+    /// macOS Dark is the default palette for dark appearance (macOS Sonoma / Sequoia HIG).
+    pub fn macos_dark() -> Self {
         Self {
             appearance: Appearance::Dark,
             colors: ThemeColors {
-                background: rgb(0x282c34).into(),
-                surface: rgb(0x21252b).into(),
-                elevated_surface: rgb(0x2c313a).into(),
-                border: rgb(0x3e4451).into(),
-                border_focused: rgb(0x61afef).into(),
-                text: rgb(0xabb2bf).into(),
-                text_muted: rgb(0x828997).into(),
-                text_disabled: rgb(0x5c6370).into(),
-                input_placeholder: rgb(0xa3a3a3).into(),
-                input_caret: rgb(0xfafafa).into(),
-                input_selection: rgb(0x1d4ed8).into(),
-                element_hover: hsla(0.0, 0.0, 1.0, 0.04),
-                element_active: hsla(0.0, 0.0, 1.0, 0.08),
-                element_selected: hsla(214.0 / 360.0, 0.6, 0.6, 0.16),
-                switch_knob: rgb(0xfafafa).into(),
-                accent: rgb(0x61afef).into(),
-                error: rgb(0xe06c75).into(),
-                warning: rgb(0xe5c07b).into(),
-                success: rgb(0x98c379).into(),
-                info: rgb(0x56b6c2).into(),
-                scrollbar_thumb: hsla(0.0, 0.0, 1.0, 0.22),
-                scrollbar_thumb_hover: hsla(0.0, 0.0, 1.0, 0.36),
-                scrollbar_thumb_active: hsla(0.0, 0.0, 1.0, 0.50),
+                background: rgb(0x1e1e1e).into(),
+                surface: rgb(0x262628).into(),
+                elevated_surface: rgb(0x2c2c2e).into(),
+                border: rgb(0x38383a).into(),
+                border_focused: rgb(0x0a84ff).into(),
+                text: rgb(0xf5f5f7).into(),
+                text_muted: rgb(0x8e8e93).into(),
+                text_disabled: rgb(0x636366).into(),
+                text_on_accent: rgb(0xffffff).into(),
+                input_placeholder: rgb(0x8e8e93).into(),
+                input_caret: rgb(0x0a84ff).into(),
+                input_selection: hsla(214.0 / 360.0, 1.0, 0.60, 0.35),
+                element_hover: hsla(0.0, 0.0, 1.0, 0.06),
+                element_active: hsla(0.0, 0.0, 1.0, 0.10),
+                element_selected: hsla(211.0 / 360.0, 1.0, 0.52, 0.20),
+                switch_knob: rgb(0xffffff).into(),
+                accent: rgb(0x0a84ff).into(),
+                error: rgb(0xff453a).into(),
+                warning: rgb(0xff9f0a).into(),
+                success: rgb(0x30d158).into(),
+                info: rgb(0x64d2ff).into(),
+                scrollbar_thumb: hsla(0.0, 0.0, 1.0, 0.25),
+                scrollbar_thumb_hover: hsla(0.0, 0.0, 1.0, 0.40),
+                scrollbar_thumb_active: hsla(0.0, 0.0, 1.0, 0.55),
                 scrollbar_track: hsla(0.0, 0.0, 0.0, 0.0),
             },
             fonts: default_fonts(),
@@ -252,34 +256,40 @@ impl Theme {
         }
     }
 
-    /// One Light is the default palette for every light appearance mode.
-    pub fn one_light() -> Self {
+    /// One Dark is retained as a compatibility alias for [`Theme::macos_dark`].
+    pub fn one_dark() -> Self {
+        Self::macos_dark()
+    }
+
+    /// macOS Light is the default palette for light appearance (macOS Sonoma / Sequoia HIG).
+    pub fn macos_light() -> Self {
         Self {
             appearance: Appearance::Light,
             colors: ThemeColors {
-                background: rgb(0xfafafa).into(),
-                surface: rgb(0xf0f0f0).into(),
+                background: rgb(0xffffff).into(),
+                surface: rgb(0xf5f5f7).into(),
                 elevated_surface: rgb(0xffffff).into(),
-                border: rgb(0xd3d4d5).into(),
-                border_focused: rgb(0x4078f2).into(),
-                text: rgb(0x383a42).into(),
-                text_muted: rgb(0x696c77).into(),
-                text_disabled: rgb(0xa0a1a7).into(),
-                input_placeholder: rgb(0x737373).into(),
-                input_caret: rgb(0x0a0a0a).into(),
-                input_selection: rgb(0x55a0fc).into(),
-                element_hover: hsla(0.0, 0.0, 0.0, 0.04),
-                element_active: hsla(0.0, 0.0, 0.0, 0.08),
-                element_selected: hsla(214.0 / 360.0, 0.55, 0.5, 0.14),
+                border: rgb(0xd1d1d6).into(),
+                border_focused: rgb(0x007aff).into(),
+                text: rgb(0x1d1d1f).into(),
+                text_muted: rgb(0x86868b).into(),
+                text_disabled: rgb(0xc7c7cc).into(),
+                text_on_accent: rgb(0xffffff).into(),
+                input_placeholder: rgb(0x86868b).into(),
+                input_caret: rgb(0x007aff).into(),
+                input_selection: hsla(211.0 / 360.0, 1.0, 0.50, 0.25),
+                element_hover: hsla(0.0, 0.0, 0.0, 0.05),
+                element_active: hsla(0.0, 0.0, 0.0, 0.09),
+                element_selected: hsla(211.0 / 360.0, 1.0, 0.50, 0.14),
                 switch_knob: rgb(0xffffff).into(),
-                accent: rgb(0x4078f2).into(),
-                error: rgb(0xe45649).into(),
-                warning: rgb(0xc18401).into(),
-                success: rgb(0x50a14f).into(),
-                info: rgb(0x0184bc).into(),
-                scrollbar_thumb: hsla(0.0, 0.0, 0.0, 0.30),
-                scrollbar_thumb_hover: hsla(0.0, 0.0, 0.0, 0.45),
-                scrollbar_thumb_active: hsla(0.0, 0.0, 0.0, 0.55),
+                accent: rgb(0x007aff).into(),
+                error: rgb(0xff3b30).into(),
+                warning: rgb(0xff9500).into(),
+                success: rgb(0x34c759).into(),
+                info: rgb(0x0071a4).into(),
+                scrollbar_thumb: hsla(0.0, 0.0, 0.0, 0.28),
+                scrollbar_thumb_hover: hsla(0.0, 0.0, 0.0, 0.42),
+                scrollbar_thumb_active: hsla(0.0, 0.0, 0.0, 0.56),
                 scrollbar_track: hsla(0.0, 0.0, 0.0, 0.0),
             },
             fonts: default_fonts(),
@@ -287,18 +297,23 @@ impl Theme {
         }
     }
 
+    /// One Light is retained as a compatibility alias for [`Theme::macos_light`].
+    pub fn one_light() -> Self {
+        Self::macos_light()
+    }
+
     pub fn dark() -> Self {
-        Self::one_dark()
+        Self::macos_dark()
     }
 
     pub fn light() -> Self {
-        Self::one_light()
+        Self::macos_light()
     }
 
     pub fn for_appearance(appearance: WindowAppearance) -> Self {
         match appearance {
-            WindowAppearance::Dark | WindowAppearance::VibrantDark => Self::one_dark(),
-            WindowAppearance::Light | WindowAppearance::VibrantLight => Self::one_light(),
+            WindowAppearance::Dark | WindowAppearance::VibrantDark => Self::dark(),
+            WindowAppearance::Light | WindowAppearance::VibrantLight => Self::light(),
         }
     }
 }
@@ -324,8 +339,9 @@ fn default_sizes() -> ThemeSizes {
         button_min_width: px(UI_FONT_SIZE * 1.5),
         button_text_size: px(UI_FONT_SIZE * 0.875),
         button_padding_x: px(UI_FONT_SIZE * 0.75),
-        button_radius: px(UI_FONT_SIZE * 0.25),
+        button_radius: px(5.0),
         button_focus_ring: px(3.0),
+        modal_radius: px(10.0),
         // Component expands the 22px icon control to fit its padded 16px child.
         icon_button_width: px(26.0),
         icon_button_height: px(22.0),
@@ -334,7 +350,7 @@ fn default_sizes() -> ThemeSizes {
         input_text_size: px(UI_FONT_SIZE * 0.875),
         input_padding_x: px(8.0),
         input_padding_y: px(2.0),
-        input_radius: px(3.0),
+        input_radius: px(5.0),
         input_focus_ring: px(3.0),
     }
 }
@@ -539,23 +555,25 @@ mod tests {
     }
 
     #[test]
-    fn dark_appearance_defaults_to_one_dark_tokens() {
+    fn dark_appearance_defaults_to_macos_dark_tokens() {
         let theme = Theme::dark();
 
-        assert_eq!(theme.colors.background, rgb(0x282c34).into());
-        assert_eq!(theme.colors.text, rgb(0xabb2bf).into());
-        assert_eq!(theme.colors.accent, rgb(0x61afef).into());
-        assert_eq!(theme.colors.error, rgb(0xe06c75).into());
+        assert_eq!(theme.colors.background, rgb(0x1e1e1e).into());
+        assert_eq!(theme.colors.text, rgb(0xf5f5f7).into());
+        assert_eq!(theme.colors.accent, rgb(0x0a84ff).into());
+        assert_eq!(theme.colors.error, rgb(0xff453a).into());
+        assert_eq!(theme.colors.text_on_accent, rgb(0xffffff).into());
     }
 
     #[test]
-    fn light_appearance_defaults_to_one_light_tokens() {
+    fn light_appearance_defaults_to_macos_light_tokens() {
         let theme = Theme::light();
 
-        assert_eq!(theme.colors.background, rgb(0xfafafa).into());
-        assert_eq!(theme.colors.text, rgb(0x383a42).into());
-        assert_eq!(theme.colors.accent, rgb(0x4078f2).into());
-        assert_eq!(theme.colors.error, rgb(0xe45649).into());
+        assert_eq!(theme.colors.background, rgb(0xffffff).into());
+        assert_eq!(theme.colors.text, rgb(0x1d1d1f).into());
+        assert_eq!(theme.colors.accent, rgb(0x007aff).into());
+        assert_eq!(theme.colors.error, rgb(0xff3b30).into());
+        assert_eq!(theme.colors.text_on_accent, rgb(0xffffff).into());
     }
 
     #[test]
@@ -563,10 +581,13 @@ mod tests {
         let dark = Theme::for_appearance(WindowAppearance::Dark);
         let light = Theme::for_appearance(WindowAppearance::Light);
 
-        assert_eq!(dark.colors.background, Theme::one_dark().colors.background);
+        assert_eq!(
+            dark.colors.background,
+            Theme::macos_dark().colors.background
+        );
         assert_eq!(
             light.colors.background,
-            Theme::one_light().colors.background
+            Theme::macos_light().colors.background
         );
     }
 
