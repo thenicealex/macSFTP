@@ -539,13 +539,13 @@ impl crate::workspace::Workspace {
                         .bg(theme.colors.elevated_surface)
                         .border_1()
                         .border_color(theme.colors.border)
-                        .rounded_md()
+                        .rounded(theme.sizes.modal_radius)
                         .shadow(theme.shadow_modal())
                         .font_family(theme.fonts.ui_family.clone())
                         .child(
                             div()
                                 .text_size(px(14.0))
-                                .font_weight(FontWeight::MEDIUM)
+                                .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme.colors.text)
                                 .child(format!("Go to Folder ({side_label})")),
                         )
@@ -728,13 +728,13 @@ impl crate::workspace::Workspace {
             .bg(theme.colors.elevated_surface)
             .border_1()
             .border_color(theme.colors.border)
-            .rounded_md()
+            .rounded(theme.sizes.modal_radius)
             .shadow(theme.shadow_modal())
             .font_family(theme.fonts.ui_family.clone())
             .child(
                 div()
                     .text_size(px(14.0))
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.colors.text)
                     .child("Connect to Server"),
             );
@@ -778,7 +778,7 @@ impl crate::workspace::Workspace {
                         .py_1()
                         .border_1()
                         .border_color(theme.colors.border)
-                        .rounded_md()
+                        .rounded(theme.sizes.input_radius)
                         .cursor_pointer()
                         .on_click(cx.listener(|workspace, _event, _window, cx| {
                             if let Some(form) = &mut workspace.connect_form_ui.form {
@@ -902,7 +902,7 @@ impl crate::workspace::Workspace {
                 .relative()
                 .border_1()
                 .border_color(theme.colors.border)
-                .rounded_md()
+                .rounded(theme.sizes.input_radius)
                 .bg(theme.colors.surface)
                 .child(
                     div()
@@ -1169,7 +1169,7 @@ impl crate::workspace::Workspace {
             .w(px(520.0))
             .max_w_full()
             .p_5()
-            .rounded_md()
+            .rounded(theme.sizes.modal_radius)
             .border_1()
             .border_color(theme.colors.border)
             .bg(theme.colors.elevated_surface)
@@ -1177,7 +1177,7 @@ impl crate::workspace::Workspace {
             .child(
                 div()
                     .text_size(px(16.0))
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.colors.text)
                     .child(if prompt.name.is_empty() {
                         "Complete Sign-In".to_string()
@@ -1328,13 +1328,13 @@ impl crate::workspace::Workspace {
                         .bg(theme.colors.elevated_surface)
                         .border_1()
                         .border_color(theme.colors.border)
-                        .rounded_md()
+                        .rounded(theme.sizes.modal_radius)
                         .shadow(theme.shadow_modal())
                         .font_family(theme.fonts.ui_family.clone())
                         .child(
                             div()
                                 .text_size(px(14.0))
-                                .font_weight(FontWeight::MEDIUM)
+                                .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme.colors.text)
                                 .child("Verify Server"),
                         )
@@ -1352,8 +1352,10 @@ impl crate::workspace::Workspace {
                                 .flex_col()
                                 .gap_2()
                                 .p_3()
-                                .rounded_sm()
-                                .bg(theme.colors.element_hover)
+                                .rounded(theme.sizes.button_radius)
+                                .border_1()
+                                .border_color(theme.colors.border)
+                                .bg(theme.colors.surface)
                                 .child(info_row(
                                     "Server Address",
                                     format!("{}:{}", prompt.host, prompt.port).into(),
@@ -1476,13 +1478,13 @@ impl crate::workspace::Workspace {
                         .bg(theme.colors.elevated_surface)
                         .border_1()
                         .border_color(theme.colors.border)
-                        .rounded_md()
+                        .rounded(theme.sizes.modal_radius)
                         .shadow(theme.shadow_modal())
                         .font_family(theme.fonts.ui_family.clone())
                         .child(
                             div()
                                 .text_size(px(14.0))
-                                .font_weight(FontWeight::MEDIUM)
+                                .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(theme.colors.text)
                                 .child("File Already Exists"),
                         )
@@ -1498,8 +1500,10 @@ impl crate::workspace::Workspace {
                                 .flex_col()
                                 .gap_2()
                                 .p_3()
-                                .rounded_sm()
-                                .bg(theme.colors.element_hover)
+                                .rounded(theme.sizes.button_radius)
+                                .border_1()
+                                .border_color(theme.colors.border)
+                                .bg(theme.colors.surface)
                                 .child(detail_row("Incoming File", source.into()))
                                 .child(detail_row("Destination", destination.into()))
                                 .child(detail_row("Size", format_size(prompt.source_size)))
@@ -1654,13 +1658,13 @@ impl crate::workspace::Workspace {
             .bg(theme.colors.elevated_surface)
             .border_1()
             .border_color(theme.colors.border)
-            .rounded_md()
+            .rounded(theme.sizes.modal_radius)
             .shadow(theme.shadow_modal())
             .font_family(theme.fonts.ui_family.clone())
             .child(
                 div()
                     .text_size(px(14.0))
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.colors.text)
                     .child("Delete Saved Connection?"),
             )

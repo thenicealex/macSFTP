@@ -1,4 +1,6 @@
-use gpui_kit::{Context, Hsla, IntoElement, Render, SharedString, Window, div, prelude::*, px};
+use gpui_kit::{
+    Context, FontWeight, Hsla, IntoElement, Render, SharedString, Window, div, prelude::*, px,
+};
 use macsftp_core::{ConnectionState, TransferEndpoint, TransferJob};
 
 use crate::{ActiveTheme, Theme};
@@ -12,6 +14,7 @@ pub fn section_header_static(label: &str, count: usize, theme: &Theme) -> impl I
         .h(px(24.0))
         .px_2()
         .text_size(px(11.0))
+        .font_weight(FontWeight::MEDIUM)
         .text_color(theme.colors.text_muted)
         .child(format!("{label} ({count})"))
 }

@@ -135,6 +135,8 @@ impl RenderOnce for TransferRow {
             .h(theme.sizes.transfer_row_height)
             .px_2()
             .gap_1()
+            .rounded(theme.sizes.button_radius)
+            .hover(|style| style.bg(theme.colors.element_hover))
             .font_family(theme.fonts.ui_family.clone())
             .child(
                 div()

@@ -1,8 +1,9 @@
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::base::motion::{Transition, transition};
 use gpui_kit::{
-    AppContext, Context, CursorStyle, DragMoveEvent, ElementId, Hsla, IntoElement, MouseButton,
-    MouseDownEvent, ParentElement, Pixels, Role, SharedString, Styled, Window, div, prelude::*, px,
+    AppContext, Context, CursorStyle, DragMoveEvent, ElementId, FontWeight, Hsla, IntoElement,
+    MouseButton, MouseDownEvent, ParentElement, Pixels, Role, SharedString, Styled, Window, div,
+    prelude::*, px,
 };
 use macsftp_core::{
     EditPhase, EntryPath, IdMatcher, TransferId, TransferJob, TransferPlanState, TransferState,
@@ -338,8 +339,14 @@ impl crate::workspace::Workspace {
                 .min_w_0()
                 .text_size(px(11.0))
                 .text_color(theme.colors.text_muted)
-                .child(icon(IconName::Transfers, theme.colors.text_muted))
-                .child(div().flex_none().child("Transfers"))
+                .child(icon(IconName::Transfers, theme.colors.text))
+                .child(
+                    div()
+                        .flex_none()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.colors.text)
+                        .child("Transfers"),
+                )
                 .when(in_progress.total + waiting.total > 0, |header| {
                     let workspace = workspace_entity.clone();
                     header.child(
@@ -409,13 +416,18 @@ impl crate::workspace::Workspace {
                     .items_center()
                     .justify_center()
                     .gap_1()
-                    .text_size(px(12.0))
-                    .text_color(theme.colors.text_muted)
-                    .child("No transfers yet")
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.colors.text)
+                            .child("No transfers yet"),
+                    )
                     .when(self.transfer_drawer.height >= px(90.0), |empty| {
                         empty.child(
                             div()
                                 .text_size(px(11.0))
+                                .text_color(theme.colors.text_muted)
                                 .child("Select files to upload or download."),
                         )
                     }),
@@ -454,6 +466,7 @@ impl crate::workspace::Workspace {
                         .h(px(24.0))
                         .px_2()
                         .text_size(px(11.0))
+                        .font_weight(FontWeight::MEDIUM)
                         .text_color(theme.colors.text_muted)
                         .hover(|style| style.bg(theme.colors.element_hover))
                         .on_click(cx.listener(move |workspace, _event, _window, cx| {
@@ -791,11 +804,18 @@ impl crate::workspace::Workspace {
                             .rounded_full()
                             .bg(status_color),
                     )
-                    .child(div().min_w_0().truncate().child(status_text))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(status_text),
+                    )
                     .when(selected_count > 0, |row| {
                         row.child(
                             div()
                                 .flex_none()
+                                .text_color(theme.colors.text_muted)
                                 .child(format!("{selected_count} selected")),
                         )
                     })
@@ -803,6 +823,7 @@ impl crate::workspace::Workspace {
                         div()
                             .min_w_0()
                             .truncate()
+                            .text_color(theme.colors.text)
                             .child(format!("— {}", line.message))
                     })),
             )
@@ -826,7 +847,7 @@ impl crate::workspace::Workspace {
                                     .items_center()
                                     .h(px(18.0))
                                     .px_2()
-                                    .rounded_sm()
+                                    .rounded(theme.sizes.button_radius)
                                     .border_1()
                                     .border_color(if is_modified {
                                         theme.colors.accent
@@ -879,9 +900,17 @@ impl crate::workspace::Workspace {
                             .flex_none()
                             .items_center()
                             .gap_1()
-                            .px_1()
-                            .rounded_sm()
-                            .hover(|style| style.bg(theme.colors.element_hover))
+                            .px(px(6.0))
+                            .py(px(2.0))
+                            .rounded(theme.sizes.button_radius)
+                            .cursor_pointer()
+                            .when(self.transfer_drawer.open, |btn| {
+                                btn.bg(theme.colors.element_selected)
+                                    .text_color(theme.colors.accent)
+                            })
+                            .when(!self.transfer_drawer.open, |btn| {
+                                btn.hover(|style| style.bg(theme.colors.element_hover))
+                            })
                             .tooltip(text_tooltip(labeled_shortcut(
                                 if self.transfer_drawer.open {
                                     "Hide Transfers"
@@ -898,13 +927,21 @@ impl crate::workspace::Workspace {
                                 IconName::Transfers,
                                 if failed_count > 0 {
                                     theme.colors.error
-                                } else if active_count > 0 {
+                                } else if active_count > 0 || self.transfer_drawer.open {
                                     theme.colors.accent
                                 } else {
                                     theme.colors.text_muted
                                 },
                             ))
-                            .child("Transfers"),
+                            .child(
+                                div()
+                                    .font_weight(if self.transfer_drawer.open {
+                                        FontWeight::MEDIUM
+                                    } else {
+                                        FontWeight::NORMAL
+                                    })
+                                    .child("Transfers"),
+                            ),
                     ),
             )
     }
