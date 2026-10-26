@@ -5,7 +5,24 @@ based on Keep a Changelog, and releases use semantic versioning.
 
 ## [Unreleased]
 
-## [0.7.0] - 2026-10-26
+## [0.7.1] - 2026-10-26
+
+### Fixed
+
+- **In-tree relative symlinks during download**: Directory downloads containing
+  relative symlinks whose resolved targets stay within the destination root
+  (including targets navigating via `..`) now succeed without false-positive path
+  traversal rejections. Targets pointing outside the destination tree, absolute
+  symlinks, empty paths, Windows drive prefixes, and Unicode bidirectional or
+  control overrides continue to be strictly rejected.
+- **Autonomous reaping of stalled connection attempts**: Connection attempts in
+  the connection pool now enforce handshake timeouts across jump-host channel
+  opening and peer authentication steps, autonomously timing out and reaping
+  stalled background attempts to prevent unbounded attempt leakage.
+
+### Changed
+
+- Upgraded `tokio` to 1.54.1 and `gpui-kit` to 0.8.0.
 
 ### Added
 

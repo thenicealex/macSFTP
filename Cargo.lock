@@ -4497,7 +4497,7 @@ checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
 name = "macsftp-app"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "gpui-kit",
  "gpui-pre-apple",
@@ -4515,7 +4515,7 @@ dependencies = [
 
 [[package]]
 name = "macsftp-core"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4524,7 +4524,7 @@ dependencies = [
 
 [[package]]
 name = "macsftp-native-menu"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "gpui-kit",
  "objc2 0.6.5",
@@ -4536,7 +4536,7 @@ dependencies = [
 
 [[package]]
 name = "macsftp-platform"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "macsftp-core",
  "notify",
@@ -4545,7 +4545,7 @@ dependencies = [
 
 [[package]]
 name = "macsftp-sftp"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "aws-lc-rs",
  "crypto-bigint",
@@ -4568,7 +4568,7 @@ dependencies = [
 
 [[package]]
 name = "macsftp-storage"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "macsftp-core",
  "rustix",
@@ -4582,14 +4582,14 @@ dependencies = [
 
 [[package]]
 name = "macsftp-test-support"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "macsftp-core",
 ]
 
 [[package]]
 name = "macsftp-ui"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "gpui-kit",
  "macsftp-core",
