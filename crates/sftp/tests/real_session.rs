@@ -1226,6 +1226,36 @@ async fn single_file_symlinks_are_copied_without_dereferencing() {
         "local link must not be created"
     );
 
+    let remote_relative_source = server.fixture_dir.join("symlink-relative-source");
+    let local_relative_destination = server.fixture_dir.join("symlink-relative-destination");
+    symlink(
+        "sub/../symlink-download-target.txt",
+        &remote_relative_source,
+    )
+    .expect("create remote relative source symlink");
+    fixture
+        .requests
+        .send_async(RemoteSessionRequest::RunTransferJobs {
+            plan_id: macsftp_core::TransferPlanId(13),
+            jobs: vec![transfer_job(
+                104,
+                TransferDirection::Download,
+                TransferEndpoint::Remote(RemotePath::new(
+                    remote_relative_source.display().to_string(),
+                )),
+                TransferEndpoint::Local(macsftp_core::LocalPath::new(
+                    local_relative_destination.display().to_string(),
+                )),
+            )],
+        })
+        .await
+        .expect("in-tree relative symlink download should reach actor");
+    wait_for_transfer_completion(&fixture, TransferId(104)).await;
+    assert_eq!(
+        std::fs::read_link(&local_relative_destination).expect("read downloaded relative symlink"),
+        std::path::PathBuf::from("sub/../symlink-download-target.txt")
+    );
+
     fixture.cancel.cancel();
 }
 
@@ -1783,6 +1813,167 @@ async fn runtime_streams_and_executes_directory_download() {
     assert_eq!(
         std::fs::read(destination_root.join("nested/second.txt")).expect("read nested result"),
         b"second"
+    );
+
+    std::thread::spawn(move || controller.shutdown())
+        .join()
+        .expect("runtime shutdown thread should finish");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_downloads_directory_with_in_tree_relative_symlinks_and_rejects_escaping() {
+    use std::os::unix::fs::symlink;
+
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+
+    let source_root = server.fixture_dir.join("symlink-dir-download-source");
+    let sub_dir = source_root.join("sub");
+    let nested_dir = sub_dir.join("nested");
+    std::fs::create_dir_all(&nested_dir).expect("create source nested directory");
+    std::fs::write(source_root.join("sibling.txt"), b"sibling data").expect("write sibling.txt");
+    symlink("../sibling.txt", sub_dir.join("link")).expect("create in-tree relative symlink");
+    symlink("../../sibling.txt", nested_dir.join("deep_link"))
+        .expect("create deep in-tree relative symlink");
+
+    let destination_root = server.fixture_dir.join("symlink-dir-download-destination");
+
+    let escape_source_root = server
+        .fixture_dir
+        .join("symlink-escape-dir-download-source");
+    let escape_sub_dir = escape_source_root.join("sub");
+    std::fs::create_dir_all(&escape_sub_dir).expect("create escape source directory");
+    symlink("../../outside.txt", escape_sub_dir.join("escape")).expect("create escaping symlink");
+    let escape_destination_root = server
+        .fixture_dir
+        .join("symlink-escape-dir-download-destination");
+
+    let known_hosts_path = server.fixture_dir.join("symlink_dir_download_known_hosts");
+    std::fs::write(
+        &known_hosts_path,
+        format!("[127.0.0.1]:{} {}\n", server.port, server.host_public_key),
+    )
+    .expect("prefill known_hosts");
+    let mut controller = RuntimeController::start(
+        RuntimeBridgeConfig::default(),
+        HostTrustConfig::new(known_hosts_path, None),
+    );
+    let client = controller.client();
+    let mut events = controller
+        .take_event_receiver()
+        .expect("event receiver should be available once");
+
+    client
+        .try_send(AppCommand::ConnectTab(ConnectCommand {
+            tab_id: TAB,
+            session_id: SESSION,
+            session_epoch: EPOCH,
+            profile_id: ProfileId(1),
+            pool_identity: ConnectionPoolIdentity::Ephemeral(SESSION),
+            settings: ConnectionSettings {
+                host: "127.0.0.1".to_string(),
+                port: server.port,
+                username: server.username.clone(),
+                auth: client_key_auth(&server),
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
+            },
+        }))
+        .expect("connect command should send");
+    let _ = next_runtime_event(&mut events, "TabConnecting").await;
+    let _ = next_runtime_event(&mut events, "TabConnected").await;
+
+    client
+        .try_send(AppCommand::StartTransfer(
+            macsftp_core::StartTransferCommand {
+                tab_id: TAB,
+                session_epoch: EPOCH,
+                profile_id: ProfileId(1),
+                direction: TransferDirection::Download,
+                sources: vec![TransferEndpoint::Remote(RemotePath::new(
+                    source_root.display().to_string(),
+                ))],
+                destination: TransferEndpoint::Local(macsftp_core::LocalPath::new(
+                    destination_root.display().to_string(),
+                )),
+                metadata_policy: macsftp_core::MetadataPolicy::default(),
+                conflict_policy: macsftp_core::ConflictPolicy::default(),
+            },
+        ))
+        .expect("directory download command should send");
+
+    // 6 jobs: root dir (1), sibling.txt (2), sub dir (3), link (4), nested dir (5), deep_link (6).
+    let mut completed_jobs = 0;
+    while completed_jobs < 6 {
+        match next_runtime_event(&mut events, "symlink directory download event").await {
+            AppEvent::TransferPlanStarted(_) | AppEvent::TransferPlanCompleted { .. } => {}
+            AppEvent::TransferPlanProgress(_) => {}
+            AppEvent::TransferRunning(_) | AppEvent::TransferProgress(_) => {}
+            AppEvent::TransferCompleted { .. } => completed_jobs += 1,
+            AppEvent::TransferFailed(failure) => {
+                panic!(
+                    "in-tree symlink directory download failed: {:?}",
+                    failure.error
+                )
+            }
+            AppEvent::ResidualTempCreated(_) | AppEvent::ResidualTempCleared { .. } => {}
+            other => panic!("unexpected symlink directory download event: {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        std::fs::read(destination_root.join("sibling.txt")).expect("read sibling result"),
+        b"sibling data"
+    );
+    assert_eq!(
+        std::fs::read_link(destination_root.join("sub/link")).expect("read sub/link"),
+        std::path::PathBuf::from("../sibling.txt")
+    );
+    assert_eq!(
+        std::fs::read_link(destination_root.join("sub/nested/deep_link")).expect("read deep_link"),
+        std::path::PathBuf::from("../../sibling.txt")
+    );
+
+    client
+        .try_send(AppCommand::StartTransfer(
+            macsftp_core::StartTransferCommand {
+                tab_id: TAB,
+                session_epoch: EPOCH,
+                profile_id: ProfileId(1),
+                direction: TransferDirection::Download,
+                sources: vec![TransferEndpoint::Remote(RemotePath::new(
+                    escape_source_root.display().to_string(),
+                ))],
+                destination: TransferEndpoint::Local(macsftp_core::LocalPath::new(
+                    escape_destination_root.display().to_string(),
+                )),
+                metadata_policy: macsftp_core::MetadataPolicy::default(),
+                conflict_policy: macsftp_core::ConflictPolicy::default(),
+            },
+        ))
+        .expect("escape directory download command should send");
+
+    let failure = loop {
+        match next_runtime_event(&mut events, "escaping symlink directory download event").await {
+            AppEvent::TransferPlanStarted(_) => {}
+            AppEvent::TransferPlanProgress(_) => {}
+            AppEvent::TransferRunning(_) | AppEvent::TransferProgress(_) => {}
+            AppEvent::TransferCompleted { .. } => {}
+            AppEvent::TransferFailed(failure) => {
+                if failure.error.code == macsftp_core::ErrorCode::UnsupportedSymlink {
+                    break failure;
+                }
+            }
+            AppEvent::TransferPlanFailed { .. } | AppEvent::TransferPlanCompleted { .. } => {}
+            AppEvent::ResidualTempCreated(_) | AppEvent::ResidualTempCleared { .. } => {}
+            other => panic!("unexpected event during escaping symlink download: {other:?}"),
+        }
+    };
+    assert_eq!(failure.error.title, "Unsafe Link Target");
+    assert!(
+        std::fs::symlink_metadata(escape_destination_root.join("sub/escape")).is_err(),
+        "escaping symlink destination must not exist"
     );
 
     std::thread::spawn(move || controller.shutdown())
