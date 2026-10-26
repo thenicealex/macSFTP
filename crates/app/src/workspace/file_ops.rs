@@ -8,7 +8,7 @@ use gpui_kit::{
 };
 use macsftp_core::{
     AppCommand, ConnectionState, EntryPath, FileKind, FsCommand, FsEntryRef, FsOp, FsPath, FsScope,
-    TabId, UserFacingError,
+    TabId, UserFacingError, is_bidi_or_control,
 };
 use macsftp_platform::{create_directory, delete_entry, local_fs_error, rename_entry};
 use macsftp_ui::{ActiveTheme, IconName, InputState, icon, text_button};
@@ -272,9 +272,21 @@ impl crate::workspace::Workspace {
             return;
         };
         let name = edit.input.value().trim().to_string();
-        if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+        if name.is_empty()
+            || name == "."
+            || name == ".."
+            || name.contains('/')
+            || name.contains('\0')
+        {
             if let Some(edit) = &mut self.modal_inputs.inline_edit {
                 edit.error = Some("Enter a name without slashes.".into());
+            }
+            cx.notify();
+            return;
+        }
+        if name.chars().any(is_bidi_or_control) {
+            if let Some(edit) = &mut self.modal_inputs.inline_edit {
+                edit.error = Some("The name contains invalid control characters.".into());
             }
             cx.notify();
             return;
@@ -638,6 +650,19 @@ fn execute_local_fs_operation(op: &FsOp) -> Result<(), UserFacingError> {
                         "Delete paths must be local.",
                     ));
                 };
+                let std_path = std::path::Path::new(path.as_str());
+                if path.as_str().is_empty()
+                    || path.as_str() == "/"
+                    || path.as_str() == "."
+                    || path.as_str() == ".."
+                    || std_path.parent().is_none()
+                {
+                    return Err(UserFacingError::new(
+                        macsftp_core::ErrorCode::Unknown,
+                        "Invalid Path",
+                        "The root directory cannot be deleted.",
+                    ));
+                }
                 delete_entry(path, entry.is_dir)
                     .map_err(|error| local_fs_error("The item couldn’t be deleted.", &error))?;
             }
@@ -651,6 +676,28 @@ fn execute_local_fs_operation(op: &FsOp) -> Result<(), UserFacingError> {
                     "Rename paths must be local.",
                 ));
             };
+            let from_path = std::path::Path::new(from.as_str());
+            let to_path = std::path::Path::new(to.as_str());
+            if from.as_str().is_empty()
+                || from.as_str() == "/"
+                || from_path.parent().is_none()
+                || to.as_str().is_empty()
+                || to.as_str() == "/"
+                || to_path.parent().is_none()
+            {
+                return Err(UserFacingError::new(
+                    macsftp_core::ErrorCode::Unknown,
+                    "Invalid Path",
+                    "The root directory cannot be renamed.",
+                ));
+            }
+            if to.as_str().contains('\0') || to.as_str().chars().any(is_bidi_or_control) {
+                return Err(UserFacingError::new(
+                    macsftp_core::ErrorCode::Unknown,
+                    "Invalid name",
+                    "The destination name is invalid or contains forbidden characters.",
+                ));
+            }
             rename_entry(from, to)
                 .map_err(|error| local_fs_error("The item couldn’t be renamed.", &error))
         }
@@ -662,6 +709,19 @@ fn execute_local_fs_operation(op: &FsOp) -> Result<(), UserFacingError> {
                     "Create-folder parent must be local.",
                 ));
             };
+            if name.is_empty()
+                || name == "."
+                || name == ".."
+                || name.contains('/')
+                || name.contains('\0')
+                || name.chars().any(is_bidi_or_control)
+            {
+                return Err(UserFacingError::new(
+                    macsftp_core::ErrorCode::Unknown,
+                    "Invalid folder name",
+                    "The folder name is invalid or contains forbidden characters.",
+                ));
+            }
             create_directory(parent, name)
                 .map(|_| ())
                 .map_err(|error| local_fs_error("The folder couldn’t be created.", &error))
@@ -711,5 +771,44 @@ mod delete_confirm_presentation_tests {
             presentation.risk_message,
             "Selected items and everything inside 2 selected folders will be permanently deleted."
         );
+    }
+
+    #[test]
+    fn local_fs_op_rejects_unsafe_names() {
+        use super::execute_local_fs_operation;
+        use macsftp_core::FsOp;
+
+        let parent = FsPath::Local(LocalPath::new("/tmp"));
+        let op = FsOp::CreateDirectory {
+            parent: parent.clone(),
+            name: "unsafe\u{202E}dir".to_string(),
+        };
+        assert!(execute_local_fs_operation(&op).is_err());
+
+        let op = FsOp::CreateDirectory {
+            parent: parent.clone(),
+            name: "../escape".to_string(),
+        };
+        assert!(execute_local_fs_operation(&op).is_err());
+
+        let op = FsOp::Rename {
+            from: FsPath::Local(LocalPath::new("/tmp/old.txt")),
+            to: FsPath::Local(LocalPath::new("/tmp/unsafe\u{202E}new.txt")),
+        };
+        assert!(execute_local_fs_operation(&op).is_err());
+
+        let op = FsOp::Delete {
+            entries: vec![macsftp_core::FsEntryRef {
+                path: FsPath::Local(LocalPath::new("/")),
+                is_dir: true,
+            }],
+        };
+        assert!(execute_local_fs_operation(&op).is_err());
+
+        let op = FsOp::Rename {
+            from: FsPath::Local(LocalPath::new("/")),
+            to: FsPath::Local(LocalPath::new("/tmp/renamed")),
+        };
+        assert!(execute_local_fs_operation(&op).is_err());
     }
 }

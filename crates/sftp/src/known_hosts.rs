@@ -109,6 +109,14 @@ impl KnownHostsStore {
         key: &PublicKey,
         app_path: &Path,
     ) -> Result<(), KnownHostsError> {
+        if host.is_empty()
+            || host
+                .chars()
+                .any(|ch| ch.is_whitespace() || macsftp_core::is_bidi_or_control(ch))
+        {
+            return Err(KnownHostsError::EntryFormat);
+        }
+
         let pattern = host_pattern(host, port);
         let key_str = key.to_string();
         let line = format!("{pattern} {key_str}");
@@ -389,6 +397,48 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn add_trusted_rejects_unsafe_host_strings() {
+        let mut store = KnownHostsStore::empty();
+        let key = test_key(4);
+        let path = std::env::temp_dir().join(format!(
+            "macsftp_test_known_hosts_unsafe_{}.txt",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        assert!(matches!(
+            store.add_trusted("", 22, &key, &path),
+            Err(KnownHostsError::EntryFormat)
+        ));
+        assert!(matches!(
+            store.add_trusted("example.com\nmalicious", 22, &key, &path),
+            Err(KnownHostsError::EntryFormat)
+        ));
+        assert!(matches!(
+            store.add_trusted("example.com\rmalicious", 22, &key, &path),
+            Err(KnownHostsError::EntryFormat)
+        ));
+        assert!(matches!(
+            store.add_trusted("example.com extra", 22, &key, &path),
+            Err(KnownHostsError::EntryFormat)
+        ));
+        assert!(matches!(
+            store.add_trusted("example\t.com", 22, &key, &path),
+            Err(KnownHostsError::EntryFormat)
+        ));
+        assert!(matches!(
+            store.add_trusted("evil\u{202E}host.com", 22, &key, &path),
+            Err(KnownHostsError::EntryFormat)
+        ));
+        assert!(matches!(
+            store.add_trusted("evil\0host.com", 22, &key, &path),
+            Err(KnownHostsError::EntryFormat)
+        ));
+        assert_eq!(store.entry_count(), 0);
+        assert!(!path.exists());
     }
 
     #[test]

@@ -13,7 +13,9 @@ pub struct WindowSessionId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct SessionId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
 pub struct TransferId(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -858,6 +860,77 @@ impl TabStore {
     }
 }
 
+#[derive(Debug)]
+pub enum IdMatcher<'a> {
+    Empty,
+    Contiguous(u64, u64),
+    Sorted(&'a [TransferId]),
+    Set(std::collections::HashSet<TransferId>),
+}
+
+impl<'a> IdMatcher<'a> {
+    pub fn new(ids: &'a [TransferId]) -> Self {
+        if ids.is_empty() {
+            return IdMatcher::Empty;
+        }
+        let first = ids[0].0;
+        let last = ids[ids.len() - 1].0;
+        let len = ids.len();
+        if last >= first
+            && (last - first) as usize == len - 1
+            && (len <= 2 || ids.windows(2).all(|w| w[0].0 + 1 == w[1].0))
+        {
+            return IdMatcher::Contiguous(first, last);
+        }
+        if ids.windows(2).all(|w| w[0] <= w[1]) {
+            IdMatcher::Sorted(ids)
+        } else {
+            IdMatcher::Set(ids.iter().copied().collect())
+        }
+    }
+
+    #[inline]
+    pub fn contains(&self, id: TransferId) -> bool {
+        match self {
+            IdMatcher::Empty => false,
+            IdMatcher::Contiguous(first, last) => id.0 >= *first && id.0 <= *last,
+            IdMatcher::Sorted(slice) => slice.binary_search(&id).is_ok(),
+            IdMatcher::Set(set) => set.contains(&id),
+        }
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        match self {
+            IdMatcher::Empty => 0,
+            IdMatcher::Contiguous(first, last) => (*last - *first + 1) as usize,
+            IdMatcher::Sorted(slice) => slice.len(),
+            IdMatcher::Set(set) => set.len(),
+        }
+    }
+}
+
+fn plan_has_child(plan: &TransferPlan, transfer_id: TransferId) -> bool {
+    if plan.child_jobs.is_empty() {
+        return false;
+    }
+    let first = plan.child_jobs[0];
+    let last = plan.child_jobs[plan.child_jobs.len() - 1];
+    if first <= last
+        && transfer_id >= first
+        && transfer_id <= last
+        && plan.child_jobs.binary_search(&transfer_id).is_ok()
+    {
+        return true;
+    }
+    plan.child_jobs.contains(&transfer_id)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TransferStore {
     pub plans: Vec<TransferPlan>,
@@ -880,8 +953,19 @@ impl TransferStore {
         self.plans.iter().find(|plan| plan.id == plan_id)
     }
 
+    pub fn find_job_index(&self, transfer_id: TransferId) -> Option<usize> {
+        if let Ok(index) = self.jobs.binary_search_by_key(&transfer_id, |job| job.id) {
+            return Some(index);
+        }
+        self.jobs.iter().position(|job| job.id == transfer_id)
+    }
+
     pub fn find_job(&self, transfer_id: TransferId) -> Option<&TransferJob> {
-        self.jobs.iter().find(|job| job.id == transfer_id)
+        self.find_job_index(transfer_id).map(|i| &self.jobs[i])
+    }
+
+    pub fn find_job_mut(&mut self, transfer_id: TransferId) -> Option<&mut TransferJob> {
+        self.find_job_index(transfer_id).map(|i| &mut self.jobs[i])
     }
 
     /// The plan a job belongs to: either its root or one of its published
@@ -890,7 +974,7 @@ impl TransferStore {
     pub fn plan_id_for_job(&self, transfer_id: TransferId) -> Option<TransferPlanId> {
         self.plans
             .iter()
-            .find(|plan| plan.root_job_id == transfer_id || plan.child_jobs.contains(&transfer_id))
+            .find(|plan| plan.root_job_id == transfer_id || plan_has_child(plan, transfer_id))
             .map(|plan| plan.id)
     }
 
@@ -934,15 +1018,51 @@ impl TransferStore {
                         plan.total_bytes = progress.total_bytes;
                         changed = true;
                     }
-                    for child_job in &progress.child_jobs {
-                        if !plan.child_jobs.contains(&child_job.id) {
+                    let is_monotonically_ascending =
+                        match (plan.child_jobs.last(), progress.child_jobs.first()) {
+                            (Some(last_id), Some(first_new)) => first_new.id > *last_id,
+                            (None, Some(_)) => true,
+                            _ => false,
+                        };
+                    if is_monotonically_ascending {
+                        plan.child_jobs.reserve(progress.child_jobs.len());
+                        for child_job in &progress.child_jobs {
                             plan.child_jobs.push(child_job.id);
+                        }
+                        changed = true;
+                    } else {
+                        let to_add: Vec<TransferId> = {
+                            let matcher = IdMatcher::new(&plan.child_jobs);
+                            progress
+                                .child_jobs
+                                .iter()
+                                .filter_map(|job| (!matcher.contains(job.id)).then_some(job.id))
+                                .collect()
+                        };
+                        if !to_add.is_empty() {
+                            plan.child_jobs.extend(to_add);
                             changed = true;
                         }
                     }
                 }
-                for child_job in &progress.child_jobs {
-                    changed |= self.insert_job(child_job.clone());
+                let is_monotonically_ascending_jobs =
+                    match (self.jobs.last(), progress.child_jobs.first()) {
+                        (Some(last_job), Some(first_new)) => first_new.id > last_job.id,
+                        (None, Some(_)) => true,
+                        _ => false,
+                    };
+                if is_monotonically_ascending_jobs {
+                    if !progress.child_jobs.is_empty() {
+                        self.jobs.reserve(progress.child_jobs.len());
+                        for child_job in &progress.child_jobs {
+                            self.jobs.push(child_job.clone());
+                        }
+                        changed = true;
+                    }
+                } else {
+                    for child_job in &progress.child_jobs {
+                        changed |= self.insert_job(child_job.clone());
+                    }
                 }
                 changed
             }
@@ -975,11 +1095,12 @@ impl TransferStore {
                     plan.state = plan_state;
                     changed = true;
                 }
-                if let Some(root_job) = self.jobs.iter_mut().find(|job| job.id == root_job_id)
-                    && root_job.state != root_state
-                {
-                    root_job.state = root_state;
-                    changed = true;
+                if let Some(index) = self.find_job_index(root_job_id) {
+                    let root_job = &mut self.jobs[index];
+                    if root_job.state != root_state {
+                        root_job.state = root_state;
+                        changed = true;
+                    }
                 }
                 changed
             }
@@ -1015,13 +1136,10 @@ impl TransferStore {
                 waiting | self.upsert_conflict(conflict)
             }
             AppEvent::TransferProgress(progress) => {
-                let Some(job) = self
-                    .jobs
-                    .iter_mut()
-                    .find(|job| job.id == progress.transfer_id)
-                else {
+                let Some(job_index) = self.find_job_index(progress.transfer_id) else {
                     return false;
                 };
+                let job = &mut self.jobs[job_index];
                 if matches!(
                     job.state,
                     TransferState::Cancelling
@@ -1048,13 +1166,10 @@ impl TransferStore {
                 }
             }
             AppEvent::TransferWarning(warning) => {
-                let Some(job) = self
-                    .jobs
-                    .iter_mut()
-                    .find(|job| job.id == warning.transfer_id)
-                else {
+                let Some(job_index) = self.find_job_index(warning.transfer_id) else {
                     return false;
                 };
+                let job = &mut self.jobs[job_index];
                 if job.warnings.contains(warning) {
                     false
                 } else {
@@ -1080,9 +1195,10 @@ impl TransferStore {
     }
 
     pub fn mark_cancelling(&mut self, transfer_id: TransferId) -> bool {
-        let Some(job) = self.jobs.iter_mut().find(|job| job.id == transfer_id) else {
+        let Some(job_index) = self.find_job_index(transfer_id) else {
             return false;
         };
+        let job = &mut self.jobs[job_index];
         if matches!(
             job.state,
             TransferState::Queued | TransferState::Running { .. }
@@ -1111,25 +1227,30 @@ impl TransferStore {
     }
 
     fn insert_job(&mut self, job: TransferJob) -> bool {
-        if self.jobs.iter().any(|existing| existing.id == job.id) {
-            false
-        } else {
-            self.jobs.push(job);
-            true
+        match self.jobs.binary_search_by_key(&job.id, |j| j.id) {
+            Ok(_) => false,
+            Err(pos) => {
+                self.jobs.insert(pos, job);
+                true
+            }
         }
     }
 
     fn upsert_job(&mut self, job: TransferJob) -> bool {
-        if let Some(existing) = self.jobs.iter_mut().find(|existing| existing.id == job.id) {
-            if *existing == job {
-                false
-            } else {
-                *existing = job;
+        match self.jobs.binary_search_by_key(&job.id, |j| j.id) {
+            Ok(existing_index) => {
+                let existing = &mut self.jobs[existing_index];
+                if *existing == job {
+                    false
+                } else {
+                    *existing = job;
+                    true
+                }
+            }
+            Err(pos) => {
+                self.jobs.insert(pos, job);
                 true
             }
-        } else {
-            self.jobs.push(job);
-            true
         }
     }
 
@@ -1152,14 +1273,34 @@ impl TransferStore {
     }
 
     fn set_job_state(&mut self, transfer_id: TransferId, state: TransferState) -> bool {
-        let Some(job) = self.jobs.iter_mut().find(|job| job.id == transfer_id) else {
+        let Some(job_index) = self.find_job_index(transfer_id) else {
             return false;
         };
+        let job = &mut self.jobs[job_index];
         if job.state == state {
             false
         } else {
             job.state = state;
             true
+        }
+    }
+
+    pub fn child_jobs_slice_range(
+        &self,
+        plan_index: usize,
+    ) -> Option<std::ops::RangeInclusive<usize>> {
+        let plan = self.plans.get(plan_index)?;
+        let wanted_len = plan.child_jobs.len();
+        if wanted_len == 0 {
+            return None;
+        }
+        let (first_id, last_id) = (plan.child_jobs.first()?, plan.child_jobs.last()?);
+        let first_idx = self.find_job_index(*first_id)?;
+        let last_idx = self.find_job_index(*last_id)?;
+        if last_idx >= first_idx && (last_idx - first_idx + 1) == wanted_len {
+            Some(first_idx..=last_idx)
+        } else {
+            None
         }
     }
 
@@ -1172,18 +1313,30 @@ impl TransferStore {
         let Some(plan_index) = self.plans.iter().position(|plan| plan.id == plan_id) else {
             return false;
         };
-        let root_job_id = self.plans[plan_index].root_job_id;
-        // Clone the child ids first so the borrow checker lets us mutate jobs
-        // while the plan stays borrowed by index below.
-        let child_job_ids = self.plans[plan_index].child_jobs.clone();
         let mut changed = false;
         if self.plans[plan_index].state != plan_state {
             self.plans[plan_index].state = plan_state;
             changed = true;
         }
-        changed |= self.set_job_state(root_job_id, job_state.clone());
-        for child_job_id in child_job_ids {
-            changed |= self.set_job_state(child_job_id, job_state.clone());
+        let root_job_id = self.plans[plan_index].root_job_id;
+        if self.plans[plan_index].child_jobs.is_empty() {
+            changed |= self.set_job_state(root_job_id, job_state);
+        } else if let Some(range) = self.child_jobs_slice_range(plan_index) {
+            changed |= self.set_job_state(root_job_id, job_state.clone());
+            for job in &mut self.jobs[range] {
+                if job.state != job_state {
+                    job.state = job_state.clone();
+                    changed = true;
+                }
+            }
+        } else {
+            let matcher = IdMatcher::new(&self.plans[plan_index].child_jobs);
+            for job in &mut self.jobs {
+                if (job.id == root_job_id || matcher.contains(job.id)) && job.state != job_state {
+                    job.state = job_state.clone();
+                    changed = true;
+                }
+            }
         }
         if changed {
             self.just_finished_plan = Some(plan_id);
@@ -1212,11 +1365,37 @@ impl TransferStore {
             return false;
         }
         let root_job_id = self.plans[plan_index].root_job_id;
-        let child_job_ids = self.plans[plan_index].child_jobs.clone();
         let mut changed = false;
-        changed |= self.cancel_job_if_unfinished(root_job_id);
-        for child_job_id in child_job_ids {
-            changed |= self.cancel_job_if_unfinished(child_job_id);
+        if self.plans[plan_index].child_jobs.is_empty() {
+            changed |= self.cancel_job_if_unfinished(root_job_id);
+        } else if let Some(range) = self.child_jobs_slice_range(plan_index) {
+            changed |= self.cancel_job_if_unfinished(root_job_id);
+            for job in &mut self.jobs[range] {
+                if !matches!(
+                    job.state,
+                    TransferState::Completed
+                        | TransferState::Skipped
+                        | TransferState::Failed { .. }
+                ) {
+                    job.state = TransferState::Skipped;
+                    changed = true;
+                }
+            }
+        } else {
+            let matcher = IdMatcher::new(&self.plans[plan_index].child_jobs);
+            for job in &mut self.jobs {
+                if (job.id == root_job_id || matcher.contains(job.id))
+                    && !matches!(
+                        job.state,
+                        TransferState::Completed
+                            | TransferState::Skipped
+                            | TransferState::Failed { .. }
+                    )
+                {
+                    job.state = TransferState::Skipped;
+                    changed = true;
+                }
+            }
         }
         if !changed {
             return false;
@@ -1230,9 +1409,10 @@ impl TransferStore {
     }
 
     fn cancel_job_if_unfinished(&mut self, transfer_id: TransferId) -> bool {
-        let Some(job) = self.jobs.iter_mut().find(|job| job.id == transfer_id) else {
+        let Some(job_index) = self.find_job_index(transfer_id) else {
             return false;
         };
+        let job = &mut self.jobs[job_index];
         if matches!(
             job.state,
             TransferState::Completed | TransferState::Skipped | TransferState::Failed { .. }
@@ -1261,7 +1441,7 @@ impl TransferStore {
         let Some(plan_index) = self
             .plans
             .iter()
-            .position(|plan| plan.child_jobs.contains(&transfer_id))
+            .position(|plan| plan_has_child(plan, transfer_id))
         else {
             // A plan that published no children has no child to finalize: its
             // root job finishing is the whole story, so record that instead of
@@ -1283,30 +1463,44 @@ impl TransferStore {
         ) {
             return false;
         }
-        // One pass over the jobs with the plan's ids in a set. Looking each
-        // child up by scanning the job list would be quadratic, and this runs
-        // on every completion — a directory transfer has thousands of them, so
-        // the scan would dominate the UI thread.
-        let child_jobs = self.plans[plan_index].child_jobs.clone();
-        let wanted: std::collections::HashSet<TransferId> = child_jobs.iter().copied().collect();
+        let wanted_len = self.plans[plan_index].child_jobs.len();
         let mut any_failed = false;
         let mut finished = 0usize;
-        for job in &self.jobs {
-            if !wanted.contains(&job.id) {
-                continue;
-            }
-            match job.state {
-                TransferState::Completed | TransferState::Skipped => finished += 1,
-                TransferState::Failed { .. } => {
-                    any_failed = true;
-                    finished += 1;
+
+        let child_slice: Option<&[TransferJob]> = self
+            .child_jobs_slice_range(plan_index)
+            .map(|range| &self.jobs[range]);
+
+        if let Some(slice) = child_slice {
+            for job in slice.iter().rev() {
+                match job.state {
+                    TransferState::Completed | TransferState::Skipped => finished += 1,
+                    TransferState::Failed { .. } => {
+                        any_failed = true;
+                        finished += 1;
+                    }
+                    _ => return false,
                 }
-                _ => return false,
+            }
+        } else {
+            let matcher = IdMatcher::new(&self.plans[plan_index].child_jobs);
+            for job in self.jobs.iter().rev() {
+                if !matcher.contains(job.id) {
+                    continue;
+                }
+                match job.state {
+                    TransferState::Completed | TransferState::Skipped => finished += 1,
+                    TransferState::Failed { .. } => {
+                        any_failed = true;
+                        finished += 1;
+                    }
+                    _ => return false,
+                }
             }
         }
         // A child that vanished from the store cannot be accounted for, so the
         // plan stays unfinished rather than claiming a completion it cannot see.
-        if finished != wanted.len() {
+        if finished != wanted_len {
             return false;
         }
 
@@ -1825,10 +2019,19 @@ fn compare_entries<E: FileEntryFields>(a: &E, b: &E, sort: &FileSort) -> std::cm
 
 /// Case-insensitive name comparison with a case-sensitive fallback so
 /// `README` and `readme` still order deterministically.
+///
+/// Has an ASCII fast path to avoid heap allocations on the common case
+/// where filenames are pure ASCII.
 fn compare_names(a: &str, b: &str) -> std::cmp::Ordering {
-    let a_lower = a.to_lowercase();
-    let b_lower = b.to_lowercase();
-    a_lower.cmp(&b_lower).then_with(|| a.cmp(b))
+    if a.is_ascii() && b.is_ascii() {
+        let a_iter = a.bytes().map(|b| b.to_ascii_lowercase());
+        let b_iter = b.bytes().map(|b| b.to_ascii_lowercase());
+        a_iter.cmp(b_iter).then_with(|| a.cmp(b))
+    } else {
+        let a_iter = a.chars().flat_map(char::to_lowercase);
+        let b_iter = b.chars().flat_map(char::to_lowercase);
+        a_iter.cmp(b_iter).then_with(|| a.cmp(b))
+    }
 }
 
 fn kind_rank(kind: FileKind) -> u8 {
@@ -3938,6 +4141,449 @@ mod tests {
     }
 
     #[test]
+    fn transfer_store_handles_ten_thousand_child_jobs_on_terminal_and_cancel() {
+        let now = Timestamp::from_secs_since_epoch(10);
+        let plan_id = TransferPlanId(1);
+        let root_job = super::TransferJob {
+            id: TransferId(1),
+            direction: TransferDirection::Upload,
+            source: TransferEndpoint::Local(LocalPath::new("/tmp/source")),
+            destination: TransferEndpoint::Remote(RemotePath::new("/srv/source")),
+            state: super::TransferState::Planning,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        let child_jobs: Vec<_> = (2..=10_001)
+            .map(|i| super::TransferJob {
+                id: TransferId(i),
+                state: if i % 2 == 0 {
+                    super::TransferState::Queued
+                } else {
+                    super::TransferState::Completed
+                },
+                ..root_job.clone()
+            })
+            .collect();
+        let plan = super::TransferPlan {
+            id: plan_id,
+            root_job_id: root_job.id,
+            source_root: root_job.source.clone(),
+            destination_root: root_job.destination.clone(),
+            state: super::TransferPlanState::Planning,
+            planned_count: 10_000,
+            total_bytes: Some(10_000),
+            child_jobs: (2..=10_001).map(TransferId).collect(),
+            conflict_policy: super::ConflictPolicy::default(),
+        };
+
+        let mut store = TransferStore::default();
+        store.apply_event(
+            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
+                plan,
+                root_job,
+            })),
+            now,
+        );
+        for chunk in child_jobs.chunks(1000) {
+            store.apply_event(
+                &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+                    plan_id,
+                    child_jobs: chunk.to_vec(),
+                    planned_count: 10_000,
+                    total_bytes: Some(10_000),
+                }),
+                now,
+            );
+        }
+
+        // Cancelling skips all non-terminal children in a single O(N) pass.
+        assert!(store.apply_event(&AppEvent::TransferPlanCancelled { plan_id }, now));
+        assert_eq!(store.plans[0].state, super::TransferPlanState::Cancelled);
+        for job in &store.jobs {
+            if job.id == TransferId(1) || job.id.0 % 2 == 0 {
+                assert_eq!(job.state, super::TransferState::Skipped);
+            } else {
+                assert_eq!(job.state, super::TransferState::Completed);
+            }
+        }
+    }
+
+    #[test]
+    fn id_matcher_correctness() {
+        use super::IdMatcher;
+
+        // Empty
+        let empty_matcher = IdMatcher::new(&[]);
+        assert!(!empty_matcher.contains(TransferId(1)));
+        assert_eq!(empty_matcher.len(), 0);
+
+        // Contiguous
+        let contiguous_ids: Vec<TransferId> = (10..=20).map(TransferId).collect();
+        let contig_matcher = IdMatcher::new(&contiguous_ids);
+        assert!(matches!(contig_matcher, IdMatcher::Contiguous(10, 20)));
+        assert!(contig_matcher.contains(TransferId(10)));
+        assert!(contig_matcher.contains(TransferId(15)));
+        assert!(contig_matcher.contains(TransferId(20)));
+        assert!(!contig_matcher.contains(TransferId(9)));
+        assert!(!contig_matcher.contains(TransferId(21)));
+        assert_eq!(contig_matcher.len(), 11);
+
+        // Sorted with gaps
+        let sorted_ids = vec![TransferId(2), TransferId(5), TransferId(8), TransferId(10)];
+        let sorted_matcher = IdMatcher::new(&sorted_ids);
+        assert!(matches!(sorted_matcher, IdMatcher::Sorted(_)));
+        assert!(sorted_matcher.contains(TransferId(5)));
+        assert!(sorted_matcher.contains(TransferId(8)));
+        assert!(!sorted_matcher.contains(TransferId(6)));
+        assert_eq!(sorted_matcher.len(), 4);
+
+        // Unsorted
+        let unsorted_ids = vec![TransferId(10), TransferId(2), TransferId(8)];
+        let set_matcher = IdMatcher::new(&unsorted_ids);
+        assert!(matches!(set_matcher, IdMatcher::Set(_)));
+        assert!(set_matcher.contains(TransferId(2)));
+        assert!(set_matcher.contains(TransferId(8)));
+        assert!(set_matcher.contains(TransferId(10)));
+        assert!(!set_matcher.contains(TransferId(5)));
+        assert_eq!(set_matcher.len(), 3);
+    }
+
+    #[test]
+    fn transfer_store_fast_finalize_with_ten_thousand_jobs() {
+        let now = Timestamp::from_secs_since_epoch(10);
+        let plan_id = TransferPlanId(42);
+        let root_job = super::TransferJob {
+            id: TransferId(1),
+            direction: TransferDirection::Upload,
+            source: TransferEndpoint::Local(LocalPath::new("/tmp/src")),
+            destination: TransferEndpoint::Remote(RemotePath::new("/srv/dest")),
+            state: super::TransferState::Planning,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        let plan = super::TransferPlan {
+            id: plan_id,
+            root_job_id: root_job.id,
+            source_root: root_job.source.clone(),
+            destination_root: root_job.destination.clone(),
+            state: super::TransferPlanState::Planning,
+            planned_count: 5_000,
+            total_bytes: Some(5_000),
+            child_jobs: Vec::new(),
+            conflict_policy: super::ConflictPolicy::default(),
+        };
+
+        let mut store = TransferStore::default();
+        store.apply_event(
+            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
+                plan,
+                root_job: root_job.clone(),
+            })),
+            now,
+        );
+
+        // Stream 5,000 jobs in batches of 250
+        for batch_idx in 0..20 {
+            let start = 2 + batch_idx * 250;
+            let end = start + 250;
+            let batch: Vec<_> = (start..end)
+                .map(|id| super::TransferJob {
+                    id: TransferId(id),
+                    state: super::TransferState::Queued,
+                    ..root_job.clone()
+                })
+                .collect();
+            store.apply_event(
+                &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+                    plan_id,
+                    child_jobs: batch,
+                    planned_count: 5_000,
+                    total_bytes: Some(5_000),
+                }),
+                now,
+            );
+        }
+        assert_eq!(store.plans[0].child_jobs.len(), 5_000);
+        assert_eq!(store.jobs.len(), 5_001);
+
+        // Completing the first child should fast-reject without scanning all 5,000 jobs
+        let start = std::time::Instant::now();
+        store.apply_event(
+            &AppEvent::TransferCompleted {
+                transfer_id: TransferId(2),
+            },
+            now,
+        );
+        let elapsed_first = start.elapsed();
+        assert!(
+            elapsed_first.as_millis() < 50,
+            "first child completion took too long: {elapsed_first:?}"
+        );
+        assert_eq!(store.plans[0].state, super::TransferPlanState::Planning);
+        assert_eq!(store.just_finished_plan, None);
+
+        // Complete all remaining children except the last one
+        for id in 3..=5000 {
+            store.apply_event(
+                &AppEvent::TransferCompleted {
+                    transfer_id: TransferId(id),
+                },
+                now,
+            );
+        }
+        assert_eq!(store.plans[0].state, super::TransferPlanState::Planning);
+
+        // Completing the final child (5001) transitions the plan to Completed
+        store.apply_event(
+            &AppEvent::TransferCompleted {
+                transfer_id: TransferId(5001),
+            },
+            now,
+        );
+        assert_eq!(store.plans[0].state, super::TransferPlanState::Completed);
+        assert_eq!(store.just_finished_plan, Some(plan_id));
+        assert_eq!(store.jobs[0].state, super::TransferState::Completed);
+    }
+
+    #[test]
+    fn multiple_plans_binary_search_and_sliced_finalization() {
+        let now = Timestamp::from_secs_since_epoch(1);
+        let mut store = TransferStore::default();
+
+        let plan_1_id = TransferPlanId(1);
+        let root_1 = super::TransferJob {
+            id: TransferId(1),
+            direction: TransferDirection::Upload,
+            source: TransferEndpoint::Local(LocalPath::new("/tmp/dir1")),
+            destination: TransferEndpoint::Remote(RemotePath::new("/srv/dir1")),
+            state: super::TransferState::Planning,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        store.apply_event(
+            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
+                plan: super::TransferPlan {
+                    id: plan_1_id,
+                    root_job_id: root_1.id,
+                    source_root: root_1.source.clone(),
+                    destination_root: root_1.destination.clone(),
+                    state: super::TransferPlanState::Planning,
+                    planned_count: 1000,
+                    total_bytes: Some(1000),
+                    child_jobs: Vec::new(),
+                    conflict_policy: super::ConflictPolicy::default(),
+                },
+                root_job: root_1.clone(),
+            })),
+            now,
+        );
+
+        let batch_1: Vec<_> = (2..=1001)
+            .map(|id| super::TransferJob {
+                id: TransferId(id),
+                state: super::TransferState::Queued,
+                ..root_1.clone()
+            })
+            .collect();
+        store.apply_event(
+            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+                plan_id: plan_1_id,
+                child_jobs: batch_1,
+                planned_count: 1000,
+                total_bytes: Some(1000),
+            }),
+            now,
+        );
+
+        let plan_2_id = TransferPlanId(2);
+        let root_2 = super::TransferJob {
+            id: TransferId(1002),
+            direction: TransferDirection::Download,
+            source: TransferEndpoint::Remote(RemotePath::new("/srv/dir2")),
+            destination: TransferEndpoint::Local(LocalPath::new("/tmp/dir2")),
+            state: super::TransferState::Planning,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        store.apply_event(
+            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
+                plan: super::TransferPlan {
+                    id: plan_2_id,
+                    root_job_id: root_2.id,
+                    source_root: root_2.source.clone(),
+                    destination_root: root_2.destination.clone(),
+                    state: super::TransferPlanState::Planning,
+                    planned_count: 1000,
+                    total_bytes: Some(1000),
+                    child_jobs: Vec::new(),
+                    conflict_policy: super::ConflictPolicy::default(),
+                },
+                root_job: root_2.clone(),
+            })),
+            now,
+        );
+
+        let batch_2: Vec<_> = (1003..=2002)
+            .map(|id| super::TransferJob {
+                id: TransferId(id),
+                state: super::TransferState::Queued,
+                ..root_2.clone()
+            })
+            .collect();
+        store.apply_event(
+            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+                plan_id: plan_2_id,
+                child_jobs: batch_2,
+                planned_count: 1000,
+                total_bytes: Some(1000),
+            }),
+            now,
+        );
+
+        assert_eq!(store.jobs.len(), 2002);
+        assert_eq!(store.find_job_index(TransferId(500)), Some(499));
+        assert_eq!(store.find_job_index(TransferId(1500)), Some(1499));
+        assert_eq!(
+            store.find_job(TransferId(500)).map(|j| j.id),
+            Some(TransferId(500))
+        );
+
+        // Complete Plan 1's children; Plan 2 must remain unfinished
+        for id in 2..=1001 {
+            store.apply_event(
+                &AppEvent::TransferCompleted {
+                    transfer_id: TransferId(id),
+                },
+                now,
+            );
+        }
+
+        assert_eq!(store.plans[0].state, super::TransferPlanState::Completed);
+        assert_eq!(store.just_finished_plan, Some(plan_1_id));
+        assert_eq!(store.plans[1].state, super::TransferPlanState::Planning);
+
+        // Complete Plan 2's children
+        for id in 1003..=2002 {
+            store.apply_event(
+                &AppEvent::TransferCompleted {
+                    transfer_id: TransferId(id),
+                },
+                now,
+            );
+        }
+
+        assert_eq!(store.plans[1].state, super::TransferPlanState::Completed);
+        assert_eq!(store.just_finished_plan, Some(plan_2_id));
+    }
+
+    #[test]
+    fn interleaved_plan_jobs_maintain_sorted_job_indices() {
+        let mut store = super::TransferStore::default();
+        let now = Timestamp::from_secs_since_epoch(10);
+
+        let plan_1_id = TransferPlanId(1);
+        let root_1 = super::TransferJob {
+            id: TransferId(10),
+            direction: super::TransferDirection::Download,
+            source: TransferEndpoint::Remote(RemotePath::new("/remote/one")),
+            destination: TransferEndpoint::Local(LocalPath::new("/tmp/one")),
+            state: super::TransferState::Planning,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        store.apply_event(
+            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
+                plan: super::TransferPlan {
+                    id: plan_1_id,
+                    root_job_id: root_1.id,
+                    source_root: root_1.source.clone(),
+                    destination_root: root_1.destination.clone(),
+                    state: super::TransferPlanState::Planning,
+                    planned_count: 2,
+                    total_bytes: Some(200),
+                    child_jobs: Vec::new(),
+                    conflict_policy: super::ConflictPolicy::default(),
+                },
+                root_job: root_1.clone(),
+            })),
+            now,
+        );
+
+        // Later job arrives first (e.g. from plan 2)
+        let plan_2_id = TransferPlanId(2);
+        let root_2 = super::TransferJob {
+            id: TransferId(20),
+            direction: super::TransferDirection::Download,
+            source: TransferEndpoint::Remote(RemotePath::new("/remote/two")),
+            destination: TransferEndpoint::Local(LocalPath::new("/tmp/two")),
+            state: super::TransferState::Planning,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+        store.apply_event(
+            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
+                plan: super::TransferPlan {
+                    id: plan_2_id,
+                    root_job_id: root_2.id,
+                    source_root: root_2.source.clone(),
+                    destination_root: root_2.destination.clone(),
+                    state: super::TransferPlanState::Planning,
+                    planned_count: 1,
+                    total_bytes: Some(100),
+                    child_jobs: Vec::new(),
+                    conflict_policy: super::ConflictPolicy::default(),
+                },
+                root_job: root_2.clone(),
+            })),
+            now,
+        );
+
+        // Now interleaved child jobs arrive for plan 1 with IDs smaller than root_2
+        let child_1 = super::TransferJob {
+            id: TransferId(11),
+            state: super::TransferState::Queued,
+            ..root_1.clone()
+        };
+        let child_2 = super::TransferJob {
+            id: TransferId(12),
+            state: super::TransferState::Queued,
+            ..root_1.clone()
+        };
+        store.apply_event(
+            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+                plan_id: plan_1_id,
+                child_jobs: vec![child_1, child_2],
+                planned_count: 2,
+                total_bytes: Some(200),
+            }),
+            now,
+        );
+
+        // All jobs in store.jobs must be strictly ascending by ID
+        let ids: Vec<_> = store.jobs.iter().map(|j| j.id.0).collect();
+        assert_eq!(ids, vec![10, 11, 12, 20]);
+
+        // Binary search find_job_index works in O(log N)
+        assert_eq!(store.find_job_index(TransferId(10)), Some(0));
+        assert_eq!(store.find_job_index(TransferId(11)), Some(1));
+        assert_eq!(store.find_job_index(TransferId(12)), Some(2));
+        assert_eq!(store.find_job_index(TransferId(20)), Some(3));
+        assert_eq!(store.find_job_index(TransferId(99)), None);
+    }
+
+    #[test]
     fn transfer_plan_progress_after_terminal_event_is_ignored() {
         let now = Timestamp::from_secs_since_epoch(10);
         let plan_id = TransferPlanId(1);
@@ -4355,6 +5001,54 @@ mod tests {
 
         assert_eq!(entries[0].path.as_str(), "/srv/a/same.txt");
         assert_eq!(entries[1].path.as_str(), "/srv/b/same.txt");
+    }
+
+    #[test]
+    fn sort_entries_handles_ten_thousand_entries() {
+        use super::FileKind;
+
+        let mut entries: Vec<super::LocalEntry> = (0..10_000)
+            .rev()
+            .map(|i| super::LocalEntry {
+                name: format!("file-{i:05}.txt"),
+                path: LocalPath::new(format!("/tmp/file-{i:05}.txt")),
+                kind: if i % 10 == 0 {
+                    FileKind::Directory
+                } else {
+                    FileKind::File
+                },
+                size: Some(i as u64),
+                permissions: None,
+                modified_at: None,
+                link_target: None,
+            })
+            .collect();
+
+        super::sort_entries(&mut entries, &super::FileSort::default());
+
+        // Directories first, then files sorted ascending
+        assert_eq!(entries[0].kind, FileKind::Directory);
+        assert_eq!(entries[0].name, "file-00000.txt");
+        assert_eq!(entries[999].kind, FileKind::Directory);
+        assert_eq!(entries[999].name, "file-09990.txt");
+        assert_eq!(entries[1000].kind, FileKind::File);
+        assert_eq!(entries[1000].name, "file-00001.txt");
+        assert_eq!(entries[9999].name, "file-09999.txt");
+    }
+
+    #[test]
+    fn sort_entries_handles_unicode_names() {
+        use super::FileKind;
+
+        let mut entries = vec![
+            remote_entry("文档.txt", FileKind::File, None),
+            remote_entry("alpha.txt", FileKind::File, None),
+            remote_entry("中文.txt", FileKind::File, None),
+            remote_entry("Alpha.txt", FileKind::File, None),
+        ];
+        super::sort_entries(&mut entries, &super::FileSort::default());
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, ["Alpha.txt", "alpha.txt", "中文.txt", "文档.txt"]);
     }
 
     #[test]
@@ -5399,6 +6093,64 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_secs(5),
             "finishing {CHILDREN} children took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn child_jobs_slice_range_and_fast_cancel_and_failure() {
+        let now = Timestamp::from_system_time(std::time::SystemTime::UNIX_EPOCH);
+        let plan_id = TransferPlanId(1);
+        const CHILDREN: u64 = 1000;
+
+        let job = |id: u64, state: super::TransferState| super::TransferJob {
+            id: TransferId(id),
+            direction: super::TransferDirection::Upload,
+            source: TransferEndpoint::Local(LocalPath::new("/tmp/test")),
+            destination: TransferEndpoint::Remote(RemotePath::new("/srv/test")),
+            state,
+            metadata_policy: MetadataPolicy::default(),
+            conflict_policy: super::ConflictPolicy::default(),
+            warnings: Vec::new(),
+            created_at: now,
+        };
+
+        let mut store = super::TransferStore::default();
+        store.plans.push(super::TransferPlan {
+            id: plan_id,
+            root_job_id: TransferId(1),
+            source_root: TransferEndpoint::Local(LocalPath::new("/tmp")),
+            destination_root: TransferEndpoint::Remote(RemotePath::new("/srv")),
+            state: super::TransferPlanState::Queued,
+            planned_count: CHILDREN as usize,
+            total_bytes: None,
+            child_jobs: (0..CHILDREN).map(|index| TransferId(index + 2)).collect(),
+            conflict_policy: super::ConflictPolicy::default(),
+        });
+        store.jobs.push(job(1, super::TransferState::Queued));
+        for index in 0..CHILDREN {
+            store
+                .jobs
+                .push(job(index + 2, super::TransferState::Queued));
+        }
+
+        let range = store.child_jobs_slice_range(0).expect("slice range exists");
+        assert_eq!(range, 1..=CHILDREN as usize);
+
+        // Cancel the plan and ensure all children become Skipped quickly
+        let started = std::time::Instant::now();
+        store.apply_event(&AppEvent::TransferPlanCancelled { plan_id }, now);
+        let elapsed = started.elapsed();
+
+        assert_eq!(store.plans[0].state, super::TransferPlanState::Cancelled);
+        assert_eq!(store.jobs[0].state, super::TransferState::Skipped);
+        assert!(
+            store.jobs[1..]
+                .iter()
+                .all(|j| j.state == super::TransferState::Skipped)
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "cancelling {CHILDREN} children took {elapsed:?}"
         );
     }
 }

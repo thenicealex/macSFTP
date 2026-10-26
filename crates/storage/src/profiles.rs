@@ -1,7 +1,7 @@
 use macsftp_core::{
     AuthCredential, AuthFingerprint, AuthMethod, AuthMethodKind, ConnectionProfile,
     ConnectionRoute, ConnectionSettings, LocalPath, ProfileId, RemotePath, ResolvedConnectionRoute,
-    SecretRef,
+    SecretRef, is_bidi_or_control,
 };
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
@@ -408,10 +408,12 @@ impl ProfileStore {
         match self.commit_transaction(TransactionKind::Save {
             profile: Box::new(profile),
         }) {
-            Ok(TransactionOutcome::Committed { .. }) => Ok(self
+            Ok(TransactionOutcome::Committed { .. }) => self
                 .find_profile(profile_id)
-                .expect("just-saved profile is present")
-                .clone()),
+                .cloned()
+                .ok_or_else(|| StorageError::Corrupt {
+                    message: "just-saved profile is missing from memory".to_string(),
+                }),
             Ok(TransactionOutcome::Unchanged) => {
                 unreachable!("save transactions always produce a saved profile")
             }
@@ -583,6 +585,67 @@ impl ProfileStore {
         request: ProfileSaveRequest,
     ) -> Result<ProfileSaveOutcome, ProfileMutationError> {
         self.ensure_writable()?;
+        if request.port == 0 {
+            return Err(ProfileMutationError::Storage(StorageError::Corrupt {
+                message: "port cannot be 0".to_string(),
+            }));
+        }
+        if request.host.is_empty()
+            || request
+                .host
+                .chars()
+                .any(|c| c.is_whitespace() || is_bidi_or_control(c))
+        {
+            return Err(ProfileMutationError::Storage(StorageError::Corrupt {
+                message: "invalid host address".to_string(),
+            }));
+        }
+        if request.username.is_empty()
+            || request
+                .username
+                .chars()
+                .any(|c| c.is_whitespace() || is_bidi_or_control(c))
+        {
+            return Err(ProfileMutationError::Storage(StorageError::Corrupt {
+                message: "invalid username".to_string(),
+            }));
+        }
+        match &request.route {
+            ConnectionRoute::Direct => {}
+            ConnectionRoute::ProxyCommand { command } => {
+                if command.trim().is_empty()
+                    || command.contains('\0')
+                    || command.chars().any(is_bidi_or_control)
+                {
+                    return Err(ProfileMutationError::Storage(StorageError::Corrupt {
+                        message: "invalid ProxyCommand".to_string(),
+                    }));
+                }
+            }
+            ConnectionRoute::JumpHost { profile_id } => {
+                if *profile_id == request.profile_id {
+                    return Err(ProfileMutationError::Storage(StorageError::Corrupt {
+                        message: format!("profile {} jumps to itself", request.profile_id.0),
+                    }));
+                }
+                let Some(jump) = self.find_profile(*profile_id) else {
+                    return Err(ProfileMutationError::Storage(StorageError::Corrupt {
+                        message: format!(
+                            "profile {} references missing jump profile {}",
+                            request.profile_id.0, profile_id.0
+                        ),
+                    }));
+                };
+                if !matches!(&jump.route, ConnectionRoute::Direct) {
+                    return Err(ProfileMutationError::Storage(StorageError::Corrupt {
+                        message: format!(
+                            "profile {} references non-direct jump profile {}",
+                            request.profile_id.0, profile_id.0
+                        ),
+                    }));
+                }
+            }
+        }
         let previous = self.find_profile(request.profile_id).cloned();
         let resolved = Self::resolve_auth(&request, previous.as_ref())?;
 
@@ -614,8 +677,8 @@ impl ProfileStore {
                 // credentials permanently inconsistent.
                 let committed_profile = self
                     .find_profile(request.profile_id)
-                    .expect("just-committed profile is present")
-                    .clone();
+                    .cloned()
+                    .ok_or(ProfileMutationError::ProfileNotFound(request.profile_id))?;
                 (committed_profile, warnings)
             }
             Ok(TransactionOutcome::Unchanged) => {
@@ -1330,6 +1393,54 @@ mod tests {
             panic!("expected password auth");
         };
         assert_eq!(password, "old-secret");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn save_request_rejects_invalid_port_host_username() {
+        let path = temp_profiles_path("invalid-input");
+        cleanup(&path);
+        let mut store = ProfileStore::open_or_empty_memory(path.clone());
+
+        let mut req = password_save_request(1, "Test", "example.com", "secret");
+        req.port = 0;
+        assert!(matches!(
+            store.save_request(req),
+            Err(ProfileMutationError::Storage(_))
+        ));
+
+        let req = password_save_request(1, "Test", "", "secret");
+        assert!(matches!(
+            store.save_request(req),
+            Err(ProfileMutationError::Storage(_))
+        ));
+
+        let req = password_save_request(1, "Test", "host with spaces", "secret");
+        assert!(matches!(
+            store.save_request(req),
+            Err(ProfileMutationError::Storage(_))
+        ));
+
+        let req = password_save_request(1, "Test", "host\u{202E}bidi", "secret");
+        assert!(matches!(
+            store.save_request(req),
+            Err(ProfileMutationError::Storage(_))
+        ));
+
+        let mut req = password_save_request(1, "Test", "example.com", "secret");
+        req.username = "".into();
+        assert!(matches!(
+            store.save_request(req),
+            Err(ProfileMutationError::Storage(_))
+        ));
+
+        let mut req = password_save_request(1, "Test", "example.com", "secret");
+        req.username = "user name".into();
+        assert!(matches!(
+            store.save_request(req),
+            Err(ProfileMutationError::Storage(_))
+        ));
+
         cleanup(&path);
     }
 

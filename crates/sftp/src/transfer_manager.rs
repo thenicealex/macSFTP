@@ -12,12 +12,22 @@ use tracing::warn;
 
 use crate::pool::{ConnectionManager, SharedConnection};
 use crate::session_actor::{
-    ConflictWaiter, TransferConflictContext, TransferJobOutcome, open_transfer_session,
-    run_transfer_job,
+    ConflictWaiter, PlanTransferFacts, TransferConflictContext, TransferJobOutcome,
+    TransferSessionSlot, open_transfer_session, run_transfer_job,
 };
 
-pub(crate) const MAX_CONCURRENT_TRANSFERS: usize = 6;
-pub(crate) const MAX_CONCURRENT_PER_PLAN: usize = 4;
+pub(crate) const MAX_CONCURRENT_TRANSFERS: usize = 12;
+pub(crate) const MAX_CONCURRENT_PER_PLAN: usize = 8;
+/// OpenSSH counts each subsystem request against `MaxSessions` (10 by default)
+/// and the browsing session holds one channel of its own. Staying at nine
+/// leaves room for it and keeps a tenth slot free for anything the server
+/// opens on its side; more transfer channels than this make channel opens fail
+/// on servers that keep the default.
+const MAX_CHANNELS_PER_CONNECTION: usize = 9;
+/// Idle sessions held per plan. Jobs of one plan run at most
+/// [`MAX_CONCURRENT_PER_PLAN`] at a time, so keeping that many is all a later
+/// job can use; the rest are closed instead of pinning server processes.
+const MAX_IDLE_SESSIONS_PER_PLAN: usize = MAX_CONCURRENT_PER_PLAN;
 /// Upper bound on pre-enqueue cancellation records. Each one is a few bytes and
 /// only matters for the instant between a cancel and its enqueue, so dropping
 /// the oldest is always safe.
@@ -56,7 +66,7 @@ pub(crate) enum TransferManagerRequest {
     },
 }
 
-struct QueuedTransfer {
+pub(crate) struct QueuedTransfer {
     connection: Arc<SharedConnection>,
     plan_id: TransferPlanId,
     job: TransferJob,
@@ -70,6 +80,9 @@ struct RunningTransfer {
 struct CompletedTransfer {
     transfer_id: TransferId,
     retry_route: Option<RetryRoute>,
+    /// Set when the job finished cleanly and its session can serve later jobs
+    /// of the same plan.
+    reusable_session: Option<Arc<TransferSessionSlot>>,
 }
 
 struct RetryRoute {
@@ -84,6 +97,8 @@ pub(crate) struct TransferManager {
     connection_manager: Arc<ConnectionManager>,
     next_conflict_id: Arc<AtomicU64>,
     pending: VecDeque<QueuedTransfer>,
+    pending_per_plan: HashMap<TransferPlanId, usize>,
+    pending_roots: HashSet<TransferId>,
     running: HashMap<TransferId, RunningTransfer>,
     running_per_plan: HashMap<TransferPlanId, usize>,
     /// First job a planner emitted for a plan. For folder transfers this is the
@@ -105,6 +120,12 @@ pub(crate) struct TransferManager {
     /// that still has a job to stop.
     pending_cancel_order: VecDeque<TransferId>,
     retry_routes: HashMap<TransferId, RetryRoute>,
+    /// Sessions a plan has finished with, available to its queued jobs.
+    /// Dropped as soon as the plan has no work left.
+    idle_sessions: HashMap<TransferPlanId, Vec<Arc<TransferSessionSlot>>>,
+    /// Verified directories and confirmed atomic hardlink support shared
+    /// across concurrent workers of the same plan to eliminate redundant RTTs.
+    plan_facts: HashMap<TransferPlanId, PlanTransferFacts>,
     plan_policies: Arc<Mutex<HashMap<TransferPlanId, ConflictPolicy>>>,
     conflict_waiters: Arc<Mutex<HashMap<ConflictRequestId, ConflictWaiter>>>,
 }
@@ -120,6 +141,8 @@ impl TransferManager {
             connection_manager,
             next_conflict_id,
             pending: VecDeque::new(),
+            pending_per_plan: HashMap::new(),
+            pending_roots: HashSet::new(),
             running: HashMap::new(),
             running_per_plan: HashMap::new(),
             plan_root_jobs: HashMap::new(),
@@ -127,6 +150,8 @@ impl TransferManager {
             cancelled_before_enqueue: HashMap::new(),
             pending_cancel_order: VecDeque::new(),
             retry_routes: HashMap::new(),
+            idle_sessions: HashMap::new(),
+            plan_facts: HashMap::new(),
             plan_policies: Arc::new(Mutex::new(HashMap::new())),
             conflict_waiters: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -184,7 +209,7 @@ impl TransferManager {
                     .iter()
                     .position(|transfer| transfer.job.id == transfer_id)
                 {
-                    let plan_id = self.pending.remove(position).map(|queued| queued.plan_id);
+                    let plan_id = self.remove_pending(position).map(|queued| queued.plan_id);
                     if let Err(error) = self
                         .event_tx
                         .send_async(AppEvent::TransferSkipped { transfer_id })
@@ -309,7 +334,7 @@ impl TransferManager {
                 skipped.push(job.id);
                 continue;
             }
-            self.pending.push_back(QueuedTransfer {
+            self.push_pending(QueuedTransfer {
                 connection: connection.clone(),
                 plan_id,
                 job,
@@ -409,7 +434,7 @@ impl TransferManager {
             .filter(|queued| queued.plan_id == plan_id)
             .map(|queued| queued.job.id)
             .collect();
-        self.pending.retain(|queued| queued.plan_id != plan_id);
+        self.retain_pending_not_plan(plan_id);
         let cancelled_running: Vec<TransferId> = self
             .running
             .iter()
@@ -438,6 +463,7 @@ impl TransferManager {
         }
         self.plan_root_jobs.remove(&plan_id);
         self.plan_children_started.remove(&plan_id);
+        self.plan_facts.remove(&plan_id);
         self.cleanup_plan_if_idle(plan_id);
     }
 
@@ -456,18 +482,85 @@ impl TransferManager {
         } else {
             self.retry_routes.remove(&completed.transfer_id);
         }
+        if let (Some(plan_id), Some(session)) = (completed_plan_id, completed.reusable_session) {
+            self.return_idle_session(plan_id, session);
+        }
         if let Some(plan_id) = completed_plan_id {
             self.cleanup_plan_if_idle(plan_id);
         }
     }
 
+    /// Takes a session the plan has finished with, if one matches the job's
+    /// direction. Sessions are direction-specific: uploads run on the
+    /// high-level SFTP session and downloads on the pipelined raw one.
+    fn take_idle_session(
+        &mut self,
+        plan_id: TransferPlanId,
+        direction: TransferDirection,
+    ) -> Option<Arc<TransferSessionSlot>> {
+        let sessions = self.idle_sessions.get_mut(&plan_id)?;
+        let position = sessions
+            .iter()
+            .position(|session| session.direction() == direction)?;
+        let session = sessions.remove(position);
+        if sessions.is_empty() {
+            self.idle_sessions.remove(&plan_id);
+        }
+        Some(session)
+    }
+
+    fn return_idle_session(&mut self, plan_id: TransferPlanId, session: Arc<TransferSessionSlot>) {
+        let sessions = self.idle_sessions.entry(plan_id).or_default();
+        if sessions.len() < MAX_IDLE_SESSIONS_PER_PLAN {
+            sessions.push(session);
+        }
+    }
+
+    pub(crate) fn push_pending(&mut self, queued: QueuedTransfer) {
+        *self.pending_per_plan.entry(queued.plan_id).or_insert(0) += 1;
+        if self.plan_root_jobs.get(&queued.plan_id) == Some(&queued.job.id) {
+            self.pending_roots.insert(queued.job.id);
+        }
+        self.pending.push_back(queued);
+    }
+
+    pub(crate) fn remove_pending(&mut self, position: usize) -> Option<QueuedTransfer> {
+        let queued = self.pending.remove(position)?;
+        if let Some(count) = self.pending_per_plan.get_mut(&queued.plan_id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.pending_per_plan.remove(&queued.plan_id);
+            }
+        }
+        self.pending_roots.remove(&queued.job.id);
+        Some(queued)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_pending(&mut self) {
+        self.pending.clear();
+        self.pending_per_plan.clear();
+        self.pending_roots.clear();
+    }
+
+    fn retain_pending_not_plan(&mut self, plan_id: TransferPlanId) {
+        self.pending.retain(|queued| queued.plan_id != plan_id);
+        self.pending_per_plan.remove(&plan_id);
+        if let Some(root_id) = self.plan_root_jobs.get(&plan_id) {
+            self.pending_roots.remove(root_id);
+        }
+    }
+
     fn cleanup_plan_if_idle(&mut self, plan_id: TransferPlanId) {
-        let has_pending = self.pending.iter().any(|queued| queued.plan_id == plan_id);
+        let has_pending = self.pending_per_plan.contains_key(&plan_id);
         let has_running = self.running_per_plan.contains_key(&plan_id);
-        let has_retry = self
-            .retry_routes
-            .values()
-            .any(|route| route.plan_id == plan_id);
+        let has_retry = if has_pending || has_running {
+            false
+        } else {
+            self.retry_routes
+                .values()
+                .any(|route| route.plan_id == plan_id)
+        };
         if !has_pending
             && !has_running
             && !has_retry
@@ -478,6 +571,10 @@ impl TransferManager {
         if !has_pending && !has_running && !has_retry {
             self.plan_root_jobs.remove(&plan_id);
             self.plan_children_started.remove(&plan_id);
+            // Idle transfer sessions are only worth their server-side process
+            // while the plan still has jobs to run.
+            self.idle_sessions.remove(&plan_id);
+            self.plan_facts.remove(&plan_id);
             // An idle plan can no longer be enqueued, so a tombstone recorded
             // for one of its finished jobs can never be consumed.
             self.forget_cancellations_for_plan(plan_id);
@@ -497,6 +594,10 @@ impl TransferManager {
         if running >= MAX_CONCURRENT_PER_PLAN {
             return false;
         }
+        if queued.connection.active_channels.load(Ordering::Relaxed) >= MAX_CHANNELS_PER_CONNECTION
+        {
+            return false;
+        }
         if queued.job.direction != TransferDirection::Download {
             return true;
         }
@@ -506,10 +607,7 @@ impl TransferManager {
         if queued.job.id == *root_id {
             return running == 0;
         }
-        let root_pending = self
-            .pending
-            .iter()
-            .any(|other| other.plan_id == queued.plan_id && other.job.id == *root_id);
+        let root_pending = self.pending_roots.contains(root_id);
         !root_pending && !self.running.contains_key(root_id)
     }
 
@@ -534,23 +632,54 @@ impl TransferManager {
     }
 
     fn next_queued_position(&self) -> Option<usize> {
+        if self.pending.is_empty() {
+            return None;
+        }
+
+        // Fast-path: find plans with remaining concurrency slots (< MAX_CONCURRENT_PER_PLAN)
+        // and whether any plan is completely idle (0 running).
+        let mut has_idle_plan = false;
+        let mut admissible_plans = Vec::with_capacity(self.pending_per_plan.len());
+
+        for &plan_id in self.pending_per_plan.keys() {
+            let running = self.running_per_plan.get(&plan_id).copied().unwrap_or(0);
+            if running == 0 {
+                has_idle_plan = true;
+            }
+            if running < MAX_CONCURRENT_PER_PLAN {
+                admissible_plans.push(plan_id);
+            }
+        }
+
+        if admissible_plans.is_empty() {
+            return None;
+        }
+
         // Two phases keep planning fair: prefer a plan with nothing running,
         // then fill remaining slots up to the per-plan cap.
-        self.pending
-            .iter()
-            .position(|queued| {
-                self.running_per_plan
-                    .get(&queued.plan_id)
-                    .copied()
-                    .unwrap_or(0)
-                    == 0
-                    && self.is_eligible(queued)
+        if has_idle_plan {
+            self.pending
+                .iter()
+                .position(|queued| {
+                    admissible_plans.contains(&queued.plan_id)
+                        && self
+                            .running_per_plan
+                            .get(&queued.plan_id)
+                            .copied()
+                            .unwrap_or(0)
+                            == 0
+                        && self.is_eligible(queued)
+                })
+                .or_else(|| {
+                    self.pending.iter().position(|queued| {
+                        admissible_plans.contains(&queued.plan_id) && self.is_eligible(queued)
+                    })
+                })
+        } else {
+            self.pending.iter().position(|queued| {
+                admissible_plans.contains(&queued.plan_id) && self.is_eligible(queued)
             })
-            .or_else(|| {
-                self.pending
-                    .iter()
-                    .position(|queued| self.is_eligible(queued))
-            })
+        }
     }
 
     async fn start_queued(&mut self, complete_tx: &flume::Sender<CompletedTransfer>) {
@@ -558,7 +687,7 @@ impl TransferManager {
             let Some(position) = self.next_queued_position() else {
                 return;
             };
-            let Some(queued) = self.pending.remove(position) else {
+            let Some(queued) = self.remove_pending(position) else {
                 return;
             };
             let mut job = queued.job;
@@ -568,40 +697,6 @@ impl TransferManager {
                 .ok()
                 .and_then(|policies| policies.get(&queued.plan_id).cloned())
                 .unwrap_or_else(|| job.conflict_policy.clone());
-
-            let transfer_session =
-                match open_transfer_session(&queued.connection.handle, job.direction).await {
-                    Ok(session) => session,
-                    Err(error) => {
-                        let transfer_id = job.id;
-                        let retryable = error.retryable;
-                        if let Err(send_error) = self
-                            .event_tx
-                            .send_async(AppEvent::TransferFailed(TransferFailure {
-                                transfer_id,
-                                error,
-                            }))
-                            .await
-                        {
-                            warn!(error = %send_error, "transfer channel failure event dropped");
-                            return;
-                        }
-                        if retryable {
-                            self.retry_routes.insert(
-                                transfer_id,
-                                RetryRoute {
-                                    connection_key: queued.connection.connection_key.clone(),
-                                    connection: Arc::downgrade(&queued.connection),
-                                    plan_id: queued.plan_id,
-                                    job,
-                                },
-                            );
-                        } else {
-                            self.cleanup_plan_if_idle(queued.plan_id);
-                        }
-                        continue;
-                    }
-                };
 
             let transfer_id = job.id;
             let may_clear_destination =
@@ -627,13 +722,64 @@ impl TransferManager {
             let retry_connection = connection.clone();
             let retry_job = job.clone();
             let plan_id = queued.plan_id;
+            let idle_session = self.take_idle_session(plan_id, job.direction);
+            let facts = self.plan_facts.entry(plan_id).or_default().clone();
             connection.active_channels.fetch_add(1, Ordering::Relaxed);
             std::mem::drop(tokio::spawn(async move {
+                // Opening a transfer channel costs several round trips (channel
+                // open, subsystem, SFTP init, limits). Awaiting it here would
+                // serialize every start behind the previous one and cap
+                // small-file throughput at roughly one file per setup latency,
+                // so a job only opens a session when the plan has none idle
+                // and reports the failure through the same completion path as
+                // a job.
+                let transfer_session = match idle_session {
+                    Some(session) => session,
+                    None => match open_transfer_session(&connection.handle, job.direction).await {
+                        Ok(session) => Arc::new(TransferSessionSlot::with_facts(session, facts)),
+                        Err(error) => {
+                            let retryable = error.retryable;
+                            if let Err(send_error) = event_tx
+                                .send_async(AppEvent::TransferFailed(TransferFailure {
+                                    transfer_id,
+                                    error,
+                                }))
+                                .await
+                            {
+                                warn!(error = %send_error, "transfer channel failure event dropped");
+                            }
+                            connection.active_channels.fetch_sub(1, Ordering::Relaxed);
+                            if let Ok(mut last_used) = connection.last_used.lock() {
+                                *last_used = std::time::Instant::now();
+                            }
+                            let retry_route = retryable.then_some(RetryRoute {
+                                connection_key: retry_connection.connection_key.clone(),
+                                connection: Arc::downgrade(&retry_connection),
+                                plan_id,
+                                job: retry_job,
+                            });
+                            if let Err(send_error) = complete_tx
+                                .send_async(CompletedTransfer {
+                                    transfer_id,
+                                    retry_route,
+                                    reusable_session: None,
+                                })
+                                .await
+                            {
+                                warn!(
+                                    error = %send_error,
+                                    "transfer completion bookkeeping dropped"
+                                );
+                            }
+                            return;
+                        }
+                    },
+                };
                 let outcome = run_transfer_job(
-                    transfer_session,
+                    transfer_session.clone(),
                     job,
                     plan_id,
-                    event_tx,
+                    event_tx.clone(),
                     cancel,
                     conflict_context,
                     connection_key,
@@ -651,10 +797,16 @@ impl TransferManager {
                         plan_id,
                         job: retry_job,
                     });
+                // Only a job that ran to completion leaves the session in a
+                // state worth reusing: a cancelled or failed job may have
+                // aborted requests still in flight.
+                let reusable_session =
+                    matches!(outcome, TransferJobOutcome::Completed).then_some(transfer_session);
                 if let Err(error) = complete_tx
                     .send_async(CompletedTransfer {
                         transfer_id,
                         retry_route,
+                        reusable_session,
                     })
                     .await
                 {
@@ -778,7 +930,7 @@ mod tests {
         assert_eq!(manager.next_queued_position(), Some(0));
 
         // Simulate starting plan 1's root (job 1): it leaves the queue.
-        let Some(root_1) = manager.pending.remove(0) else {
+        let Some(root_1) = manager.remove_pending(0) else {
             panic!("plan 1 root must be queued");
         };
         manager.running.insert(
@@ -798,7 +950,7 @@ mod tests {
         // The root finished; one of its children is now the running job.
         manager.running.remove(&TransferId(1));
         // Plan 2's root starts running as well.
-        let Some(root_2) = manager.pending.remove(3) else {
+        let Some(root_2) = manager.remove_pending(3) else {
             panic!("plan 2 root must be queued");
         };
         manager.running.insert(
@@ -836,7 +988,7 @@ mod tests {
         // A folder plan's first job removes the destination tree; it must run
         // alone before any child starts.
         assert_eq!(manager.next_queued_position(), Some(0));
-        let Some(root) = manager.pending.remove(0) else {
+        let Some(root) = manager.remove_pending(0) else {
             panic!("root job must be queued");
         };
         manager.running.insert(
@@ -965,6 +1117,7 @@ mod tests {
         manager.handle_completed(CompletedTransfer {
             transfer_id: TransferId(1),
             retry_route: None,
+            reusable_session: None,
         });
 
         assert!(!manager.running.contains_key(&TransferId(1)));
@@ -982,6 +1135,7 @@ mod tests {
         manager.handle_completed(CompletedTransfer {
             transfer_id: TransferId(2),
             retry_route: None,
+            reusable_session: None,
         });
 
         assert!(!manager.running.contains_key(&TransferId(2)));
@@ -1036,6 +1190,7 @@ mod tests {
         manager.handle_completed(CompletedTransfer {
             transfer_id: TransferId(1),
             retry_route: Some(retry),
+            reusable_session: None,
         });
 
         assert!(!manager.running.contains_key(&TransferId(1)));
@@ -1493,5 +1648,193 @@ mod tests {
             event_rx.try_recv().is_err(),
             "a retried transfer must not be reported as skipped"
         );
+    }
+
+    #[tokio::test]
+    async fn idle_sessions_are_reused_per_plan_and_direction() {
+        let Some(server) = SshTestServer::spawn() else {
+            eprintln!("skipping test: sshd not available");
+            return;
+        };
+        let connection = connect_test_server(&server).await;
+        let (event_tx, _event_rx) = flume::bounded(64);
+        let next_conflict_id = Arc::new(AtomicU64::new(1));
+        let cm = Arc::new(ConnectionManager::new());
+        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
+
+        let upload = open_transfer_session(&connection.handle, TransferDirection::Upload)
+            .await
+            .expect("upload session should open against the test server");
+        let session = Arc::new(TransferSessionSlot::new(upload));
+        let plan_id = TransferPlanId(1);
+
+        let other_plan = TransferPlanId(2);
+        assert!(
+            manager
+                .take_idle_session(other_plan, TransferDirection::Upload)
+                .is_none(),
+            "a plan must not see another plan's sessions"
+        );
+
+        manager.return_idle_session(plan_id, session.clone());
+        assert!(
+            manager
+                .take_idle_session(plan_id, TransferDirection::Download)
+                .is_none(),
+            "a download job must not take an upload session"
+        );
+        let taken = manager
+            .take_idle_session(plan_id, TransferDirection::Upload)
+            .expect("the plan's upload session should be reusable");
+        assert!(Arc::ptr_eq(&taken, &session));
+
+        // A plan that still has queued work keeps its session.
+        manager.return_idle_session(plan_id, taken.clone());
+        manager.push_pending(QueuedTransfer {
+            connection: connection.clone(),
+            plan_id,
+            job: dummy_job(7, TransferDirection::Upload),
+        });
+        manager.cleanup_plan_if_idle(plan_id);
+        assert!(
+            manager.idle_sessions.contains_key(&plan_id),
+            "a plan with pending jobs must keep its idle sessions"
+        );
+
+        manager.clear_pending();
+        manager.cleanup_plan_if_idle(plan_id);
+        assert!(
+            manager.idle_sessions.is_empty(),
+            "an idle plan must release its pooled sessions"
+        );
+    }
+
+    #[tokio::test]
+    async fn per_connection_channel_cap_blocks_new_jobs() {
+        let Some(server) = SshTestServer::spawn() else {
+            eprintln!("skipping test: sshd not available");
+            return;
+        };
+        let connection = connect_test_server(&server).await;
+        let (event_tx, _event_rx) = flume::bounded(64);
+        let next_conflict_id = Arc::new(AtomicU64::new(1));
+        let cm = Arc::new(ConnectionManager::new());
+        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
+
+        let plan_id = TransferPlanId(1);
+        manager
+            .enqueue(
+                connection.clone(),
+                plan_id,
+                vec![dummy_job(1, TransferDirection::Upload)],
+                true,
+            )
+            .await;
+
+        connection
+            .active_channels
+            .store(MAX_CHANNELS_PER_CONNECTION, Ordering::Relaxed);
+        let queued = manager.pending.front().expect("job should be queued");
+        assert!(
+            !manager.is_eligible(queued),
+            "no job may start once the connection is at its channel cap"
+        );
+
+        connection
+            .active_channels
+            .store(MAX_CHANNELS_PER_CONNECTION - 1, Ordering::Relaxed);
+        let queued = manager.pending.front().expect("job should be queued");
+        assert!(
+            manager.is_eligible(queued),
+            "a connection below the cap may start another job"
+        );
+    }
+
+    #[tokio::test]
+    async fn large_queue_dispatch_is_constant_time_and_tracks_plan_state() {
+        let Some(server) = SshTestServer::spawn() else {
+            eprintln!("skipping test: sshd not available");
+            return;
+        };
+        let connection = connect_test_server(&server).await;
+        let (event_tx, _event_rx) = flume::bounded(64);
+        let next_conflict_id = Arc::new(AtomicU64::new(1));
+        let cm = Arc::new(ConnectionManager::new());
+        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
+
+        let plan_download = TransferPlanId(10);
+        let jobs: Vec<TransferJob> = (1..=3000)
+            .map(|id| dummy_job(id, TransferDirection::Download))
+            .collect();
+        manager
+            .enqueue(connection.clone(), plan_download, jobs, true)
+            .await;
+
+        assert_eq!(manager.pending.len(), 3000);
+        assert_eq!(manager.pending_per_plan.get(&plan_download), Some(&3000));
+        assert!(manager.pending_roots.contains(&TransferId(1)));
+
+        // First position must be the root (id 1)
+        assert_eq!(manager.next_queued_position(), Some(0));
+
+        // Start the root
+        let root = manager.remove_pending(0).expect("root should be present");
+        assert_eq!(root.job.id, TransferId(1));
+        assert!(!manager.pending_roots.contains(&TransferId(1)));
+        assert_eq!(manager.pending_per_plan.get(&plan_download), Some(&2999));
+
+        manager.running.insert(
+            TransferId(1),
+            RunningTransfer {
+                plan_id: plan_download,
+                cancel: CancellationToken::new(),
+            },
+        );
+        manager.running_per_plan.insert(plan_download, 1);
+
+        // While root is running, children must be blocked
+        assert_eq!(manager.next_queued_position(), None);
+
+        // Root finishes
+        manager.running.remove(&TransferId(1));
+        manager.running_per_plan.insert(plan_download, 0);
+
+        // Children can now start
+        for i in 0..MAX_CONCURRENT_PER_PLAN {
+            assert_eq!(
+                manager.next_queued_position(),
+                Some(0),
+                "child {i} should be immediately dispatched from the front"
+            );
+            let child = manager.remove_pending(0).expect("child should be queued");
+            manager.running.insert(
+                child.job.id,
+                RunningTransfer {
+                    plan_id: plan_download,
+                    cancel: CancellationToken::new(),
+                },
+            );
+            *manager.running_per_plan.entry(plan_download).or_insert(0) += 1;
+        }
+
+        // Plan 1 is now at MAX_CONCURRENT_PER_PLAN cap
+        assert_eq!(manager.next_queued_position(), None);
+
+        // Enqueue Plan 2 (upload with 500 files)
+        let plan_upload = TransferPlanId(20);
+        let upload_jobs: Vec<TransferJob> = (4000..4500)
+            .map(|id| dummy_job(id, TransferDirection::Upload))
+            .collect();
+        manager
+            .enqueue(connection.clone(), plan_upload, upload_jobs, true)
+            .await;
+
+        // Plan 2 has 0 running jobs and is prioritized by Phase 1
+        let pos_plan_2 = manager
+            .next_queued_position()
+            .expect("idle plan 2 should be scheduled");
+        let item_plan_2 = &manager.pending[pos_plan_2];
+        assert_eq!(item_plan_2.plan_id, plan_upload);
+        assert_eq!(item_plan_2.job.id, TransferId(4000));
     }
 }

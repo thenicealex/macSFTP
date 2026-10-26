@@ -5,6 +5,8 @@ based on Keep a Changelog, and releases use semantic versioning.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-26
+
 ### Added
 
 - The local and remote panes can be resized by dragging the divider between
@@ -34,12 +36,25 @@ based on Keep a Changelog, and releases use semantic versioning.
 
 ### Security
 
+- Stricter input validation across hostnames and known_hosts to prevent CRLF and whitespace injection.
+- Rejection of path traversal (`..`), absolute targets, Windows drive prefixes, and Unicode bidirectional formatting (Trojan Source) overrides in symlink resolution and upload planning.
+- Deletion and rename protection against root (`/`) and empty paths across local, remote, and edit temporary directories.
+- Command and option injection defenses in ProxyCommand expansion and external editor invocation via `/usr/bin/open`.
+- JumpHost routing topology verification prior to Keychain updates, and non-truncating file locking with private permissions (`0o600`).
 - A downloaded executable (`.command`, `.app`-shaped, or anything the server
   marked `+x`) is now flagged with the macOS quarantine attribute, so the first
   launch asks for confirmation instead of running silently. The download keeps
   the server's permission bits, and nothing else would have marked an SFTP
   download as untrusted. Documents are not quarantined, and neither are
   remote-edit temp copies, which the editor flow opens.
+
+### Performance
+
+- Pipelined upload writer and expanded SFTP read/write window buffers, yielding dramatic throughput improvements (5-6x) for small file batches and high-RTT large file transfers.
+- Accelerated transfer drawer indexing, job lookups, and filename sorting with binary search and caching.
+- Enabled `TCP_NODELAY` on connected socket streams to eliminate TCP packet stalls.
+- Widened SSH channel buffer sizes to prevent packet stall on high-throughput connections.
+- Consolidated window refreshes per event batch and deferred off-screen drawer row calculations.
 
 ### Fixed
 
@@ -60,6 +75,13 @@ based on Keep a Changelog, and releases use semantic versioning.
 
 ### Changed
 
+- Transfers reuse one SFTP session per plan instead of opening a channel per
+  file, open channels in parallel instead of one after another, and keep more
+  files in flight (8 per plan, capped per connection so default OpenSSH
+  `MaxSessions` still fits). A folder of small files now moves several times
+  faster, especially over a high-latency link, and downloads advertise a larger
+  SSH window so a single large file is no longer capped at roughly 30 MiB/s on
+  a 50 ms link.
 - Status-bar messages now expire after six seconds instead of lingering until
   the next action happens to overwrite them.
 - Finishing an upload or download now re-reads the pane that received the

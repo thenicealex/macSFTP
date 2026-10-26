@@ -61,11 +61,23 @@ pub struct AppEventCoordinator {
 
 impl Global for AppEventCoordinator {}
 
+const EVENT_BATCH_DRAIN_LIMIT: usize = 64;
+
 impl AppEventCoordinator {
     pub fn start(mut event_receiver: EventReceiver, cx: &mut App) -> Self {
         let event_drain = cx.spawn(async move |cx| {
+            let mut batch = Vec::with_capacity(EVENT_BATCH_DRAIN_LIMIT);
             while let Some(event) = event_receiver.recv().await {
-                cx.update(|cx| dispatch_event(event, cx));
+                batch.push(event);
+                while batch.len() < EVENT_BATCH_DRAIN_LIMIT {
+                    match event_receiver.try_recv() {
+                        Some(event) => batch.push(event),
+                        None => break,
+                    }
+                }
+                cx.update(|cx| {
+                    dispatch_events_batch(batch.drain(..), cx);
+                });
             }
         });
 
@@ -91,8 +103,18 @@ impl AppEventCoordinator {
             };
 
         let local_event_drain = cx.spawn(async move |cx| {
+            let mut batch = Vec::with_capacity(EVENT_BATCH_DRAIN_LIMIT);
             while let Some(event) = local_rx.recv().await {
-                cx.update(|cx| dispatch_event(event, cx));
+                batch.push(event);
+                while batch.len() < EVENT_BATCH_DRAIN_LIMIT {
+                    match local_rx.try_recv() {
+                        Ok(event) => batch.push(event),
+                        Err(_) => break,
+                    }
+                }
+                cx.update(|cx| {
+                    dispatch_events_batch(batch.drain(..), cx);
+                });
             }
         });
 
@@ -104,17 +126,36 @@ impl AppEventCoordinator {
     }
 }
 
+fn dispatch_events_batch<I: IntoIterator<Item = AppEvent>>(events: I, cx: &mut App) {
+    let mut had_transfer_events = false;
+    for event in events {
+        if event.is_transfer_event() {
+            had_transfer_events = true;
+            dispatch_transfer_event(event, cx);
+        } else {
+            dispatch_event(event, cx);
+        }
+    }
+    if had_transfer_events {
+        cx.refresh_windows();
+    }
+}
+
+fn dispatch_transfer_event(event: AppEvent, cx: &mut App) {
+    cx.apply_transfer_event(&event, Timestamp(std::time::SystemTime::now()));
+    if matches!(event, AppEvent::TransferConflict(_)) {
+        present_orphaned_transfer_conflicts(cx);
+    }
+    advance_edit_sessions(&event, cx);
+    advance_conflict_compare(&event, cx);
+    reload_panes_for_finished_plan(&event, cx);
+    quarantine_completed_download(&event, cx);
+}
+
 fn dispatch_event(event: AppEvent, cx: &mut App) {
     if event.is_transfer_event() {
-        cx.apply_transfer_event(&event, Timestamp(std::time::SystemTime::now()));
-        if matches!(event, AppEvent::TransferConflict(_)) {
-            present_orphaned_transfer_conflicts(cx);
-        }
-        advance_edit_sessions(&event, cx);
-        advance_conflict_compare(&event, cx);
+        dispatch_transfer_event(event, cx);
         cx.refresh_windows();
-        reload_panes_for_finished_plan(&event, cx);
-        quarantine_completed_download(&event, cx);
         return;
     }
 

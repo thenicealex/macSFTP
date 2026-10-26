@@ -16,7 +16,8 @@ use tracing::warn;
 use crate::resources::ActiveResources;
 use crate::workspace::helpers::connected_transfer_session;
 use crate::workspace::visible_entries::{
-    first_prefix_match, visible_local_indices, visible_remote_indices,
+    QueryMatcher, count_visible_local, count_visible_remote, first_prefix_match, is_dotfile,
+    real_local_index_at, real_remote_index_at, visible_local_indices, visible_remote_indices,
 };
 use crate::workspace::*;
 use macsftp_core::HistoryOp;
@@ -127,17 +128,62 @@ impl crate::workspace::Workspace {
         let show_hidden = cx.resources().config.config().show_hidden_files;
         match (self.active_tab(), side) {
             (Some(tab), PaneSide::Local) => {
-                visible_local_indices(&tab.local.entries, show_hidden, "").len()
+                if show_hidden {
+                    tab.local.entries.len()
+                } else {
+                    tab.local
+                        .entries
+                        .iter()
+                        .filter(|entry| !is_dotfile(&entry.name))
+                        .count()
+                }
             }
             (Some(tab), PaneSide::Remote) => {
-                visible_remote_indices(&tab.remote.entries, show_hidden, "").len()
+                if show_hidden {
+                    tab.remote.entries.len()
+                } else {
+                    tab.remote
+                        .entries
+                        .iter()
+                        .filter(|entry| !is_dotfile(&entry.name))
+                        .count()
+                }
             }
             (None, _) => 0,
         }
     }
 
     pub(crate) fn entry_count(&self, side: PaneSide, cx: &App) -> usize {
-        self.visible_indices(side, cx).len()
+        let show_hidden = cx.resources().config.config().show_hidden_files;
+        let query = self.filter_query(side);
+        match (self.active_tab(), side) {
+            (Some(tab), PaneSide::Local) => {
+                count_visible_local(&tab.local.entries, show_hidden, query)
+            }
+            (Some(tab), PaneSide::Remote) => {
+                count_visible_remote(&tab.remote.entries, show_hidden, query)
+            }
+            (None, _) => 0,
+        }
+    }
+
+    pub(crate) fn real_index_at(
+        &self,
+        side: PaneSide,
+        visible_index: usize,
+        cx: &App,
+    ) -> Option<usize> {
+        let show_hidden = cx.resources().config.config().show_hidden_files;
+        let query = self.filter_query(side);
+        match (self.active_tab(), side) {
+            (Some(tab), PaneSide::Local) => {
+                real_local_index_at(&tab.local.entries, visible_index, show_hidden, query)
+            }
+            (Some(tab), PaneSide::Remote) => {
+                real_remote_index_at(&tab.remote.entries, visible_index, show_hidden, query)
+            }
+            (None, _) => None,
+        }
     }
 
     pub(crate) fn entry_path_at(
@@ -146,7 +192,7 @@ impl crate::workspace::Workspace {
         visible_index: usize,
         cx: &App,
     ) -> Option<EntryPath> {
-        let real_index = *self.visible_indices(side, cx).get(visible_index)?;
+        let real_index = self.real_index_at(side, visible_index, cx)?;
         self.entry_path_at_stored_index(side, real_index)
     }
 
@@ -181,23 +227,41 @@ impl crate::workspace::Workspace {
         cx: &App,
     ) -> Option<usize> {
         let tab = self.active_tab()?;
-        let visible = self.visible_indices(side, cx);
+        let show_hidden = cx.resources().config.config().show_hidden_files;
+        let query = self.filter_query(side);
+        let matcher = QueryMatcher::new(query);
         match (side, path) {
             (PaneSide::Local, EntryPath::Local(local_path)) => {
-                visible.iter().position(|&real_index| {
-                    tab.local
-                        .entries
-                        .get(real_index)
-                        .is_some_and(|entry| &entry.path == local_path)
-                })
+                let mut visible_idx = 0;
+                for entry in &tab.local.entries {
+                    if !show_hidden && is_dotfile(&entry.name) {
+                        continue;
+                    }
+                    if !matcher.is_empty() && !matcher.matches(&entry.name) {
+                        continue;
+                    }
+                    if &entry.path == local_path {
+                        return Some(visible_idx);
+                    }
+                    visible_idx += 1;
+                }
+                None
             }
             (PaneSide::Remote, EntryPath::Remote(remote_path)) => {
-                visible.iter().position(|&real_index| {
-                    tab.remote
-                        .entries
-                        .get(real_index)
-                        .is_some_and(|entry| &entry.path == remote_path)
-                })
+                let mut visible_idx = 0;
+                for entry in &tab.remote.entries {
+                    if !show_hidden && is_dotfile(&entry.name) {
+                        continue;
+                    }
+                    if !matcher.is_empty() && !matcher.matches(&entry.name) {
+                        continue;
+                    }
+                    if &entry.path == remote_path {
+                        return Some(visible_idx);
+                    }
+                    visible_idx += 1;
+                }
+                None
             }
             _ => None,
         }
@@ -205,6 +269,14 @@ impl crate::workspace::Workspace {
 
     fn selection_visible_bounds(&self, side: PaneSide, cx: &App) -> Option<(usize, usize)> {
         let tab = self.active_tab()?;
+        if tab.selection.selected_paths.is_empty() {
+            return None;
+        }
+        if tab.selection.selected_paths.len() == 1 {
+            let single = &tab.selection.selected_paths[0];
+            let index = self.visible_index_of_path(side, single, cx)?;
+            return Some((index, index));
+        }
         let selected: std::collections::HashSet<_> = tab.selection.selected_paths.iter().collect();
         let visible = self.visible_indices(side, cx);
         let mut selected_visible = visible
@@ -362,7 +434,7 @@ impl crate::workspace::Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let real_index = match self.visible_indices(side, cx).get(visible_index).copied() {
+        let real_index = match self.real_index_at(side, visible_index, cx) {
             Some(index) => index,
             None => return,
         };
@@ -971,21 +1043,31 @@ impl crate::workspace::Workspace {
         let Some(tab) = self.active_tab() else {
             return Vec::new();
         };
-        self.visible_indices(side, cx)
-            .into_iter()
-            .filter_map(|real_index| match side {
-                PaneSide::Local => tab
-                    .local
-                    .entries
-                    .get(real_index)
-                    .map(|entry| entry.name.as_str()),
-                PaneSide::Remote => tab
-                    .remote
-                    .entries
-                    .get(real_index)
-                    .map(|entry| entry.name.as_str()),
-            })
-            .collect()
+        let show_hidden = cx.resources().config.config().show_hidden_files;
+        let query = self.filter_query(side);
+        let matcher = QueryMatcher::new(query);
+        match side {
+            PaneSide::Local => tab
+                .local
+                .entries
+                .iter()
+                .filter(|entry| {
+                    (show_hidden || !is_dotfile(&entry.name))
+                        && (matcher.is_empty() || matcher.matches(&entry.name))
+                })
+                .map(|entry| entry.name.as_str())
+                .collect(),
+            PaneSide::Remote => tab
+                .remote
+                .entries
+                .iter()
+                .filter(|entry| {
+                    (show_hidden || !is_dotfile(&entry.name))
+                        && (matcher.is_empty() || matcher.matches(&entry.name))
+                })
+                .map(|entry| entry.name.as_str())
+                .collect(),
+        }
     }
 
     pub(crate) fn navigate_focused(

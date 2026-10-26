@@ -2,7 +2,7 @@ use gpui_kit::base::input::InputEvent;
 use gpui_kit::{App, Context, KeyDownEvent, SharedString, Window};
 use macsftp_core::{
     AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionRoute, LocalPath, ProfileId,
-    RemotePath,
+    RemotePath, is_bidi_or_control,
 };
 use macsftp_storage::{
     PrivateKeyPassphraseUpdate, ProfileAuthUpdate, ProfileMutationError, ProfileSaveRequest,
@@ -572,6 +572,16 @@ impl crate::workspace::Workspace {
             cx.notify();
             return;
         }
+        if host
+            .chars()
+            .any(|c| c.is_whitespace() || is_bidi_or_control(c))
+        {
+            if let Some(editor) = self.settings.profile_editor.as_mut() {
+                editor.error = Some("Server address contains invalid characters.".into());
+            }
+            cx.notify();
+            return;
+        }
         let port: u16 = if port_text.is_empty() {
             22
         } else {
@@ -589,6 +599,32 @@ impl crate::workspace::Workspace {
         if username.is_empty() {
             if let Some(editor) = self.settings.profile_editor.as_mut() {
                 editor.error = Some("Enter a username.".into());
+            }
+            cx.notify();
+            return;
+        }
+        if username
+            .chars()
+            .any(|c| c.is_whitespace() || is_bidi_or_control(c))
+        {
+            if let Some(editor) = self.settings.profile_editor.as_mut() {
+                editor.error = Some("Username contains invalid characters.".into());
+            }
+            cx.notify();
+            return;
+        }
+
+        if entered_name.chars().any(is_bidi_or_control) {
+            if let Some(editor) = self.settings.profile_editor.as_mut() {
+                editor.error = Some("Connection name contains invalid characters.".into());
+            }
+            cx.notify();
+            return;
+        }
+
+        if default_remote_path_text.chars().any(is_bidi_or_control) {
+            if let Some(editor) = self.settings.profile_editor.as_mut() {
+                editor.error = Some("Initial folder path contains invalid characters.".into());
             }
             cx.notify();
             return;
@@ -625,6 +661,13 @@ impl crate::workspace::Workspace {
                 if key_path.is_empty() {
                     if let Some(editor) = self.settings.profile_editor.as_mut() {
                         editor.error = Some("Enter the full path to your key file.".into());
+                    }
+                    cx.notify();
+                    return;
+                }
+                if key_path.chars().any(is_bidi_or_control) {
+                    if let Some(editor) = self.settings.profile_editor.as_mut() {
+                        editor.error = Some("Key path contains invalid characters.".into());
                     }
                     cx.notify();
                     return;
@@ -683,14 +726,32 @@ impl crate::workspace::Workspace {
                     cx.notify();
                     return;
                 }
+                if let Some(jump) = cx.resources().profiles.find_profile(jump_profile_id)
+                    && !matches!(jump.route, ConnectionRoute::Direct)
+                {
+                    if let Some(editor) = self.settings.profile_editor.as_mut() {
+                        editor.error =
+                            Some("Intermediate server must use a direct connection.".into());
+                    }
+                    cx.notify();
+                    return;
+                }
                 ConnectionRoute::JumpHost {
                     profile_id: jump_profile_id,
                 }
             }
             ProfileRouteKind::ProxyCommand => {
-                if proxy_command.is_empty() {
+                if proxy_command.trim().is_empty() {
                     if let Some(editor) = self.settings.profile_editor.as_mut() {
                         editor.error = Some("Enter a connection command.".into());
+                    }
+                    cx.notify();
+                    return;
+                }
+                if proxy_command.contains('\0') || proxy_command.chars().any(is_bidi_or_control) {
+                    if let Some(editor) = self.settings.profile_editor.as_mut() {
+                        editor.error =
+                            Some("Connection command contains invalid characters.".into());
                     }
                     cx.notify();
                     return;

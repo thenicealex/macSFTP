@@ -1,4 +1,4 @@
-use macsftp_core::{LocalPath, WindowSessionId};
+use macsftp_core::{LocalPath, WindowSessionId, is_bidi_or_control};
 use serde::{Deserialize, Serialize};
 
 use super::StorageError;
@@ -69,8 +69,34 @@ impl SessionFile {
         }
     }
 
+    pub fn sanitize(&mut self) {
+        for window in &mut self.windows {
+            window.pane_split_ratio = window
+                .pane_split_ratio
+                .filter(|ratio| ratio.is_finite() && *ratio > 0.0 && *ratio < 1.0);
+            window.transfer_drawer_height = window
+                .transfer_drawer_height
+                .filter(|height| height.is_finite() && *height > 0.0);
+            for tab in &mut window.tabs {
+                if tab.port == 0 {
+                    tab.port = 22;
+                }
+                if tab.title.chars().any(is_bidi_or_control) {
+                    tab.title = tab
+                        .title
+                        .chars()
+                        .filter(|c| !is_bidi_or_control(*c))
+                        .collect();
+                    if tab.title.is_empty() {
+                        tab.title = "Restored Connection".to_string();
+                    }
+                }
+            }
+        }
+    }
+
     pub fn load(path: &LocalPath) -> Result<Self, StorageError> {
-        match std::fs::read_to_string(path.as_str()) {
+        let mut session = match std::fs::read_to_string(path.as_str()) {
             Ok(contents) => {
                 let version: SessionVersion =
                     serde_json::from_str(&contents).map_err(|error| StorageError::Parse {
@@ -84,7 +110,7 @@ impl SessionFile {
                                     message: error.to_string(),
                                 }
                             })?;
-                        Ok(Self {
+                        SessionFile {
                             version: Self::CURRENT_VERSION,
                             active_window_index: 0,
                             windows: vec![SessionWindowSnapshot {
@@ -94,25 +120,31 @@ impl SessionFile {
                                 pane_split_ratio: None,
                                 transfer_drawer_height: None,
                             }],
-                        })
+                        }
                     }
                     Self::CURRENT_VERSION => {
                         serde_json::from_str(&contents).map_err(|error| StorageError::Parse {
                             message: error.to_string(),
-                        })
+                        })?
                     }
-                    unsupported => Err(StorageError::UnsupportedVersion {
-                        found: unsupported,
-                        supported: Self::CURRENT_VERSION,
-                    }),
+                    unsupported => {
+                        return Err(StorageError::UnsupportedVersion {
+                            found: unsupported,
+                            supported: Self::CURRENT_VERSION,
+                        });
+                    }
                 }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::empty()),
-            Err(error) => Err(StorageError::Io {
-                path: path.as_str().to_string(),
-                message: error.to_string(),
-            }),
-        }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::empty(),
+            Err(error) => {
+                return Err(StorageError::Io {
+                    path: path.as_str().to_string(),
+                    message: error.to_string(),
+                });
+            }
+        };
+        session.sanitize();
+        Ok(session)
     }
 
     pub fn save(&self, path: &LocalPath) -> Result<(), StorageError> {
@@ -488,5 +520,33 @@ mod tests {
         let window = file.windows.first().expect("one window");
         assert_eq!(window.pane_split_ratio, None);
         assert_eq!(window.transfer_drawer_height, None);
+    }
+
+    #[test]
+    fn session_sanitize_filters_nan_and_port_zero_and_bidi() {
+        let mut session = SessionFile {
+            version: SessionFile::CURRENT_VERSION,
+            active_window_index: 0,
+            windows: vec![SessionWindowSnapshot {
+                id: WindowSessionId(1),
+                active_tab_index: 0,
+                pane_split_ratio: Some(f32::NAN),
+                transfer_drawer_height: Some(-100.0),
+                tabs: vec![SessionTabSnapshot {
+                    title: "evil\u{202E}tab".into(),
+                    profile_id: None,
+                    host: "example.com".into(),
+                    port: 0,
+                    username: "user".into(),
+                    local_path: None,
+                    remote_path: None,
+                }],
+            }],
+        };
+        session.sanitize();
+        assert_eq!(session.windows[0].pane_split_ratio, None);
+        assert_eq!(session.windows[0].transfer_drawer_height, None);
+        assert_eq!(session.windows[0].tabs[0].port, 22);
+        assert_eq!(session.windows[0].tabs[0].title, "eviltab");
     }
 }

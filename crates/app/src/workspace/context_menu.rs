@@ -148,7 +148,7 @@ impl Workspace {
 
     /// Kind of the entry at a visible index, used for menu item wording.
     fn entry_kind_at(&self, side: PaneSide, visible_index: usize, cx: &App) -> Option<FileKind> {
-        let real_index = self.visible_indices(side, cx).get(visible_index).copied()?;
+        let real_index = self.real_index_at(side, visible_index, cx)?;
         let tab = self.active_tab()?;
         match side {
             PaneSide::Local => tab.local.entries.get(real_index).map(|entry| entry.kind),

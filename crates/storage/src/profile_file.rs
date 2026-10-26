@@ -1,5 +1,6 @@
 use macsftp_core::{
     AuthMethod, ConnectionProfile, ConnectionRoute, LocalPath, ProfileId, SecretRef,
+    is_bidi_or_control,
 };
 use serde::{Deserialize, Serialize};
 
@@ -146,13 +147,50 @@ impl ProfilesFile {
                     message: format!("profile {} has revision 0", profile.id.0),
                 });
             }
+            if profile.port == 0 {
+                return Err(StorageError::Corrupt {
+                    message: format!("profile {} has port 0", profile.id.0),
+                });
+            }
+            if profile.host.is_empty()
+                || profile
+                    .host
+                    .chars()
+                    .any(|c| c.is_whitespace() || is_bidi_or_control(c))
+            {
+                return Err(StorageError::Corrupt {
+                    message: format!(
+                        "profile {} has invalid host {:?}",
+                        profile.id.0, profile.host
+                    ),
+                });
+            }
+            if profile.username.is_empty()
+                || profile
+                    .username
+                    .chars()
+                    .any(|c| c.is_whitespace() || is_bidi_or_control(c))
+            {
+                return Err(StorageError::Corrupt {
+                    message: format!(
+                        "profile {} has invalid username {:?}",
+                        profile.id.0, profile.username
+                    ),
+                });
+            }
             validate_auth(&profile.auth, profile.id)?;
             match &profile.route {
                 ConnectionRoute::Direct => {}
                 ConnectionRoute::ProxyCommand { command } => {
-                    if command.trim().is_empty() {
+                    if command.trim().is_empty()
+                        || command.contains('\0')
+                        || command.chars().any(is_bidi_or_control)
+                    {
                         return Err(StorageError::Corrupt {
-                            message: format!("profile {} has an empty ProxyCommand", profile.id.0),
+                            message: format!(
+                                "profile {} has an invalid ProxyCommand",
+                                profile.id.0
+                            ),
                         });
                     }
                 }
@@ -390,5 +428,59 @@ impl std::fmt::Display for StorageError {
                 write!(formatter, "could not parse profiles: {message}")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_profile(id: u64, host: &str, username: &str, port: u16) -> ConnectionProfile {
+        let mut profile = ConnectionProfile::new(
+            ProfileId(id),
+            "Test",
+            host,
+            username,
+            AuthMethod::KeyboardInteractive,
+        );
+        profile.port = port;
+        profile.revision = 1;
+        profile
+    }
+
+    #[test]
+    fn validate_rejects_invalid_port_or_host_or_username() {
+        let mut file = ProfilesFile::new();
+        file.profiles
+            .push(sample_profile(1, "valid.com", "user", 0));
+        assert!(matches!(file.validate(), Err(StorageError::Corrupt { .. })));
+
+        file.profiles.clear();
+        file.profiles.push(sample_profile(1, "", "user", 22));
+        assert!(matches!(file.validate(), Err(StorageError::Corrupt { .. })));
+
+        file.profiles.clear();
+        file.profiles
+            .push(sample_profile(1, "host with space", "user", 22));
+        assert!(matches!(file.validate(), Err(StorageError::Corrupt { .. })));
+
+        file.profiles.clear();
+        file.profiles
+            .push(sample_profile(1, "host\u{202E}bidi", "user", 22));
+        assert!(matches!(file.validate(), Err(StorageError::Corrupt { .. })));
+
+        file.profiles.clear();
+        file.profiles.push(sample_profile(1, "valid.com", "", 22));
+        assert!(matches!(file.validate(), Err(StorageError::Corrupt { .. })));
+
+        file.profiles.clear();
+        file.profiles
+            .push(sample_profile(1, "valid.com", "user\nname", 22));
+        assert!(matches!(file.validate(), Err(StorageError::Corrupt { .. })));
+
+        file.profiles.clear();
+        file.profiles
+            .push(sample_profile(1, "valid.com", "user", 22));
+        assert!(file.validate().is_ok());
     }
 }

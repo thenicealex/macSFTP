@@ -6469,6 +6469,50 @@ fn repointed_link_does_not_create_a_second_session_on_the_same_path(cx: &mut Tes
 }
 
 #[gpui_kit::test]
+fn remote_edit_rejects_unsafe_file_names(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    connect_and_drain(&workspace, &mut cx, &channels);
+
+    // Bidi override characters
+    let unsafe_bidi = RemotePath::new("/home/tester/evil\u{202E}txt.sh");
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        workspace.begin_edit_resolved(
+            unsafe_bidi.clone(),
+            unsafe_bidi.clone(),
+            Some(1_024),
+            None,
+            cx,
+        );
+    });
+    assert!(channels.command_rx.try_recv().is_err());
+    workspace.read_with(&cx, |workspace, _cx| {
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some("The selected file has a name that cannot be saved safely.")
+        );
+    });
+
+    // Control characters / null byte
+    let unsafe_control = RemotePath::new("/home/tester/evil\0file");
+    workspace.update_in(&mut cx, |workspace, _window, cx| {
+        workspace.begin_edit_resolved(
+            unsafe_control.clone(),
+            unsafe_control.clone(),
+            Some(1_024),
+            None,
+            cx,
+        );
+    });
+    assert!(channels.command_rx.try_recv().is_err());
+    workspace.read_with(&cx, |workspace, _cx| {
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some("The selected file has a name that cannot be saved safely.")
+        );
+    });
+}
+
+#[gpui_kit::test]
 fn link_edit_conflict_compare_downloads_the_write_through_target(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
     connect_and_drain(&workspace, &mut cx, &channels);
@@ -7668,6 +7712,32 @@ fn connect_form_builds_interactive_and_agent_credentials() {
             socket_path: Some(ref path)
         } if path == "/tmp/test-agent.sock"
     ));
+}
+
+#[gpui_kit::test]
+fn connect_form_validation_rejects_unsafe_inputs() {
+    let mut form = ConnectForm::empty();
+    form.host.set_value("server.example");
+    form.username.set_value("alex");
+    form.set_auth_method(AuthMethodKind::KeyboardInteractive);
+
+    form.host.set_value("server with space");
+    assert!(form.build_settings().is_err());
+
+    form.host.set_value("server\u{202E}bidi");
+    assert!(form.build_settings().is_err());
+
+    form.host.set_value("server.example");
+    form.username.set_value("user with space");
+    assert!(form.build_settings().is_err());
+
+    form.username.set_value("user\u{202E}bidi");
+    assert!(form.build_settings().is_err());
+
+    form.username.set_value("alex");
+    form.set_auth_method(AuthMethodKind::PrivateKey);
+    form.key_path.set_value("/path/to/\u{202E}key");
+    assert!(form.build_settings().is_err());
 }
 
 #[gpui_kit::test]

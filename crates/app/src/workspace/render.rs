@@ -10,6 +10,7 @@ use macsftp_ui::{
     file_table_header, format_size_label, format_timestamp, icon, icon_button, loading_state, tab,
     text_button, text_tooltip,
 };
+use std::collections::HashSet;
 
 use crate::palette_commands::labeled_shortcut;
 use crate::resources::ActiveResources;
@@ -1224,11 +1225,29 @@ impl crate::workspace::Workspace {
                         return Vec::new();
                     };
                     let selected_paths = &tab.selection.selected_paths;
-                    let real_indices = workspace_view.visible_indices(side, cx);
+                    let selected_set: HashSet<&str> = selected_paths
+                        .iter()
+                        .map(|path| match path {
+                            EntryPath::Local(local_path) => local_path.as_str(),
+                            EntryPath::Remote(remote_path) => remote_path.as_str(),
+                        })
+                        .collect();
+                    let show_hidden = cx.resources().config.config().show_hidden_files;
+                    let query = workspace_view.filter_query(side);
+                    let is_identity = query.is_empty() && show_hidden;
+                    let real_indices = if is_identity {
+                        Vec::new()
+                    } else {
+                        workspace_view.visible_indices(side, cx)
+                    };
 
                     visible_range
                         .filter_map(|visible_index| {
-                            let real_index = *real_indices.get(visible_index)?;
+                            let real_index = if is_identity {
+                                visible_index
+                            } else {
+                                *real_indices.get(visible_index)?
+                            };
                             let (model, drag_item) = match side {
                                 PaneSide::Local => {
                                     let entry = tab.local.entries.get(real_index)?;
@@ -1237,8 +1256,7 @@ impl crate::workspace::Workspace {
                                             name: entry.name.clone().into(),
                                             kind: entry.kind,
                                             is_hidden: entry.name.starts_with('.'),
-                                            selected: selected_paths
-                                                .contains(&EntryPath::Local(entry.path.clone())),
+                                            selected: selected_set.contains(entry.path.as_str()),
                                             size_label: format_size_label(entry.kind, entry.size),
                                             modified_label: format_timestamp(entry.modified_at),
                                         },
@@ -1264,8 +1282,7 @@ impl crate::workspace::Workspace {
                                             name: display_name.into(),
                                             kind: entry.kind,
                                             is_hidden: entry.name.starts_with('.'),
-                                            selected: selected_paths
-                                                .contains(&EntryPath::Remote(entry.path.clone())),
+                                            selected: selected_set.contains(entry.path.as_str()),
                                             size_label: format_size_label(entry.kind, entry.size),
                                             modified_label: format_timestamp(entry.modified_at),
                                         },

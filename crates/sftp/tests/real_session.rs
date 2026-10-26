@@ -857,6 +857,58 @@ async fn overwrite_uses_temporary_files_without_leaving_residue() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn pipelined_upload_large_file_transfers_intact() {
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    let fixture = spawn_actor(
+        &server,
+        client_key_auth(&server),
+        Some(&server.host_public_key),
+    );
+    let _ = next_event(&fixture, "TabConnected").await;
+
+    // 1 MiB payload to span multiple negotiated SFTP write chunks and pipeline window slots
+    let payload: Vec<u8> = (0..1_048_576).map(|i| (i % 251) as u8).collect();
+    let upload_source = server.fixture_dir.join("pipelined-upload-large-source.bin");
+    let upload_destination = server.fixture_dir.join("pipelined-upload-large-dest.bin");
+    std::fs::write(&upload_source, &payload).expect("write large upload source");
+
+    let upload = transfer_job(
+        105,
+        TransferDirection::Upload,
+        TransferEndpoint::Local(macsftp_core::LocalPath::new(
+            upload_source.display().to_string(),
+        )),
+        TransferEndpoint::Remote(RemotePath::new(upload_destination.display().to_string())),
+    );
+    fixture
+        .requests
+        .send_async(RemoteSessionRequest::RunTransferJobs {
+            plan_id: macsftp_core::TransferPlanId(9),
+            jobs: vec![upload],
+        })
+        .await
+        .expect("pipelined upload request should reach actor");
+    wait_for_transfer_completion(&fixture, TransferId(105)).await;
+
+    assert_eq!(
+        std::fs::read(&upload_destination).expect("read uploaded large file"),
+        payload
+    );
+    assert!(
+        !upload_destination
+            .parent()
+            .expect("upload destination has parent")
+            .join(".pipelined-upload-large-dest.bin.macsftp-part-105")
+            .exists(),
+        "successful pipelined upload must remove its remote temporary file"
+    );
+
+    fixture.cancel.cancel();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn conflict_decision_pauses_job_and_applies_skip_to_later_plan_jobs() {
     let Some(server) = SshTestServer::spawn() else {
         return;
@@ -1739,6 +1791,133 @@ async fn runtime_streams_and_executes_directory_download() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn runtime_downloads_multi_directory_tree_with_pipelined_planning() {
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    let source_root = server.fixture_dir.join("multi-dir-download-source");
+    std::fs::create_dir(&source_root).expect("create download source");
+    std::fs::write(source_root.join("root.txt"), b"root content").expect("write root file");
+
+    for i in 1..=5 {
+        let sub = source_root.join(format!("dir{i}"));
+        std::fs::create_dir(&sub).expect("create subdir");
+        std::fs::write(
+            sub.join(format!("file{i}.txt")),
+            format!("content {i}").as_bytes(),
+        )
+        .expect("write sub file");
+    }
+
+    let deep1 = source_root.join("dir1").join("nested1");
+    std::fs::create_dir(&deep1).expect("create deep1");
+    std::fs::write(deep1.join("deep1.txt"), b"deep content 1").expect("write deep1 file");
+
+    let deep2 = source_root.join("dir2").join("nested2");
+    std::fs::create_dir(&deep2).expect("create deep2");
+    std::fs::write(deep2.join("deep2.txt"), b"deep content 2").expect("write deep2 file");
+
+    let destination_root = server.fixture_dir.join("multi-dir-download-destination");
+
+    let known_hosts_path = server.fixture_dir.join("multi_dir_download_known_hosts");
+    std::fs::write(
+        &known_hosts_path,
+        format!("[127.0.0.1]:{} {}\n", server.port, server.host_public_key),
+    )
+    .expect("prefill known_hosts");
+    let mut controller = RuntimeController::start(
+        RuntimeBridgeConfig::default(),
+        HostTrustConfig::new(known_hosts_path, None),
+    );
+    let client = controller.client();
+    let mut events = controller
+        .take_event_receiver()
+        .expect("event receiver should be available once");
+
+    client
+        .try_send(AppCommand::ConnectTab(ConnectCommand {
+            tab_id: TAB,
+            session_id: SESSION,
+            session_epoch: EPOCH,
+            profile_id: ProfileId(1),
+            pool_identity: ConnectionPoolIdentity::Ephemeral(SESSION),
+            settings: ConnectionSettings {
+                host: "127.0.0.1".to_string(),
+                port: server.port,
+                username: server.username.clone(),
+                auth: client_key_auth(&server),
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
+            },
+        }))
+        .expect("connect command should send");
+    let _ = next_runtime_event(&mut events, "TabConnecting").await;
+    let _ = next_runtime_event(&mut events, "TabConnected").await;
+
+    client
+        .try_send(AppCommand::StartTransfer(
+            macsftp_core::StartTransferCommand {
+                tab_id: TAB,
+                session_epoch: EPOCH,
+                profile_id: ProfileId(1),
+                direction: TransferDirection::Download,
+                sources: vec![TransferEndpoint::Remote(RemotePath::new(
+                    source_root.display().to_string(),
+                ))],
+                destination: TransferEndpoint::Local(macsftp_core::LocalPath::new(
+                    destination_root.display().to_string(),
+                )),
+                metadata_policy: macsftp_core::MetadataPolicy::default(),
+                conflict_policy: macsftp_core::ConflictPolicy::default(),
+            },
+        ))
+        .expect("directory download command should send");
+
+    let mut planned_jobs = 0;
+    let mut completed_jobs = 0;
+    while completed_jobs < 16 {
+        match next_runtime_event(&mut events, "multi-directory download event").await {
+            AppEvent::TransferPlanStarted(_) | AppEvent::TransferPlanCompleted { .. } => {}
+            AppEvent::TransferPlanProgress(progress) => {
+                planned_jobs += progress.child_jobs.len();
+            }
+            AppEvent::TransferRunning(_) | AppEvent::TransferProgress(_) => {}
+            AppEvent::TransferCompleted { .. } => completed_jobs += 1,
+            AppEvent::TransferFailed(failure) => {
+                panic!("multi-directory download failed: {:?}", failure.error)
+            }
+            AppEvent::ResidualTempCreated(_) | AppEvent::ResidualTempCleared { .. } => {}
+            other => panic!("unexpected multi-directory download event: {other:?}"),
+        }
+    }
+    assert_eq!(
+        planned_jobs, 16,
+        "pipelined directory planner must emit root, 7 nested dirs, and 8 files"
+    );
+    assert_eq!(
+        std::fs::read(destination_root.join("root.txt")).expect("read root"),
+        b"root content"
+    );
+    for i in 1..=5 {
+        assert_eq!(
+            std::fs::read(destination_root.join(format!("dir{i}/file{i}.txt"))).expect("read sub"),
+            format!("content {i}").as_bytes()
+        );
+    }
+    assert_eq!(
+        std::fs::read(destination_root.join("dir1/nested1/deep1.txt")).expect("read deep1"),
+        b"deep content 1"
+    );
+    assert_eq!(
+        std::fs::read(destination_root.join("dir2/nested2/deep2.txt")).expect("read deep2"),
+        b"deep content 2"
+    );
+
+    std::thread::spawn(move || controller.shutdown())
+        .join()
+        .expect("runtime shutdown thread should finish");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn remote_download_failure_after_progress_emits_plan_failure() {
     let Some(server) = SshTestServer::spawn() else {
         return;
@@ -1953,6 +2132,309 @@ async fn runtime_routes_read_dir_to_real_actor() {
             if scoped.payload.path == path
                 && scoped.payload.entries.iter().any(|entry| entry.name == "routed.txt")
     ));
+
+    std::thread::spawn(move || controller.shutdown())
+        .join()
+        .expect("runtime shutdown thread should finish");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_routes_remove_remote_temp_file_and_emits_cleared() {
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    let residual_file = server
+        .fixture_dir
+        .join(".runtime_residual.txt.macsftp-part-88");
+    std::fs::write(&residual_file, b"residual payload").expect("write residual file");
+
+    let known_hosts_path = server.fixture_dir.join("runtime_residual_known_hosts");
+    std::fs::write(
+        &known_hosts_path,
+        format!("[127.0.0.1]:{} {}\n", server.port, server.host_public_key),
+    )
+    .expect("prefill known_hosts");
+    let mut controller = RuntimeController::start(
+        RuntimeBridgeConfig::default(),
+        HostTrustConfig::new(known_hosts_path, None),
+    );
+    let client = controller.client();
+    let mut events = controller
+        .take_event_receiver()
+        .expect("event receiver should be available once");
+
+    client
+        .try_send(AppCommand::ConnectTab(ConnectCommand {
+            tab_id: TAB,
+            session_id: SESSION,
+            session_epoch: EPOCH,
+            profile_id: ProfileId(1),
+            pool_identity: ConnectionPoolIdentity::Ephemeral(SESSION),
+            settings: ConnectionSettings {
+                host: "127.0.0.1".to_string(),
+                port: server.port,
+                username: server.username.clone(),
+                auth: client_key_auth(&server),
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
+            },
+        }))
+        .expect("connect command should send");
+    let _ = next_runtime_event(&mut events, "TabConnecting").await;
+    let _ = next_runtime_event(&mut events, "TabConnected").await;
+
+    let path_str = residual_file.display().to_string();
+    client
+        .try_send(AppCommand::RemoveRemoteTempFile {
+            tab_id: TAB,
+            transfer_id: TransferId(88),
+            path: RemotePath::new(&path_str),
+        })
+        .expect("remove remote temp command should send");
+
+    let cleared = next_runtime_event(&mut events, "ResidualTempCleared").await;
+    match cleared {
+        AppEvent::ResidualTempCleared { transfer_id, path } => {
+            assert_eq!(transfer_id, TransferId(88));
+            assert_eq!(path, path_str);
+        }
+        other => panic!("expected ResidualTempCleared, got {other:?}"),
+    }
+    assert!(
+        !residual_file.exists(),
+        "remote residual temp file must be deleted"
+    );
+
+    // Second removal of the now-absent file must also emit ResidualTempCleared (idempotent).
+    client
+        .try_send(AppCommand::RemoveRemoteTempFile {
+            tab_id: TAB,
+            transfer_id: TransferId(88),
+            path: RemotePath::new(&path_str),
+        })
+        .expect("second remove remote temp command should send");
+
+    let cleared_again = next_runtime_event(&mut events, "ResidualTempCleared").await;
+    match cleared_again {
+        AppEvent::ResidualTempCleared { transfer_id, path } => {
+            assert_eq!(transfer_id, TransferId(88));
+            assert_eq!(path, path_str);
+        }
+        other => panic!("expected second ResidualTempCleared, got {other:?}"),
+    }
+
+    std::thread::spawn(move || controller.shutdown())
+        .join()
+        .expect("runtime shutdown thread should finish");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_handles_in_flight_transfer_cancellation_and_temp_cleanup() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    let source_file = server.fixture_dir.join("cancel-in-flight-source.bin");
+    // 20 MiB payload so pipelined upload is actively in-flight across multiple chunks
+    let payload = vec![0x5au8; 20 * 1024 * 1024];
+    std::fs::write(&source_file, &payload).expect("write large source file");
+
+    let destination_file = server.fixture_dir.join("cancel-in-flight-dest.bin");
+
+    let known_hosts_path = server.fixture_dir.join("cancel_in_flight_known_hosts");
+    std::fs::write(
+        &known_hosts_path,
+        format!("[127.0.0.1]:{} {}\n", server.port, server.host_public_key),
+    )
+    .expect("prefill known_hosts");
+    let mut controller = RuntimeController::start(
+        RuntimeBridgeConfig::default(),
+        HostTrustConfig::new(known_hosts_path, None),
+    );
+    let client = controller.client();
+    let mut events = controller
+        .take_event_receiver()
+        .expect("event receiver should be available once");
+
+    client
+        .try_send(AppCommand::ConnectTab(ConnectCommand {
+            tab_id: TAB,
+            session_id: SESSION,
+            session_epoch: EPOCH,
+            profile_id: ProfileId(1),
+            pool_identity: ConnectionPoolIdentity::Ephemeral(SESSION),
+            settings: ConnectionSettings {
+                host: "127.0.0.1".to_string(),
+                port: server.port,
+                username: server.username.clone(),
+                auth: client_key_auth(&server),
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
+            },
+        }))
+        .expect("connect command should send");
+    let _ = next_runtime_event(&mut events, "TabConnecting").await;
+    let _ = next_runtime_event(&mut events, "TabConnected").await;
+
+    client
+        .try_send(AppCommand::StartTransfer(
+            macsftp_core::StartTransferCommand {
+                tab_id: TAB,
+                session_epoch: EPOCH,
+                profile_id: ProfileId(1),
+                direction: TransferDirection::Upload,
+                sources: vec![TransferEndpoint::Local(macsftp_core::LocalPath::new(
+                    source_file.display().to_string(),
+                ))],
+                destination: TransferEndpoint::Remote(RemotePath::new(
+                    destination_file.display().to_string(),
+                )),
+                metadata_policy: macsftp_core::MetadataPolicy::default(),
+                conflict_policy: macsftp_core::ConflictPolicy::OverwriteAll,
+            },
+        ))
+        .expect("start transfer command should send");
+
+    let mut transfer_id = None;
+    let mut plan_id = None;
+    let mut cancel_sent = false;
+
+    // Loop until we observe ResidualTempCreated (meaning the temp file exists on remote)
+    // and actively cancel while upload is in flight
+    while !cancel_sent {
+        let ev = next_runtime_event(&mut events, "upload in-flight event").await;
+        match ev {
+            AppEvent::TransferPlanStarted(started) => {
+                plan_id = Some(started.plan.id);
+            }
+            AppEvent::TransferPlanProgress(progress) => {
+                if let Some(job) = progress.child_jobs.first() {
+                    transfer_id = Some(job.id);
+                }
+            }
+            AppEvent::TransferPlanCompleted { .. } => {}
+            AppEvent::TransferRunning(running) => {
+                transfer_id = Some(running.job.id);
+            }
+            AppEvent::ResidualTempCreated(_) => {
+                let tid = transfer_id.expect("transfer_id must be known when temp created");
+                client
+                    .try_send(AppCommand::CancelTransfer {
+                        transfer_id: tid,
+                        plan_id,
+                    })
+                    .expect("cancel transfer command should send");
+                cancel_sent = true;
+            }
+            AppEvent::TransferProgress(_) => {}
+            other => panic!("unexpected event before cancel: {other:?}"),
+        }
+    }
+
+    // Now wait for terminal cancellation events
+    let mut saw_skipped = false;
+    let mut saw_plan_cancelled = false;
+    let mut saw_temp_cleared = false;
+    while !saw_skipped || !saw_plan_cancelled || !saw_temp_cleared {
+        match next_runtime_event(&mut events, "post-cancel event").await {
+            AppEvent::TransferSkipped { .. } => {
+                saw_skipped = true;
+            }
+            AppEvent::TransferPlanCancelled { .. } => {
+                saw_plan_cancelled = true;
+            }
+            AppEvent::ResidualTempCleared { .. } => {
+                saw_temp_cleared = true;
+            }
+            AppEvent::TransferProgress(_) | AppEvent::TransferPlanProgress(_) => {}
+            other => panic!("unexpected event after cancel: {other:?}"),
+        }
+    }
+
+    assert!(
+        !destination_file.exists(),
+        "final destination must not exist after cancellation"
+    );
+
+    // Verify retry workflow on failure:
+    // Create an unwritable target directory
+    let fail_dir = server.fixture_dir.join("retry-fail-dir");
+    std::fs::create_dir(&fail_dir).expect("create fail dir");
+    std::fs::set_permissions(&fail_dir, std::fs::Permissions::from_mode(0o555))
+        .expect("make fail dir read-only");
+    let fail_dest = fail_dir.join("output.txt");
+
+    let small_source = server.fixture_dir.join("retry-small-source.txt");
+    std::fs::write(&small_source, b"retryable payload").expect("write small source");
+
+    client
+        .try_send(AppCommand::StartTransfer(
+            macsftp_core::StartTransferCommand {
+                tab_id: TAB,
+                session_epoch: EPOCH,
+                profile_id: ProfileId(1),
+                direction: TransferDirection::Upload,
+                sources: vec![TransferEndpoint::Local(macsftp_core::LocalPath::new(
+                    small_source.display().to_string(),
+                ))],
+                destination: TransferEndpoint::Remote(RemotePath::new(
+                    fail_dest.display().to_string(),
+                )),
+                metadata_policy: macsftp_core::MetadataPolicy::default(),
+                conflict_policy: macsftp_core::ConflictPolicy::OverwriteAll,
+            },
+        ))
+        .expect("start transfer to readonly dir should send");
+
+    let retry_id = loop {
+        match next_runtime_event(&mut events, "failing transfer event").await {
+            AppEvent::TransferPlanStarted(_)
+            | AppEvent::TransferPlanProgress(_)
+            | AppEvent::TransferPlanCompleted { .. }
+            | AppEvent::TransferRunning(_)
+            | AppEvent::ResidualTempCreated(_)
+            | AppEvent::ResidualTempCleared { .. } => {}
+            AppEvent::TransferFailed(failure) => {
+                assert!(
+                    failure.error.retryable,
+                    "failure should be marked retryable"
+                );
+                break failure.transfer_id;
+            }
+            AppEvent::TransferPlanFailed { .. } => {}
+            other => panic!("unexpected event for failing transfer: {other:?}"),
+        }
+    };
+
+    // Make target directory writable so retry succeeds
+    std::fs::set_permissions(&fail_dir, std::fs::Permissions::from_mode(0o755))
+        .expect("restore write permissions to fail dir");
+
+    client
+        .try_send(AppCommand::RetryTransfer {
+            transfer_id: retry_id,
+        })
+        .expect("retry command should send");
+
+    let mut saw_retry_completed = false;
+    while !saw_retry_completed {
+        match next_runtime_event(&mut events, "retried transfer event").await {
+            AppEvent::TransferRunning(_)
+            | AppEvent::TransferProgress(_)
+            | AppEvent::ResidualTempCreated(_)
+            | AppEvent::ResidualTempCleared { .. } => {}
+            AppEvent::TransferCompleted { transfer_id } => {
+                assert_eq!(transfer_id, retry_id);
+                saw_retry_completed = true;
+            }
+            AppEvent::TransferPlanCompleted { .. } => {}
+            other => panic!("unexpected event on retry: {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        std::fs::read(&fail_dest).expect("read retry dest file"),
+        b"retryable payload"
+    );
 
     std::thread::spawn(move || controller.shutdown())
         .join()

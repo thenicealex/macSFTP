@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
-use macsftp_core::{AppEvent, ErrorCode, TransferId, TransferProgress, UserFacingError};
+use macsftp_core::{
+    AppEvent, ErrorCode, TransferDirection, TransferId, TransferProgress, UserFacingError,
+};
 use russh_sftp::client::RawSftpSession;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
@@ -8,8 +10,22 @@ use tracing::warn;
 
 use crate::runtime::ProgressThrottle;
 
-pub const DEFAULT_WINDOW_CAPACITY: usize = 16;
+pub const TARGET_PIPELINE_WINDOW_BYTES: u64 = 8 * 1024 * 1024;
+pub const DEFAULT_WINDOW_CAPACITY: usize = 32;
 pub const DEFAULT_CHUNK_SIZE: u32 = 256 * 1024;
+
+/// Calculates the optimal sliding window capacity (number of concurrent in-flight chunks)
+/// to saturate the 8 MiB SSH transport channel window across high-latency networks.
+///
+/// Bounded between 16 (for 512 KiB+ chunks or default) and 128 (for small 32 KiB chunks)
+/// to avoid excessive async task spawning while maintaining a full pipeline.
+pub fn optimal_window_capacity(chunk_size: u32) -> usize {
+    if chunk_size == 0 {
+        return DEFAULT_WINDOW_CAPACITY;
+    }
+    let capacity = (TARGET_PIPELINE_WINDOW_BYTES / u64::from(chunk_size)) as usize;
+    capacity.clamp(16, 128)
+}
 
 /// Bytes to request for a chunk of `remaining` bytes. Clamping has to happen in
 /// `u64` before the cast: a `(remaining as u32).min(chunk)` would wrap past
@@ -75,10 +91,11 @@ async fn emit_transfer_progress(
 
 pub(crate) async fn open_raw_sftp_session(
     channel: russh::Channel<russh::client::Msg>,
+    direction: TransferDirection,
 ) -> Result<(Arc<RawSftpSession>, u32), UserFacingError> {
     let sftp_config = russh_sftp::client::Config {
         max_packet_len: 262144,
-        max_concurrent_writes: 16,
+        max_concurrent_writes: 128,
         request_timeout_secs: 30,
     };
     let mut raw = RawSftpSession::new_with_config(channel.into_stream(), sftp_config);
@@ -112,8 +129,12 @@ pub(crate) async fn open_raw_sftp_session(
                 "The server limits could not be read.",
             )
         })?;
-        if extension.max_read_len > 0 {
-            chunk_size = extension.max_read_len.min(DEFAULT_CHUNK_SIZE as u64) as u32;
+        let limit = match direction {
+            TransferDirection::Download => extension.max_read_len,
+            TransferDirection::Upload => extension.max_write_len,
+        };
+        if limit > 0 {
+            chunk_size = limit.min(DEFAULT_CHUNK_SIZE as u64) as u32;
         }
         raw.set_limits(russh_sftp::client::rawsession::Limits::from(extension));
     }
@@ -122,6 +143,7 @@ pub(crate) async fn open_raw_sftp_session(
 
 pub(crate) async fn open_transfer_raw_sftp(
     handle: &russh::client::Handle<crate::physical_connection::ClientHandler>,
+    direction: TransferDirection,
 ) -> Result<(Arc<RawSftpSession>, u32), UserFacingError> {
     let channel = handle.channel_open_session().await.map_err(|error| {
         warn!(
@@ -152,7 +174,7 @@ pub(crate) async fn open_transfer_raw_sftp(
                 "The server rejected the SFTP subsystem.",
             )
         })?;
-    open_raw_sftp_session(channel).await
+    open_raw_sftp_session(channel, direction).await
 }
 
 struct ReadChunkResult {
@@ -197,6 +219,64 @@ impl PipelinedDownloadReader {
         self
     }
 
+    fn spawn_read_requests(
+        &self,
+        in_flight: &mut tokio::task::JoinSet<ReadChunkResult>,
+        retry_ranges: &mut std::collections::VecDeque<(u64, u32)>,
+        next_request_offset: &mut u64,
+        eof_reached: bool,
+    ) {
+        while in_flight.len() < self.window_capacity {
+            let (offset, read_len) = if let Some((offset, len)) = retry_ranges.pop_front() {
+                // Retried tails stay eligible even after an empty read
+                // marked EOF: with an unknown file size, EOF can arrive
+                // while a short read is still missing bytes.
+                (offset, len)
+            } else if eof_reached {
+                break;
+            } else if let Some(total) = self.bytes_total {
+                if *next_request_offset >= total {
+                    break;
+                }
+                // Clamp in u64 space: `(total - offset) as u32` wraps once
+                // more than 4 GiB remain and would end the transfer early.
+                let remaining = total - *next_request_offset;
+                let len = next_chunk_len(remaining, self.chunk_size);
+                let offset = *next_request_offset;
+                *next_request_offset += u64::from(len);
+                (offset, len)
+            } else {
+                let offset = *next_request_offset;
+                *next_request_offset += u64::from(self.chunk_size);
+                (offset, self.chunk_size)
+            };
+
+            let raw = self.raw.clone();
+            let handle = self.file_handle.clone();
+            in_flight.spawn(async move {
+                let result = raw.read(handle, offset, read_len).await;
+                ReadChunkResult {
+                    offset,
+                    requested_len: read_len,
+                    result: match result {
+                        Ok(data) => Ok(data.data),
+                        Err(russh_sftp::client::error::Error::Status(status))
+                            if status.status_code == russh_sftp::protocol::StatusCode::Eof =>
+                        {
+                            Ok(Vec::new())
+                        }
+                        Err(error) => Err(transfer_error(
+                            ErrorCode::Unknown,
+                            "Transfer Read Failed",
+                            "The remote file could not be read.",
+                            crate::session_actor::sftp_status_guidance(&error),
+                        )),
+                    },
+                }
+            });
+        }
+    }
+
     pub async fn download_to<W>(
         self,
         destination: &mut W,
@@ -230,6 +310,7 @@ impl PipelinedDownloadReader {
         let mut eof_reached = false;
         let mut in_flight = tokio::task::JoinSet::new();
         let mut bytes_done: u64 = 0;
+        let mut current_offset: Option<u64> = None;
         let mut throttle = ProgressThrottle::new(10);
 
         loop {
@@ -238,55 +319,12 @@ impl PipelinedDownloadReader {
                 return Err(cancelled_transfer_error());
             }
 
-            while in_flight.len() < self.window_capacity {
-                let (offset, read_len) = if let Some((offset, len)) = retry_ranges.pop_front() {
-                    // Retried tails stay eligible even after an empty read
-                    // marked EOF: with an unknown file size, EOF can arrive
-                    // while a short read is still missing bytes.
-                    (offset, len)
-                } else if eof_reached {
-                    break;
-                } else if let Some(total) = self.bytes_total {
-                    if next_request_offset >= total {
-                        break;
-                    }
-                    // Clamp in u64 space: `(total - offset) as u32` wraps once
-                    // more than 4 GiB remain and would end the transfer early.
-                    let remaining = total - next_request_offset;
-                    let len = next_chunk_len(remaining, self.chunk_size);
-                    let offset = next_request_offset;
-                    next_request_offset += u64::from(len);
-                    (offset, len)
-                } else {
-                    let offset = next_request_offset;
-                    next_request_offset += u64::from(self.chunk_size);
-                    (offset, self.chunk_size)
-                };
-
-                let raw = self.raw.clone();
-                let handle = self.file_handle.clone();
-                in_flight.spawn(async move {
-                    let result = raw.read(handle, offset, read_len).await;
-                    ReadChunkResult {
-                        offset,
-                        requested_len: read_len,
-                        result: match result {
-                            Ok(data) => Ok(data.data),
-                            Err(russh_sftp::client::error::Error::Status(status))
-                                if status.status_code == russh_sftp::protocol::StatusCode::Eof =>
-                            {
-                                Ok(Vec::new())
-                            }
-                            Err(error) => Err(transfer_error(
-                                ErrorCode::Unknown,
-                                "Transfer Read Failed",
-                                "The remote file could not be read.",
-                                crate::session_actor::sftp_status_guidance(&error),
-                            )),
-                        },
-                    }
-                });
-            }
+            self.spawn_read_requests(
+                &mut in_flight,
+                &mut retry_ranges,
+                &mut next_request_offset,
+                eof_reached,
+            );
 
             if in_flight.is_empty() {
                 break;
@@ -358,16 +396,28 @@ impl PipelinedDownloadReader {
                 }
             }
 
+            // Immediately replenish the in-flight pipeline before waiting for local disk writes.
+            // This overlaps network RTT with disk I/O, preventing the 8 MiB pipeline from
+            // stalling on local filesystem latency.
+            self.spawn_read_requests(
+                &mut in_flight,
+                &mut retry_ranges,
+                &mut next_request_offset,
+                eof_reached,
+            );
+
             if !data.is_empty() {
-                tokio::select! {
-                    _ = cancel.cancelled() => {
-                        in_flight.abort_all();
-                        return Err(cancelled_transfer_error());
-                    }
-                    seek_res = destination.seek(std::io::SeekFrom::Start(chunk.offset)) => {
-                        if let Err(error) = seek_res {
+                if current_offset != Some(chunk.offset) {
+                    tokio::select! {
+                        _ = cancel.cancelled() => {
                             in_flight.abort_all();
-                            return Err(local_transfer_error("Transfer Write Failed", &error));
+                            return Err(cancelled_transfer_error());
+                        }
+                        seek_res = destination.seek(std::io::SeekFrom::Start(chunk.offset)) => {
+                            if let Err(error) = seek_res {
+                                in_flight.abort_all();
+                                return Err(local_transfer_error("Transfer Write Failed", &error));
+                            }
                         }
                     }
                 }
@@ -385,6 +435,7 @@ impl PipelinedDownloadReader {
                     }
                 }
 
+                current_offset = Some(chunk.offset + received);
                 bytes_done += received;
                 if throttle.should_send(std::time::Instant::now()) {
                     emit_transfer_progress(event_tx, transfer_id, bytes_done, self.bytes_total)
@@ -850,6 +901,27 @@ mod tests {
 
     /// Regression guard for the >4 GiB arithmetic: clamping the remaining
     /// length after casting to `u32` wraps and ends large transfers early.
+    #[tokio::test]
+    async fn test_pipelined_download_pipeline_replenishes_immediately() {
+        let payload: Vec<u8> = (0..16_384).map(|i| (i % 251) as u8).collect();
+        let raw = spawn_mock_raw_session(payload.clone(), false).await;
+        let (event_tx, _event_rx) = flume::bounded(100);
+        let cancel = CancellationToken::new();
+        let mut destination = Cursor::new(vec![0u8; payload.len()]);
+
+        let reader = PipelinedDownloadReader::new(raw, "mock-handle", Some(payload.len() as u64))
+            .with_chunk_size(1024)
+            .with_window_capacity(4);
+
+        let transferred = reader
+            .download_to(&mut destination, TransferId(43), &event_tx, &cancel)
+            .await
+            .expect("download with immediate replenishment must complete successfully");
+
+        assert_eq!(transferred, payload.len() as u64);
+        assert_eq!(destination.into_inner(), payload);
+    }
+
     #[test]
     fn next_chunk_len_does_not_wrap_past_four_gib() {
         let chunk = DEFAULT_CHUNK_SIZE;
@@ -860,5 +932,20 @@ mod tests {
         assert_eq!(next_chunk_len(8 * 1024 * 1024 * 1024, chunk), chunk);
         assert_eq!(next_chunk_len(1234, chunk), 1234);
         assert_eq!(next_chunk_len(0, chunk), 0);
+    }
+
+    #[test]
+    fn test_optimal_window_capacity_calculation() {
+        assert_eq!(optimal_window_capacity(0), DEFAULT_WINDOW_CAPACITY);
+        // 256 KiB chunks: 8 MiB / 256 KiB = 32 chunks
+        assert_eq!(optimal_window_capacity(256 * 1024), 32);
+        // 128 KiB chunks: 8 MiB / 128 KiB = 64 chunks
+        assert_eq!(optimal_window_capacity(128 * 1024), 64);
+        // 64 KiB chunks: 8 MiB / 64 KiB = 128 chunks
+        assert_eq!(optimal_window_capacity(64 * 1024), 128);
+        // 32 KiB chunks: clamped to upper bound of 128 chunks (4 MiB)
+        assert_eq!(optimal_window_capacity(32 * 1024), 128);
+        // Large chunks (e.g. 1 MiB): clamped to lower bound of 16 chunks
+        assert_eq!(optimal_window_capacity(1024 * 1024), 16);
     }
 }

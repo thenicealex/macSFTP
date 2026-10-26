@@ -105,7 +105,9 @@ pub(crate) fn write_phased_with_parent_sync(
         return Err(discard_temp_file(&temp_path, error));
     }
 
-    std::fs::rename(&temp_path, path).map_err(AtomicWriteError::NotCommitted)?;
+    if let Err(rename_error) = std::fs::rename(&temp_path, path) {
+        return Err(discard_temp_file(&temp_path, rename_error));
+    }
     // Past this point the destination already holds the new contents, so
     // failures can no longer mean "not committed".
     sync_parent(&parent_directory).map_err(AtomicWriteError::ReplacedButNotDurable)
@@ -135,6 +137,12 @@ fn discard_temp_file(temp_path: &Path, failure: std::io::Error) -> AtomicWriteEr
 /// cannot each read the old file and overwrite the other's entry. The file is
 /// handled as bytes: a non-UTF-8 comment must not make the append unreadable.
 pub fn append_private_line_atomically(path: &Path, line: &str) -> std::io::Result<()> {
+    if line.contains('\n') || line.contains('\r') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "line cannot contain newline characters",
+        ));
+    }
     let _lock = crate::file_lock::FileLock::acquire(path)?;
     let mut content = match std::fs::read(path) {
         Ok(content) => content,
@@ -237,6 +245,33 @@ mod tests {
         );
         std::fs::remove_dir_all(directory).expect("remove not-committed fixture directory");
     }
+
+    #[test]
+    fn rename_failure_cleans_up_staging_file() {
+        let directory = temp_dir("rename-failure");
+        std::fs::create_dir_all(&directory).expect("create rename-failure directory");
+        let dest_dir = directory.join("existing_dir");
+        std::fs::create_dir(&dest_dir).expect("create conflicting directory");
+
+        let result = write_phased_with_parent_sync(&dest_dir, b"content", File::sync_all);
+        match result {
+            Err(AtomicWriteError::NotCommitted(_)) => {}
+            other => panic!("expected NotCommitted error, got {other:?}"),
+        }
+
+        let entries: Vec<_> = std::fs::read_dir(&directory)
+            .expect("read_dir")
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "only the existing_dir should remain; staging file must be cleaned up"
+        );
+        assert_eq!(entries[0].file_name(), "existing_dir");
+        std::fs::remove_dir_all(directory).expect("cleanup");
+    }
+
     #[test]
     fn append_private_line_preserves_non_utf8_bytes_and_is_idempotent_per_call() {
         let directory = temp_dir("append-line");
@@ -269,6 +304,16 @@ mod tests {
             & 0o777;
         assert_eq!(mode, 0o600, "appended trust data stays private");
 
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn append_private_line_rejects_newlines() {
+        let directory = temp_dir("reject-newlines");
+        std::fs::create_dir_all(&directory).expect("create directory");
+        let path = directory.join("known_hosts");
+        assert!(append_private_line_atomically(&path, "line1\nline2").is_err());
+        assert!(append_private_line_atomically(&path, "line1\rline2").is_err());
         std::fs::remove_dir_all(&directory).ok();
     }
 }

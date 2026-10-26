@@ -1,4 +1,4 @@
-use macsftp_core::LocalPath;
+use macsftp_core::{LocalPath, is_bidi_or_control};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -50,7 +50,38 @@ impl RecentsFile {
                         supported: Self::CURRENT_VERSION,
                     });
                 }
-                Ok(parsed)
+                let mut valid_entries = Vec::with_capacity(parsed.entries.len());
+                for entry in parsed.entries {
+                    if entry.port == 0
+                        || entry.host.is_empty()
+                        || entry
+                            .host
+                            .chars()
+                            .any(|c| c.is_whitespace() || is_bidi_or_control(c))
+                        || entry.username.is_empty()
+                        || entry
+                            .username
+                            .chars()
+                            .any(|c| c.is_whitespace() || is_bidi_or_control(c))
+                    {
+                        continue;
+                    }
+                    let display_name = entry
+                        .display_name
+                        .filter(|name| !name.chars().any(is_bidi_or_control));
+                    let last_remote_path = entry
+                        .last_remote_path
+                        .filter(|p| !p.chars().any(is_bidi_or_control));
+                    valid_entries.push(RecentEntry {
+                        display_name,
+                        last_remote_path,
+                        ..entry
+                    });
+                }
+                Ok(RecentsFile {
+                    version: parsed.version,
+                    entries: valid_entries,
+                })
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::empty()),
             Err(error) => Err(StorageError::Io {
@@ -147,6 +178,35 @@ impl RecentsStore {
 
     /// Upsert by `(host, port, username, profile_id)`; move to front; cap 20; save.
     pub fn upsert(&mut self, entry: RecentEntryInput) -> Result<(), StorageError> {
+        self.ensure_writable()?;
+        if entry.port == 0
+            || entry.host.is_empty()
+            || entry
+                .host
+                .chars()
+                .any(|c| c.is_whitespace() || is_bidi_or_control(c))
+            || entry.username.is_empty()
+            || entry
+                .username
+                .chars()
+                .any(|c| c.is_whitespace() || is_bidi_or_control(c))
+        {
+            return Err(StorageError::Corrupt {
+                message: "invalid recent entry endpoint".to_string(),
+            });
+        }
+        let display_name = entry
+            .display_name
+            .filter(|name| !name.chars().any(is_bidi_or_control));
+        let last_remote_path = entry
+            .last_remote_path
+            .filter(|p| !p.chars().any(is_bidi_or_control));
+        let entry = RecentEntryInput {
+            display_name,
+            last_remote_path,
+            ..entry
+        };
+
         let _lock = self.acquire_write_lock()?;
         // Reload under the lock so entries another app instance wrote since
         // our last sync are merged into our view instead of being clobbered
@@ -560,5 +620,53 @@ mod tests {
                 "recents json must not contain {forbidden}: {raw}"
             );
         }
+    }
+
+    #[test]
+    fn recents_rejects_and_filters_invalid_endpoints() {
+        let path = temp_path("invalid-endpoints");
+        let mut store = RecentsStore::open_or_empty(path.clone());
+
+        let mut invalid_port = sample_input("a.example", 1);
+        invalid_port.port = 0;
+        assert!(matches!(
+            store.upsert(invalid_port),
+            Err(StorageError::Corrupt { .. })
+        ));
+
+        let invalid_host = sample_input("", 1);
+        assert!(matches!(
+            store.upsert(invalid_host),
+            Err(StorageError::Corrupt { .. })
+        ));
+
+        let invalid_host_bidi = sample_input("evil\u{202E}host", 1);
+        assert!(matches!(
+            store.upsert(invalid_host_bidi),
+            Err(StorageError::Corrupt { .. })
+        ));
+
+        let mut invalid_user = sample_input("a.example", 1);
+        invalid_user.username = "user name".into();
+        assert!(matches!(
+            store.upsert(invalid_user),
+            Err(StorageError::Corrupt { .. })
+        ));
+
+        // Test filtering on load
+        std::fs::write(
+            path.as_str(),
+            r#"{"version":1,"entries":[
+                {"id":1,"host":"valid.example","port":22,"username":"alex","last_connected_at":10},
+                {"id":2,"host":"bad.example","port":0,"username":"alex","last_connected_at":11},
+                {"id":3,"host":"","port":22,"username":"alex","last_connected_at":12},
+                {"id":4,"host":"bidi\u202Ehost","port":22,"username":"alex","last_connected_at":13}
+            ]}"#,
+        )
+        .expect("write fixtures");
+
+        let loaded = RecentsStore::open(path).expect("open");
+        assert_eq!(loaded.entries().len(), 1);
+        assert_eq!(loaded.entries()[0].host, "valid.example");
     }
 }

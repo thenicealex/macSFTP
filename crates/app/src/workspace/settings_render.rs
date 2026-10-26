@@ -9,7 +9,7 @@ use gpui_kit::{
     App, ClickEvent, Context, FontWeight, IntoElement, ParentElement, Styled, Window,
     WindowControlArea, div, prelude::*, px,
 };
-use macsftp_core::{AuthMethodKind, ConnectionRoute};
+use macsftp_core::{AuthMethodKind, ConnectionRoute, is_bidi_or_control};
 use macsftp_storage::AppearancePreference;
 use macsftp_ui::{
     ActiveTheme, IconName, InputState, TextFieldModel, ThemeColors, empty_state, icon,
@@ -521,6 +521,11 @@ impl crate::workspace::Workspace {
             .value()
             .trim()
             .to_string();
+        if trimmed.chars().any(is_bidi_or_control) {
+            self.config_error = Some("Editor command contains invalid characters.".into());
+            cx.notify();
+            return;
+        }
         let editor = if trimmed.is_empty() {
             None
         } else {
@@ -639,6 +644,13 @@ impl crate::workspace::Workspace {
 
         if pattern.is_empty() || app_name.is_empty() {
             self.config_error = Some("Enter both a pattern and an app name.".into());
+            cx.notify();
+            return;
+        }
+
+        if pattern.chars().any(is_bidi_or_control) || app_name.chars().any(is_bidi_or_control) {
+            self.config_error =
+                Some("Rule pattern and app name cannot contain control characters.".into());
             cx.notify();
             return;
         }
