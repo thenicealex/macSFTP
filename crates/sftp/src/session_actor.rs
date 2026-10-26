@@ -159,6 +159,7 @@ struct TransferQueue {
     /// First job of each plan: the folder job for directory transfers, which
     /// removes the destination before any child may start.
     plan_root_jobs: HashMap<TransferPlanId, TransferId>,
+    plan_facts: HashMap<TransferPlanId, PlanTransferFacts>,
     /// Plans whose non-root job started at least once; a retried root must not
     /// clear the destination again.
     children_started: std::collections::HashSet<TransferPlanId>,
@@ -207,6 +208,7 @@ impl TransferQueue {
             running: HashMap::new(),
             plan_policies: Arc::new(Mutex::new(HashMap::new())),
             plan_root_jobs: HashMap::new(),
+            plan_facts: HashMap::new(),
             children_started: std::collections::HashSet::new(),
         }
     }
@@ -223,6 +225,10 @@ impl TransferQueue {
         // root mapping was already cleaned up.
         if record_root && let Some(root_job) = jobs.first() {
             self.plan_root_jobs.entry(plan_id).or_insert(root_job.id);
+            if let TransferEndpoint::Local(destination) = &root_job.destination {
+                let facts = self.plan_facts.entry(plan_id).or_default();
+                facts.set_destination_root(destination.clone());
+            }
         }
         self.pending
             .extend(jobs.into_iter().map(|job| QueuedTransfer { plan_id, job }));
@@ -267,6 +273,7 @@ impl TransferQueue {
         if !plan_busy {
             self.plan_root_jobs.remove(&plan_id);
             self.children_started.remove(&plan_id);
+            self.plan_facts.remove(&plan_id);
         }
     }
 
@@ -294,6 +301,7 @@ impl TransferQueue {
                 if !plan_busy {
                     self.plan_root_jobs.remove(&plan_id);
                     self.children_started.remove(&plan_id);
+                    self.plan_facts.remove(&plan_id);
                 }
             }
             return Some(true);
@@ -689,9 +697,14 @@ impl RemoteSessionActor {
             let mut job = queued_transfer.job;
             job.conflict_policy =
                 transfer_queue.policy_for(queued_transfer.plan_id, &job.conflict_policy);
+            let facts = transfer_queue
+                .plan_facts
+                .entry(queued_transfer.plan_id)
+                .or_default()
+                .clone();
             let transfer_session =
                 match open_transfer_session(&self.shared_connection.handle, job.direction).await {
-                    Ok(session) => Arc::new(TransferSessionSlot::new(session)),
+                    Ok(session) => Arc::new(TransferSessionSlot::with_facts(session, facts)),
                     Err(error) => {
                         if self
                             .event_tx
@@ -903,6 +916,26 @@ pub(crate) struct PlanTransferFacts {
     /// into a subdirectory that is a different mount, where hardlinks may be
     /// unsupported.
     pub(crate) hardlink_commit_directories: Arc<Mutex<HashSet<String>>>,
+    pub(crate) destination_root: Arc<Mutex<Option<LocalPath>>>,
+}
+
+impl PlanTransferFacts {
+    pub(crate) fn destination_root(&self) -> Option<LocalPath> {
+        self.destination_root
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub(crate) fn set_destination_root(&self, root: LocalPath) {
+        let mut guard = self
+            .destination_root
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if guard.is_none() {
+            *guard = Some(root);
+        }
+    }
 }
 
 pub(crate) struct TransferSessionSlot {
@@ -911,12 +944,17 @@ pub(crate) struct TransferSessionSlot {
 }
 
 impl TransferSessionSlot {
+    #[cfg(test)]
     pub(crate) fn new(session: TransferSession) -> Self {
         Self::with_facts(session, PlanTransferFacts::default())
     }
 
     pub(crate) fn with_facts(session: TransferSession, facts: PlanTransferFacts) -> Self {
         Self { session, facts }
+    }
+
+    pub(crate) fn destination_root(&self) -> Option<LocalPath> {
+        self.facts.destination_root()
     }
 
     #[cfg(test)]
@@ -1403,6 +1441,14 @@ pub(crate) async fn run_transfer_job(
     connection_key: String,
     may_clear_destination: bool,
 ) -> TransferJobOutcome {
+    if may_clear_destination
+        && job.direction == macsftp_core::TransferDirection::Download
+        && let TransferEndpoint::Local(destination) = &job.destination
+    {
+        transfer_session
+            .facts
+            .set_destination_root(destination.clone());
+    }
     let result = match resolve_transfer_conflict(
         transfer_session.session(),
         &mut job,
@@ -2718,7 +2764,11 @@ async fn download_symlink_raw(
             sftp_status_guidance(&error),
         )
     })?;
-    validate_download_symlink_target(&target)?;
+    validate_download_symlink_target(
+        transfer_session.destination_root().as_ref(),
+        destination,
+        &target,
+    )?;
     if matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
         remove_downloaded_file_destination(destination.as_str()).await?;
     }
@@ -3155,7 +3205,11 @@ async fn download_symlink(
             sftp_status_guidance(&error),
         )
     })?;
-    validate_download_symlink_target(&target)?;
+    validate_download_symlink_target(
+        transfer_session.destination_root().as_ref(),
+        destination,
+        &target,
+    )?;
     if matches!(job.conflict_policy, ConflictPolicy::OverwriteAll) {
         remove_downloaded_file_destination(destination.as_str()).await?;
     }
@@ -3999,7 +4053,55 @@ fn target_escapes_through_parent(target: &str) -> bool {
     target.split('/').any(|component| component == "..")
 }
 
-fn validate_download_symlink_target(target: &str) -> Result<(), UserFacingError> {
+fn relative_link_dir<'a>(destination_root: &'a Path, destination: &'a Path) -> Option<&'a Path> {
+    if destination == destination_root {
+        return Some(Path::new(""));
+    }
+    let relative = destination.strip_prefix(destination_root).ok()?;
+    if relative.as_os_str().is_empty() {
+        Some(Path::new(""))
+    } else {
+        relative.parent()
+    }
+}
+
+fn symlink_target_escapes_root(relative_dir: &Path, target: &str) -> bool {
+    let mut stack: Vec<&str> = Vec::new();
+    for component in relative_dir.components() {
+        match component {
+            Component::Normal(name) => {
+                if let Some(segment) = name.to_str() {
+                    stack.push(segment);
+                } else {
+                    return true;
+                }
+            }
+            Component::CurDir => {}
+            _ => return true,
+        }
+    }
+
+    for component in target.split('/') {
+        if component.is_empty() || component == "." {
+            continue;
+        }
+        if component == ".." {
+            if stack.pop().is_none() {
+                return true;
+            }
+        } else {
+            stack.push(component);
+        }
+    }
+
+    false
+}
+
+fn validate_download_symlink_target(
+    destination_root: Option<&LocalPath>,
+    destination: &LocalPath,
+    target: &str,
+) -> Result<(), UserFacingError> {
     let is_windows_drive_prefix = target.len() >= 2
         && target.as_bytes()[1] == b':'
         && target.as_bytes()[0].is_ascii_alphabetic();
@@ -4011,7 +4113,6 @@ fn validate_download_symlink_target(target: &str) -> Result<(), UserFacingError>
         || target.contains('\\')
         || is_windows_drive_prefix
         || target.chars().any(is_bidi_or_control)
-        || target_escapes_through_parent(target)
     {
         return Err(UserFacingError::new(
             ErrorCode::UnsupportedSymlink,
@@ -4019,6 +4120,28 @@ fn validate_download_symlink_target(target: &str) -> Result<(), UserFacingError>
             "The remote symlink target cannot be recreated safely inside the download folder.",
         ));
     }
+
+    let dest_path = Path::new(destination.as_str());
+    let root_path = destination_root
+        .map(|root| Path::new(root.as_str()))
+        .unwrap_or(dest_path);
+
+    let Some(relative_dir) = relative_link_dir(root_path, dest_path) else {
+        return Err(UserFacingError::new(
+            ErrorCode::UnsupportedSymlink,
+            "Unsafe Link Target",
+            "The remote symlink target cannot be recreated safely inside the download folder.",
+        ));
+    };
+
+    if symlink_target_escapes_root(relative_dir, target) {
+        return Err(UserFacingError::new(
+            ErrorCode::UnsupportedSymlink,
+            "Unsafe Link Target",
+            "The remote symlink target cannot be recreated safely inside the download folder.",
+        ));
+    }
+
     Ok(())
 }
 
@@ -4142,27 +4265,97 @@ mod tests {
 
     #[test]
     fn download_symlink_rejects_unsafe_targets() {
-        assert!(validate_download_symlink_target("").is_err());
-        assert!(validate_download_symlink_target("/etc/passwd").is_err());
-        assert!(validate_download_symlink_target("/Users/alex").is_err());
-        assert!(validate_download_symlink_target("../outside").is_err());
-        assert!(validate_download_symlink_target("sub/../../secret").is_err());
-        assert!(validate_download_symlink_target(r"C:\Windows\System32").is_err());
-        assert!(validate_download_symlink_target("C:Windows").is_err());
-        assert!(validate_download_symlink_target("~/secret").is_err());
-        assert!(validate_download_symlink_target("evil\u{202E}txt.exe").is_err());
-        assert!(validate_download_symlink_target("evil\x00file").is_err());
-        assert!(validate_download_symlink_target("evil\x1b[31mfile").is_err());
-        assert!(validate_download_symlink_target(r"sub\..\secret").is_err());
+        let dest = LocalPath::new("/tmp/downloads/link");
+        assert!(validate_download_symlink_target(None, &dest, "").is_err());
+        assert!(validate_download_symlink_target(None, &dest, "/etc/passwd").is_err());
+        assert!(validate_download_symlink_target(None, &dest, "/Users/alex").is_err());
+        assert!(validate_download_symlink_target(None, &dest, "../outside").is_err());
+        assert!(validate_download_symlink_target(None, &dest, "sub/../../secret").is_err());
+        assert!(validate_download_symlink_target(None, &dest, r"C:\Windows\System32").is_err());
+        assert!(validate_download_symlink_target(None, &dest, "C:Windows").is_err());
+        assert!(validate_download_symlink_target(None, &dest, "~/secret").is_err());
+        assert!(validate_download_symlink_target(None, &dest, "evil\u{202E}txt.exe").is_err());
+        assert!(validate_download_symlink_target(None, &dest, "evil\x00file").is_err());
+        assert!(validate_download_symlink_target(None, &dest, "evil\x1b[31mfile").is_err());
+        assert!(validate_download_symlink_target(None, &dest, r"sub\..\secret").is_err());
 
-        let err = validate_download_symlink_target("/etc/passwd")
+        let err = validate_download_symlink_target(None, &dest, "/etc/passwd")
             .expect_err("absolute target must be rejected");
         assert_eq!(err.code, ErrorCode::UnsupportedSymlink);
         assert_eq!(err.title, "Unsafe Link Target");
 
-        assert!(validate_download_symlink_target("sibling.txt").is_ok());
-        assert!(validate_download_symlink_target("sub/file.txt").is_ok());
-        assert!(validate_download_symlink_target("version.1.0").is_ok());
+        assert!(validate_download_symlink_target(None, &dest, "sibling.txt").is_ok());
+        assert!(validate_download_symlink_target(None, &dest, "sub/file.txt").is_ok());
+        assert!(validate_download_symlink_target(None, &dest, "version.1.0").is_ok());
+    }
+
+    #[test]
+    fn download_symlink_allows_in_tree_relative_targets() {
+        let root = LocalPath::new("/tmp/downloads/tree");
+        let nested_link = LocalPath::new("/tmp/downloads/tree/sub/link");
+        let deep_link = LocalPath::new("/tmp/downloads/tree/a/b/link");
+        let root_link = LocalPath::new("/tmp/downloads/tree/link");
+
+        // Target pointing to sibling from subdirectory (Issue #63)
+        assert!(
+            validate_download_symlink_target(Some(&root), &nested_link, "../sibling.txt").is_ok()
+        );
+        assert!(
+            validate_download_symlink_target(Some(&root), &nested_link, "../other_sub/file.txt")
+                .is_ok()
+        );
+
+        // Multi-level parent traversal staying inside tree
+        assert!(
+            validate_download_symlink_target(Some(&root), &deep_link, "../../sibling.txt").is_ok()
+        );
+        assert!(
+            validate_download_symlink_target(Some(&root), &deep_link, "../sibling.txt").is_ok()
+        );
+
+        // Self-cancelling `..` segments
+        assert!(
+            validate_download_symlink_target(Some(&root), &root_link, "sub/../sibling.txt").is_ok()
+        );
+        assert!(
+            validate_download_symlink_target(Some(&root), &nested_link, "sub2/../file.txt").is_ok()
+        );
+
+        // Target pointing to the download root itself from a subdirectory
+        assert!(validate_download_symlink_target(Some(&root), &nested_link, "..").is_ok());
+
+        // Single-file download with self-cancelling in-tree `..`
+        let single_file_link = LocalPath::new("/tmp/downloads/single_link");
+        assert!(
+            validate_download_symlink_target(
+                Some(&single_file_link),
+                &single_file_link,
+                "sub/../sibling.txt"
+            )
+            .is_ok()
+        );
+
+        // Reject targets that escape download tree
+        assert!(
+            validate_download_symlink_target(Some(&root), &nested_link, "../../outside").is_err()
+        );
+        assert!(
+            validate_download_symlink_target(Some(&root), &deep_link, "../../../outside").is_err()
+        );
+        assert!(validate_download_symlink_target(Some(&root), &root_link, "../outside").is_err());
+        assert!(validate_download_symlink_target(Some(&root), &root_link, "..").is_err());
+        assert!(
+            validate_download_symlink_target(
+                Some(&single_file_link),
+                &single_file_link,
+                "../outside"
+            )
+            .is_err()
+        );
+        assert!(
+            validate_download_symlink_target(Some(&single_file_link), &single_file_link, "..")
+                .is_err()
+        );
     }
 
     fn queue_job(id: u64, direction: TransferDirection) -> TransferJob {

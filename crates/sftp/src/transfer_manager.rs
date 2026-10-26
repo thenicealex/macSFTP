@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex, Weak};
 
 use macsftp_core::{
     AppEvent, ConflictDecision, ConflictPolicy, ConflictRequestId, ConnectionKey, ErrorCode,
-    TransferDirection, TransferFailure, TransferId, TransferJob, TransferPlanId, UserFacingError,
+    TransferDirection, TransferEndpoint, TransferFailure, TransferId, TransferJob, TransferPlanId,
+    UserFacingError,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -327,6 +328,10 @@ impl TransferManager {
         // root mapping survives the plan's lifetime for exactly this reason.
         if record_root && let Some(root_job) = jobs.first() {
             self.plan_root_jobs.entry(plan_id).or_insert(root_job.id);
+            if let TransferEndpoint::Local(destination) = &root_job.destination {
+                let facts = self.plan_facts.entry(plan_id).or_default();
+                facts.set_destination_root(destination.clone());
+            }
         }
         let mut skipped = Vec::new();
         for job in jobs {
