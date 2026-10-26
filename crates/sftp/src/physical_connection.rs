@@ -3,7 +3,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aws_lc_rs::rand::SystemRandom;
 use aws_lc_rs::signature::{RSA_PKCS1_SHA256, RSA_PKCS1_SHA512, RsaKeyPair};
@@ -123,6 +123,43 @@ async fn bounded_handshake<T, E>(
     }
 }
 
+/// Mutable deadline shared across an in-flight connection attempt.
+///
+/// Initially computed from the route and authentication peer-phases budget,
+/// and extended dynamically when human-in-the-loop steps (host-key trust
+/// prompt, keyboard-interactive authentication) actually begin.
+#[derive(Clone, Debug)]
+pub struct AttemptDeadline {
+    deadline: Arc<Mutex<Instant>>,
+}
+
+impl AttemptDeadline {
+    pub fn new(deadline: Instant) -> Self {
+        Self {
+            deadline: Arc::new(Mutex::new(deadline)),
+        }
+    }
+
+    pub fn get(&self) -> Instant {
+        *self
+            .deadline
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn extend(&self, duration: Duration) {
+        let mut guard = self
+            .deadline
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard += duration;
+    }
+
+    pub fn is_expired(&self) -> bool {
+        Instant::now() >= self.get()
+    }
+}
+
 /// Run the SSH handshake under a bound that excludes a host-key trust prompt.
 ///
 /// The peer-facing part of the handshake is bounded by `timeout`. Once the
@@ -130,12 +167,14 @@ async fn bounded_handshake<T, E>(
 /// prompt, the deadline moves to `timeout + prompt_timeout`: the human is
 /// already in the loop and their wait is covered by the prompt's own bound,
 /// so a silent peer still fails fast while a slow user never trips the
-/// handshake bound.
+/// handshake bound. When provided, `attempt_deadline` is extended by the prompt
+/// timeout so the overall connection manager respects the human wait.
 async fn bounded_handshake_with_trust_prompt<T>(
     timeout: Duration,
     prompt_timeout: Duration,
     prompt_started: Arc<Notify>,
     phase: &'static str,
+    attempt_deadline: Option<&AttemptDeadline>,
     future: impl std::future::Future<Output = Result<T, russh::Error>>,
 ) -> Result<T, HandshakePhaseError<russh::Error>> {
     let mut future = std::pin::pin!(future);
@@ -149,6 +188,9 @@ async fn bounded_handshake_with_trust_prompt<T>(
             _ = prompt_started.as_mut(), if !prompt_seen => {
                 prompt_seen = true;
                 deadline = tokio::time::Instant::now() + timeout + prompt_timeout;
+                if let Some(attempt_deadline) = attempt_deadline {
+                    attempt_deadline.extend(prompt_timeout);
+                }
             }
             _ = tokio::time::sleep_until(deadline) => {
                 return Err(HandshakePhaseError::TimedOut(phase));
@@ -829,6 +871,7 @@ async fn emit_auth_failure(
     ConnectFailure::AuthFailed(failure)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn authenticate_keyboard_interactive(
     handle: &mut client::Handle<ClientHandler>,
     settings: &ConnectionSettings,
@@ -836,13 +879,23 @@ async fn authenticate_keyboard_interactive(
     event_tx: &flume::Sender<AppEvent>,
     registry: &KeyboardInteractiveRegistry,
     next_request_id: &AtomicU64,
+    handshake_timeout: Duration,
+    attempt_deadline: Option<&AttemptDeadline>,
 ) -> Result<client::AuthResult, ConnectFailure> {
-    let mut result = handle
-        .authenticate_keyboard_interactive_start(settings.username.clone(), None::<String>)
-        .await
-        .map_err(|error| {
+    let mut result = bounded_handshake(
+        handshake_timeout,
+        "keyboard-interactive start",
+        handle.authenticate_keyboard_interactive_start(settings.username.clone(), None::<String>),
+    )
+    .await
+    .map_err(|error| match error {
+        HandshakePhaseError::TimedOut(phase) => {
+            ConnectFailure::Connection(handshake_timeout_error(phase))
+        }
+        HandshakePhaseError::Failed(error) => {
             ConnectFailure::Connection(connection_error(&settings.host, settings.port, &error))
-        })?;
+        }
+    })?;
 
     loop {
         result = match result {
@@ -895,6 +948,9 @@ async fn authenticate_keyboard_interactive(
                     );
                     return Err(emit_auth_failure(scope, event_tx, reason).await);
                 }
+                if let Some(deadline) = attempt_deadline {
+                    deadline.extend(Duration::from_secs(120));
+                }
                 let response = tokio::time::timeout(Duration::from_secs(120), response_rx).await;
                 let mut response = match response {
                     Ok(Ok(Some(response))) => response,
@@ -924,16 +980,20 @@ async fn authenticate_keyboard_interactive(
                     );
                     return Err(emit_auth_failure(scope, event_tx, reason).await);
                 }
-                handle
-                    .authenticate_keyboard_interactive_respond(response.take_responses())
-                    .await
-                    .map_err(|error| {
-                        ConnectFailure::Connection(connection_error(
-                            &settings.host,
-                            settings.port,
-                            &error,
-                        ))
-                    })?
+                bounded_handshake(
+                    handshake_timeout,
+                    "keyboard-interactive response",
+                    handle.authenticate_keyboard_interactive_respond(response.take_responses()),
+                )
+                .await
+                .map_err(|error| match error {
+                    HandshakePhaseError::TimedOut(phase) => {
+                        ConnectFailure::Connection(handshake_timeout_error(phase))
+                    }
+                    HandshakePhaseError::Failed(error) => ConnectFailure::Connection(
+                        connection_error(&settings.host, settings.port, &error),
+                    ),
+                })?
             }
         };
     }
@@ -1080,6 +1140,7 @@ async fn authenticate_ssh_agent(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn authenticate(
     handle: &mut client::Handle<ClientHandler>,
     settings: &ConnectionSettings,
@@ -1088,6 +1149,7 @@ async fn authenticate(
     keyboard_interactive_registry: &KeyboardInteractiveRegistry,
     next_keyboard_interactive_id: &AtomicU64,
     handshake_timeout: Duration,
+    attempt_deadline: Option<&AttemptDeadline>,
 ) -> Result<(), ConnectFailure> {
     let method = match &settings.auth {
         AuthCredential::Password { .. } => "password",
@@ -1191,6 +1253,8 @@ async fn authenticate(
                 event_tx,
                 keyboard_interactive_registry,
                 next_keyboard_interactive_id,
+                handshake_timeout,
+                attempt_deadline,
             )
             .await?
         }
@@ -1226,6 +1290,8 @@ async fn authenticate(
                 event_tx,
                 keyboard_interactive_registry,
                 next_keyboard_interactive_id,
+                handshake_timeout,
+                attempt_deadline,
             )
             .await?
         }
@@ -1453,6 +1519,7 @@ async fn establish_on_stream<R>(
     event_tx: flume::Sender<AppEvent>,
     connection_lost: CancellationToken,
     disconnect_cause: Arc<Mutex<Option<PhysicalDisconnectCause>>>,
+    attempt_deadline: Arc<AttemptDeadline>,
 ) -> Result<client::Handle<ClientHandler>, ConnectFailure>
 where
     R: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -1493,6 +1560,7 @@ where
         trust_prompt_timeout,
         trust_prompt_started,
         "the SSH handshake",
+        Some(&attempt_deadline),
         client::connect_stream(config, stream, handler),
     )
     .await;
@@ -1551,6 +1619,7 @@ where
         &keyboard_interactive_registry,
         &next_keyboard_interactive_id,
         handshake_timeout,
+        Some(&attempt_deadline),
     )
     .await?;
 
@@ -1611,6 +1680,7 @@ pub async fn establish_physical_connection(
     event_tx: flume::Sender<AppEvent>,
     connection_lost: CancellationToken,
     disconnect_cause: Arc<Mutex<Option<PhysicalDisconnectCause>>>,
+    attempt_deadline: Arc<AttemptDeadline>,
 ) -> Result<client::Handle<ClientHandler>, ConnectFailure> {
     if settings.port == 0
         || settings.host.is_empty()
@@ -1660,6 +1730,7 @@ pub async fn establish_physical_connection(
                 event_tx,
                 connection_lost,
                 disconnect_cause,
+                attempt_deadline,
             )
             .await
         }
@@ -1678,6 +1749,7 @@ pub async fn establish_physical_connection(
                 event_tx,
                 connection_lost,
                 disconnect_cause,
+                attempt_deadline,
             )
             .await
         }
@@ -1706,26 +1778,33 @@ pub async fn establish_physical_connection(
                 event_tx.clone(),
                 connection_lost.clone(),
                 disconnect_cause.clone(),
+                attempt_deadline.clone(),
             )
             .await?;
-            let channel = jump_handle
-                .channel_open_direct_tcpip(
+            let channel = bounded_handshake(
+                trust_config.handshake_timeout,
+                "opening intermediate channel",
+                jump_handle.channel_open_direct_tcpip(
                     settings.host.clone(),
                     u32::from(settings.port),
                     "127.0.0.1",
                     0,
-                )
-                .await
-                .map_err(|_| {
-                    ConnectFailure::Connection(
-                        UserFacingError::new(
-                            ErrorCode::ChannelClosed,
-                            "Server Couldn’t Be Reached",
-                            "The intermediate server rejected the connection to your destination.",
-                        )
-                        .with_retryable(true),
+                ),
+            )
+            .await
+            .map_err(|error| match error {
+                HandshakePhaseError::TimedOut(phase) => {
+                    ConnectFailure::Connection(handshake_timeout_error(phase))
+                }
+                HandshakePhaseError::Failed(_) => ConnectFailure::Connection(
+                    UserFacingError::new(
+                        ErrorCode::ChannelClosed,
+                        "Server Couldn’t Be Reached",
+                        "The intermediate server rejected the connection to your destination.",
                     )
-                })?;
+                    .with_retryable(true),
+                ),
+            })?;
             let stream = JumpHostStream {
                 stream: channel.into_stream(),
                 _jump_handle: jump_handle,
@@ -1743,6 +1822,7 @@ pub async fn establish_physical_connection(
                 event_tx,
                 connection_lost,
                 disconnect_cause,
+                attempt_deadline,
             )
             .await
         }
@@ -1857,11 +1937,11 @@ mod tests {
     use ssh_key::{Algorithm, HashAlg};
 
     use super::{
-        AppEvent, ClientHandler, HandshakePhaseError, HostKeyMismatchDetails, MidSessionDisconnect,
-        PhysicalDisconnectCause, TransportFailureKind, bounded_handshake_with_trust_prompt,
-        classify_mid_session_disconnect, client_config, connect_tcp_stream, connection_error,
-        expand_proxy_command, host_key_mismatch_event, legacy_rsa_host_key_bits,
-        private_key_file_name, sftp_connection_error,
+        AppEvent, AttemptDeadline, ClientHandler, HandshakePhaseError, HostKeyMismatchDetails,
+        MidSessionDisconnect, PhysicalDisconnectCause, TransportFailureKind,
+        bounded_handshake_with_trust_prompt, classify_mid_session_disconnect, client_config,
+        connect_tcp_stream, connection_error, expand_proxy_command, host_key_mismatch_event,
+        legacy_rsa_host_key_bits, private_key_file_name, sftp_connection_error,
     };
     use crate::session_actor::HostTrustConfig;
     use crate::trust::TrustRegistry;
@@ -2252,6 +2332,7 @@ mod tests {
             Duration::from_secs(30),
             prompt_started,
             "the SSH handshake",
+            None,
             std::future::pending(),
         )
         .await
@@ -2287,6 +2368,7 @@ mod tests {
             Duration::from_secs(5),
             prompt_started,
             "the SSH handshake",
+            None,
             async {
                 tokio::time::sleep(Duration::from_millis(300)).await;
                 Ok(7)
@@ -2310,6 +2392,7 @@ mod tests {
             Duration::from_millis(100),
             prompt_started,
             "the SSH handshake",
+            None,
             std::future::pending(),
         )
         .await
@@ -2319,5 +2402,36 @@ mod tests {
             error,
             HandshakePhaseError::TimedOut("the SSH handshake")
         ));
+    }
+
+    #[tokio::test]
+    async fn handshake_bound_with_attempt_deadline_extends_on_prompt() {
+        let prompt_started = Arc::new(Notify::new());
+        let notify = Arc::clone(&prompt_started);
+        let attempt_deadline =
+            AttemptDeadline::new(std::time::Instant::now() + Duration::from_secs(1));
+        let deadline_clone = attempt_deadline.clone();
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            notify.notify_one();
+        });
+
+        let before = attempt_deadline.get();
+        let result = bounded_handshake_with_trust_prompt::<u8>(
+            Duration::from_millis(50),
+            Duration::from_secs(5),
+            prompt_started,
+            "the SSH handshake",
+            Some(&deadline_clone),
+            async {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                Ok(1)
+            },
+        )
+        .await;
+
+        assert_eq!(result.ok(), Some(1));
+        assert!(attempt_deadline.get() >= before + Duration::from_secs(5));
     }
 }
