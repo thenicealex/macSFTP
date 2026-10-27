@@ -10,6 +10,11 @@ rust-version.workspace = true
 name = "macsftp_core"
 path = "src/core.rs"
 
+[features]
+# Seeding/mutation hooks for `macsftp-app`'s tests; never enabled in a
+# production build.
+test-support = []
+
 [dependencies]
 zeroize = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

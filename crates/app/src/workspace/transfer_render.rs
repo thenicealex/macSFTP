@@ -839,7 +839,7 @@ impl crate::workspace::Workspace {
                                 let is_modified = cx
                                     .resources()
                                     .edit_sessions
-                                    .get(session_id)
+                                    .session(session_id)
                                     .is_some_and(|s| s.local_modified);
                                 div()
                                     .id("upload-modified-file")

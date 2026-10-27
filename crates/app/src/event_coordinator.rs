@@ -1,16 +1,17 @@
 use gpui_kit::base::Root;
 use gpui_kit::{AnyWindowHandle, App, Context, Global, Task, Window, WindowHandle};
 use macsftp_core::{
-    AppCommand, AppEvent, ConflictRequest, EditPhase, EditSessionId, LocalPath, ProfileId,
-    RemotePath, RemoteSnapshot, TabId, Timestamp, TransferConflictPrompt, TransferDirection,
-    TransferEndpoint, TransferId, TransferPlanId,
+    AppEvent, ConflictRequest, DispatchRollback, EditCheckOutcome, EditCheckResult, EditEffect,
+    EditNotice, EditPhase, EditSessionId, EditTransferFinished, LocalFileFacts, LocalPath, TabId,
+    Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferId,
+    TransferPlanId,
 };
 use macsftp_sftp::EventReceiver;
 use tracing::warn;
 
 use crate::resources::{ActiveResources, ActiveTransfers};
 use crate::workspace::Workspace;
-use crate::workspace::build_edit_upload_command;
+use crate::workspace::edit_notice_text;
 
 /// Hook used to open the downloaded temp file in the user's editor. Production
 /// always uses [`macsftp_platform::open_in_editor`]; tests swap in a recording
@@ -337,23 +338,12 @@ fn reload_panes_for_finished_plan(event: &AppEvent, cx: &mut App) {
 }
 
 /// Correlate a completed/failed transfer back to the edit session it belongs
-/// to, then advance that session. Handles two phases:
+/// to and let the lifecycle advance it. The lifecycle re-checks the job's
+/// direction and remote endpoint against the session's phase, so a transfer
+/// that merely shares the temp path cannot drive the session.
 ///
-/// - `Downloading` (the initial fetch, correlated by the job's local
-///   *destination*): success moves the session to [`EditPhase::Editing`] and
-///   opens the editor; failure removes the session, deletes its temp directory,
-///   and surfaces a status message to the owning window so the user can retry.
-/// - `UploadingBack` (the explicit upload, correlated by the job's local
-///   *source*): success rebases `remote_snapshot` to the just-uploaded file's
-///   own `(size, mtime)` — an honest zero-round-trip approximation of the new
-///   remote, with the mtime truncated to whole seconds so a later directory
-///   refresh (which carries the server's whole-second mtime) agrees with it —
-///   and returns to [`EditPhase::Editing`]; failure also returns to `Editing`,
-///   keeping the temp file for an explicit retry.
-///
-/// Non-terminal events, other phases, and transfers unrelated to any edit are
-/// ignored. Runs process-wide, mirroring the transfer reducer, because edit
-/// sessions live in the process-global [`AppResources`], not any single window.
+/// Runs process-wide, mirroring the transfer reducer, because edit sessions
+/// live in the process-global [`AppResources`], not any single window.
 fn advance_edit_sessions(event: &AppEvent, cx: &mut App) {
     let (transfer_id, succeeded) = match event {
         AppEvent::TransferCompleted { transfer_id } => (*transfer_id, true),
@@ -369,261 +359,180 @@ fn advance_edit_sessions(event: &AppEvent, cx: &mut App) {
         None => return,
     };
     // Exactly one endpoint is local for an edit transfer; that is the temp path.
-    let temp_path = match (&source, &destination) {
-        (_, TransferEndpoint::Local(path)) => path.clone(),
-        (TransferEndpoint::Local(path), _) => path.clone(),
+    let local_facts = match (&source, &destination) {
+        (_, TransferEndpoint::Local(path)) => read_local_facts(path),
+        (TransferEndpoint::Local(path), _) => read_local_facts(path),
         _ => return,
     };
-    let (session_id, phase, tab_id, remote_path) =
-        match cx.resources().edit_sessions.find_by_temp_path(&temp_path) {
-            Some(session)
-                if matches!(
-                    session.phase,
-                    EditPhase::Downloading | EditPhase::UploadingBack
-                ) =>
-            {
-                (
-                    session.id,
-                    session.phase.clone(),
-                    session.tab_id,
-                    // Edit transfers always target the write-through path.
-                    session.io_path.clone(),
-                )
-            }
-            _ => return,
-        };
-
-    // Verify the job's direction and remote endpoint match what this session's
-    // phase expects. A download lands the remote origin at the local temp
-    // (Remote source → Local destination); an upload-back sends the local temp
-    // to the remote origin (Local source → Remote destination). A transfer that
-    // merely shares the temp path but is the wrong direction or targets a
-    // different remote path is NOT this edit's transfer and must be ignored.
-    let job_matches_phase = match phase {
-        EditPhase::Downloading => {
-            direction == TransferDirection::Download
-                && matches!(&source, TransferEndpoint::Remote(remote) if remote == &remote_path)
-        }
-        EditPhase::UploadingBack => {
-            direction == TransferDirection::Upload
-                && matches!(&destination, TransferEndpoint::Remote(remote) if remote == &remote_path)
-        }
-        _ => false,
-    };
-    if !job_matches_phase {
-        return;
-    }
-
-    match phase {
-        EditPhase::Downloading => advance_downloading(session_id, &temp_path, succeeded, cx),
-        EditPhase::UploadingBack => {
-            advance_uploading_back(session_id, &temp_path, tab_id, &remote_path, succeeded, cx)
-        }
-        _ => {}
-    }
-}
-
-/// Finish an edit download: open the editor on success. On failure, tear the
-/// session down entirely — remove it from the store, delete its temp directory,
-/// and surface a status message to the window owning its tab — so the user gets
-/// feedback and can retry the edit (a lingering session would silently block
-/// re-editing via [`find_active`]).
-///
-/// [`find_active`]: macsftp_core::EditSessionStore::find_active
-fn advance_downloading(
-    session_id: macsftp_core::EditSessionId,
-    temp_path: &LocalPath,
-    succeeded: bool,
-    cx: &mut App,
-) {
-    if !succeeded {
-        // Drop the dead session and remember its tab so we can tell that
-        // window's user why the edit did not open.
-        let (tab_id, name) = match cx.resources_mut().edit_sessions.remove(session_id) {
-            Some(session) => (session.tab_id, file_name_of(session.remote_path.as_str())),
-            None => return,
-        };
-        // Clean up the per-session temp directory (`<edits_dir>/<run>/<id>/<file>`);
-        // best-effort, so ignore errors (e.g. it was never created).
-        crate::workspace::cleanup_edit_temp_dir(temp_path);
-        // Surface the failure in the owning window's status bar. Edit sessions
-        // are process-global, so the owner is whichever window holds the tab.
-        let message = format!("Could not download {name} for editing");
-        for window in workspace_windows(cx) {
-            let shown = window.update(cx, |workspace, _window, cx| {
-                workspace.set_edit_status(tab_id, message.clone(), cx)
-            });
-            if matches!(shown, Ok(true)) {
-                break;
-            }
-        }
-        return;
-    }
-
-    let (tab_id, editor) = {
-        let resources = cx.resources_mut();
-        let config = resources.config.config();
-        let file_name = std::path::Path::new(temp_path.as_str())
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let editor = macsftp_core::resolve_editor_app(
-            &file_name,
-            &config.editor_rules,
-            config.external_editor.as_deref(),
-        )
-        .map(str::to_string);
-        let Some(session) = resources.edit_sessions.get_mut(session_id) else {
-            return;
-        };
-        session.phase = EditPhase::Editing;
-        session.local_modified = false;
-        if let Ok(meta) = std::fs::metadata(temp_path.as_str())
-            && let Ok(mtime) = meta.modified()
-        {
-            session.local_baseline = Some(macsftp_core::LocalBaseline {
-                size: meta.len(),
-                mtime,
-            });
-        }
-        (session.tab_id, editor)
-    };
-    match open_edit_temp(temp_path, editor.as_deref()) {
-        Ok(()) => show_edit_status(
-            cx,
-            tab_id,
-            "Your copy is open. After saving, click Upload Changes.",
-        ),
-        Err(error) => warn!(error = %error, "could not open editor for remote edit"),
-    }
-}
-
-/// Finish an edit upload-back: return to `Editing` either way, rebasing the
-/// remote snapshot on success so a later explicit upload is judged against what
-/// we just wrote. The owning tab's directory-listing entry is rebased to the
-/// same `(size, mtime)` so a later refresh does not create a false conflict.
-fn advance_uploading_back(
-    session_id: macsftp_core::EditSessionId,
-    temp_path: &LocalPath,
-    tab_id: TabId,
-    remote_path: &RemotePath,
-    succeeded: bool,
-    cx: &mut App,
-) {
-    // On success the remote now holds our local bytes; take the local file's
-    // own (size, mtime) as the new remote baseline. It is an approximation
-    // (the server may stamp a different mtime) but a self-consistent one. The
-    // mtime is TRUNCATED to whole seconds so it matches the granularity the
-    // SFTP server — and therefore a future `RemoteDirLoaded` refresh — reports;
-    // without this, the sub-second component would make an untouched remote
-    // look changed after the next refresh and flag a spurious conflict. On
-    // failure we leave the baseline untouched.
-    let refreshed = succeeded
-        .then(|| std::fs::metadata(temp_path.as_str()).ok())
-        .flatten()
-        .map(|meta| {
-            RemoteSnapshot {
-                size: Some(meta.len()),
-                modified_at: meta.modified().ok().map(Timestamp::from_system_time),
-            }
-            .truncated_to_secs()
-        });
-    if let Some(session) = cx.resources_mut().edit_sessions.get_mut(session_id) {
-        session.phase = EditPhase::Editing;
-        if succeeded {
-            session.local_modified = false;
-            if let Ok(meta) = std::fs::metadata(temp_path.as_str())
-                && let Ok(mtime) = meta.modified()
-            {
-                session.local_baseline = Some(macsftp_core::LocalBaseline {
-                    size: meta.len(),
-                    mtime,
-                });
-            }
-        }
-        if let Some(snapshot) = refreshed {
-            session.remote_snapshot = snapshot;
-        }
-    }
-    // Keep the listing baseline in step with the rebased snapshot. Done after
-    // the resources mutation above so the immutable/mutable resource borrow is
-    // dropped before `window.update` re-borrows `cx`. Only one window/tab owns
-    // the tab, so we stop after the first entry we update.
-    if let Some(snapshot) = refreshed {
-        for window in workspace_windows(cx) {
-            let synced = window.update(cx, |workspace, _window, _cx| {
-                workspace.sync_remote_entry_snapshot(tab_id, remote_path, snapshot)
-            });
-            if matches!(synced, Ok(true)) {
-                break;
-            }
-        }
-    }
-    if !succeeded {
-        warn!(
-            temp = %temp_path.as_str(),
-            "explicit edit upload failed; session returned to Editing for retry"
-        );
-    }
-    show_edit_status(
-        cx,
-        tab_id,
-        if succeeded {
-            "Changes uploaded"
-        } else {
-            "Upload failed. Click Upload Changes to try again."
+    let effects = cx.resources_mut().edit_sessions.on_transfer_finished(
+        EditTransferFinished {
+            direction,
+            source,
+            destination,
+            succeeded,
         },
+        local_facts,
     );
+    apply_edit_effects(cx, effects);
+}
+
+/// Read the facts the lifecycle needs about a local file; `None` when it cannot
+/// be stat'ed (the lifecycle then keeps its existing baseline).
+fn read_local_facts(path: &LocalPath) -> Option<LocalFileFacts> {
+    let metadata = std::fs::metadata(path.as_str()).ok()?;
+    let mtime = metadata.modified().ok()?;
+    Some(LocalFileFacts {
+        size: metadata.len(),
+        mtime,
+    })
+}
+
+/// Execute lifecycle effects produced by a process-wide event.
+///
+/// A failed dispatch rolls the session back through the lifecycle (the effect
+/// names its rollback), so a command that never entered the channel cannot
+/// strand a phase.
+fn apply_edit_effects(cx: &mut App, effects: Vec<EditEffect>) {
+    for effect in effects {
+        match effect {
+            EditEffect::Dispatch {
+                tab_id,
+                session_id,
+                command,
+                rollback,
+            } => {
+                let client = workspace_windows(cx).into_iter().find_map(|window| {
+                    window
+                        .read(cx)
+                        .ok()
+                        .filter(|workspace| workspace.owns_tab(tab_id))
+                        .map(|workspace| workspace.runtime_client())
+                });
+                let sent = match client {
+                    Some(client) => client.try_send(command).is_ok(),
+                    None => {
+                        warn!(tab_id = ?tab_id, "no window owns the tab for an edit command");
+                        false
+                    }
+                };
+                if sent {
+                    continue;
+                }
+                warn!(session_id = ?session_id, "edit command could not be dispatched");
+                let file_name = cx
+                    .resources()
+                    .edit_sessions
+                    .session(session_id)
+                    .map(|session| file_name_of(session.remote_path.as_str()))
+                    .unwrap_or_default();
+                let follow_up = cx
+                    .resources_mut()
+                    .edit_sessions
+                    .dispatch_failed(session_id, rollback);
+                match rollback {
+                    DispatchRollback::AbortDownload => {
+                        show_edit_notice(cx, tab_id, EditNotice::DownloadFailed { file_name })
+                    }
+                    DispatchRollback::RevertCheck | DispatchRollback::RestoreConflict => {
+                        show_edit_notice(cx, tab_id, EditNotice::UploadStartFailed)
+                    }
+                }
+                // A rollback can itself schedule cleanup (an aborted
+                // download's temp directory); those effects never dispatch.
+                apply_edit_effects(cx, follow_up);
+            }
+            EditEffect::OpenEditor { tab_id, temp_path } => {
+                let config = cx.resources().config.config();
+                let editor = macsftp_core::resolve_editor_app(
+                    &file_name_of(temp_path.as_str()),
+                    &config.editor_rules,
+                    config.external_editor.as_deref(),
+                )
+                .map(str::to_string);
+                match open_edit_temp(&temp_path, editor.as_deref()) {
+                    Ok(()) => show_edit_notice(cx, tab_id, EditNotice::CopyOpen),
+                    Err(error) => {
+                        warn!(error = %error, "could not open editor for remote edit");
+                        show_edit_notice(cx, tab_id, EditNotice::CopyOpenFailed);
+                    }
+                }
+            }
+            EditEffect::DeleteTempDir { path } => crate::workspace::cleanup_edit_temp_dir(&path),
+            EditEffect::RebaseListing {
+                tab_id,
+                path,
+                snapshot,
+            } => {
+                // Keep the listing baseline in step with the rebased snapshot.
+                // Only one window/tab owns the tab, so stop after the first
+                // entry we update.
+                for window in workspace_windows(cx) {
+                    let synced = window.update(cx, |workspace, _window, _cx| {
+                        workspace.sync_remote_entry_snapshot(tab_id, &path, snapshot)
+                    });
+                    if matches!(synced, Ok(true)) {
+                        break;
+                    }
+                }
+            }
+            EditEffect::Notice { tab_id, notice } => show_edit_notice(cx, tab_id, notice),
+        }
+    }
 }
 
 /// Apply one authoritative remote-edit check result exactly once. Edit
 /// sessions are process-global, so this runs here (not in any window) and
 /// returns without broadcasting. The user action allocated the `EditCheckId`,
 /// parked the session in `CheckingRemote`, and recorded the local file's mtime;
-/// every guard below must re-confirm all of that before an upload or conflict
-/// is authorized, or a delayed result from an earlier retry could clobber a
+/// the lifecycle re-confirms all of that before an upload or conflict is
+/// authorized, so a delayed result from an earlier retry cannot clobber a
 /// concurrent remote change.
 fn apply_remote_edit_check_event(event: &AppEvent, cx: &mut App) {
-    // Decode the three event shapes into a uniform (scope, tab, epoch, id,
-    // check, path, outcome) tuple. The dispatch-failure event carries no
-    // scope: routing never reached a live actor, so it is correlated only by
-    // epoch/edit-session/check id rather than a remote session. Both scoped and
-    // dispatch-failure events still carry the tab/epoch that must match the
-    // stored session.
-    let (scope, event_tab_id, event_epoch, edit_session_id, check_id, path, outcome) = match event {
+    // Decode the three event shapes into a uniform (scope, result). The
+    // dispatch-failure event carries no scope: routing never reached a live
+    // actor, so it is correlated only by epoch/edit-session/check id rather
+    // than a remote session. Both scoped and dispatch-failure events still
+    // carry the tab/epoch that must match the stored session.
+    let (scope, result) = match event {
         AppEvent::RemoteEditSnapshotChecked(scoped) => (
             Some(scoped.scope.clone()),
-            scoped.scope.tab_id,
-            scoped.scope.session_epoch,
-            scoped.payload.edit_session_id,
-            scoped.payload.check_id,
-            scoped.payload.path.clone(),
-            CheckOutcome::Matched(scoped.payload.snapshot),
+            EditCheckResult {
+                tab_id: scoped.scope.tab_id,
+                session_epoch: scoped.scope.session_epoch,
+                session_id: scoped.payload.edit_session_id,
+                check_id: scoped.payload.check_id,
+                path: scoped.payload.path.clone(),
+                outcome: EditCheckOutcome::Matched(scoped.payload.snapshot),
+            },
         ),
         AppEvent::RemoteEditSnapshotCheckFailed(scoped) => (
             Some(scoped.scope.clone()),
-            scoped.scope.tab_id,
-            scoped.scope.session_epoch,
-            scoped.payload.edit_session_id,
-            scoped.payload.check_id,
-            scoped.payload.path.clone(),
-            CheckOutcome::Failure,
+            EditCheckResult {
+                tab_id: scoped.scope.tab_id,
+                session_epoch: scoped.scope.session_epoch,
+                session_id: scoped.payload.edit_session_id,
+                check_id: scoped.payload.check_id,
+                path: scoped.payload.path.clone(),
+                outcome: EditCheckOutcome::Failed,
+            },
         ),
         AppEvent::RemoteEditSnapshotDispatchFailed(payload) => (
             None,
-            payload.tab_id,
-            payload.session_epoch,
-            payload.edit_session_id,
-            payload.check_id,
-            payload.path.clone(),
-            CheckOutcome::Failure,
+            EditCheckResult {
+                tab_id: payload.tab_id,
+                session_epoch: payload.session_epoch,
+                session_id: payload.edit_session_id,
+                check_id: payload.check_id,
+                path: payload.path.clone(),
+                outcome: EditCheckOutcome::Failed,
+            },
         ),
         _ => return,
     };
 
     // Owner resolution for scoped events: a live window must still own the
     // tab at the scope's epoch. The dispatch-failure event has no scope, so it
-    // skips this and relies purely on the epoch/edit-session/check tuple below.
+    // skips this and relies on the lifecycle's epoch/edit-session/check guard.
     if let Some(scope) = &scope {
         let owned = workspace_windows(cx).into_iter().any(|window| {
             window
@@ -636,160 +545,31 @@ fn apply_remote_edit_check_event(event: &AppEvent, cx: &mut App) {
         }
     }
 
-    // Snapshot the guarded session state in one immutable read, then validate
-    // every correlation the user action set up. Any mismatch means the result is
-    // stale, superseded, or for a different session, and must be ignored so it
-    // cannot authorize an upload.
-    let guard = match cx.resources().edit_sessions.get(edit_session_id) {
-        Some(session) => {
-            let applicable = session.phase == EditPhase::CheckingRemote
-                && session.pending_check_id == Some(check_id)
-                && session.checking_local_mtime.is_some()
-                && session.io_path == path
-                && event_tab_id == session.tab_id
-                && event_epoch == session.session_epoch;
-            if !applicable {
-                return;
-            }
-            CheckGuard {
-                tab_id: session.tab_id,
-                session_epoch: session.session_epoch,
-                profile_id: session.profile_id,
-                temp_path: session.local_temp_path.clone(),
-                remote_path: session.io_path.clone(),
-                baseline: session.remote_snapshot,
-                checking_local_mtime: session.checking_local_mtime,
-            }
-        }
-        None => return,
+    let Some(temp_path) = cx
+        .resources()
+        .edit_sessions
+        .session(result.session_id)
+        .map(|session| session.local_temp_path.clone())
+    else {
+        return;
     };
 
     // The local file selected for upload must remain unchanged while the remote
     // check is in flight. A later save requires another explicit upload.
-    let current_temp_mtime = std::fs::metadata(guard.temp_path.as_str())
+    let current_local_mtime = std::fs::metadata(temp_path.as_str())
         .ok()
-        .and_then(|meta| meta.modified().ok())
+        .and_then(|metadata| metadata.modified().ok())
         .map(Timestamp::from_system_time);
-    if current_temp_mtime != guard.checking_local_mtime {
-        revert_edit_check(cx, edit_session_id);
-        show_edit_status(
-            cx,
-            guard.tab_id,
-            "Your copy changed during the check. Click Upload Changes again.",
-        );
-        return;
-    }
-
-    match outcome {
-        CheckOutcome::Matched(snapshot) => {
-            apply_matched_remote_check(cx, edit_session_id, &guard, &snapshot);
-        }
-        CheckOutcome::Failure => {
-            // Actor stat failure or runtime dispatch failure: return to
-            // `Editing` and require another explicit request. Do not claim a
-            // conflict and do not upload.
-            revert_edit_check(cx, edit_session_id);
-            show_edit_status(
-                cx,
-                guard.tab_id,
-                "The server file couldn’t be checked. Click Upload Changes to try again.",
-            );
-        }
-    }
+    let effects = cx
+        .resources_mut()
+        .edit_sessions
+        .on_check_result(result, current_local_mtime);
+    apply_edit_effects(cx, effects);
+    cx.refresh_windows();
 }
 
-/// Snapshot of the guarded edit session state captured before any transition.
-struct CheckGuard {
-    tab_id: TabId,
-    session_epoch: u64,
-    profile_id: ProfileId,
-    temp_path: LocalPath,
-    remote_path: RemotePath,
-    baseline: RemoteSnapshot,
-    checking_local_mtime: Option<Timestamp>,
-}
-
-/// Decoded outcome of a check: either the actor read a live snapshot, or the
-/// check failed (actor stat error or runtime dispatch failure).
-#[derive(Clone, Copy)]
-enum CheckOutcome {
-    Matched(RemoteSnapshot),
-    Failure,
-}
-
-/// Apply a check whose remote snapshot matches the actor's live read. If the
-/// remote is still at the baseline, upload the edited file back; if it diverged,
-/// flag a conflict. Both branches clear the pending-check fields.
-fn apply_matched_remote_check(
-    cx: &mut App,
-    edit_session_id: EditSessionId,
-    guard: &CheckGuard,
-    snapshot: &RemoteSnapshot,
-) {
-    if *snapshot == guard.baseline {
-        // Remote confirmed unchanged → upload the edited file back to its
-        // origin. The phase leaves `CheckingRemote` before dispatch so a second
-        // click cannot create a duplicate upload.
-        let command = build_edit_upload_command(
-            &guard.temp_path,
-            &guard.remote_path,
-            guard.session_epoch,
-            guard.profile_id,
-            guard.tab_id,
-        );
-        if let Some(session) = cx.resources_mut().edit_sessions.get_mut(edit_session_id) {
-            session.phase = EditPhase::UploadingBack;
-            session.pending_check_id = None;
-            session.checking_local_mtime = None;
-        }
-        dispatch_edit_command(cx, edit_session_id, guard.tab_id, command);
-        cx.refresh_windows();
-    } else {
-        // Remote diverged from the baseline → flag a conflict so the user decides.
-        if let Some(session) = cx.resources_mut().edit_sessions.get_mut(edit_session_id) {
-            session.phase = EditPhase::RemoteConflict;
-            session.pending_check_id = None;
-            session.checking_local_mtime = None;
-        }
-        cx.refresh_windows();
-    }
-}
-
-fn dispatch_edit_command(
-    cx: &mut App,
-    session_id: EditSessionId,
-    tab_id: TabId,
-    command: AppCommand,
-) {
-    let client = workspace_windows(cx).into_iter().find_map(|window| {
-        window
-            .read(cx)
-            .ok()
-            .filter(|workspace| workspace.owns_tab(tab_id))
-            .map(|workspace| workspace.runtime_client())
-    });
-    let result = match client {
-        Some(client) => client.try_send(command),
-        None => {
-            warn!(tab_id = ?tab_id, "no window owns the tab for explicit edit upload");
-            revert_edit_check(cx, session_id);
-            show_edit_status(cx, tab_id, "The upload couldn’t start. Try again.");
-            return;
-        }
-    };
-    if let Err(error) = result {
-        warn!(error = ?error, "explicit edit upload could not be dispatched");
-        revert_edit_check(cx, session_id);
-        show_edit_status(cx, tab_id, "The upload couldn’t start. Try again.");
-    }
-}
-
-fn revert_edit_check(cx: &mut App, session_id: EditSessionId) {
-    if let Some(session) = cx.resources_mut().edit_sessions.get_mut(session_id) {
-        session.phase = EditPhase::Editing;
-        session.pending_check_id = None;
-        session.checking_local_mtime = None;
-    }
+fn show_edit_notice(cx: &mut App, tab_id: TabId, notice: EditNotice) {
+    show_edit_status(cx, tab_id, &edit_notice_text(notice));
 }
 
 /// Surface an edit status message in the window that owns `tab_id`.
@@ -920,31 +700,15 @@ fn conflict_prompt(conflict: ConflictRequest) -> TransferConflictPrompt {
 }
 
 fn handle_local_edit_modified(session_id: EditSessionId, temp_path: &str, cx: &mut App) {
+    let path = LocalPath::new(temp_path.to_string());
+    let facts = read_local_facts(&path);
+    if cx
+        .resources_mut()
+        .edit_sessions
+        .record_local_modified(session_id, &path, facts)
     {
-        let resources = cx.resources_mut();
-        let Some(session) = resources.edit_sessions.get_mut(session_id) else {
-            return;
-        };
-        if session.local_temp_path.as_str() != temp_path {
-            return;
-        }
-        if session.phase != EditPhase::Editing {
-            return;
-        }
-        if let Ok(meta) = std::fs::metadata(temp_path) {
-            let current_size = meta.len();
-            let current_mtime = meta.modified().ok();
-            if let (Some(base), Some(current_mtime)) = (session.local_baseline, current_mtime)
-                && base.size == current_size
-                && base.mtime == current_mtime
-            {
-                // Exactly matches our baseline (our own write or metadata only) -> suppress!
-                return;
-            }
-        }
-        session.local_modified = true;
+        cx.refresh_windows();
     }
-    cx.refresh_windows();
 }
 
 fn advance_conflict_compare(event: &AppEvent, cx: &mut App) {
@@ -1338,7 +1102,7 @@ mod tests {
             let session = cx
                 .resources()
                 .edit_sessions
-                .get(session_id)
+                .session(session_id)
                 .expect("edit session survives completion");
             assert_eq!(session.phase, EditPhase::Editing);
         });
@@ -1389,7 +1153,7 @@ mod tests {
             let session = cx
                 .resources()
                 .edit_sessions
-                .get(session_id)
+                .session(session_id)
                 .expect("edit session must survive an unrelated transfer");
             assert_eq!(
                 session.phase,
@@ -1439,7 +1203,7 @@ mod tests {
 
         cx.read(|cx| {
             assert!(
-                cx.resources().edit_sessions.get(session_id).is_none(),
+                cx.resources().edit_sessions.session(session_id).is_none(),
                 "a failed download must remove the session, not park it as Failed"
             );
         });
@@ -1491,7 +1255,7 @@ mod tests {
             let session = cx
                 .resources()
                 .edit_sessions
-                .get(session_id)
+                .session(session_id)
                 .expect("session survives upload completion");
             assert_eq!(
                 session.phase,
@@ -1562,7 +1326,7 @@ mod tests {
             let session = cx
                 .resources()
                 .edit_sessions
-                .get(session_id)
+                .session(session_id)
                 .expect("session survives upload completion");
             let modified = session
                 .remote_snapshot
@@ -1624,7 +1388,7 @@ mod tests {
             let session = cx
                 .resources()
                 .edit_sessions
-                .get(session_id)
+                .session(session_id)
                 .expect("session survives upload failure");
             assert_eq!(
                 session.phase,
@@ -1850,7 +1614,7 @@ mod tests {
         cx.update(|cx| {
             cx.resources()
                 .edit_sessions
-                .get(id)
+                .session(id)
                 .expect("session survives")
                 .phase
                 .clone()
@@ -2071,7 +1835,7 @@ mod tests {
         // reset out of CheckingRemote (as `update_epoch_for_tab` does).
         let (_window, channels) = open_owning_window(cx, 2);
         cx.update(|cx| {
-            if let Some(session) = cx.resources_mut().edit_sessions.get_mut(id) {
+            if let Some(session) = cx.resources_mut().edit_sessions.session_mut(id) {
                 session.phase = EditPhase::Editing;
                 session.pending_check_id = None;
                 session.checking_local_mtime = None;
@@ -2122,7 +1886,7 @@ mod tests {
         // flight. The session is CheckingRemote again with the new epoch/id.
         let (_window, channels) = open_owning_window(cx, 2);
         cx.update(|cx| {
-            if let Some(session) = cx.resources_mut().edit_sessions.get_mut(id) {
+            if let Some(session) = cx.resources_mut().edit_sessions.session_mut(id) {
                 session.session_epoch = 2;
                 session.pending_check_id = Some(EditCheckId(2));
             }
@@ -2143,7 +1907,7 @@ mod tests {
         let pending = cx.update(|cx| {
             cx.resources()
                 .edit_sessions
-                .get(id)
+                .session(id)
                 .expect("session survives")
                 .pending_check_id
         });
@@ -2388,7 +2152,7 @@ mod tests {
         let modified_after_suppression = cx.read(|cx| {
             cx.resources()
                 .edit_sessions
-                .get(id)
+                .session(id)
                 .expect("session exists")
                 .local_modified
         });
@@ -2414,7 +2178,7 @@ mod tests {
         let modified_after_change = cx.read(|cx| {
             cx.resources()
                 .edit_sessions
-                .get(id)
+                .session(id)
                 .expect("session exists")
                 .local_modified
         });
@@ -2692,7 +2456,7 @@ mod reload_tests {
     use crate::workspace::Workspace;
     use gpui_kit::TestAppContext;
     use macsftp_core::{
-        ConflictPolicy, ConnectionState, LocalPath, MetadataPolicy, RemotePath,
+        AppCommand, ConflictPolicy, ConnectionState, LocalPath, MetadataPolicy, RemotePath,
         RuntimeBridgeConfig, SessionId, Timestamp, TransferDirection, TransferEndpoint, TransferId,
         TransferJob, TransferPlan, TransferPlanId, TransferPlanSnapshot, TransferPlanState,
         TransferState, WindowSessionId,

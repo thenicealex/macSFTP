@@ -1670,8 +1670,8 @@ mod visible_entries;
 
 #[cfg(test)]
 pub(crate) use remote_edit::ConflictChoice;
-pub(crate) use remote_edit::build_edit_upload_command;
 pub(crate) use remote_edit::cleanup_edit_sessions_for_tab;
 pub(crate) use remote_edit::cleanup_edit_temp_dir;
 pub(crate) use remote_edit::cleanup_orphaned_edit_sessions;
 pub(crate) use remote_edit::conflict_remote_path;
+pub(crate) use remote_edit::edit_notice_text;

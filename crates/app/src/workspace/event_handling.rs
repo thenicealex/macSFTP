@@ -1,7 +1,7 @@
 use gpui_kit::{Context, UniformListScrollHandle, Window};
 use macsftp_core::{
-    AppEvent, EditSessionId, EntryPath, ErrorCode, FileKind, ModalRequest, RemotePath,
-    RemoteSnapshot, RestoredTabTarget, TabId, UserFacingError, sort_entries,
+    AppEvent, EntryPath, ErrorCode, FileKind, ModalRequest, RemotePath, RemoteSnapshot,
+    RestoredTabTarget, TabId, UserFacingError, sort_entries,
 };
 
 use tracing::debug;
@@ -371,47 +371,18 @@ impl crate::workspace::Workspace {
     /// byte equal so no residual noise survives.
     ///
     /// The adoption rule is deliberately narrow to preserve real-conflict
-    /// detection: for each `Editing` session whose file is in the listing, adopt
-    /// the listing entry's exact `(size, mtime)` as the new baseline ONLY when
-    /// it agrees with the current baseline at whole-second granularity (same
-    /// size, same whole-second mtime). If they differ at that granularity, the
-    /// remote genuinely changed since we last synced, so we leave the baseline
-    /// untouched for the next explicit upload check.
-    /// `RemoteConflict` sessions are excluded entirely (see
-    /// [`macsftp_core::EditSessionStore::editing_sessions_for_tab`]) so an
-    /// already-surfaced conflict is never masked by a refresh.
+    /// detection and lives in
+    /// [`macsftp_core::RemoteEditLifecycle::adopt_listing_baselines`]: an
+    /// `Editing` session adopts a listing entry only when the two agree at
+    /// whole-second granularity, write-through sessions are skipped, and
+    /// `RemoteConflict` sessions are never touched.
     fn resync_edit_baselines_on_refresh(
         tab_id: TabId,
         listing: &[(RemotePath, RemoteSnapshot)],
         cx: &mut Context<Self>,
     ) {
-        // Decide adoptions under an immutable borrow, then apply them, so the
-        // resource borrow does not overlap the mutable one below.
-        let adoptions: Vec<(EditSessionId, RemoteSnapshot)> = cx
-            .resources()
+        cx.resources_mut()
             .edit_sessions
-            .editing_sessions_for_tab(tab_id)
-            .filter_map(|session| {
-                // A write-through session's baseline is the resolved target,
-                // while the listing entry for the link reports the link itself
-                // (lstat size/mtime). Adopting it would compare unlike values,
-                // so those sessions rely on the next explicit upload check.
-                if session.io_path != session.remote_path {
-                    return None;
-                }
-                let (_, listed) = listing
-                    .iter()
-                    .find(|(path, _)| path == &session.remote_path)?;
-                session
-                    .remote_snapshot
-                    .agrees_at_second_granularity(*listed)
-                    .then_some((session.id, *listed))
-            })
-            .collect();
-        for (id, snapshot) in adoptions {
-            if let Some(session) = cx.resources_mut().edit_sessions.get_mut(id) {
-                session.remote_snapshot = snapshot;
-            }
-        }
+            .adopt_listing_baselines(tab_id, listing);
     }
 }

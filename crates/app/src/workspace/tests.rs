@@ -3702,21 +3702,6 @@ fn transfers_use_the_configured_metadata_policy(cx: &mut TestAppContext) {
         panic!("expected StartTransfer for download, got {download:?}");
     };
     assert_eq!(download.metadata_policy, policy);
-
-    // Remote-edit upload-back keeps the default policy on purpose: its
-    // conflict baseline is derived from the local temp file's mtime, so
-    // disabling mtime preservation here would fabricate a conflict.
-    let edit = super::remote_edit::build_edit_upload_command(
-        &LocalPath::new("/tmp/edit.txt"),
-        &RemotePath::new("/home/tester/edit.txt"),
-        1,
-        ProfileId(1),
-        TabId(1),
-    );
-    let AppCommand::StartTransfer(edit) = edit else {
-        panic!("expected StartTransfer for edit upload, got {edit:?}");
-    };
-    assert_eq!(edit.metadata_policy, MetadataPolicy::default());
 }
 
 #[gpui_kit::test]
@@ -4003,7 +3988,7 @@ fn duplicate_edit_reopens_existing_temp_without_downloading(cx: &mut TestAppCont
         );
         assert_eq!(
             workspace.status_message_for_test().as_deref(),
-            Some("Your copy is open for editing.")
+            Some("Your copy is open. After saving, click Upload Changes.")
         );
     });
     assert!(
@@ -4158,7 +4143,7 @@ fn upload_modified_file_is_explicit_and_checks_remote_first(cx: &mut TestAppCont
         let session = cx
             .resources()
             .edit_sessions
-            .get(session_id)
+            .session(session_id)
             .expect("edit session remains live");
         assert_eq!(session.phase, EditPhase::CheckingRemote);
         assert_eq!(session.pending_check_id, Some(command.check_id));
@@ -4214,7 +4199,7 @@ fn edit_metadata_failure_preserves_session_and_temp_directory(cx: &mut TestAppCo
         let session = cx
             .resources()
             .edit_sessions
-            .get(session_id)
+            .session(session_id)
             .expect("metadata failure keeps the edit session retryable");
         assert_eq!(session.phase, EditPhase::Editing);
         assert!(session.pending_check_id.is_none());
@@ -4289,7 +4274,7 @@ fn edit_reaps_orphaned_existing_session_and_retries(cx: &mut TestAppContext) {
     });
 
     workspace.read_with(&cx, |_workspace, cx| {
-        assert!(cx.resources().edit_sessions.get(stale_id).is_none());
+        assert!(cx.resources().edit_sessions.session(stale_id).is_none());
         let fresh = cx
             .resources()
             .edit_sessions
@@ -4787,7 +4772,7 @@ fn resolve_conflict_overwrite_uploads(cx: &mut TestAppContext) {
         let session = cx
             .resources()
             .edit_sessions
-            .get(id)
+            .session(id)
             .expect("session survives an overwrite");
         assert_eq!(session.phase, EditPhase::UploadingBack);
     });
@@ -4857,7 +4842,7 @@ fn resolve_conflict_later_returns_to_editing(cx: &mut TestAppContext) {
         let session = cx
             .resources()
             .edit_sessions
-            .get(id)
+            .session(id)
             .expect("session survives a Later choice");
         assert_eq!(session.phase, EditPhase::Editing);
     });
@@ -4888,7 +4873,7 @@ fn resolve_conflict_discard_local_redownloads(cx: &mut TestAppContext) {
     workspace.read_with(&cx, |_workspace, cx| {
         let store = &cx.resources().edit_sessions;
         assert!(
-            store.get(id).is_none(),
+            store.session(id).is_none(),
             "discarding must remove the conflicted session"
         );
         let fresh = store
@@ -4976,7 +4961,7 @@ fn edit_dedup_follows_captured_connection_key_not_profile_id(cx: &mut TestAppCon
             "the edit must not reuse the foreign session"
         );
         assert_eq!(
-            store.get(EditSessionId(1)).map(|s| s.phase.clone()),
+            store.session(EditSessionId(1)).map(|s| s.phase.clone()),
             Some(EditPhase::Editing)
         );
     });
@@ -5473,7 +5458,7 @@ fn session_snapshot(
     workspace.read_with(cx, |_workspace, cx| {
         cx.resources()
             .edit_sessions
-            .get(id)
+            .session(id)
             .expect("edit session survives refresh")
             .remote_snapshot
     })
@@ -8988,7 +8973,7 @@ fn close_tab_tears_down_its_edit_sessions_and_temp_dir(cx: &mut TestAppContext) 
 
     workspace.read_with(&cx, |_ws, cx| {
         assert!(
-            cx.resources().edit_sessions.get(id).is_none(),
+            cx.resources().edit_sessions.session(id).is_none(),
             "closing a tab must remove its edit sessions so re-edit is not blocked"
         );
     });
@@ -9040,7 +9025,7 @@ fn window_closed_callback_reaps_orphaned_edit_session(cx: &mut TestAppContext) {
     workspace.update_in(&mut cx, |_workspace, window, _cx| window.remove_window());
 
     assert!(
-        app.read(|cx| cx.resources().edit_sessions.get(id).is_none()),
+        app.read(|cx| cx.resources().edit_sessions.session(id).is_none()),
         "the real window-close callback must remove orphaned edit sessions"
     );
     assert!(!session_dir.exists());
@@ -10278,7 +10263,7 @@ fn remote_row_shows_dirty_indicator_when_locally_modified(cx: &mut TestAppContex
 
     // Mark session dirty
     workspace.update_in(&mut cx, |_workspace, _window, cx| {
-        if let Some(session) = cx.resources_mut().edit_sessions.get_mut(session_id) {
+        if let Some(session) = cx.resources_mut().edit_sessions.session_mut(session_id) {
             session.local_modified = true;
         }
         cx.refresh_windows();

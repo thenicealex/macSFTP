@@ -13,8 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui_kit::{App, Global};
 use macsftp_core::{
-    AppEvent, EditSessionStore, LocalPath, SessionId, TabId, Timestamp, TransferId, TransferState,
-    TransferStore,
+    AppEvent, LocalPath, RemoteEditLifecycle, SessionId, TabId, Timestamp, TransferId,
+    TransferState, TransferStore,
 };
 use macsftp_platform::AppPaths;
 use macsftp_storage::{ConfigStore, ProfileStore, RecentsStore, ResidualTempStore};
@@ -35,7 +35,7 @@ pub struct AppResources {
     /// process-wide and shared across windows. Empty at
     /// launch; the edits directory is cleared in `main()` before this is
     /// built.
-    pub edit_sessions: EditSessionStore,
+    pub edit_sessions: RemoteEditLifecycle,
     /// Per-process namespace for remote-edit temp paths. `EditSessionId`
     /// restarts at one on every launch, so using it alone would reuse the same
     /// document URL while an external editor may still remember the previous
@@ -91,14 +91,16 @@ impl AppResources {
         if recents.initial_error().is_some() {
             warn!("recents.json could not be loaded; recent writes are blocked until recovery");
         }
+        let edit_run_id = next_edit_run_id();
+        let edits_dir = app_paths.edits_dir.clone();
         Self {
             app_paths,
             config,
             profiles,
             residual_temps,
             recents,
-            edit_sessions: EditSessionStore::new(),
-            edit_run_id: next_edit_run_id(),
+            edit_sessions: RemoteEditLifecycle::new(edits_dir, edit_run_id.clone()),
+            edit_run_id,
             next_tab_id: Arc::new(AtomicU64::new(1)),
             next_session_id: Arc::new(AtomicU64::new(0)),
         }
