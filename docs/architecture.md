@@ -224,6 +224,7 @@ Profile 更新由 `ProfileStore` 协调：校验请求和 route → 写入或读
 - Edit 菜单使用 `MenuItem::os_action` 走 AppKit 标准 selector（`cut:`/`copy:`/`paste:`/`selectAll:`/`undo:`/`redo:`），dispatch 的仍是 `gpui-base` input action，不得自造文本编辑 action（§12.14）。
 - 平台支持 `MenuItem::checked`，但菜单栏是应用级的一份，在启动时构建一次（`main.rs` 的 `set_menus(menu_bar())`），而排序状态属于每个 tab（两个 pane 共用），单个 checkmark 无法表达多 tab 下的当前状态——要显示它就必须在排序、tab 或窗口焦点变化时重建整个菜单栏，目前不做。有状态的命令因此写成显式取值（例如 Sort By ▸ Name (A→Z)/(Z→A)）；当前排序状态的显示位置只有文件列表表头（§12.3）。
 - command palette 不得暴露 runtime、channel、actor、crate 等内部实现细节；用户忘记快捷键时必须能用 command palette 完成同一操作。
+- command palette 的每一行携带并 dispatch 与菜单栏、快捷键相同的 action，不得直接调用 Workspace 的处理函数；新增或修改 palette 命令只需登记行与它对应的 action handler，不维护第二条执行路径（ADR-0001）。
 - path bar 必须支持复制当前路径，local 和 remote 都保留 back、up、refresh；路径过长从中间省略，当前所在目录以加粗突出显示（MEDIUM 字重与主文本色），上级路径以次要文本色呈现；loading 时不得消失，只增加局部 spinner 或 progress indicator。Copy Path 复制的是选中条目自身的完整路径（多选时每行一条），只有没有选中任何条目时才回落到当前目录路径——右键菜单会先选中指针下的行，因此右键某个文件再 Copy Path 得到的必须是该文件的路径，而不是它所在目录。
 - Go to Folder（⌘⇧G）必须预填当前 pane 正在显示的路径并全选：改写一段即可到达兄弟目录，不必重打整条路径。全选只作用于新创建的输入框（`select_on_first_render`），输入即替换、方向键则保留可编辑。
 

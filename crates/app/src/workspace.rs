@@ -1585,13 +1585,7 @@ impl Render for Workspace {
                 }),
             )
             .on_action(cx.listener(|workspace, _: &OpenSettings, window, cx| {
-                if workspace.connect_form_ui.form.is_none()
-                    && workspace.active_host_key_prompt().is_none()
-                    && workspace.active_keyboard_interactive_prompt().is_none()
-                    && workspace.active_transfer_conflict_prompt().is_none()
-                    && workspace.modal_inputs.delete_confirm.is_none()
-                    && !workspace.go_to_path.open
-                {
+                if workspace.can_switch_surface() {
                     workspace.modal_inputs.about_open = false;
                     workspace.surface = WorkspaceSurface::Settings;
                     workspace.settings.section = SettingsSection::General;
@@ -1600,13 +1594,7 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|workspace, _: &OpenProfiles, window, cx| {
-                if workspace.connect_form_ui.form.is_none()
-                    && workspace.active_host_key_prompt().is_none()
-                    && workspace.active_keyboard_interactive_prompt().is_none()
-                    && workspace.active_transfer_conflict_prompt().is_none()
-                    && workspace.modal_inputs.delete_confirm.is_none()
-                    && !workspace.go_to_path.open
-                {
+                if workspace.can_switch_surface() {
                     workspace.modal_inputs.about_open = false;
                     workspace.surface = WorkspaceSurface::Settings;
                     workspace.set_settings_section(SettingsSection::Profiles, cx);
@@ -1615,13 +1603,7 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|workspace, _: &ShowAbout, _window, cx| {
-                if workspace.connect_form_ui.form.is_none()
-                    && workspace.active_host_key_prompt().is_none()
-                    && workspace.active_keyboard_interactive_prompt().is_none()
-                    && workspace.active_transfer_conflict_prompt().is_none()
-                    && workspace.modal_inputs.delete_confirm.is_none()
-                    && !workspace.go_to_path.open
-                {
+                if workspace.can_switch_surface() {
                     workspace.modal_inputs.about_open = true;
                     cx.notify();
                 }
