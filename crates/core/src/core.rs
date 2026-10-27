@@ -4,6 +4,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+mod remote_edit;
+pub use remote_edit::*;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct TabId(pub u64);
 
@@ -2782,7 +2785,7 @@ pub struct EditSession {
 }
 
 #[derive(Debug, Default)]
-pub struct EditSessionStore {
+pub(crate) struct EditSessionStore {
     sessions: Vec<EditSession>,
     next_id: u64,
     next_check_id: u64,

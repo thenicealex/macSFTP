@@ -1,14 +1,16 @@
+use std::collections::HashSet;
+
 use gpui_kit::{
     Context, FontWeight, IntoElement, ParentElement, Styled, Window, div, prelude::*, px,
 };
 use macsftp_core::{
-    AppCommand, CheckRemoteEditSnapshotCommand, ConflictPolicy, ConnectionKey, EditPhase,
-    EditSession, EditSessionId, EntryPath, LocalPath, MetadataPolicy, ProfileId, RemotePath,
-    RemoteSnapshot, StartTransferCommand, TabId, Timestamp, TransferDirection, TransferEndpoint,
-    is_bidi_or_control,
+    AppCommand, BeginEdit, DispatchRollback, EditEffect, EditNotice, EditPhase, EditSessionId,
+    EntryPath, LocalPath, RemotePath, TabId, Timestamp, UploadRequest, is_bidi_or_control,
 };
 use macsftp_ui::{ActiveTheme, format_size, text_button};
 use tracing::warn;
+
+pub(crate) use macsftp_core::{ConflictChoice, PendingEdit, conflict_remote_path};
 
 use crate::event_coordinator::{open_edit_temp, workspace_windows};
 use crate::resources::ActiveResources;
@@ -17,30 +19,6 @@ use crate::workspace::helpers::connected_edit_session;
 use crate::workspace::overlay::OverlayFade;
 
 pub(crate) const EDIT_SIZE_WARN_THRESHOLD: u64 = 100 * 1024 * 1024;
-
-pub(crate) fn conflict_remote_path(local_temp_path: &LocalPath) -> LocalPath {
-    let path = std::path::Path::new(local_temp_path.as_str());
-    let parent = path.parent().unwrap_or(path);
-    let ext = path.extension().and_then(|e| e.to_str());
-    let file_name = match ext {
-        Some(e) if !e.is_empty() && !e.chars().any(is_bidi_or_control) => {
-            format!("conflict-remote.{}", e)
-        }
-        _ => "conflict-remote".to_string(),
-    };
-    // Keep the snapshot in a subdirectory. Sharing the session directory would
-    // collide with a remote file literally named `conflict-remote.<ext>`, and
-    // the comparison download would overwrite the user's edited copy. The
-    // watcher only understands `<session>/<file>`, so writing this snapshot
-    // can never mark the session dirty either.
-    LocalPath::new(
-        parent
-            .join("compare")
-            .join(file_name)
-            .to_string_lossy()
-            .to_string(),
-    )
-}
 
 /// Best-effort removal of a remote-edit session's temp directory
 /// (`<edits>/<run>/<id>/`). NotFound is treated as success; any other failure
@@ -55,32 +33,58 @@ pub(crate) fn cleanup_edit_temp_dir(temp_path: &LocalPath) {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct PendingEdit {
-    /// The path the user opened, as the listing showed it (UI identity).
-    pub remote_path: RemotePath,
-    /// The write-through path every transfer and check must use: the resolved
-    /// target for a file symlink, otherwise `remote_path`.
-    pub io_path: RemotePath,
-    pub size: Option<u64>,
-    pub modified_at: Option<Timestamp>,
-    pub session_epoch: u64,
-    /// Identity of the physical connection the edit was opened through; used
-    /// for dedup only. The transfer commands keep carrying `ProfileId` (the
-    /// tab's own value, `ProfileId(0)` when manual).
-    pub connection_key: ConnectionKey,
-    pub tab_id: TabId,
+/// Display copy for one lifecycle notice.
+pub(crate) fn edit_notice_text(notice: EditNotice) -> String {
+    match notice {
+        EditNotice::StillDownloading => "Your copy is still downloading.".into(),
+        EditNotice::CheckingServerFile => "Checking the server file before uploading…".into(),
+        EditNotice::ReviewConflictBeforeReopen => {
+            "Review the server file’s changes before reopening.".into()
+        }
+        EditNotice::LinkRepointed { conflict: true } => {
+            "The link now points somewhere else. Resolve the open edit before reopening it.".into()
+        }
+        EditNotice::LinkRepointed { conflict: false } => {
+            "The link now points somewhere else. Finish the open edit before reopening it.".into()
+        }
+        EditNotice::PhaseBlocked(phase) => match phase {
+            EditPhase::Downloading => "Your copy is still downloading.".into(),
+            EditPhase::CheckingRemote => "The server file is already being checked.".into(),
+            EditPhase::UploadingBack => "Your changes are already uploading.".into(),
+            EditPhase::RemoteConflict => "Review the server file’s changes first.".into(),
+            EditPhase::Editing => "Your copy is ready to edit.".into(),
+        },
+        EditNotice::WrongConnection => {
+            "Reconnect to the original server before uploading your changes.".into()
+        }
+        EditNotice::CopyUnreadable => {
+            "Your edited copy couldn’t be read. Check file permissions and try again.".into()
+        }
+        EditNotice::LocalChangedDuringCheck => {
+            "Your copy changed during the check. Click Upload Changes again.".into()
+        }
+        EditNotice::ServerCheckFailed => {
+            "The server file couldn’t be checked. Click Upload Changes to try again.".into()
+        }
+        EditNotice::UploadStartFailed => "The upload couldn’t start. Try again.".into(),
+        EditNotice::DownloadFailed { file_name } => {
+            format!("Could not download {file_name} for editing")
+        }
+        EditNotice::CopyOpen => "Your copy is open. After saving, click Upload Changes.".into(),
+        EditNotice::CopyOpenFailed => "Your copy couldn’t be opened for editing.".into(),
+        EditNotice::Uploaded => "Changes uploaded".into(),
+        EditNotice::UploadFailed => "Upload failed. Click Upload Changes to try again.".into(),
+        EditNotice::UnsafeFileName => {
+            "The selected file has a name that cannot be saved safely.".into()
+        }
+    }
 }
 
-/// How the user chose to resolve a remote-changed-under-edit conflict.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ConflictChoice {
-    /// Force the local temp file back over the (changed) remote.
-    Overwrite,
-    /// Throw away local edits and re-download the current remote.
-    DiscardLocal,
-    /// Dismiss for now; the session returns to `Editing`.
-    Later,
+fn file_name_of(path: &RemotePath) -> String {
+    std::path::Path::new(path.as_str())
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default()
 }
 
 impl Workspace {
@@ -111,21 +115,12 @@ impl Workspace {
             return;
         };
         if phase != EditPhase::Editing {
-            self.show_status(
-                match phase {
-                    EditPhase::Downloading => "Your copy is still downloading.".into(),
-                    EditPhase::CheckingRemote => "The server file is already being checked.".into(),
-                    EditPhase::UploadingBack => "Your changes are already uploading.".into(),
-                    EditPhase::RemoteConflict => "Review the server file’s changes first.".into(),
-                    EditPhase::Editing => "Your copy is ready to edit.".into(),
-                },
-                cx,
-            );
+            self.show_edit_notice(EditNotice::PhaseBlocked(phase), cx);
             cx.notify();
             return;
         }
 
-        let Some(session) = cx.resources().edit_sessions.get(session_id).cloned() else {
+        let Some(session) = cx.resources().edit_sessions.session(session_id) else {
             return;
         };
         let Some(tab) = self.state.tabs.find_tab(session.tab_id) else {
@@ -136,54 +131,35 @@ impl Workspace {
             cx.notify();
             return;
         };
-        if connection_key != session.connection_key {
-            self.status_message =
-                Some("Reconnect to the original server before uploading your changes.".into());
-            cx.notify();
-            return;
-        }
 
         let checking_local_mtime = match std::fs::metadata(session.local_temp_path.as_str())
             .and_then(|metadata| metadata.modified())
         {
-            Ok(modified) => Timestamp::from_system_time(modified),
+            Ok(modified) => macsftp_core::Timestamp::from_system_time(modified),
             Err(error) => {
                 warn!(error = %error, "edited temp file is unavailable");
-                if let Some(session) = cx.resources_mut().edit_sessions.get_mut(session_id) {
-                    session.phase = EditPhase::Editing;
-                    session.pending_check_id = None;
-                    session.checking_local_mtime = None;
-                }
-                self.show_status(
-                    "Your edited copy couldn’t be read. Check file permissions and try again."
-                        .into(),
-                    cx,
-                );
+                self.show_edit_notice(EditNotice::CopyUnreadable, cx);
                 cx.notify();
                 return;
             }
         };
 
-        let check_id = cx.resources_mut().edit_sessions.next_check_id();
-        if let Some(session) = cx.resources_mut().edit_sessions.get_mut(session_id) {
-            session.phase = EditPhase::CheckingRemote;
-            session.session_epoch = session_epoch;
-            session.pending_check_id = Some(check_id);
-            session.checking_local_mtime = Some(checking_local_mtime);
-        }
-        let command = AppCommand::CheckRemoteEditSnapshot(CheckRemoteEditSnapshotCommand {
-            tab_id: session.tab_id,
+        let request = cx.resources_mut().edit_sessions.request_upload(
+            session_id,
             session_epoch,
-            edit_session_id: session_id,
-            check_id,
-            path: session.io_path,
-        });
-        if self.send_command(command, cx) {
-            self.show_status("Checking the server file before uploading…".into(), cx);
-        } else if let Some(session) = cx.resources_mut().edit_sessions.get_mut(session_id) {
-            session.phase = EditPhase::Editing;
-            session.pending_check_id = None;
-            session.checking_local_mtime = None;
+            &connection_key,
+            checking_local_mtime,
+        );
+        match request {
+            UploadRequest::Check(command) => {
+                if self.send_command(AppCommand::CheckRemoteEditSnapshot(command), cx) {
+                    self.show_edit_notice(EditNotice::CheckingServerFile, cx);
+                } else {
+                    cx.resources_mut().edit_sessions.revert_check(session_id);
+                    self.show_edit_notice(EditNotice::UploadStartFailed, cx);
+                }
+            }
+            UploadRequest::Rejected(notice) => self.show_edit_notice(notice, cx),
         }
         cx.notify();
     }
@@ -254,103 +230,12 @@ impl Workspace {
                 return;
             }
         }
-        // A link that was re-pointed after its session was created would
-        // otherwise produce two live sessions sharing one `remote_path`, and
-        // the pane lookup could select either. Bind edit sessions to the target
-        // they were opened against and refuse the ambiguous case instead.
-        if let Some((existing_tab_id, existing_io_path, existing_phase)) = cx
-            .resources()
-            .edit_sessions
-            .find_active_for_remote_path(&connection_key, &remote_path)
-            .map(|session| {
-                (
-                    session.tab_id,
-                    session.io_path.clone(),
-                    session.phase.clone(),
-                )
-            })
-            && existing_io_path != io_path
-        {
-            let owner_is_live = self.owns_tab(existing_tab_id)
-                || workspace_windows(cx).into_iter().any(|window| {
-                    window
-                        .read(cx)
-                        .is_ok_and(|workspace| workspace.owns_tab(existing_tab_id))
-                });
-            if owner_is_live {
-                self.show_status(match existing_phase {
-                    EditPhase::RemoteConflict => {
-                        "The link now points somewhere else. Resolve the open edit before reopening it."
-                            .into()
-                    }
-                    _ => {
-                        "The link now points somewhere else. Finish the open edit before reopening it."
-                            .into()
-                    }
-                }, cx);
-                cx.notify();
-                return;
+        let profile_id = tab.profile_id.unwrap_or_default();
+        let mut live_tabs: HashSet<TabId> = self.tab_ids().into_iter().collect();
+        for window in workspace_windows(cx) {
+            if let Ok(workspace) = window.read(cx) {
+                live_tabs.extend(workspace.tab_ids());
             }
-            // The old session's tab is gone, so it cannot make progress; reap
-            // it before binding this link to its new target.
-            cleanup_edit_sessions_for_tab(cx, existing_tab_id);
-        }
-        // Deduplicate a genuinely live edit, but do not let a session whose
-        // owning tab disappeared with a closed window block this path forever.
-        // Window-close cleanup is the primary lifecycle boundary; this check is
-        // the self-healing guard if that boundary was missed by an older build
-        // or interrupted lifecycle.
-        if let Some((existing_tab_id, existing_phase, existing_temp_path)) = cx
-            .resources()
-            .edit_sessions
-            .find_active(&connection_key, &io_path)
-            .map(|session| {
-                (
-                    session.tab_id,
-                    session.phase.clone(),
-                    session.local_temp_path.clone(),
-                )
-            })
-        {
-            let owner_is_live = self.owns_tab(existing_tab_id)
-                || workspace_windows(cx).into_iter().any(|window| {
-                    window
-                        .read(cx)
-                        .is_ok_and(|workspace| workspace.owns_tab(existing_tab_id))
-                });
-            if owner_is_live {
-                self.show_status(match existing_phase {
-                    EditPhase::Editing | EditPhase::UploadingBack => {
-                        let config = cx.resources().config.config();
-                        let file_name = std::path::Path::new(existing_temp_path.as_str())
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_default();
-                        let editor = macsftp_core::resolve_editor_app(
-                            &file_name,
-                            &config.editor_rules,
-                            config.external_editor.as_deref(),
-                        );
-                        match open_edit_temp(&existing_temp_path, editor) {
-                            Ok(()) => "Your copy is open for editing.".into(),
-                            Err(error) => {
-                                warn!(error = %error, "could not reopen editor for remote edit");
-                                "Your copy couldn’t be opened for editing.".into()
-                            }
-                        }
-                    }
-                    EditPhase::Downloading => "Your copy is still downloading.".into(),
-                    EditPhase::CheckingRemote => {
-                        "Checking the server file before uploading…".into()
-                    }
-                    EditPhase::RemoteConflict => {
-                        "Review the server file’s changes before reopening.".into()
-                    }
-                }, cx);
-                cx.notify();
-                return;
-            }
-            cleanup_edit_sessions_for_tab(cx, existing_tab_id);
         }
         let pending = PendingEdit {
             remote_path,
@@ -360,98 +245,59 @@ impl Workspace {
             session_epoch,
             connection_key,
             tab_id,
+            profile_id,
         };
-        if pending.size.unwrap_or(0) > EDIT_SIZE_WARN_THRESHOLD {
-            self.modal_inputs.large_edit_confirm = Some(pending);
-            cx.notify();
-            return;
+        match cx
+            .resources_mut()
+            .edit_sessions
+            .begin(pending, |tab_id| live_tabs.contains(&tab_id))
+        {
+            BeginEdit::Handled(effects) => {
+                self.apply_edit_effects(effects, cx);
+                cx.notify();
+            }
+            BeginEdit::Start { pending, effects } => {
+                self.apply_edit_effects(effects, cx);
+                if pending.size.unwrap_or(0) > EDIT_SIZE_WARN_THRESHOLD {
+                    self.modal_inputs.large_edit_confirm = Some(pending);
+                    cx.notify();
+                    return;
+                }
+                self.start_edit_download(pending, cx);
+            }
         }
-        self.start_edit_download(pending, cx);
     }
 
-    pub(crate) fn start_edit_download(&mut self, pending: PendingEdit, cx: &mut Context<Self>) {
-        let Some(file_name) = std::path::Path::new(pending.remote_path.as_str())
-            .file_name()
-            .and_then(|name| name.to_str())
-            .filter(|name| !name.is_empty() && !name.chars().any(is_bidi_or_control))
-        else {
-            self.show_status(
-                "The selected file has a name that cannot be saved safely.".into(),
-                cx,
-            );
-            cx.notify();
-            return;
-        };
+    pub(crate) fn start_edit_download(&mut self, mut pending: PendingEdit, cx: &mut Context<Self>) {
         // StartTransferCommand carries the profile id as metadata only —
         // runtime routing keys transfers by (tab_id, session_epoch); only
         // edit dedup uses `connection_key`. Read it from the live tab so a
         // reconnect between arming and confirming the large-file modal
         // refreshes both values.
-        let transfer_profile_id = self
-            .state
-            .tabs
-            .find_tab(pending.tab_id)
-            .map(|tab| tab.profile_id.unwrap_or(ProfileId(0)));
-        let edits_dir = cx.resources().app_paths.edits_dir.clone();
-        let edit_run_id = cx.resources().edit_run_id.clone();
-        let id = cx.resources_mut().edit_sessions.next_id();
-        let local_temp_path = LocalPath::new(format!(
-            "{}/{}/{}/{}",
-            edits_dir.as_str(),
-            edit_run_id,
-            id.0,
-            file_name
-        ));
-        // The download worker creates the parent directory itself and reports
-        // creation failures as transfer errors, so no synchronous FS call
-        // belongs in this UI path (audit APP-EDIT-002).
-        let session = EditSession {
-            id,
-            remote_path: pending.remote_path.clone(),
-            io_path: pending.io_path.clone(),
-            tab_id: pending.tab_id,
-            session_epoch: pending.session_epoch,
-            profile_id: transfer_profile_id.unwrap_or_default(),
-            connection_key: pending.connection_key.clone(),
-            local_temp_path: local_temp_path.clone(),
-            phase: EditPhase::Downloading,
-            remote_snapshot: RemoteSnapshot {
-                size: pending.size,
-                modified_at: pending.modified_at,
-            },
-            pending_check_id: None,
-            checking_local_mtime: None,
-            local_modified: false,
-            local_baseline: None,
+        if let Some(tab) = self.state.tabs.find_tab(pending.tab_id) {
+            pending.profile_id = tab.profile_id.unwrap_or_default();
+        }
+        let started = match cx.resources_mut().edit_sessions.start_download(pending) {
+            Ok(started) => started,
+            Err(notice) => {
+                self.show_edit_notice(notice, cx);
+                cx.notify();
+                return;
+            }
         };
-        cx.resources_mut().edit_sessions.register(session);
-        let command = AppCommand::StartTransfer(StartTransferCommand {
-            tab_id: pending.tab_id,
-            session_epoch: pending.session_epoch,
-            profile_id: transfer_profile_id.unwrap_or(ProfileId(0)),
-            direction: TransferDirection::Download,
-            sources: vec![TransferEndpoint::Remote(pending.io_path)],
-            destination: TransferEndpoint::Local(local_temp_path),
-            metadata_policy: MetadataPolicy::default(),
-            // An edit temp is always ours to overwrite; a download must never
-            // prompt the user (see build_edit_upload_command for the rationale).
-            conflict_policy: ConflictPolicy::OverwriteAll,
-        });
-        if self.send_command(command, cx) {
+        if self.send_command(started.command, cx) {
             self.show_status("Opening your copy…".into(), cx);
-            cx.notify();
         } else {
             // The command never entered the channel (full/closed). The
-            // Downloading session we just registered has no in-flight transfer
-            // to advance it, so it would strand: never polled (not Editing),
-            // never rendered (not RemoteConflict), never cleaned up — and
-            // find_active would block re-editing this file forever. Roll it back
-            // and delete its temp directory. send_command already set a
-            // "Busy — try again" status.
-            if let Some(session) = cx.resources_mut().edit_sessions.remove(id) {
-                cleanup_edit_temp_dir(&session.local_temp_path);
-            }
+            // Downloading session has no in-flight transfer to advance it, so
+            // it would strand; roll it back and delete its temp directory.
+            let effects = cx
+                .resources_mut()
+                .edit_sessions
+                .abort_download(started.session_id);
+            self.apply_edit_effects(effects, cx);
         }
+        cx.notify();
     }
 
     /// User confirmed the large-file edit warning: proceed with the download.
@@ -479,6 +325,7 @@ impl Workspace {
         // predate a reconnect.
         pending.session_epoch = session_epoch;
         pending.connection_key = connection_key;
+        pending.profile_id = tab.profile_id.unwrap_or_default();
         self.start_edit_download(pending, cx);
     }
 
@@ -495,9 +342,12 @@ impl Workspace {
         choice: ConflictChoice,
         cx: &mut Context<Self>,
     ) {
-        // Clone the session out first so we do not hold a resources borrow
-        // across the resources_mut()/send_command() calls below.
-        let Some(session) = cx.resources().edit_sessions.get(id).cloned() else {
+        let Some(phase) = cx
+            .resources()
+            .edit_sessions
+            .session(id)
+            .map(|session| session.phase.clone())
+        else {
             return;
         };
         // Only a session actually in RemoteConflict may be resolved. The
@@ -506,66 +356,28 @@ impl Workspace {
         // guard makes the second call a no-op instead of, e.g., firing a second
         // Overwrite upload. Existence alone is not enough — the first click may
         // have already moved the session to UploadingBack/Editing.
-        if session.phase != EditPhase::RemoteConflict {
+        if phase != EditPhase::RemoteConflict {
             return;
         }
         self.modal_inputs.reset_conflict_compare();
-        match choice {
-            ConflictChoice::Overwrite => {
-                let command = build_edit_upload_command(
-                    &session.local_temp_path,
-                    &session.io_path,
-                    session.session_epoch,
-                    session.profile_id,
-                    session.tab_id,
-                );
-                if let Some(s) = cx.resources_mut().edit_sessions.get_mut(id) {
-                    s.phase = EditPhase::UploadingBack;
-                }
-                // If the command never entered the channel, the UploadingBack
-                // session has no in-flight transfer to advance it and would
-                // strand invisibly. Roll back to RemoteConflict so the modal
-                // stays up and the user can retry. send_command already set a
-                // "Busy — try again" status.
-                if !self.send_command(command, cx)
-                    && let Some(s) = cx.resources_mut().edit_sessions.get_mut(id)
-                {
-                    s.phase = EditPhase::RemoteConflict;
-                }
-            }
-            ConflictChoice::DiscardLocal => {
-                // Re-download the current remote over the local temp; the fresh
-                // session starts back at Downloading.
-                let pending = PendingEdit {
-                    remote_path: session.remote_path.clone(),
-                    io_path: session.io_path.clone(),
-                    size: session.remote_snapshot.size,
-                    modified_at: session.remote_snapshot.modified_at,
-                    session_epoch: session.session_epoch,
-                    connection_key: session.connection_key.clone(),
-                    tab_id: session.tab_id,
-                };
-                cx.resources_mut().edit_sessions.remove(id);
-                // start_edit_download mints a NEW session id (and a new temp
-                // dir), so the discarded session's `<edits>/<run>/<old_id>/` directory
-                // would orphan. Delete it now rather than leaking it until quit.
-                cleanup_edit_temp_dir(&session.local_temp_path);
-                self.start_edit_download(pending, cx);
-            }
-            ConflictChoice::Later => {
-                if let Some(s) = cx.resources_mut().edit_sessions.get_mut(id) {
-                    s.phase = EditPhase::Editing;
-                }
-            }
-        }
+        let effects = cx
+            .resources_mut()
+            .edit_sessions
+            .resolve_conflict(id, choice);
+        self.apply_edit_effects(effects, cx);
         cx.notify();
     }
 
     pub(crate) fn compare_edit_conflict(&mut self, id: EditSessionId, cx: &mut Context<Self>) {
-        let Some(session) = cx.resources().edit_sessions.get(id).cloned() else {
+        let Some((phase, tab_id, profile_id)) = cx
+            .resources()
+            .edit_sessions
+            .session(id)
+            .map(|session| (session.phase.clone(), session.tab_id, session.profile_id))
+        else {
             return;
         };
-        if session.phase != EditPhase::RemoteConflict {
+        if phase != EditPhase::RemoteConflict {
             return;
         }
         if macsftp_platform::detect_default_diff_tool().is_none() {
@@ -579,27 +391,22 @@ impl Workspace {
         // Always re-download. A snapshot from an earlier comparison is stale
         // once the server file changes again, and diffing against it would
         // present old remote content as if it were current.
-        let compare_path = conflict_remote_path(&session.local_temp_path);
-
         self.modal_inputs.begin_conflict_compare(id);
 
-        let transfer_profile_id = self
+        let live_profile_id = self
             .state
             .tabs
-            .find_tab(session.tab_id)
-            .map(|tab| tab.profile_id.unwrap_or(ProfileId(0)))
-            .unwrap_or(session.profile_id);
+            .find_tab(tab_id)
+            .map(|tab| tab.profile_id.unwrap_or_default())
+            .unwrap_or(profile_id);
 
-        let command = AppCommand::StartTransfer(StartTransferCommand {
-            tab_id: session.tab_id,
-            session_epoch: session.session_epoch,
-            profile_id: transfer_profile_id,
-            direction: TransferDirection::Download,
-            sources: vec![TransferEndpoint::Remote(session.io_path)],
-            destination: TransferEndpoint::Local(compare_path),
-            metadata_policy: MetadataPolicy::default(),
-            conflict_policy: ConflictPolicy::OverwriteAll,
-        });
+        let Some(command) = cx
+            .resources()
+            .edit_sessions
+            .plan_conflict_compare(id, live_profile_id)
+        else {
+            return;
+        };
 
         if !self.send_command(command, cx) {
             self.modal_inputs.conflict_compare_loading = false;
@@ -607,6 +414,83 @@ impl Workspace {
                 Some("Could not start comparison download. Try again.".into());
         }
         cx.notify();
+    }
+
+    /// Surface one lifecycle notice in this window's status bar.
+    pub(crate) fn show_edit_notice(&mut self, notice: EditNotice, cx: &mut Context<Self>) {
+        self.show_status(edit_notice_text(notice).into(), cx);
+    }
+
+    /// Execute lifecycle effects produced by a user action in this window.
+    ///
+    /// A failed dispatch rolls the session back through the lifecycle (the
+    /// effect names its rollback), so a command that never entered the channel
+    /// cannot strand a phase. The coordinator has its own executor for effects
+    /// that arrive process-wide.
+    pub(crate) fn apply_edit_effects(&mut self, effects: Vec<EditEffect>, cx: &mut Context<Self>) {
+        for effect in effects {
+            match effect {
+                EditEffect::Dispatch {
+                    session_id,
+                    command,
+                    rollback,
+                    ..
+                } => {
+                    if self.send_command(command, cx) {
+                        continue;
+                    }
+                    let file_name = cx
+                        .resources()
+                        .edit_sessions
+                        .session(session_id)
+                        .map(|session| file_name_of(&session.remote_path))
+                        .unwrap_or_default();
+                    let follow_up = cx
+                        .resources_mut()
+                        .edit_sessions
+                        .dispatch_failed(session_id, rollback);
+                    match rollback {
+                        DispatchRollback::AbortDownload => {
+                            self.show_edit_notice(EditNotice::DownloadFailed { file_name }, cx)
+                        }
+                        DispatchRollback::RevertCheck | DispatchRollback::RestoreConflict => {
+                            self.show_edit_notice(EditNotice::UploadStartFailed, cx)
+                        }
+                    }
+                    // A rollback can itself schedule cleanup (an aborted
+                    // download's temp directory); those effects never dispatch.
+                    self.apply_edit_effects(follow_up, cx);
+                }
+                EditEffect::OpenEditor { temp_path, .. } => {
+                    let config = cx.resources().config.config();
+                    let file_name = std::path::Path::new(temp_path.as_str())
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    let editor = macsftp_core::resolve_editor_app(
+                        &file_name,
+                        &config.editor_rules,
+                        config.external_editor.as_deref(),
+                    );
+                    match open_edit_temp(&temp_path, editor) {
+                        Ok(()) => self.show_edit_notice(EditNotice::CopyOpen, cx),
+                        Err(error) => {
+                            warn!(error = %error, "could not open editor for remote edit");
+                            self.show_edit_notice(EditNotice::CopyOpenFailed, cx);
+                        }
+                    }
+                }
+                EditEffect::DeleteTempDir { path } => cleanup_edit_temp_dir(&path),
+                EditEffect::RebaseListing {
+                    tab_id,
+                    path,
+                    snapshot,
+                } => {
+                    self.sync_remote_entry_snapshot(tab_id, &path, snapshot);
+                }
+                EditEffect::Notice { notice, .. } => self.show_edit_notice(notice, cx),
+            }
+        }
     }
 
     pub(crate) fn render_large_edit_modal(
@@ -851,14 +735,12 @@ impl Workspace {
 /// on-disk temp directory. Called when a tab or its window closes (and on
 /// disconnect): the session can no longer make progress once its owning tab is
 /// gone, and leaving it registered would strand its temp files and — because
-/// [`find_active`] keys on `(connection_key, io_path)` regardless of tab —
+/// sessions are deduplicated by `(connection_key, io_path)` regardless of tab —
 /// permanently block re-editing the same file. Best-effort on the filesystem;
 /// a temp dir that was never created is ignored.
 ///
 /// Takes `&mut App` (not `Context<Workspace>`) so it can run from both the
 /// tab-close path (where `Context` derefs to `App`) and the window-closed hook.
-///
-/// [`find_active`]: macsftp_core::EditSessionStore::find_active
 pub(crate) fn cleanup_edit_sessions_for_tab(cx: &mut gpui_kit::App, tab_id: TabId) {
     let removed = cx.resources_mut().edit_sessions.remove_for_tab(tab_id);
     for session in removed {
@@ -890,42 +772,4 @@ pub(crate) fn cleanup_orphaned_edit_sessions(cx: &mut gpui_kit::App) {
     for tab_id in orphaned {
         cleanup_edit_sessions_for_tab(cx, tab_id);
     }
-}
-
-/// Uploads changes from a remote-edit session. This deliberately keeps the
-/// default metadata policy instead of the user's transfer preference:
-/// `advance_uploading_back` rebases the remote snapshot from the local temp
-/// file's mtime, which is only valid when the upload preserved mtime.
-/// Letting the preference disable mtime here would make the next refresh
-/// report a spurious conflict.
-///
-/// `remote_path` must be the session's `io_path` (the resolved target for a
-/// symlink), never the listed link path: uploading to the link would replace
-/// it with a regular file and break every other reference to the target.
-pub(crate) fn build_edit_upload_command(
-    temp: &LocalPath,
-    remote_path: &RemotePath,
-    session_epoch: u64,
-    profile_id: ProfileId,
-    tab_id: TabId,
-) -> AppCommand {
-    AppCommand::StartTransfer(StartTransferCommand {
-        tab_id,
-        session_epoch,
-        profile_id,
-        direction: TransferDirection::Upload,
-        sources: vec![TransferEndpoint::Local(temp.clone())],
-        destination: TransferEndpoint::Remote(remote_path.clone()),
-        // Keep the default policy (preserve mtime and permissions): remote-edit
-        // relies on preserving the local temp file's mtime to construct the
-        // baseline for `advance_uploading_back`. If mtime preservation were
-        // disabled per user preference, the server would assign its current time,
-        // causing subsequent refreshes to report a false conflict.
-        metadata_policy: MetadataPolicy::default(),
-        // The edit layer already ran its own (size, mtime) divergence check, or
-        // the user explicitly chose "Replace Server File". The pipeline-level
-        // existence prompt would be redundant (the origin file always exists),
-        // so overwrite unconditionally rather than emitting a TransferConflict.
-        conflict_policy: ConflictPolicy::OverwriteAll,
-    })
 }

@@ -46,7 +46,7 @@ test_support -> core
 
 每个 `Workspace` 拥有一个窗口的 `AppState`/`TabStore`、window-local modal 队列，以及 focus、popover、filter、scroll handle 等 view state。
 
-进程级 GPUI globals 拥有 Profile、配置、最近连接和 residual-temp stores、全局 `TransferStore` 与速率采样、远程编辑 session、runtime event receiver 和多窗口 session checkpoint 协调。
+进程级 GPUI globals 拥有 Profile、配置、最近连接和 residual-temp stores、全局 `TransferStore` 与速率采样、远程编辑 session（`RemoteEditLifecycle`）、runtime event receiver 和多窗口 session checkpoint 协调。
 
 - 传输 event 只能在进程级边界 reduce 一次，再由所有窗口读取共享快照；tab event 可以广播到窗口，但必须先经过 core 的陈旧事件校验。
 - process-owned 的 transfer、residual-temp 和远程编辑校验 event 不能在 `Workspace` 再保留第二套生产 reducer；新增 event 必须进入显式路由分支，不能依靠 wildcard 静默忽略。
@@ -139,6 +139,8 @@ route 支持 Direct、单跳 saved-profile JumpHost（jump profile 自身必须 
 ## 9. 远程编辑
 
 远程编辑 session 属于进程级状态，因为外部编辑器和传输可能跨窗口存活。tab 关闭必须清理该 tab 的 session 和临时目录；应用启动时使用新的 run namespace，避免外部编辑器缓存旧路径。
+
+session、id/check-id 分配、临时目录命名和全部 phase transition 由 `macsftp_core::remote_edit::RemoteEditLifecycle` 独占。调用方只表达意图（`begin`、`request_upload`、`on_check_result`、`on_transfer_finished`、`resolve_conflict` 等），lifecycle 校验 phase/epoch/check id/路径并返回 `EditEffect`：runtime dispatch、打开编辑器、删除临时目录、rebase listing 和 `EditNotice`。`app` 负责连接与文件名校验、modal、编辑器解析、watcher 接线和 command 发送；dispatch 失败时按 effect 声明的 rollback（`RevertCheck`/`RestoreConflict`/`AbortDownload`）回调 lifecycle。lifecycle 不做文件系统 I/O，也不持有 GPUI、Tokio 或 platform 类型；本地 size/mtime 等事实由 app 读取后传入。
 
 应用监视编辑会话临时目录中的保存动作，但只用于在文件列表和状态栏显示 dirty 标记；它绝不触发上传，也不因此放宽远端一致性检查。应用自身写入临时副本（下载完成、`DiscardLocal` 重新下载）必须按 size+mtime baseline 抑制，不能被误报成本地修改。用户在选中已打开编辑的远端文件后，通过明确的 **Upload Changes** 操作发起上传。上传不能依赖 UI 缓存的目录 listing 授权覆盖远端文件。流程为：
 
