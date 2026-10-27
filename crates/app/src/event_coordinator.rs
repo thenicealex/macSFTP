@@ -1,10 +1,10 @@
 use gpui_kit::base::Root;
 use gpui_kit::{AnyWindowHandle, App, Context, Global, Task, Window, WindowHandle};
 use macsftp_core::{
-    AppEvent, ConflictRequest, DispatchRollback, EditCheckOutcome, EditCheckResult, EditEffect,
-    EditNotice, EditPhase, EditSessionId, EditTransferFinished, LocalFileFacts, LocalPath, TabId,
-    Timestamp, TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferId,
-    TransferPlanId,
+    AppEvent, ConflictRequest, DispatchRollback, EditCheckEvent, EditCheckOutcome, EditCheckResult,
+    EditEffect, EditNotice, EditPhase, EditSessionId, EditTransferFinished, LocalFileFacts,
+    LocalPath, ProcessEvent, RoutedEvent, TabId, Timestamp, TransferConflictPrompt,
+    TransferDirection, TransferEndpoint, TransferEvent, TransferId, TransferPlanId, WindowEvent,
 };
 use macsftp_sftp::EventReceiver;
 use tracing::warn;
@@ -128,67 +128,37 @@ impl AppEventCoordinator {
 }
 
 fn dispatch_events_batch<I: IntoIterator<Item = AppEvent>>(events: I, cx: &mut App) {
-    let mut had_transfer_events = false;
+    let mut refresh_windows = false;
     for event in events {
-        if event.is_transfer_event() {
-            had_transfer_events = true;
-            dispatch_transfer_event(event, cx);
-        } else {
-            dispatch_event(event, cx);
+        match event.route() {
+            RoutedEvent::Process(event) => refresh_windows |= dispatch_process_event(event, cx),
+            RoutedEvent::Window(event) => dispatch_window_event(event, cx),
         }
     }
-    if had_transfer_events {
+    if refresh_windows {
         cx.refresh_windows();
     }
 }
 
-fn dispatch_transfer_event(event: AppEvent, cx: &mut App) {
-    cx.apply_transfer_event(&event, Timestamp(std::time::SystemTime::now()));
-    if matches!(event, AppEvent::TransferConflict(_)) {
-        present_orphaned_transfer_conflicts(cx);
-    }
-    advance_edit_sessions(&event, cx);
-    advance_conflict_compare(&event, cx);
-    reload_panes_for_finished_plan(&event, cx);
-    quarantine_completed_download(&event, cx);
-}
-
-fn dispatch_event(event: AppEvent, cx: &mut App) {
-    if event.is_transfer_event() {
-        dispatch_transfer_event(event, cx);
-        cx.refresh_windows();
-        return;
-    }
-
-    // The three authoritative edit-check results are owned process-wide, not by
-    // any window: edit sessions live in the process-global `AppResources`, and
-    // broadcasting one result to every window would let them race to apply a
-    // single outcome (Task 5). Apply it exactly once here, then return before
-    // the ordinary window-broadcast path below.
-    match &event {
-        AppEvent::RemoteEditSnapshotChecked(_)
-        | AppEvent::RemoteEditSnapshotCheckFailed(_)
-        | AppEvent::RemoteEditSnapshotDispatchFailed(_) => {
-            apply_remote_edit_check_event(&event, cx);
-            return;
-        }
-        AppEvent::LocalEditModified {
-            session_id,
-            temp_path,
-        } => {
-            handle_local_edit_modified(*session_id, temp_path, cx);
-            return;
-        }
-        _ => {}
-    }
-
+/// Apply a process-owned event exactly once. Returns whether the transfer
+/// drawer needs a refresh.
+fn dispatch_process_event(event: ProcessEvent, cx: &mut App) -> bool {
     match event {
-        AppEvent::ResidualTempCreated(record) => {
+        ProcessEvent::Transfer(event) => {
+            dispatch_transfer_event(&event, cx);
+            true
+        }
+        ProcessEvent::EditCheck(event) => {
+            apply_remote_edit_check_event(&event, cx);
+            false
+        }
+        ProcessEvent::ResidualTempCreated(record) => {
             if let Err(error) = cx.resources_mut().residual_temps.add_and_save(record) {
                 warn!(error = %error, "could not persist residual temp record");
             }
+            false
         }
-        AppEvent::ResidualTempCleared { transfer_id, path } => {
+        ProcessEvent::ResidualTempCleared { transfer_id, path } => {
             if let Err(error) = cx
                 .resources_mut()
                 .residual_temps
@@ -196,18 +166,45 @@ fn dispatch_event(event: AppEvent, cx: &mut App) {
             {
                 warn!(error = %error, "could not update residual temp store");
             }
+            false
         }
-        window_event => {
-            for window in workspace_windows(cx) {
-                let event = window_event.clone();
-                // A window can close between enumeration and update. The
-                // remaining workspaces still receive the event.
-                let _closed = window.update(cx, |workspace, window, cx| {
-                    workspace.handle_app_event(event, window, cx);
-                });
-            }
+        ProcessEvent::LocalEditModified {
+            session_id,
+            temp_path,
+        } => {
+            handle_local_edit_modified(session_id, &temp_path, cx);
+            false
         }
     }
+}
+
+fn dispatch_window_event(event: WindowEvent, cx: &mut App) {
+    for window in workspace_windows(cx) {
+        let event = event.clone();
+        // A window can close between enumeration and update. The remaining
+        // workspaces still receive the event.
+        let _closed = window.update(cx, |workspace, window, cx| {
+            workspace.handle_window_event(event, window, cx);
+        });
+    }
+}
+
+fn dispatch_transfer_event(event: &TransferEvent, cx: &mut App) {
+    cx.apply_transfer_event(event, Timestamp(std::time::SystemTime::now()));
+    if matches!(event, TransferEvent::Conflict(_)) {
+        present_orphaned_transfer_conflicts(cx);
+    }
+    advance_edit_sessions(event, cx);
+    advance_conflict_compare(event, cx);
+    reload_panes_for_finished_plan(event, cx);
+    quarantine_completed_download(event, cx);
+}
+
+/// Feed one event through the same routing path as production. Tests use this
+/// to drive process- and window-owned events without a live runtime.
+#[cfg(test)]
+fn dispatch_event(event: AppEvent, cx: &mut App) {
+    dispatch_events_batch(std::iter::once(event), cx);
 }
 
 /// Mark a just-downloaded executable so macOS asks before running it.
@@ -222,8 +219,8 @@ fn dispatch_event(event: AppEvent, cx: &mut App) {
 /// Only executables are marked (see `quarantine_executable_download`), and the
 /// work runs on the background executor: it is a `stat` plus at most two small
 /// process spawns, none of which belongs on the UI thread.
-fn quarantine_completed_download(event: &AppEvent, cx: &mut App) {
-    let AppEvent::TransferCompleted { transfer_id } = event else {
+fn quarantine_completed_download(event: &TransferEvent, cx: &mut App) {
+    let TransferEvent::Completed { transfer_id } = event else {
         return;
     };
     let Some(job) = cx.transfers().find_job(*transfer_id) else {
@@ -266,22 +263,23 @@ fn quarantine_completed_download(event: &AppEvent, cx: &mut App) {
 /// Reloading is skipped while the plan is still outstanding, and a plan that
 /// only touched edit temp files reloads nothing visible: its destination parent
 /// is the edits directory, which no pane ever lists.
-fn reload_panes_for_finished_plan(event: &AppEvent, cx: &mut App) {
+fn reload_panes_for_finished_plan(event: &TransferEvent, cx: &mut App) {
     let plan_id = match event {
         // A plan reaches its terminal state once its last job lands. The
         // reducer records that transition, because re-deriving it here would
         // mean scanning the plan's jobs on every one of thousands of
         // completions — the difference between one directory read at the end of
         // a directory transfer and a quadratic scan per file.
-        AppEvent::TransferCompleted { .. } | AppEvent::TransferSkipped { .. } => {
+        TransferEvent::Completed { .. } | TransferEvent::Skipped { .. } => {
             let Some(plan_id) = cx.transfers().just_finished_plan else {
                 return;
             };
             plan_id
         }
         // Plan-level outcomes are once per plan already.
-        AppEvent::TransferPlanFailed { plan_id, .. }
-        | AppEvent::TransferPlanCancelled { plan_id } => *plan_id,
+        TransferEvent::PlanFailed { plan_id, .. } | TransferEvent::PlanCancelled { plan_id } => {
+            *plan_id
+        }
         _ => return,
     };
 
@@ -344,10 +342,10 @@ fn reload_panes_for_finished_plan(event: &AppEvent, cx: &mut App) {
 ///
 /// Runs process-wide, mirroring the transfer reducer, because edit sessions
 /// live in the process-global [`AppResources`], not any single window.
-fn advance_edit_sessions(event: &AppEvent, cx: &mut App) {
+fn advance_edit_sessions(event: &TransferEvent, cx: &mut App) {
     let (transfer_id, succeeded) = match event {
-        AppEvent::TransferCompleted { transfer_id } => (*transfer_id, true),
-        AppEvent::TransferFailed(failure) => (failure.transfer_id, false),
+        TransferEvent::Completed { transfer_id } => (*transfer_id, true),
+        TransferEvent::Failed(failure) => (failure.transfer_id, false),
         _ => return,
     };
     // Capture the job's full shape (direction + both endpoints) before mutably
@@ -487,14 +485,14 @@ fn apply_edit_effects(cx: &mut App, effects: Vec<EditEffect>) {
 /// the lifecycle re-confirms all of that before an upload or conflict is
 /// authorized, so a delayed result from an earlier retry cannot clobber a
 /// concurrent remote change.
-fn apply_remote_edit_check_event(event: &AppEvent, cx: &mut App) {
+fn apply_remote_edit_check_event(event: &EditCheckEvent, cx: &mut App) {
     // Decode the three event shapes into a uniform (scope, result). The
     // dispatch-failure event carries no scope: routing never reached a live
     // actor, so it is correlated only by epoch/edit-session/check id rather
     // than a remote session. Both scoped and dispatch-failure events still
     // carry the tab/epoch that must match the stored session.
     let (scope, result) = match event {
-        AppEvent::RemoteEditSnapshotChecked(scoped) => (
+        EditCheckEvent::Checked(scoped) => (
             Some(scoped.scope.clone()),
             EditCheckResult {
                 tab_id: scoped.scope.tab_id,
@@ -505,7 +503,7 @@ fn apply_remote_edit_check_event(event: &AppEvent, cx: &mut App) {
                 outcome: EditCheckOutcome::Matched(scoped.payload.snapshot),
             },
         ),
-        AppEvent::RemoteEditSnapshotCheckFailed(scoped) => (
+        EditCheckEvent::CheckFailed(scoped) => (
             Some(scoped.scope.clone()),
             EditCheckResult {
                 tab_id: scoped.scope.tab_id,
@@ -516,7 +514,7 @@ fn apply_remote_edit_check_event(event: &AppEvent, cx: &mut App) {
                 outcome: EditCheckOutcome::Failed,
             },
         ),
-        AppEvent::RemoteEditSnapshotDispatchFailed(payload) => (
+        EditCheckEvent::DispatchFailed(payload) => (
             None,
             EditCheckResult {
                 tab_id: payload.tab_id,
@@ -527,7 +525,6 @@ fn apply_remote_edit_check_event(event: &AppEvent, cx: &mut App) {
                 outcome: EditCheckOutcome::Failed,
             },
         ),
-        _ => return,
     };
 
     // Owner resolution for scoped events: a live window must still own the
@@ -711,15 +708,15 @@ fn handle_local_edit_modified(session_id: EditSessionId, temp_path: &str, cx: &m
     }
 }
 
-fn advance_conflict_compare(event: &AppEvent, cx: &mut App) {
+fn advance_conflict_compare(event: &TransferEvent, cx: &mut App) {
     let (dest_path, outcome) = match event {
-        AppEvent::TransferCompleted { transfer_id } => {
+        TransferEvent::Completed { transfer_id } => {
             let Some(dest_path) = compare_destination_for_transfer(*transfer_id, cx) else {
                 return;
             };
             (dest_path, Ok(()))
         }
-        AppEvent::TransferFailed(failure) => {
+        TransferEvent::Failed(failure) => {
             let Some(dest_path) = compare_destination_for_transfer(failure.transfer_id, cx) else {
                 return;
             };
@@ -732,7 +729,7 @@ fn advance_conflict_compare(event: &AppEvent, cx: &mut App) {
         // plan that dies before its job runs would otherwise leave the modal
         // stuck on “Comparing…”. The plan's destination root identifies the
         // comparison request.
-        AppEvent::TransferPlanFailed { plan_id, error } => {
+        TransferEvent::PlanFailed { plan_id, error } => {
             let Some(dest_path) = compare_destination_for_plan(*plan_id, cx) else {
                 return;
             };
@@ -744,7 +741,7 @@ fn advance_conflict_compare(event: &AppEvent, cx: &mut App) {
                 )),
             )
         }
-        AppEvent::TransferPlanCancelled { plan_id } => {
+        TransferEvent::PlanCancelled { plan_id } => {
             let Some(dest_path) = compare_destination_for_plan(*plan_id, cx) else {
                 return;
             };
@@ -756,7 +753,7 @@ fn advance_conflict_compare(event: &AppEvent, cx: &mut App) {
         // A child cancel emits only `TransferSkipped`; cancelling a plan root
         // is reported as `TransferPlanCancelled`. Both mean this comparison
         // download stopped before producing its copy.
-        AppEvent::TransferSkipped { transfer_id } => {
+        TransferEvent::Skipped { transfer_id } => {
             let Some(dest_path) = compare_destination_for_transfer(*transfer_id, cx) else {
                 return;
             };

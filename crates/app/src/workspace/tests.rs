@@ -6,17 +6,17 @@ use gpui_kit::{
     ScrollWheelEvent, TestAppContext, VisualTestContext, Window, div, point, px, size,
 };
 use macsftp_core::{
-    AppCommand, AppEvent, AuthCredential, AuthMethod, AuthMethodKind, ConflictDecision,
-    ConflictPolicy, ConflictRequestId, ConnectionKey, ConnectionPoolIdentity, ConnectionProfile,
+    AppCommand, AuthCredential, AuthMethod, AuthMethodKind, ConflictDecision, ConflictPolicy,
+    ConflictRequestId, ConnectionKey, ConnectionPoolIdentity, ConnectionProfile,
     ConnectionSettings, ConnectionState, DisconnectReason, EditPhase, EntryPath, ErrorCode,
     FileKind, FileSortField, HostKeyPrompt, KeyboardInteractivePrompt,
     KeyboardInteractivePromptField, KeyboardInteractiveRequestId, LocalPath, MetadataPolicy,
     ProfileId, RemoteDirSnapshot, RemoteEntry, RemoteEntryResolution, RemoteEventScope,
     RemoteOperationFailure, RemotePath, RemoteScoped, RestoredTabTarget, RuntimeBridgeConfig,
     SessionId, SortDirection, TabConnected, TabDisconnected, TabId, TabState, Timestamp,
-    TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferId, TransferJob,
-    TransferPlanId, TransferPlanProgress, TransferPlanSnapshot, TransferPlanState, TransferState,
-    TrustRequestId, UserFacingError, WindowSessionId,
+    TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferEvent, TransferId,
+    TransferJob, TransferPlanId, TransferPlanProgress, TransferPlanSnapshot, TransferPlanState,
+    TransferState, TrustRequestId, UserFacingError, WindowEvent, WindowSessionId,
 };
 use macsftp_core::{EditSession, EditSessionId, RemoteSnapshot};
 use macsftp_platform::AppPaths;
@@ -327,7 +327,7 @@ fn connect_and_prompt(workspace: &Entity<Workspace>, cx: &mut VisualTestContext)
         fingerprint_sha256: "SHA256:mock".to_string(),
     };
     workspace.update_in(cx, |workspace, window, cx| {
-        workspace.handle_app_event(AppEvent::HostKeyUnknown(prompt.clone()), window, cx);
+        workspace.handle_window_event(WindowEvent::HostKeyUnknown(prompt.clone()), window, cx);
     });
     prompt
 }
@@ -2542,8 +2542,8 @@ fn keyboard_interactive_prompt_submits_redacted_responses(cx: &mut TestAppContex
         }],
     };
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::KeyboardInteractivePrompt(prompt.clone()),
+        workspace.handle_window_event(
+            WindowEvent::KeyboardInteractivePrompt(prompt.clone()),
             window,
             cx,
         );
@@ -2600,8 +2600,8 @@ fn keyboard_interactive_prompt_supports_clipboard_paste(cx: &mut TestAppContext)
         }],
     };
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::KeyboardInteractivePrompt(prompt.clone()),
+        workspace.handle_window_event(
+            WindowEvent::KeyboardInteractivePrompt(prompt.clone()),
             window,
             cx,
         );
@@ -2648,8 +2648,8 @@ fn stale_keyboard_interactive_prompt_is_dropped(cx: &mut TestAppContext) {
     });
     let _ = channels.command_rx.try_recv();
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::KeyboardInteractivePrompt(KeyboardInteractivePrompt {
+        workspace.handle_window_event(
+            WindowEvent::KeyboardInteractivePrompt(KeyboardInteractivePrompt {
                 request_id: KeyboardInteractiveRequestId(9),
                 scope: RemoteEventScope::new(TabId(1), SessionId(99), 0),
                 name: String::new(),
@@ -2832,7 +2832,11 @@ fn custom_conflict_rename_validates_and_sends_plan_scoped_decision(cx: &mut Test
         source_modified_at: Some(macsftp_core::Timestamp::from_secs_since_epoch(42)),
     };
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(AppEvent::TransferConflict(prompt.clone()), window, cx);
+        cx.apply_transfer_event(
+            &TransferEvent::Conflict(prompt.clone()),
+            Timestamp(std::time::SystemTime::now()),
+        );
+        workspace.present_transfer_conflict(prompt.clone(), window, cx);
         assert_eq!(
             workspace.modal_inputs.conflict_rename.value(),
             "existing (copy).txt"
@@ -2895,7 +2899,11 @@ fn full_command_channel_keeps_transfer_conflict_modal(cx: &mut TestAppContext) {
         source_modified_at: None,
     };
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(AppEvent::TransferConflict(prompt.clone()), window, cx);
+        cx.apply_transfer_event(
+            &TransferEvent::Conflict(prompt.clone()),
+            Timestamp(std::time::SystemTime::now()),
+        );
+        workspace.present_transfer_conflict(prompt.clone(), window, cx);
     });
     fill_command_channel(&channels);
 
@@ -2943,7 +2951,7 @@ fn stale_host_key_prompt_is_dropped(cx: &mut TestAppContext) {
         fingerprint_sha256: "SHA256:stale".to_string(),
     };
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(AppEvent::HostKeyUnknown(stale_prompt), window, cx);
+        workspace.handle_window_event(WindowEvent::HostKeyUnknown(stale_prompt), window, cx);
     });
 
     workspace.read_with(&cx, |workspace, _| {
@@ -2969,8 +2977,8 @@ fn tab_connected_event_requests_the_real_remote_root(cx: &mut TestAppContext) {
 
     let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabConnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabConnected(RemoteScoped::new(
                 scope,
                 TabConnected {
                     remote_root: RemotePath::new(TEST_REMOTE_ROOT),
@@ -3018,8 +3026,8 @@ fn session_snapshot_never_contains_cached_credentials(cx: &mut TestAppContext) {
 
     let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabConnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabConnected(RemoteScoped::new(
                 scope,
                 TabConnected {
                     remote_root: RemotePath::new("/home/root"),
@@ -3070,8 +3078,8 @@ fn classified_disconnect_reasons_reach_the_connection_state(cx: &mut TestAppCont
 
     let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabConnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabConnected(RemoteScoped::new(
                 scope.clone(),
                 TabConnected {
                     remote_root: RemotePath::new(TEST_REMOTE_ROOT),
@@ -3089,8 +3097,8 @@ fn classified_disconnect_reasons_reach_the_connection_state(cx: &mut TestAppCont
     )
     .with_retryable(true);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabDisconnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabDisconnected(RemoteScoped::new(
                 scope.clone(),
                 TabDisconnected {
                     reason: DisconnectReason::Error(network_timeout),
@@ -3113,8 +3121,8 @@ fn classified_disconnect_reasons_reach_the_connection_state(cx: &mut TestAppCont
     // A stale-epoch repeat of the same event must not resurrect state.
     workspace.update_in(&mut cx, |workspace, window, cx| {
         let stale_scope = RemoteEventScope::new(TabId(1), SessionId(1), 0);
-        workspace.handle_app_event(
-            AppEvent::TabDisconnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabDisconnected(RemoteScoped::new(
                 stale_scope,
                 TabDisconnected {
                     reason: DisconnectReason::UserRequested,
@@ -3142,8 +3150,8 @@ fn disconnect_preserves_last_remote_path_for_session_restore(cx: &mut TestAppCon
     let _ = channels.command_rx.try_recv();
 
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabConnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabConnected(RemoteScoped::new(
                 RemoteEventScope::new(TabId(1), SessionId(1), 1),
                 TabConnected {
                     remote_root: RemotePath::new(TEST_REMOTE_ROOT),
@@ -3159,8 +3167,8 @@ fn disconnect_preserves_last_remote_path_for_session_restore(cx: &mut TestAppCon
     workspace.update_in(&mut cx, |workspace, window, cx| {
         let tab = workspace.active_tab_mut().expect("tab must exist");
         tab.remote.path = Some(RemotePath::new("/home/tester/projects"));
-        workspace.handle_app_event(
-            AppEvent::TabDisconnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabDisconnected(RemoteScoped::new(
                 RemoteEventScope::new(TabId(1), SessionId(1), 1),
                 TabDisconnected {
                     reason: DisconnectReason::UserRequested,
@@ -3193,8 +3201,8 @@ fn tab_connected_upserts_recents(cx: &mut TestAppContext) {
 
     let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabConnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabConnected(RemoteScoped::new(
                 scope,
                 TabConnected {
                     remote_root: RemotePath::new(TEST_REMOTE_ROOT),
@@ -3236,8 +3244,8 @@ fn tab_connected_dedupes_recents(cx: &mut TestAppContext) {
     let _ = channels.command_rx.try_recv();
     let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabConnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabConnected(RemoteScoped::new(
                 scope,
                 TabConnected {
                     remote_root: RemotePath::new(TEST_REMOTE_ROOT),
@@ -3254,8 +3262,8 @@ fn tab_connected_dedupes_recents(cx: &mut TestAppContext) {
     workspace.update_in(&mut cx, |workspace, window, cx| {
         let tab = workspace.active_tab_mut().expect("tab must exist");
         tab.remote.path = Some(RemotePath::new("/tmp"));
-        workspace.handle_app_event(
-            AppEvent::TabDisconnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabDisconnected(RemoteScoped::new(
                 RemoteEventScope::new(TabId(1), SessionId(1), 1),
                 TabDisconnected {
                     reason: DisconnectReason::UserRequested,
@@ -3270,8 +3278,8 @@ fn tab_connected_dedupes_recents(cx: &mut TestAppContext) {
     // begin_connect bumps session_epoch to 2.
     let scope = RemoteEventScope::new(TabId(1), SessionId(2), 2);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabConnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabConnected(RemoteScoped::new(
                 scope,
                 TabConnected {
                     // Actor root differs; reconnect must prefer the stashed path.
@@ -3549,8 +3557,8 @@ fn drag_local_file_onto_remote_pane_begins_upload(cx: &mut TestAppContext) {
     let _ = channels.command_rx.try_recv();
     let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabConnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabConnected(RemoteScoped::new(
                 scope,
                 TabConnected {
                     remote_root: RemotePath::new(TEST_REMOTE_ROOT),
@@ -3600,8 +3608,8 @@ fn drag_remote_file_onto_local_pane_begins_download(cx: &mut TestAppContext) {
     let _ = channels.command_rx.try_recv();
     let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabConnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabConnected(RemoteScoped::new(
                 scope,
                 TabConnected {
                     remote_root: RemotePath::new(TEST_REMOTE_ROOT),
@@ -3650,8 +3658,8 @@ fn transfers_use_the_configured_metadata_policy(cx: &mut TestAppContext) {
     let _ = channels.command_rx.try_recv();
     let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabConnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabConnected(RemoteScoped::new(
                 scope,
                 TabConnected {
                     remote_root: RemotePath::new(TEST_REMOTE_ROOT),
@@ -3714,8 +3722,8 @@ fn directory_selection_starts_a_download_plan(cx: &mut TestAppContext) {
 
     let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabConnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabConnected(RemoteScoped::new(
                 scope,
                 TabConnected {
                     remote_root: RemotePath::new(TEST_REMOTE_ROOT),
@@ -3790,8 +3798,8 @@ fn connect_and_drain_with(
     let _ = channels.command_rx.try_recv();
     let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
     workspace.update_in(cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabConnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabConnected(RemoteScoped::new(
                 scope,
                 TabConnected {
                     remote_root: RemotePath::new(TEST_REMOTE_ROOT),
@@ -3815,8 +3823,8 @@ fn complete_connect(
 ) {
     let scope = RemoteEventScope::new(TabId(1), session_id, epoch);
     workspace.update_in(cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabConnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabConnected(RemoteScoped::new(
                 scope,
                 TabConnected {
                     remote_root: RemotePath::new(TEST_REMOTE_ROOT),
@@ -4485,8 +4493,8 @@ fn confirm_large_edit_uses_refreshed_epoch_after_reconnect(cx: &mut TestAppConte
     let _ = channels.command_rx.try_recv();
     let reconnect_scope = RemoteEventScope::new(TabId(1), SessionId(2), 2);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabConnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabConnected(RemoteScoped::new(
                 reconnect_scope,
                 TabConnected {
                     remote_root: RemotePath::new(TEST_REMOTE_ROOT),
@@ -5164,8 +5172,8 @@ fn older_directory_result_does_not_replace_a_newer_requested_path(cx: &mut TestA
 
     let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabConnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabConnected(RemoteScoped::new(
                 scope.clone(),
                 TabConnected {
                     remote_root: RemotePath::new(TEST_REMOTE_ROOT),
@@ -5187,8 +5195,8 @@ fn older_directory_result_does_not_replace_a_newer_requested_path(cx: &mut TestA
     let _ = channels.command_rx.try_recv();
 
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::RemoteDirLoaded(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::RemoteDirLoaded(RemoteScoped::new(
                 scope.clone(),
                 RemoteDirSnapshot {
                     path: older_path,
@@ -5229,8 +5237,8 @@ fn current_directory_failure_shows_recoverable_pane_error(cx: &mut TestAppContex
 
     let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabConnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabConnected(RemoteScoped::new(
                 scope.clone(),
                 TabConnected {
                     remote_root: RemotePath::new(TEST_REMOTE_ROOT),
@@ -5249,8 +5257,8 @@ fn current_directory_failure_shows_recoverable_pane_error(cx: &mut TestAppContex
     let _ = channels.command_rx.try_recv();
 
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::RemoteOperationFailed(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::RemoteOperationFailed(RemoteScoped::new(
                 scope,
                 RemoteOperationFailure {
                     operation: "Read remote directory".to_string(),
@@ -5303,8 +5311,8 @@ fn remote_listing_applies_the_tab_sort(cx: &mut TestAppContext) {
 
     let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabConnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabConnected(RemoteScoped::new(
                 scope.clone(),
                 TabConnected {
                     remote_root: RemotePath::new(TEST_REMOTE_ROOT),
@@ -5317,8 +5325,8 @@ fn remote_listing_applies_the_tab_sort(cx: &mut TestAppContext) {
     let _ = channels.command_rx.try_recv();
 
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::RemoteDirLoaded(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::RemoteDirLoaded(RemoteScoped::new(
                 scope,
                 RemoteDirSnapshot {
                     path: RemotePath::new(TEST_REMOTE_ROOT),
@@ -5384,8 +5392,8 @@ fn connect_and_land_on_root(
     let _ = channels.command_rx.try_recv();
     let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
     workspace.update_in(cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabConnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabConnected(RemoteScoped::new(
                 scope.clone(),
                 TabConnected {
                     remote_root: RemotePath::new(TEST_REMOTE_ROOT),
@@ -5432,8 +5440,8 @@ fn remote_dir_loaded_with_doc(
     scope: RemoteEventScope,
     size: Option<u64>,
     modified_at: Option<Timestamp>,
-) -> AppEvent {
-    AppEvent::RemoteDirLoaded(RemoteScoped::new(
+) -> WindowEvent {
+    WindowEvent::RemoteDirLoaded(RemoteScoped::new(
         scope,
         RemoteDirSnapshot {
             path: RemotePath::new(TEST_REMOTE_ROOT),
@@ -5487,7 +5495,7 @@ fn refresh_adopts_listing_when_only_sub_second_mtime_differs(cx: &mut TestAppCon
         modified_at: Some(Timestamp::from_secs_since_epoch(1_000)),
     };
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
+        workspace.handle_window_event(
             remote_dir_loaded_with_doc(scope, listed.size, listed.modified_at),
             window,
             cx,
@@ -5527,7 +5535,7 @@ fn refresh_preserves_baseline_when_remote_genuinely_changed(cx: &mut TestAppCont
         modified_at: Some(Timestamp::from_secs_since_epoch(2_000)),
     };
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
+        workspace.handle_window_event(
             remote_dir_loaded_with_doc(scope, changed.size, changed.modified_at),
             window,
             cx,
@@ -5568,7 +5576,7 @@ fn refresh_preserves_baseline_when_size_changed_at_same_second(cx: &mut TestAppC
         modified_at: Some(Timestamp::from_secs_since_epoch(1_000)),
     };
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
+        workspace.handle_window_event(
             remote_dir_loaded_with_doc(scope, bigger.size, bigger.modified_at),
             window,
             cx,
@@ -5845,8 +5853,8 @@ fn go_to_path_remote_requests_directory_with_push(cx: &mut TestAppContext) {
 
     let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabConnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabConnected(RemoteScoped::new(
                 scope.clone(),
                 TabConnected {
                     remote_root: RemotePath::new(TEST_REMOTE_ROOT),
@@ -5860,8 +5868,8 @@ fn go_to_path_remote_requests_directory_with_push(cx: &mut TestAppContext) {
     let _ = channels.command_rx.try_recv();
 
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::RemoteDirLoaded(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::RemoteDirLoaded(RemoteScoped::new(
                 scope,
                 RemoteDirSnapshot {
                     path: RemotePath::new(TEST_REMOTE_ROOT),
@@ -5903,8 +5911,8 @@ fn remote_navigation_and_refresh_keep_the_previous_listing_visible(cx: &mut Test
 
     let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabConnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabConnected(RemoteScoped::new(
                 scope.clone(),
                 TabConnected {
                     remote_root: RemotePath::new(TEST_REMOTE_ROOT),
@@ -5918,8 +5926,8 @@ fn remote_navigation_and_refresh_keep_the_previous_listing_visible(cx: &mut Test
 
     let child_path = RemotePath::new("/home/tester/child");
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::RemoteDirLoaded(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::RemoteDirLoaded(RemoteScoped::new(
                 scope,
                 RemoteDirSnapshot {
                     path: RemotePath::new(TEST_REMOTE_ROOT),
@@ -6022,8 +6030,8 @@ fn resolved_remote_directory_link_navigates_by_its_listed_path(cx: &mut TestAppC
     let link_path = RemotePath::new("/home/tester/latest");
     let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::RemoteEntryResolved(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::RemoteEntryResolved(RemoteScoped::new(
                 scope,
                 RemoteEntryResolution {
                     path: link_path.clone(),
@@ -6058,8 +6066,8 @@ fn resolved_remote_file_link_edits_the_write_through_target(cx: &mut TestAppCont
     let target_path = RemotePath::new("/home/tester/releases/2.txt");
     let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::RemoteEntryResolved(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::RemoteEntryResolved(RemoteScoped::new(
                 scope,
                 RemoteEntryResolution {
                     path: link_path.clone(),
@@ -6110,8 +6118,8 @@ fn remote_entry_resolution_is_dropped_when_the_pane_moved_on(cx: &mut TestAppCon
         // The pane has navigated into a different directory since the request.
         workspace.active_tab_mut().expect("active tab").remote.path =
             Some(RemotePath::new("/home/tester/archive"));
-        workspace.handle_app_event(
-            AppEvent::RemoteEntryResolved(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::RemoteEntryResolved(RemoteScoped::new(
                 scope,
                 RemoteEntryResolution {
                     path: link_path.clone(),
@@ -6169,8 +6177,8 @@ fn remote_entry_resolution_for_a_non_active_tab_is_ignored(cx: &mut TestAppConte
 
     let scope = RemoteEventScope::new(TabId(2), SessionId(2), 1);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::RemoteEntryResolved(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::RemoteEntryResolved(RemoteScoped::new(
                 scope,
                 RemoteEntryResolution {
                     path: RemotePath::new("/srv/other/latest"),
@@ -6223,8 +6231,8 @@ fn dropped_entry_resolution_clears_the_pending_check_status(cx: &mut TestAppCont
     workspace.update_in(&mut cx, |workspace, window, cx| {
         workspace.active_tab_mut().expect("active tab").remote.path =
             Some(RemotePath::new("/home/tester/archive"));
-        workspace.handle_app_event(
-            AppEvent::RemoteEntryResolved(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::RemoteEntryResolved(RemoteScoped::new(
                 RemoteEventScope::new(TabId(1), SessionId(1), 1),
                 RemoteEntryResolution {
                     path: link_path,
@@ -6262,8 +6270,8 @@ fn older_link_result_does_not_clear_a_newer_check_status(cx: &mut TestAppContext
         workspace.begin_link_check(TabId(1), EntryPath::Remote(first.clone()), Some(1), cx);
         // A second request supersedes the first one's status.
         workspace.begin_link_check(TabId(1), EntryPath::Remote(second), Some(1), cx);
-        workspace.handle_app_event(
-            AppEvent::RemoteEntryResolved(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::RemoteEntryResolved(RemoteScoped::new(
                 RemoteEventScope::new(TabId(1), SessionId(1), 1),
                 RemoteEntryResolution {
                     path: first,
@@ -6345,8 +6353,8 @@ fn stale_epoch_entry_resolution_is_dropped_by_the_state_guard(cx: &mut TestAppCo
             .active_tab_mut()
             .expect("active tab")
             .session_epoch = 2;
-        workspace.handle_app_event(
-            AppEvent::RemoteEntryResolved(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::RemoteEntryResolved(RemoteScoped::new(
                 scope,
                 RemoteEntryResolution {
                     path: RemotePath::new("/home/tester/latest"),
@@ -6591,8 +6599,8 @@ fn refresh_does_not_resync_a_write_through_session_baseline(cx: &mut TestAppCont
         // mtime). They must not overwrite the target's baseline.
         workspace.active_tab_mut().expect("active tab").remote.path =
             Some(RemotePath::new(TEST_REMOTE_ROOT));
-        workspace.handle_app_event(
-            AppEvent::RemoteDirLoaded(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::RemoteDirLoaded(RemoteScoped::new(
                 scope,
                 RemoteDirSnapshot {
                     path: RemotePath::new(TEST_REMOTE_ROOT),
@@ -6637,8 +6645,8 @@ fn entry_resolve_routing_failure_clears_its_pending_check(cx: &mut TestAppContex
     let link_path = RemotePath::new("/home/tester/latest");
     workspace.update_in(&mut cx, |workspace, window, cx| {
         workspace.begin_link_check(TabId(1), EntryPath::Remote(link_path.clone()), Some(1), cx);
-        workspace.handle_app_event(
-            AppEvent::RemoteEntryResolveFailed(macsftp_core::RemoteEntryResolveFailure {
+        workspace.handle_window_event(
+            WindowEvent::RemoteEntryResolveFailed(macsftp_core::RemoteEntryResolveFailure {
                 tab_id: TabId(1),
                 session_epoch: 1,
                 path: link_path.clone(),
@@ -6680,8 +6688,8 @@ fn same_path_failure_from_a_superseded_epoch_keeps_the_newer_check(cx: &mut Test
         // The user reopened the same path after a reconnect; the pending check
         // belongs to the new epoch.
         workspace.begin_link_check(TabId(1), EntryPath::Remote(link_path.clone()), Some(2), cx);
-        workspace.handle_app_event(
-            AppEvent::RemoteEntryResolveFailed(macsftp_core::RemoteEntryResolveFailure {
+        workspace.handle_window_event(
+            WindowEvent::RemoteEntryResolveFailed(macsftp_core::RemoteEntryResolveFailure {
                 tab_id: TabId(1),
                 session_epoch: 2,
                 path: link_path.clone(),
@@ -6694,8 +6702,8 @@ fn same_path_failure_from_a_superseded_epoch_keeps_the_newer_check(cx: &mut Test
     workspace.update_in(&mut cx, |workspace, window, cx| {
         workspace.begin_link_check(TabId(1), EntryPath::Remote(link_path.clone()), Some(3), cx);
         // A late failure from the superseded epoch names the same path.
-        workspace.handle_app_event(
-            AppEvent::RemoteEntryResolveFailed(macsftp_core::RemoteEntryResolveFailure {
+        workspace.handle_window_event(
+            WindowEvent::RemoteEntryResolveFailed(macsftp_core::RemoteEntryResolveFailure {
                 tab_id: TabId(1),
                 session_epoch: 2,
                 path: link_path.clone(),
@@ -6726,8 +6734,8 @@ fn unresolved_remote_link_reports_an_error_without_moving_the_pane(cx: &mut Test
     let link_path = RemotePath::new("/home/tester/broken");
     let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::RemoteEntryResolved(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::RemoteEntryResolved(RemoteScoped::new(
                 scope,
                 RemoteEntryResolution {
                     path: link_path.clone(),
@@ -6773,8 +6781,8 @@ fn disconnect_event_clears_remote_pane_and_expires_modal(cx: &mut TestAppContext
 
     let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabDisconnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabDisconnected(RemoteScoped::new(
                 scope,
                 TabDisconnected {
                     reason: DisconnectReason::ConnectionLost,
@@ -6855,8 +6863,8 @@ fn request_connect_opens_form_then_reuses_session_credentials(cx: &mut TestAppCo
     // without reopening the form.
     let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabDisconnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabDisconnected(RemoteScoped::new(
                 scope,
                 TabDisconnected {
                     reason: DisconnectReason::ConnectionLost,
@@ -7750,8 +7758,8 @@ fn host_key_mismatch_fails_tab_and_blocks(cx: &mut TestAppContext) {
     let _ = channels.command_rx.try_recv();
 
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::HostKeyMismatch(macsftp_core::HostKeyMismatch {
+        workspace.handle_window_event(
+            WindowEvent::HostKeyMismatch(macsftp_core::HostKeyMismatch {
                 scope: macsftp_core::RemoteEventScope::new(
                     macsftp_core::TabId(1),
                     macsftp_core::SessionId(1),
@@ -7796,8 +7804,8 @@ fn stale_host_key_mismatch_does_not_fail_replacement_session(cx: &mut TestAppCon
 
     // Reconnect: bump the tab to epoch 2 / session 2.
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabDisconnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabDisconnected(RemoteScoped::new(
                 RemoteEventScope::new(TabId(1), SessionId(1), 1),
                 TabDisconnected {
                     reason: DisconnectReason::UserRequested,
@@ -7810,8 +7818,8 @@ fn stale_host_key_mismatch_does_not_fail_replacement_session(cx: &mut TestAppCon
     });
     let _ = channels.command_rx.try_recv();
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabConnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabConnected(RemoteScoped::new(
                 RemoteEventScope::new(TabId(1), SessionId(2), 2),
                 TabConnected {
                     remote_root: RemotePath::new(TEST_REMOTE_ROOT),
@@ -7825,8 +7833,8 @@ fn stale_host_key_mismatch_does_not_fail_replacement_session(cx: &mut TestAppCon
     // A stale mismatch from the OLD session (epoch 1) must be dropped by
     // the central stale-event guard and must NOT fail the replacement.
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::HostKeyMismatch(macsftp_core::HostKeyMismatch {
+        workspace.handle_window_event(
+            WindowEvent::HostKeyMismatch(macsftp_core::HostKeyMismatch {
                 scope: RemoteEventScope::new(TabId(1), SessionId(1), 1),
                 host: "mock.example.com".to_string(),
                 port: 22,
@@ -7921,7 +7929,7 @@ fn completed_child_jobs_finalize_root_plan(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
     let now = Timestamp(std::time::SystemTime::now());
 
-    workspace.update_in(&mut cx, |workspace, window, cx| {
+    workspace.update_in(&mut cx, |_workspace, _window, cx| {
         let plan_id = TransferPlanId(1);
         let root_job_id = TransferId(1);
         let _child_job_id = TransferId(2);
@@ -7948,13 +7956,12 @@ fn completed_child_jobs_finalize_root_plan(cx: &mut TestAppContext) {
             warnings: Vec::new(),
             created_at: now,
         };
-        workspace.handle_app_event(
-            AppEvent::TransferPlanStarted(Box::new(TransferPlanSnapshot { plan, root_job })),
-            window,
-            cx,
+        cx.apply_transfer_event(
+            &TransferEvent::PlanStarted(Box::new(TransferPlanSnapshot { plan, root_job })),
+            now,
         );
 
-        workspace.handle_app_event(AppEvent::TransferPlanCompleted { plan_id }, window, cx);
+        cx.apply_transfer_event(&TransferEvent::PlanCompleted { plan_id }, now);
 
         // Without children, planning completion should finalize the root
         // job immediately so it does not linger in the Queued section.
@@ -7974,7 +7981,7 @@ fn completed_child_jobs_finalize_root_plan(cx: &mut TestAppContext) {
         assert_eq!(plan.state, TransferPlanState::Completed);
     });
 
-    workspace.update_in(&mut cx, |workspace, window, cx| {
+    workspace.update_in(&mut cx, |_workspace, _window, cx| {
         let plan_id = TransferPlanId(2);
         let root_job_id = TransferId(10);
         let child_job_id = TransferId(11);
@@ -8001,12 +8008,11 @@ fn completed_child_jobs_finalize_root_plan(cx: &mut TestAppContext) {
             warnings: Vec::new(),
             created_at: now,
         };
-        workspace.handle_app_event(
-            AppEvent::TransferPlanStarted(Box::new(TransferPlanSnapshot { plan, root_job })),
-            window,
-            cx,
+        cx.apply_transfer_event(
+            &TransferEvent::PlanStarted(Box::new(TransferPlanSnapshot { plan, root_job })),
+            now,
         );
-        workspace.handle_app_event(AppEvent::TransferPlanCompleted { plan_id }, window, cx);
+        cx.apply_transfer_event(&TransferEvent::PlanCompleted { plan_id }, now);
 
         // Plan completion with children keeps root in Queued.
         let root_job = cx
@@ -8028,22 +8034,20 @@ fn completed_child_jobs_finalize_root_plan(cx: &mut TestAppContext) {
             warnings: Vec::new(),
             created_at: now,
         };
-        workspace.handle_app_event(
-            AppEvent::TransferPlanProgress(TransferPlanProgress {
+        cx.apply_transfer_event(
+            &TransferEvent::PlanProgress(TransferPlanProgress {
                 plan_id,
                 child_jobs: vec![child_job],
                 planned_count: 1,
                 total_bytes: Some(100),
             }),
-            window,
-            cx,
+            now,
         );
-        workspace.handle_app_event(
-            AppEvent::TransferCompleted {
+        cx.apply_transfer_event(
+            &TransferEvent::Completed {
                 transfer_id: child_job_id,
             },
-            window,
-            cx,
+            now,
         );
 
         // After the last child completes, the root plan/job must finalize.
@@ -8769,8 +8773,8 @@ fn fs_operation_failed_sets_pane_error(cx: &mut TestAppContext) {
     workspace.update_in(&mut cx, |workspace, window, cx| {
         let tab_id = workspace.active_tab().expect("tab").id;
         let epoch = workspace.active_tab().expect("tab").session_epoch;
-        workspace.handle_app_event(
-            AppEvent::FsOperationFailed {
+        workspace.handle_window_event(
+            WindowEvent::FsOperationFailed {
                 scope: macsftp_core::FsScope::Remote {
                     tab_id,
                     session_epoch: epoch,
@@ -10162,8 +10166,8 @@ fn copy_path_copies_a_remote_entry_even_while_disconnected(cx: &mut TestAppConte
     let scope = connect_and_land_on_root(&workspace, &mut cx, &channels);
     let remote_path = RemotePath::new(format!("{TEST_REMOTE_ROOT}/doc.txt"));
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::RemoteDirLoaded(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::RemoteDirLoaded(RemoteScoped::new(
                 scope,
                 RemoteDirSnapshot {
                     path: RemotePath::new(TEST_REMOTE_ROOT),
@@ -10868,14 +10872,14 @@ fn seed_finished_transfer(
         conflict_policy: job.conflict_policy.clone(),
     };
     cx.apply_transfer_event(
-        &AppEvent::TransferPlanStarted(Box::new(TransferPlanSnapshot {
+        &TransferEvent::PlanStarted(Box::new(TransferPlanSnapshot {
             plan,
             root_job: job,
         })),
         Timestamp::from_secs_since_epoch(1),
     );
     cx.apply_transfer_event(
-        &AppEvent::TransferCompleted { transfer_id: id },
+        &TransferEvent::Completed { transfer_id: id },
         Timestamp::from_secs_since_epoch(2),
     );
 }
@@ -11046,8 +11050,8 @@ fn recent_connections_menu_targets_the_row(cx: &mut TestAppContext) {
     let _ = channels.command_rx.try_recv();
     let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabConnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabConnected(RemoteScoped::new(
                 scope,
                 TabConnected {
                     remote_root: RemotePath::new(TEST_REMOTE_ROOT),
@@ -11109,8 +11113,8 @@ fn copying_a_recent_endpoint_copies_user_host_port(cx: &mut TestAppContext) {
     let _ = channels.command_rx.try_recv();
     let scope = RemoteEventScope::new(TabId(1), SessionId(1), 1);
     workspace.update_in(&mut cx, |workspace, window, cx| {
-        workspace.handle_app_event(
-            AppEvent::TabConnected(RemoteScoped::new(
+        workspace.handle_window_event(
+            WindowEvent::TabConnected(RemoteScoped::new(
                 scope,
                 TabConnected {
                     remote_root: RemotePath::new(TEST_REMOTE_ROOT),
@@ -11560,14 +11564,14 @@ fn a_long_transfer_section_pages_its_rows(cx: &mut TestAppContext) {
             };
             let now = macsftp_core::Timestamp::from_secs_since_epoch(1);
             cx.apply_transfer_event(
-                &AppEvent::TransferPlanStarted(Box::new(TransferPlanSnapshot {
+                &TransferEvent::PlanStarted(Box::new(TransferPlanSnapshot {
                     plan,
                     root_job: job,
                 })),
                 now,
             );
             cx.apply_transfer_event(
-                &AppEvent::TransferCompleted { transfer_id: id },
+                &TransferEvent::Completed { transfer_id: id },
                 macsftp_core::Timestamp::from_secs_since_epoch(2),
             );
         }
@@ -11682,7 +11686,7 @@ fn cancel_all_transfers_is_reachable_from_chord_menu_and_palette(cx: &mut TestAp
         };
         cx.update(|_window, cx| {
             cx.apply_transfer_event(
-                &AppEvent::TransferPlanStarted(Box::new(macsftp_core::TransferPlanSnapshot {
+                &TransferEvent::PlanStarted(Box::new(macsftp_core::TransferPlanSnapshot {
                     plan,
                     root_job: job,
                 })),

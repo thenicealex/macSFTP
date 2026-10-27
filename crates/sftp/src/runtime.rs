@@ -1568,8 +1568,9 @@ async fn emit_remote_edit_dispatch_failure(
 /// `RemoteEditSnapshotDispatchFailed` so the coordinator can reset the exact
 /// pending `(tab_id, session_epoch, edit_session_id, check_id, path)` tuple and
 /// retry the save. No fabricated `SessionId`/`RemoteEventScope` is used because
-/// routing never reached a live actor — the event is epoch-correlated, not
-/// remote-session-scoped (see `AppEvent::remote_scope`).
+/// routing never reached a live actor — the event is epoch-correlated, and
+/// [`macsftp_core::AppEvent::route`] sends it to the process-owned edit-check
+/// sink rather than to a window.
 async fn route_check_remote_edit_snapshot(
     command: CheckRemoteEditSnapshotCommand,
     sessions: &HashMap<TabId, RemoteSessionHandle>,
@@ -2837,10 +2838,14 @@ mod tests {
             }
             other => panic!("expected RemoteEditSnapshotDispatchFailed, got {other:?}"),
         }
-        assert_eq!(
-            event.remote_scope(),
-            None,
-            "dispatch failure is epoch-correlated, not remote-session-scoped"
+        assert!(
+            matches!(
+                event.route(),
+                macsftp_core::RoutedEvent::Process(macsftp_core::ProcessEvent::EditCheck(
+                    macsftp_core::EditCheckEvent::DispatchFailed(_)
+                ))
+            ),
+            "dispatch failure is epoch-correlated and process-owned"
         );
     }
 

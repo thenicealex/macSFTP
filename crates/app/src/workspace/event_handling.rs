@@ -1,41 +1,20 @@
 use gpui_kit::{Context, UniformListScrollHandle, Window};
 use macsftp_core::{
-    AppEvent, EntryPath, ErrorCode, FileKind, ModalRequest, RemotePath, RemoteSnapshot,
-    RestoredTabTarget, TabId, UserFacingError, sort_entries,
+    EntryPath, ErrorCode, FileKind, ModalRequest, RemotePath, RemoteSnapshot, RestoredTabTarget,
+    TabId, UserFacingError, WindowEvent, sort_entries,
 };
 
 use tracing::debug;
 
 use crate::resources::ActiveResources;
-#[cfg(test)]
-use crate::resources::ActiveTransfers;
 
 impl crate::workspace::Workspace {
-    pub(crate) fn handle_app_event(
+    pub(crate) fn handle_window_event(
         &mut self,
-        event: AppEvent,
+        event: WindowEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Test-only adapter for older direct Workspace tests. Production
-        // transfer ownership lives exclusively in AppEventCoordinator.
-        #[cfg(test)]
-        if event.is_transfer_event() {
-            let conflict_prompt = match &event {
-                AppEvent::TransferConflict(prompt) => Some(prompt.clone()),
-                _ => None,
-            };
-            cx.apply_transfer_event(
-                &event,
-                macsftp_core::Timestamp(std::time::SystemTime::now()),
-            );
-            if let Some(prompt) = conflict_prompt {
-                self.present_transfer_conflict(prompt, window, cx);
-            }
-            cx.notify();
-            return;
-        }
-
         if !self.state.should_accept_event(&event) {
             // Events may carry host-key fingerprints, paths, and remote error
             // details. Keep stale-event diagnostics structural rather than
@@ -45,21 +24,21 @@ impl crate::workspace::Workspace {
         }
 
         match event {
-            AppEvent::TabConnecting { .. } => {
+            WindowEvent::TabConnecting { .. } => {
                 // Already reflected optimistically when the command was
                 // sent; nothing to update.
             }
-            AppEvent::HostKeyUnknown(prompt) => {
+            WindowEvent::HostKeyUnknown(prompt) => {
                 if let Some(tab) = self.state.tabs.find_tab_mut(prompt.tab_id) {
                     tab.await_host_key(prompt.session_id, prompt.request_id);
                     self.state.modals.active.push(ModalRequest::HostKey(prompt));
                     window.focus(&self.modal_focus, cx);
                 }
             }
-            AppEvent::KeyboardInteractivePrompt(prompt) => {
+            WindowEvent::KeyboardInteractivePrompt(prompt) => {
                 self.present_keyboard_interactive(prompt, window, cx);
             }
-            AppEvent::HostKeyMismatch(mismatch) => {
+            WindowEvent::HostKeyMismatch(mismatch) => {
                 // Security block, no override (architecture §10): the tab fails
                 // with an explanation and the known_hosts file location.
                 if let Some(tab) = self.state.tabs.find_tab_mut(mismatch.scope.tab_id) {
@@ -85,7 +64,7 @@ impl crate::workspace::Workspace {
                     tab.fail(error);
                 }
             }
-            AppEvent::TabConnected(scoped) => {
+            WindowEvent::TabConnected(scoped) => {
                 let tab_id = scoped.scope.tab_id;
                 let remote_root = scoped.payload.remote_root;
                 if let Some(tab) = self.state.tabs.find_tab_mut(tab_id) {
@@ -118,7 +97,7 @@ impl crate::workspace::Workspace {
                     self.record_recent_for_tab(tab_id, cx);
                 }
             }
-            AppEvent::TabDisconnected(scoped) => {
+            WindowEvent::TabDisconnected(scoped) => {
                 let tab_id = scoped.scope.tab_id;
                 cx.resources_mut()
                     .edit_sessions
@@ -161,7 +140,7 @@ impl crate::workspace::Workspace {
                     self.focus_pane(self.focused_side, window, cx);
                 }
             }
-            AppEvent::AuthFailed(scoped) => {
+            WindowEvent::AuthFailed(scoped) => {
                 if let Some(tab) = self.state.tabs.find_tab_mut(scoped.scope.tab_id) {
                     tab.fail(scoped.payload.reason);
                 }
@@ -170,7 +149,7 @@ impl crate::workspace::Workspace {
                     self.focus_pane(self.focused_side, window, cx);
                 }
             }
-            AppEvent::RemoteDirLoading(scoped) => {
+            WindowEvent::RemoteDirLoading(scoped) => {
                 if let Some(tab) = self.state.tabs.find_tab_mut(scoped.scope.tab_id)
                     && tab.remote.path.as_ref() == Some(&scoped.payload.path)
                 {
@@ -178,7 +157,7 @@ impl crate::workspace::Workspace {
                     tab.remote.error = None;
                 }
             }
-            AppEvent::RemoteDirLoaded(scoped) => {
+            WindowEvent::RemoteDirLoaded(scoped) => {
                 let tab_id = scoped.scope.tab_id;
                 let mut entries = scoped.payload.entries;
                 // The (path, snapshot) pairs of the freshly-applied listing,
@@ -219,7 +198,7 @@ impl crate::workspace::Workspace {
                     Self::resync_edit_baselines_on_refresh(tab_id, &listing, cx);
                 }
             }
-            AppEvent::RemoteEntryResolved(scoped) => {
+            WindowEvent::RemoteEntryResolved(scoped) => {
                 // Navigation and editing act on this window's active tab; an
                 // event for a tab owned by another window must not steer it.
                 let tab_id = scoped.scope.tab_id;
@@ -272,7 +251,7 @@ impl crate::workspace::Workspace {
                     }
                 }
             }
-            AppEvent::RemoteEntryResolveFailed(failure) => {
+            WindowEvent::RemoteEntryResolveFailed(failure) => {
                 // Epoch-correlated: accept only while this tab is still the
                 // same session. Otherwise the tab reconnected and the pending
                 // state belongs to the old one.
@@ -292,7 +271,7 @@ impl crate::workspace::Workspace {
                         Some(format!("{}: {}", failure.error.title, failure.error.message).into());
                 }
             }
-            AppEvent::RemoteOperationFailed(scoped) => {
+            WindowEvent::RemoteOperationFailed(scoped) => {
                 if let Some(tab) = self.state.tabs.find_tab_mut(scoped.scope.tab_id)
                     && scoped
                         .payload
@@ -312,7 +291,7 @@ impl crate::workspace::Workspace {
                     cx,
                 );
             }
-            AppEvent::FsOperationFailed { scope, failure } => {
+            WindowEvent::FsOperationFailed { scope, failure } => {
                 // FsScope has no session_id; filter by tab + epoch only.
                 // Fs failures stay status-bar-only (listing remains visible);
                 // directory-read errors use RemoteOperationFailed + in-pane Retry.
@@ -333,26 +312,6 @@ impl crate::workspace::Workspace {
                     self.status_message =
                         Some(format!("{}: {}", failure.title, failure.message).into());
                 }
-            }
-            AppEvent::TransferPlanStarted(_)
-            | AppEvent::TransferPlanProgress(_)
-            | AppEvent::TransferPlanCompleted { .. }
-            | AppEvent::TransferPlanCancelled { .. }
-            | AppEvent::TransferPlanFailed { .. }
-            | AppEvent::TransferConflict(_)
-            | AppEvent::TransferRunning(_)
-            | AppEvent::TransferProgress(_)
-            | AppEvent::TransferWarning(_)
-            | AppEvent::TransferCompleted { .. }
-            | AppEvent::TransferSkipped { .. }
-            | AppEvent::TransferFailed(_)
-            | AppEvent::ResidualTempCreated(_)
-            | AppEvent::ResidualTempCleared { .. }
-            | AppEvent::RemoteEditSnapshotChecked(_)
-            | AppEvent::RemoteEditSnapshotCheckFailed(_)
-            | AppEvent::RemoteEditSnapshotDispatchFailed(_)
-            | AppEvent::LocalEditModified { .. } => {
-                debug_assert!(false, "process-owned event reached a Workspace")
             }
         }
         cx.notify();
