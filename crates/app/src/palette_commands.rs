@@ -1,5 +1,18 @@
 //! Explicit command palette registry (phase 4).
 //! Not reflective of all `actions!` — only user-facing commands with stable ids.
+//! Each row carries the action it runs; the palette never calls a handler itself.
+
+use gpui_kit::Action;
+
+use crate::app_actions::{
+    CancelAllTransfers, CloseTab, CopyPath, DeleteSelection, DownloadSelection, FilterPane,
+    FocusLocalPane, FocusRemotePane, GoToPath, NavigateBack, NavigateForward, NewFolder, NewTab,
+    OpenCommandPalette, OpenLogFolder, OpenProfiles, OpenSelectedEntry, OpenSettings,
+    ParentDirectory, ReconnectTab, RefreshPane, RenameEntry, ShowAbout, ShowInFinder,
+    ShowTransferDrawer, SortByDateModifiedAscending, SortByDateModifiedDescending,
+    SortByNameAscending, SortByNameDescending, SortBySizeAscending, SortBySizeDescending,
+    ToggleHiddenFiles, UploadEditedFile, UploadSelection,
+};
 
 /// Coarse availability predicate for a palette entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +31,8 @@ pub struct PaletteCommand {
     pub keywords: &'static [&'static str],
     pub keybinding: Option<&'static str>,
     pub when: PaletteWhen,
+    /// The action this row runs — the same one the menu bar and keymap use.
+    pub action: fn() -> Box<dyn Action>,
 }
 
 /// View-side facts used to evaluate [`PaletteWhen`].
@@ -35,6 +50,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["connection", "open", "connect", "tab", "new tab"],
         keybinding: Some("⌘T"),
         when: PaletteWhen::Always,
+        action: || Box::new(NewTab),
     },
     PaletteCommand {
         id: "CloseTab",
@@ -42,6 +58,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["close", "dismiss"],
         keybinding: Some("⌘W"),
         when: PaletteWhen::HasTabs,
+        action: || Box::new(CloseTab),
     },
     PaletteCommand {
         id: "RefreshPane",
@@ -49,6 +66,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["reload", "update", "list"],
         keybinding: Some("⌘R"),
         when: PaletteWhen::HasActiveTab,
+        action: || Box::new(RefreshPane),
     },
     PaletteCommand {
         id: "FocusLocalPane",
@@ -56,6 +74,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["left", "local", "side", "focus local pane"],
         keybinding: Some("⌘1"),
         when: PaletteWhen::HasActiveTab,
+        action: || Box::new(FocusLocalPane),
     },
     PaletteCommand {
         id: "FocusRemotePane",
@@ -63,6 +82,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["right", "remote", "side", "server", "focus remote pane"],
         keybinding: Some("⌘2"),
         when: PaletteWhen::HasActiveTab,
+        action: || Box::new(FocusRemotePane),
     },
     PaletteCommand {
         id: "OpenSelectedEntry",
@@ -70,6 +90,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["enter", "open selected", "open file", "launch"],
         keybinding: Some("↩"),
         when: PaletteWhen::HasActiveTab,
+        action: || Box::new(OpenSelectedEntry),
     },
     PaletteCommand {
         id: "UploadSelection",
@@ -77,6 +98,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["put", "send", "transfer", "upload selection"],
         keybinding: Some("⌘U"),
         when: PaletteWhen::HasActiveTab,
+        action: || Box::new(UploadSelection),
     },
     PaletteCommand {
         id: "UploadEditedFile",
@@ -84,6 +106,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["upload", "edit", "save", "remote edit", "changes"],
         keybinding: Some("⌘⇧U"),
         when: PaletteWhen::ConnectedRemote,
+        action: || Box::new(UploadEditedFile),
     },
     PaletteCommand {
         id: "DownloadSelection",
@@ -91,6 +114,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["get", "receive", "transfer", "download selection"],
         keybinding: Some("⌘D"),
         when: PaletteWhen::ConnectedRemote,
+        action: || Box::new(DownloadSelection),
     },
     PaletteCommand {
         id: "CancelAllTransfers",
@@ -98,6 +122,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["stop", "abort", "cancel", "transfers", "queue"],
         keybinding: Some("⌘."),
         when: PaletteWhen::HasActiveTab,
+        action: || Box::new(CancelAllTransfers),
     },
     PaletteCommand {
         id: "ShowTransferDrawer",
@@ -112,6 +137,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         ],
         keybinding: Some("⌘J"),
         when: PaletteWhen::Always,
+        action: || Box::new(ShowTransferDrawer),
     },
     PaletteCommand {
         id: "OpenSettings",
@@ -119,6 +145,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["preferences", "options", "config", "open settings"],
         keybinding: Some("⌘,"),
         when: PaletteWhen::Always,
+        action: || Box::new(OpenSettings),
     },
     PaletteCommand {
         id: "OpenProfiles",
@@ -126,6 +153,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["profile", "credentials", "settings", "manage profiles"],
         keybinding: None,
         when: PaletteWhen::Always,
+        action: || Box::new(OpenProfiles),
     },
     PaletteCommand {
         id: "ShowAbout",
@@ -133,6 +161,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["version", "info"],
         keybinding: None,
         when: PaletteWhen::Always,
+        action: || Box::new(ShowAbout),
     },
     PaletteCommand {
         id: "DeleteSelection",
@@ -140,6 +169,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["remove", "trash", "rm", "delete selection"],
         keybinding: Some("⌘⌫"),
         when: PaletteWhen::HasActiveTab,
+        action: || Box::new(DeleteSelection),
     },
     PaletteCommand {
         id: "RenameEntry",
@@ -147,6 +177,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["mv", "move", "name"],
         keybinding: Some("F2"),
         when: PaletteWhen::HasActiveTab,
+        action: || Box::new(RenameEntry),
     },
     PaletteCommand {
         id: "NewFolder",
@@ -154,6 +185,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["mkdir", "directory", "create"],
         keybinding: Some("⌘⇧N"),
         when: PaletteWhen::HasActiveTab,
+        action: || Box::new(NewFolder),
     },
     PaletteCommand {
         id: "FilterPane",
@@ -161,6 +193,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["search", "find", "narrow", "filter pane"],
         keybinding: Some("⌘F"),
         when: PaletteWhen::HasActiveTab,
+        action: || Box::new(FilterPane),
     },
     PaletteCommand {
         id: "GoToPath",
@@ -168,6 +201,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["jump", "cd", "location", "go to path"],
         keybinding: Some("⌘⇧G"),
         when: PaletteWhen::HasActiveTab,
+        action: || Box::new(GoToPath),
     },
     // Sort sets field and direction explicitly, mirroring View ▸ Sort By: the
     // palette row and the menu item read the same way, and neither has to
@@ -178,6 +212,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["sort", "order", "name", "ascending"],
         keybinding: None,
         when: PaletteWhen::HasActiveTab,
+        action: || Box::new(SortByNameAscending),
     },
     PaletteCommand {
         id: "SortByNameDescending",
@@ -185,6 +220,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["sort", "order", "name", "descending", "reverse"],
         keybinding: None,
         when: PaletteWhen::HasActiveTab,
+        action: || Box::new(SortByNameDescending),
     },
     PaletteCommand {
         id: "SortBySizeAscending",
@@ -192,6 +228,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["sort", "order", "size", "ascending"],
         keybinding: None,
         when: PaletteWhen::HasActiveTab,
+        action: || Box::new(SortBySizeAscending),
     },
     PaletteCommand {
         id: "SortBySizeDescending",
@@ -199,6 +236,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["sort", "order", "size", "descending", "reverse"],
         keybinding: None,
         when: PaletteWhen::HasActiveTab,
+        action: || Box::new(SortBySizeDescending),
     },
     PaletteCommand {
         id: "SortByDateModifiedAscending",
@@ -206,6 +244,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["sort", "order", "modified", "date", "ascending"],
         keybinding: None,
         when: PaletteWhen::HasActiveTab,
+        action: || Box::new(SortByDateModifiedAscending),
     },
     PaletteCommand {
         id: "SortByDateModifiedDescending",
@@ -213,6 +252,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["sort", "order", "modified", "date", "descending", "reverse"],
         keybinding: None,
         when: PaletteWhen::HasActiveTab,
+        action: || Box::new(SortByDateModifiedDescending),
     },
     PaletteCommand {
         id: "NavigateBack",
@@ -220,6 +260,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["history", "previous"],
         keybinding: Some("⌘["),
         when: PaletteWhen::HasActiveTab,
+        action: || Box::new(NavigateBack),
     },
     PaletteCommand {
         id: "NavigateForward",
@@ -227,6 +268,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["history", "next"],
         keybinding: Some("⌘]"),
         when: PaletteWhen::HasActiveTab,
+        action: || Box::new(NavigateForward),
     },
     // Toolbar parent-directory control (⌘↑). Display string is the source of
     // truth for path-bar tooltips via `labeled_shortcut`.
@@ -236,6 +278,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["up", "cd..", "parent", "folder", "parent directory"],
         keybinding: Some("⌘↑"),
         when: PaletteWhen::HasActiveTab,
+        action: || Box::new(ParentDirectory),
     },
     PaletteCommand {
         id: "ToggleHiddenFiles",
@@ -243,6 +286,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["dotfiles", "hidden", "toggle"],
         keybinding: Some("⌘⇧."),
         when: PaletteWhen::Always,
+        action: || Box::new(ToggleHiddenFiles),
     },
     PaletteCommand {
         id: "CopyPath",
@@ -250,6 +294,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["clipboard", "path"],
         keybinding: Some("⌘⇧C"),
         when: PaletteWhen::HasActiveTab,
+        action: || Box::new(CopyPath),
     },
     PaletteCommand {
         id: "ShowInFinder",
@@ -257,6 +302,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["reveal", "finder", "locate", "show in finder"],
         keybinding: None,
         when: PaletteWhen::HasActiveTab,
+        action: || Box::new(ShowInFinder),
     },
     PaletteCommand {
         id: "ReconnectTab",
@@ -264,6 +310,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["retry", "connect", "session"],
         keybinding: Some("⌘⇧R"),
         when: PaletteWhen::HasActiveTab,
+        action: || Box::new(ReconnectTab),
     },
     PaletteCommand {
         id: "OpenLogFolder",
@@ -271,6 +318,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["logs", "diagnostics", "debug", "open log folder"],
         keybinding: None,
         when: PaletteWhen::Always,
+        action: || Box::new(OpenLogFolder),
     },
     PaletteCommand {
         id: "OpenCommandPalette",
@@ -278,6 +326,7 @@ static PALETTE_COMMANDS: &[PaletteCommand] = &[
         keywords: &["commands", "actions", "search", "command palette"],
         keybinding: Some("⌘⇧P"),
         when: PaletteWhen::Always,
+        action: || Box::new(OpenCommandPalette),
     },
 ];
 
@@ -437,6 +486,18 @@ mod tests {
         for (id, keybinding) in required {
             let command = by_id.get(id).unwrap_or_else(|| panic!("missing id: {id}"));
             assert_eq!(command.keybinding, keybinding, "keybinding for {id}");
+        }
+    }
+
+    #[test]
+    fn every_row_dispatches_its_registered_action() {
+        for command in all_palette_commands() {
+            assert_eq!(
+                (command.action)().name(),
+                format!("macsftp::{}", command.id),
+                "row {} must run its own action",
+                command.id
+            );
         }
     }
 

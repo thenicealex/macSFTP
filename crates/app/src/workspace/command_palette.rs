@@ -10,9 +10,8 @@ use macsftp_core::ConnectionState;
 use macsftp_ui::ActiveTheme;
 
 use crate::palette_commands::{PaletteCommand, PaletteContext, filter_palette_commands};
+use crate::workspace::Workspace;
 use crate::workspace::overlay::OverlayFade;
-use crate::workspace::{PaneSide, Workspace, WorkspaceSurface};
-use macsftp_core::{FileSortField, HistoryOp, SortDirection};
 
 impl Workspace {
     pub(crate) fn palette_context(&self) -> PaletteContext {
@@ -63,9 +62,16 @@ impl Workspace {
         let Some(command) = hits.get(self.palette.selected) else {
             return;
         };
-        let id = command.id;
+        let action = (command.action)();
+        let workspace_focus = self.workspace_focus.clone();
         self.close_command_palette(window, cx);
-        self.dispatch_palette_id(id, window, cx);
+        // Same path as the menu bar and the keymap: one action, one handler.
+        // Deferred, because the handler is a listener on this same entity,
+        // which GPUI cannot update while this update is still in progress.
+        // The Workspace root, unlike the focused pane, renders on every surface.
+        window.defer(cx, move |window, cx| {
+            workspace_focus.dispatch_action(action.as_ref(), window, cx);
+        });
     }
 
     pub(crate) fn execute_palette_at(
@@ -76,114 +82,6 @@ impl Workspace {
     ) {
         self.palette.selected = index;
         self.execute_palette_selected(window, cx);
-    }
-
-    pub(crate) fn dispatch_palette_id(
-        &mut self,
-        id: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match id {
-            "NewTab" => self.open_new_tab(window, cx),
-            "CloseTab" => {
-                if let Some(tab_id) = self.state.tabs.active_tab_id {
-                    self.close_tab_by_id(tab_id, window, cx);
-                }
-            }
-            "RefreshPane" => self.refresh_focused_pane(window, cx),
-            "FocusLocalPane" => self.focus_pane(PaneSide::Local, window, cx),
-            "FocusRemotePane" => self.focus_pane(PaneSide::Remote, window, cx),
-            "OpenSelectedEntry" => self.open_selected_entry(window, cx),
-            "UploadSelection" => self.upload_selection(cx),
-            "UploadEditedFile" => self.upload_selected_edit(cx),
-            "DownloadSelection" => self.download_selection(cx),
-            "ShowTransferDrawer" => {
-                self.transfer_drawer.open = !self.transfer_drawer.open;
-                cx.notify();
-            }
-            "OpenSettings" => {
-                if self.connect_form_ui.form.is_none()
-                    && self.active_host_key_prompt().is_none()
-                    && self.active_keyboard_interactive_prompt().is_none()
-                    && self.active_transfer_conflict_prompt().is_none()
-                    && self.modal_inputs.delete_confirm.is_none()
-                    && !self.go_to_path.open
-                {
-                    self.modal_inputs.about_open = false;
-                    self.surface = WorkspaceSurface::Settings;
-                    self.settings.section = crate::workspace::profiles::SettingsSection::General;
-                    self.workspace_focus.focus(window, cx);
-                    cx.notify();
-                }
-            }
-            "OpenProfiles" => {
-                if self.connect_form_ui.form.is_none()
-                    && self.active_host_key_prompt().is_none()
-                    && self.active_keyboard_interactive_prompt().is_none()
-                    && self.active_transfer_conflict_prompt().is_none()
-                    && self.modal_inputs.delete_confirm.is_none()
-                    && !self.go_to_path.open
-                {
-                    self.modal_inputs.about_open = false;
-                    self.surface = WorkspaceSurface::Settings;
-                    self.set_settings_section(
-                        crate::workspace::profiles::SettingsSection::Profiles,
-                        cx,
-                    );
-                    self.workspace_focus.focus(window, cx);
-                    cx.notify();
-                }
-            }
-            "ShowAbout" => {
-                if self.connect_form_ui.form.is_none()
-                    && self.active_host_key_prompt().is_none()
-                    && self.active_keyboard_interactive_prompt().is_none()
-                    && self.active_transfer_conflict_prompt().is_none()
-                    && self.modal_inputs.delete_confirm.is_none()
-                    && !self.go_to_path.open
-                {
-                    self.modal_inputs.about_open = true;
-                    cx.notify();
-                }
-            }
-            "DeleteSelection" => self.request_delete_selection(window, cx),
-            "RenameEntry" => self.begin_rename_selection(window, cx),
-            "NewFolder" => self.begin_new_folder(window, cx),
-            "FilterPane" => self.open_filter_pane(window, cx),
-            "GoToPath" => self.open_go_to_path(window, cx),
-            "NavigateBack" => self.navigate_focused(HistoryOp::Back, window, cx),
-            "NavigateForward" => self.navigate_focused(HistoryOp::Forward, window, cx),
-            "ParentDirectory" => self.go_to_parent_directory(window, cx),
-            "ToggleHiddenFiles" => self.toggle_hidden_files(cx),
-            // View ▸ Sort By: field and direction are both explicit, so a menu
-            // item and a palette row mean exactly the same thing (§12.2).
-            "SortByNameAscending" => {
-                self.set_sort(FileSortField::Name, SortDirection::Ascending, cx)
-            }
-            "SortByNameDescending" => {
-                self.set_sort(FileSortField::Name, SortDirection::Descending, cx)
-            }
-            "SortBySizeAscending" => {
-                self.set_sort(FileSortField::Size, SortDirection::Ascending, cx)
-            }
-            "SortBySizeDescending" => {
-                self.set_sort(FileSortField::Size, SortDirection::Descending, cx)
-            }
-            "SortByDateModifiedAscending" => {
-                self.set_sort(FileSortField::ModifiedAt, SortDirection::Ascending, cx)
-            }
-            "SortByDateModifiedDescending" => {
-                self.set_sort(FileSortField::ModifiedAt, SortDirection::Descending, cx)
-            }
-            "CancelAllTransfers" => self.cancel_all_transfers(cx),
-            "CopyPath" => self.copy_focused_path(cx),
-            "ShowInFinder" => self.reveal_local_selection(cx),
-            "ReconnectTab" => self.request_connect(window, cx),
-            "OpenLogFolder" => self.open_log_folder(cx),
-            "OpenCommandPalette" => self.open_command_palette(window, cx),
-            _ => {}
-        }
     }
 
     pub(crate) fn handle_command_palette_key(

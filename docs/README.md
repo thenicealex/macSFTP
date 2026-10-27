@@ -7,6 +7,7 @@
 | 文档 | 用途 |
 | --- | --- |
 | [`architecture.md`](architecture.md) | 当前架构、所有权、协议、安全、UI/UX 和测试边界；架构或界面改动前必读 |
+| [`adr/`](adr/) | 已接受且仍约束当前实现的架构决策；避免后续评审重复讨论同一取舍 |
 | [`release-process.md`](release-process.md) | tag、版本、构建和 GitHub Release 流程 |
 | [`release-evidence/`](release-evidence/) | 已发布版本的验收记录及新版本模板 |
 | [`screenshots/`](screenshots/) | `README.md` 使用的产品截图 |
@@ -28,6 +29,7 @@
 
 - 代码是行为事实来源；文档只记录代码无法强制的约束和取舍。
 - 中等以上架构或 UI/UX 变化更新 `architecture.md`；功能交付后把仍有效的约束并回当前文档，并删除已完成的逐步实施计划。
+- 已接受且仍约束当前实现的架构取舍记录在 `adr/`，一条决策一个文件；被新决定取代时标记 Superseded 并保留原文，不删除历史。
 - 发布证据按版本保留，不把旧版本的结果改写成当前状态。
 - 用户流程改变时同步 `README.md`、其三种语言版本和 `CHANGELOG.md`；持久 UI 规则改变时同步 `architecture.md` 第 12 节。
 - 历史材料需要追溯时使用 `git log -- docs`、`git show <commit>:<path>` 或 GitHub commit history。

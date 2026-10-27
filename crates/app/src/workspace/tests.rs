@@ -9151,6 +9151,9 @@ fn command_palette_filters_and_runs_new_tab(cx: &mut TestAppContext) {
         ws.palette.selected = 0;
         ws.execute_palette_selected(window, cx);
         assert!(!ws.palette.open);
+    });
+    cx.run_until_parked();
+    workspace.read_with(&cx, |ws, _| {
         assert_eq!(ws.state.tabs.tabs.len(), 2);
     });
 }
@@ -9164,8 +9167,68 @@ fn command_palette_manage_profiles_opens_profiles_section(cx: &mut TestAppContex
         ws.palette.selected = 0;
         ws.execute_palette_selected(window, cx);
         assert!(!ws.palette.open);
+    });
+    cx.run_until_parked();
+    workspace.read_with(&cx, |ws, _| {
         assert_eq!(ws.surface, WorkspaceSurface::Settings);
         assert_eq!(ws.settings.section, SettingsSection::Profiles);
+    });
+}
+
+#[gpui_kit::test]
+fn palette_surface_switch_uses_the_action_guard(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _) = init_workspace(cx);
+    workspace.update_in(&mut cx, |ws, window, cx| {
+        ws.open_go_to_path(window, cx);
+        assert!(ws.go_to_path.open);
+
+        ws.open_command_palette(window, cx);
+        ws.palette.input.set_value("settings");
+        ws.palette.selected = 0;
+        assert_eq!(ws.filtered_palette_commands()[0].id, "OpenSettings");
+        ws.execute_palette_selected(window, cx);
+    });
+    cx.run_until_parked();
+    workspace.read_with(&cx, |ws, _| {
+        assert_eq!(
+            ws.surface,
+            WorkspaceSurface::Files,
+            "an open modal blocks the surface switch"
+        );
+        assert!(ws.go_to_path.open, "the modal stays open");
+    });
+
+    workspace.update_in(&mut cx, |ws, window, cx| {
+        ws.cancel_active_modal(window, cx);
+        assert!(!ws.go_to_path.open);
+
+        ws.open_command_palette(window, cx);
+        ws.palette.input.set_value("settings");
+        ws.palette.selected = 0;
+        ws.execute_palette_selected(window, cx);
+    });
+    cx.run_until_parked();
+    workspace.read_with(&cx, |ws, _| {
+        assert_eq!(ws.surface, WorkspaceSurface::Settings);
+        assert_eq!(ws.settings.section, SettingsSection::General);
+    });
+}
+
+#[gpui_kit::test]
+fn palette_runs_from_the_settings_surface(cx: &mut TestAppContext) {
+    let (workspace, mut cx, _) = init_workspace(cx);
+    workspace.update_in(&mut cx, |ws, window, cx| {
+        ws.surface = WorkspaceSurface::Settings;
+        assert!(ws.transfer_drawer.open, "the drawer ships open");
+        ws.open_command_palette(window, cx);
+        ws.palette.input.set_value("show transfers");
+        ws.palette.selected = 0;
+        ws.execute_palette_selected(window, cx);
+    });
+    cx.run_until_parked();
+    workspace.read_with(&cx, |ws, _| {
+        assert!(!ws.transfer_drawer.open, "the row toggled the drawer");
+        assert_eq!(ws.surface, WorkspaceSurface::Settings);
     });
 }
 
@@ -9201,6 +9264,7 @@ fn show_in_finder_without_a_local_selection_says_so(cx: &mut TestAppContext) {
         ws.palette.selected = 0;
         ws.execute_palette_selected(window, cx);
     });
+    cx.run_until_parked();
     workspace.read_with(&cx, |ws, _| {
         assert_eq!(
             ws.status_message_for_test().as_deref(),

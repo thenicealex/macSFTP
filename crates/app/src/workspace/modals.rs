@@ -105,6 +105,16 @@ impl crate::workspace::Workspace {
                 _ => None,
             })
     }
+    /// Whether replacing the workspace surface (Settings, About) is allowed.
+    /// Any active modal owns input; switching under it would strand the modal.
+    pub(crate) fn can_switch_surface(&self) -> bool {
+        self.connect_form_ui.form.is_none()
+            && self.active_host_key_prompt().is_none()
+            && self.active_keyboard_interactive_prompt().is_none()
+            && self.active_transfer_conflict_prompt().is_none()
+            && self.modal_inputs.delete_confirm.is_none()
+            && !self.go_to_path.open
+    }
     pub(crate) fn remove_modal(&mut self, request_id: TrustRequestId) {
         self.state
             .modals
