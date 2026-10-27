@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::pool::{ConnectionManager, SharedConnection};
-use crate::session_actor::{
+use crate::transfer_job::{
     ConflictWaiter, PlanTransferFacts, TransferConflictContext, TransferJobOutcome,
     TransferSessionSlot, open_transfer_session, run_transfer_job,
 };
@@ -802,11 +802,16 @@ impl TransferManager {
                         plan_id,
                         job: retry_job,
                     });
-                // Only a job that ran to completion leaves the session in a
-                // state worth reusing: a cancelled or failed job may have
-                // aborted requests still in flight.
-                let reusable_session =
-                    matches!(outcome, TransferJobOutcome::Completed).then_some(transfer_session);
+                // A reusable upload conflict skip happens before file I/O.
+                // Other cancellations or failures may leave requests in flight.
+                let reusable_session = matches!(
+                    outcome,
+                    TransferJobOutcome::Completed
+                        | TransferJobOutcome::Skipped {
+                            reusable_session: true
+                        }
+                )
+                .then_some(transfer_session);
                 if let Err(error) = complete_tx
                     .send_async(CompletedTransfer {
                         transfer_id,

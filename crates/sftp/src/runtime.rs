@@ -564,7 +564,6 @@ async fn command_dispatch_loop(
                         );
 
                         let event_tx_clone = event_tx.clone();
-                        let next_conflict_id_clone = next_conflict_id.clone();
                         let cancel_clone = cancel.clone();
                         let host_clone = cmd.settings.host.clone();
                         let port = cmd.settings.port;
@@ -629,7 +628,6 @@ async fn command_dispatch_loop(
                                                 shared_connection,
                                                 sftp,
                                                 event_tx_clone,
-                                                next_conflict_id_clone,
                                             );
                                             actor.run(cancel_clone, request_rx).await;
                                         }
