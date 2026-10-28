@@ -1,5 +1,5 @@
 use gpui_kit::{
-    App, BoxShadow, Global, Hsla, Pixels, SharedString, WindowAppearance, hsla, px, rgb,
+    App, BoxShadow, FontWeight, Global, Hsla, Pixels, SharedString, WindowAppearance, hsla, px, rgb,
 };
 
 /// Which of the two required token sets is active.
@@ -17,6 +17,7 @@ pub struct Theme {
     pub appearance: Appearance,
     pub colors: ThemeColors,
     pub fonts: ThemeFonts,
+    pub typography: ThemeTypography,
     pub sizes: ThemeSizes,
 }
 
@@ -72,6 +73,75 @@ pub struct ThemeFonts {
     pub mono_family: SharedString,
 }
 
+/// The face a text role uses. Kept with the role so a call site cannot pair a
+/// size with the wrong family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextFamily {
+    Ui,
+    Mono,
+}
+
+/// One semantic text role: size, weight, and leading applied together.
+///
+/// Roles are the only place a type size is chosen. Call sites name the job
+/// (`title`, `body`, `label`) instead of picking pixels, so the scale stays
+/// small and every step in it means one thing. GPUI has no letter-spacing
+/// property, so hierarchy is carried by size, weight, and leading.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextStyle {
+    pub size: Pixels,
+    pub weight: FontWeight,
+    /// Multiple of the font size.
+    pub line_height: f32,
+    pub family: TextFamily,
+}
+
+/// The semantic type scale. Roles may share a size when their job differs by
+/// weight; no role chooses a size outside this scale.
+#[derive(Debug, Clone, Copy)]
+pub struct ThemeTypography {
+    /// Brand mark in the About window — the only display moment.
+    pub display: TextStyle,
+    /// Product name in the About window.
+    pub brand: TextStyle,
+    /// Page and sheet titles: Settings, modal and palette headers.
+    pub title: TextStyle,
+    /// Section titles inside a page or sheet.
+    pub heading: TextStyle,
+    /// Body copy: file rows, palette rows, form values, empty-state leads.
+    pub body: TextStyle,
+    /// Body copy carrying selection or emphasis.
+    pub body_medium: TextStyle,
+    /// Auxiliary copy: hints, tooltips, errors, descriptions.
+    pub secondary: TextStyle,
+    /// Column headers, field labels, and status readouts.
+    pub label: TextStyle,
+    /// Button and input text.
+    pub control: TextStyle,
+    /// Machine facts: sizes, timestamps, transfer detail.
+    pub mono: TextStyle,
+    /// Inline shortcuts and key glyphs.
+    pub shortcut: TextStyle,
+}
+
+/// Apply a semantic text role to any GPUI element.
+pub trait TextRoleExt: Sized {
+    fn text_role(self, theme: &Theme, role: TextStyle) -> Self;
+}
+
+impl<T: gpui_kit::Styled> TextRoleExt for T {
+    fn text_role(self, theme: &Theme, role: TextStyle) -> Self {
+        let family = match role.family {
+            TextFamily::Ui => theme.fonts.ui_family.clone(),
+            TextFamily::Mono => theme.fonts.mono_family.clone(),
+        };
+        self.font_family(family)
+            .text_size(role.size)
+            .font_weight(role.weight)
+            .line_height(gpui_kit::relative(role.line_height))
+    }
+}
+
 /// Fixed heights so hover/loading/progress never cause layout jitter.
 #[derive(Debug, Clone, Copy)]
 pub struct ThemeSizes {
@@ -85,7 +155,6 @@ pub struct ThemeSizes {
     pub scrollbar_width: Pixels,
     pub button_height: Pixels,
     pub button_min_width: Pixels,
-    pub button_text_size: Pixels,
     pub button_padding_x: Pixels,
     pub button_radius: Pixels,
     pub button_focus_ring: Pixels,
@@ -93,7 +162,6 @@ pub struct ThemeSizes {
     pub icon_button_width: Pixels,
     pub icon_button_height: Pixels,
     pub input_height: Pixels,
-    pub input_text_size: Pixels,
     pub input_padding_x: Pixels,
     pub input_padding_y: Pixels,
     pub input_radius: Pixels,
@@ -252,6 +320,7 @@ impl Theme {
                 scrollbar_track: hsla(0.0, 0.0, 0.0, 0.0),
             },
             fonts: default_fonts(),
+            typography: default_typography(),
             sizes: default_sizes(),
         }
     }
@@ -293,6 +362,7 @@ impl Theme {
                 scrollbar_track: hsla(0.0, 0.0, 0.0, 0.0),
             },
             fonts: default_fonts(),
+            typography: default_typography(),
             sizes: default_sizes(),
         }
     }
@@ -326,6 +396,79 @@ fn default_fonts() -> ThemeFonts {
     }
 }
 
+fn default_typography() -> ThemeTypography {
+    let ui = TextFamily::Ui;
+    let mono = TextFamily::Mono;
+    ThemeTypography {
+        display: TextStyle {
+            size: px(22.0),
+            weight: FontWeight::BOLD,
+            line_height: 1.1,
+            family: ui,
+        },
+        brand: TextStyle {
+            size: px(18.0),
+            weight: FontWeight::MEDIUM,
+            line_height: 1.2,
+            family: ui,
+        },
+        title: TextStyle {
+            size: px(15.0),
+            weight: FontWeight::SEMIBOLD,
+            line_height: 1.2,
+            family: ui,
+        },
+        heading: TextStyle {
+            size: px(UI_FONT_SIZE),
+            weight: FontWeight::SEMIBOLD,
+            line_height: 1.3,
+            family: ui,
+        },
+        body: TextStyle {
+            size: px(UI_FONT_SIZE),
+            weight: FontWeight::NORMAL,
+            line_height: 1.35,
+            family: ui,
+        },
+        body_medium: TextStyle {
+            size: px(UI_FONT_SIZE),
+            weight: FontWeight::MEDIUM,
+            line_height: 1.35,
+            family: ui,
+        },
+        secondary: TextStyle {
+            size: px(12.0),
+            weight: FontWeight::NORMAL,
+            line_height: 1.35,
+            family: ui,
+        },
+        label: TextStyle {
+            size: px(11.0),
+            weight: FontWeight::MEDIUM,
+            line_height: 1.2,
+            family: ui,
+        },
+        control: TextStyle {
+            size: px(UI_FONT_SIZE * 0.875),
+            weight: FontWeight::NORMAL,
+            line_height: 1.25,
+            family: ui,
+        },
+        mono: TextStyle {
+            size: px(11.0),
+            weight: FontWeight::NORMAL,
+            line_height: 1.25,
+            family: mono,
+        },
+        shortcut: TextStyle {
+            size: px(12.0),
+            weight: FontWeight::NORMAL,
+            line_height: 1.25,
+            family: mono,
+        },
+    }
+}
+
 fn default_sizes() -> ThemeSizes {
     ThemeSizes {
         tab_bar_height: px(34.0),
@@ -337,7 +480,6 @@ fn default_sizes() -> ThemeSizes {
         scrollbar_width: px(10.0),
         button_height: px(26.0),
         button_min_width: px(UI_FONT_SIZE * 1.5),
-        button_text_size: px(UI_FONT_SIZE * 0.875),
         button_padding_x: px(UI_FONT_SIZE * 0.75),
         button_radius: px(5.0),
         button_focus_ring: px(3.0),
@@ -347,7 +489,6 @@ fn default_sizes() -> ThemeSizes {
         icon_button_height: px(22.0),
         // Match the rendered Component Small input (1.5rem at the 13px UI font).
         input_height: px(UI_FONT_SIZE * 1.5),
-        input_text_size: px(UI_FONT_SIZE * 0.875),
         input_padding_x: px(8.0),
         input_padding_y: px(2.0),
         input_radius: px(5.0),
@@ -539,9 +680,9 @@ mod tests {
         );
     }
 
-    use gpui_kit::{WindowAppearance, px, rgb};
+    use gpui_kit::{FontWeight, WindowAppearance, px, rgb};
 
-    use super::{Appearance, Theme};
+    use super::{Appearance, TextFamily, Theme};
 
     #[test]
     fn dark_and_light_token_sets_are_both_defined_and_distinct() {
@@ -596,6 +737,54 @@ mod tests {
         let theme = Theme::dark();
 
         assert_ne!(theme.fonts.ui_family, theme.fonts.mono_family);
+    }
+
+    #[test]
+    fn type_scale_stays_semantic_and_small() {
+        // One size per job. Adding a role must reuse a step from this list
+        // instead of inventing another near-identical size.
+        let typography = Theme::dark().typography;
+        let roles = [
+            typography.display,
+            typography.brand,
+            typography.title,
+            typography.heading,
+            typography.body,
+            typography.body_medium,
+            typography.secondary,
+            typography.label,
+            typography.control,
+            typography.mono,
+            typography.shortcut,
+        ];
+        let mut sizes: Vec<f32> = roles.iter().map(|role| f32::from(role.size)).collect();
+        sizes.sort_by(f32::total_cmp);
+        sizes.dedup();
+        assert_eq!(
+            sizes,
+            vec![11.0, 11.375, 12.0, 13.0, 15.0, 18.0, 22.0],
+            "the type scale must stay at seven steps"
+        );
+
+        // Hierarchy is carried by size, weight, and leading together.
+        assert!(typography.display.size > typography.title.size);
+        assert!(typography.title.size > typography.heading.size);
+        assert!(typography.heading.size >= typography.body.size);
+        assert!(typography.body.size > typography.secondary.size);
+        assert!(typography.secondary.size > typography.control.size);
+        assert!(typography.control.size > typography.label.size);
+        assert_eq!(typography.title.weight, FontWeight::SEMIBOLD);
+        assert_eq!(typography.heading.weight, FontWeight::SEMIBOLD);
+        assert_eq!(typography.body.weight, FontWeight::NORMAL);
+        assert_eq!(typography.body_medium.weight, FontWeight::MEDIUM);
+        assert_eq!(typography.label.weight, FontWeight::MEDIUM);
+        assert!(
+            typography.body.line_height > typography.control.line_height,
+            "body copy needs looser leading than controls"
+        );
+        assert_eq!(typography.mono.family, TextFamily::Mono);
+        assert_eq!(typography.shortcut.family, TextFamily::Mono);
+        assert_eq!(typography.body.family, TextFamily::Ui);
     }
 
     #[test]

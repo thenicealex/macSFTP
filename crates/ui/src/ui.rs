@@ -25,7 +25,10 @@ pub use scrollbar::{
     MIN_THUMB, Scrollbar, ScrollbarState, ThumbGeometry, scroll_area, thumb_geometry,
 };
 pub use tab::{Tab, tab};
-pub use theme::{ActiveTheme, Appearance, Theme, ThemeColors, ThemeFonts, ThemeSizes, init};
+pub use theme::{
+    ActiveTheme, Appearance, TextFamily, TextRoleExt, TextStyle, Theme, ThemeColors, ThemeFonts,
+    ThemeSizes, ThemeTypography, init,
+};
 pub use transfer_row::{TransferRow, transfer_row};
 pub use workspace_widgets::{
     DragPreview, connection_status, copy_name, section_header_static, transfer_title,

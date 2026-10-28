@@ -9967,6 +9967,65 @@ fn regenerate_workspace_ux_evidence() {
     });
     cx.run_until_parked();
     capture(&mut cx, "dark-settings-general-720x480.png");
+
+    // Captures 12–14 (light): Settings → General at the desktop widths it has
+    // to hold. The form keeps its 640 pt measure centered, so a wider window
+    // adds outer margin instead of stretching the controls or the sidebar.
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                workspace.set_appearance(AppearancePreference::Light, window, cx);
+                workspace.settings.section = SettingsSection::General;
+                window.focus(&workspace.workspace_focus, cx);
+                cx.notify();
+            })
+            .expect("workspace must be live");
+    });
+    for (width, height) in [(1024.0, 720.0), (1280.0, 800.0), (1440.0, 900.0)] {
+        cx.update_window(window, |_, window, cx| {
+            window.resize(size(px(width), px(height)));
+            // The test platform only records the new bounds; this is the
+            // callback a real platform fires to relayout the root view.
+            window.bounds_changed(cx);
+        })
+        .expect("window resize must succeed");
+        cx.run_until_parked();
+        cx.run_until_parked();
+        capture(
+            &mut cx,
+            &format!(
+                "light-settings-general-{}x{}.png",
+                width as u32, height as u32
+            ),
+        );
+    }
+
+    // Capture 15 (light): the workspace at the default desktop size. The shell
+    // keeps its fixed chrome and splits the remaining width between the panes.
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                workspace.surface = WorkspaceSurface::Files;
+                workspace.set_local_path(
+                    LocalPath::new(fixture.to_string_lossy().into_owned()),
+                    window,
+                    cx,
+                );
+                window.focus(&workspace.workspace_focus, cx);
+                cx.notify();
+            })
+            .expect("workspace must be live");
+    });
+    cx.update_window(window, |_, window, cx| {
+        window.resize(size(px(1280.0), px(800.0)));
+        window.bounds_changed(cx);
+    })
+    .expect("window resize must succeed");
+    cx.run_until_parked();
+    cx.run_until_parked();
+    capture(&mut cx, "light-1280x800.png");
 }
 
 /// Local pane with a real, sorted fixture listing; returns the fixture dir so

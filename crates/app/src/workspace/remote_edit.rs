@@ -1,13 +1,11 @@
 use std::collections::HashSet;
 
-use gpui_kit::{
-    Context, FontWeight, IntoElement, ParentElement, Styled, Window, div, prelude::*, px,
-};
+use gpui_kit::{Context, IntoElement, ParentElement, Styled, Window, div, prelude::*, px};
 use macsftp_core::{
     AppCommand, BeginEdit, DispatchRollback, EditEffect, EditNotice, EditPhase, EditSessionId,
     EntryPath, LocalPath, RemotePath, TabId, Timestamp, UploadRequest, is_bidi_or_control,
 };
-use macsftp_ui::{ActiveTheme, format_size, text_button};
+use macsftp_ui::{ActiveTheme, TextRoleExt, format_size, text_button};
 use tracing::warn;
 
 pub(crate) use macsftp_core::{ConflictChoice, PendingEdit, conflict_remote_path};
@@ -521,17 +519,15 @@ impl Workspace {
             .border_color(theme.colors.border)
             .rounded(theme.sizes.modal_radius)
             .shadow(theme.shadow_modal())
-            .font_family(theme.fonts.ui_family.clone())
             .child(
                 div()
-                    .text_size(px(14.0))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_role(&theme, theme.typography.title)
                     .text_color(theme.colors.text)
                     .child("Edit Large File?"),
             )
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_role(&theme, theme.typography.secondary)
                     .text_color(theme.colors.text_muted)
                     .child(body),
             )
@@ -617,17 +613,15 @@ impl Workspace {
             .border_color(theme.colors.border)
             .rounded(theme.sizes.modal_radius)
             .shadow(theme.shadow_modal())
-            .font_family(theme.fonts.ui_family.clone())
             .child(
                 div()
-                    .text_size(px(14.0))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_role(&theme, theme.typography.title)
                     .text_color(theme.colors.text)
                     .child("Server File Changed"),
             )
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_role(&theme, theme.typography.secondary)
                     .text_color(theme.colors.text_muted)
                     .child(
                         "The server file changed after you opened it. Replacing it will discard those changes.",
@@ -636,7 +630,7 @@ impl Workspace {
             .when(!diff_tool_available, |card| {
                 card.child(
                     div()
-                        .text_size(px(11.0))
+                        .text_role(&theme, theme.typography.secondary)
                         .text_color(theme.colors.text_muted)
                         .child("No supported diff tool found (/usr/bin/opendiff or code)."),
                 )
@@ -644,7 +638,7 @@ impl Workspace {
             .when_some(compare_error, |card, error| {
                 card.child(
                     div()
-                        .text_size(px(11.0))
+                        .text_role(&theme, theme.typography.secondary)
                         .text_color(theme.colors.error)
                         .child(error.to_string()),
                 )

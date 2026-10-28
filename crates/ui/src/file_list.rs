@@ -9,7 +9,7 @@ use gpui_kit::{
 use macsftp_core::{FileKind, FileSort, FileSortField, SortDirection, Timestamp};
 
 use crate::icon::{ICON_SIZE, IconName, icon, icon_with_size};
-use crate::theme::ActiveTheme;
+use crate::theme::{ActiveTheme, TextRoleExt};
 
 /// Fixed trailing column widths shared by the header and every row so
 /// the table stays aligned. The name column takes the remaining space.
@@ -46,11 +46,7 @@ pub fn file_table_header(
             .flex()
             .items_center()
             .gap_1()
-            .font_weight(if active {
-                FontWeight::SEMIBOLD
-            } else {
-                FontWeight::MEDIUM
-            })
+            .when(active, |column| column.font_weight(FontWeight::SEMIBOLD))
             .text_color(if active {
                 theme.colors.text
             } else {
@@ -89,10 +85,8 @@ pub fn file_table_header(
         .bg(theme.colors.surface)
         .border_b_1()
         .border_color(theme.colors.border)
-        .text_size(px(11.0))
+        .text_role(theme, theme.typography.label)
         .text_color(theme.colors.text_muted)
-        .font_family(theme.fonts.ui_family.clone())
-        .font_weight(FontWeight::MEDIUM)
         .child(
             div()
                 .id("sort-name")
@@ -223,8 +217,7 @@ pub fn file_row(
         .px(px(4.0))
         .gap_2()
         .rounded(theme.sizes.button_radius)
-        .text_size(px(13.0))
-        .font_family(theme.fonts.ui_family.clone())
+        .text_role(theme, theme.typography.body)
         .when(model.selected, |row| row.bg(theme.colors.element_selected))
         .when(!model.selected, |row| {
             row.hover(move |style| style.bg(hover_background))
@@ -235,11 +228,14 @@ pub fn file_row(
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .font_weight(if model.selected {
-                    FontWeight::MEDIUM
-                } else {
-                    FontWeight::NORMAL
-                })
+                .text_role(
+                    theme,
+                    if model.selected {
+                        theme.typography.body_medium
+                    } else {
+                        theme.typography.body
+                    },
+                )
                 .text_color(name_color)
                 .child(model.name),
         )
@@ -248,18 +244,16 @@ pub fn file_row(
                 .w(SIZE_COLUMN_WIDTH)
                 .flex_none()
                 .text_right()
-                .text_size(px(11.0))
+                .text_role(theme, theme.typography.mono)
                 .text_color(secondary_color)
-                .font_family(theme.fonts.mono_family.clone())
                 .child(model.size_label),
         )
         .child(
             div()
                 .w(MODIFIED_COLUMN_WIDTH)
                 .flex_none()
-                .text_size(px(11.0))
+                .text_role(theme, theme.typography.mono)
                 .text_color(secondary_color)
-                .font_family(theme.fonts.mono_family.clone())
                 .child(model.modified_label),
         )
         .role(Role::ListItem)

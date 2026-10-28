@@ -1,14 +1,13 @@
 use gpui_kit::{
-    AnyView, App, ClickEvent, Context, ElementId, FontWeight, Hsla, IntoElement, ParentElement,
-    Render, RenderOnce, SharedString, Styled, Transformation, Window, div, hsla, prelude::*, px,
-    radians, relative,
+    AnyView, App, ClickEvent, Context, ElementId, Hsla, IntoElement, ParentElement, Render,
+    RenderOnce, SharedString, Styled, Transformation, Window, div, hsla, prelude::*, px, radians,
 };
 
 use gpui_kit::base::Button;
 use gpui_kit::base::motion::{IterationCount, Keyframe, Keyframes, Timing, animate_keyframes};
 
 use crate::icon::{IconName, icon_with_size};
-use crate::theme::ActiveTheme;
+use crate::theme::{ActiveTheme, TextRoleExt};
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
@@ -38,9 +37,8 @@ impl Render for Tooltip {
             .border_1()
             .border_color(theme.colors.border)
             .shadow(theme.shadow_chip())
-            .text_size(px(12.0))
+            .text_role(theme, theme.typography.secondary)
             .text_color(theme.colors.text)
-            .font_family(theme.fonts.ui_family.clone())
             .child(self.label.clone())
     }
 }
@@ -236,8 +234,7 @@ impl RenderOnce for TextButton {
             .border_1()
             .bg(background)
             .text_color(text_color)
-            .text_size(theme.sizes.button_text_size)
-            .font_family(theme.fonts.ui_family.clone())
+            .text_role(&theme, theme.typography.control)
             // A filled button keeps its fill on hover — AppKit prominent
             // buttons do not tint until pressed — and darkens it while held, so
             // the press reads without touching the label's contrast. A plain
@@ -308,7 +305,6 @@ fn button_base(
         .flex_shrink_0()
         .cursor_default()
         .rounded(btn_radius)
-        .line_height(relative(1.25))
         .when_some(border_color, |button, color| {
             button.border_color(if focused {
                 theme.colors.border_focused
@@ -372,7 +368,6 @@ impl RenderOnce for EmptyState {
             .items_center()
             .justify_center()
             .gap_3()
-            .font_family(theme.fonts.ui_family.clone())
             .child(
                 div()
                     .flex()
@@ -382,9 +377,7 @@ impl RenderOnce for EmptyState {
                     .child(
                         div()
                             .debug_selector(|| "empty-state-message".into())
-                            .text_size(px(13.0))
-                            .line_height(relative(1.2))
-                            .font_weight(FontWeight::MEDIUM)
+                            .text_role(theme, theme.typography.body_medium)
                             .text_color(theme.colors.text)
                             .child(self.title),
                     )
@@ -393,8 +386,7 @@ impl RenderOnce for EmptyState {
                             div()
                                 .debug_selector(|| "empty-state-detail".into())
                                 .max_w(px(320.0))
-                                .text_size(px(12.0))
-                                .line_height(relative(1.25))
+                                .text_role(theme, theme.typography.secondary)
                                 .text_color(theme.colors.text_muted)
                                 .text_center()
                                 .child(detail),
@@ -433,9 +425,8 @@ pub fn loading_state(
         .items_center()
         .justify_center()
         .gap_2()
-        .text_size(px(13.0))
+        .text_role(theme, theme.typography.body)
         .text_color(theme.colors.text_muted)
-        .font_family(theme.fonts.ui_family.clone())
         .child(
             icon_with_size(IconName::Refresh, theme.colors.accent, LOADING_GLYPH_SIZE)
                 .with_transformation(Transformation::rotate(radians(spin_angle(window, cx)))),
@@ -496,7 +487,7 @@ mod tests {
         fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
             let text_clicks = self.clicks.clone();
             let icon_clicks = self.clicks.clone();
-            window.set_rem_size(cx.theme().sizes.button_text_size / 0.875);
+            window.set_rem_size(cx.theme().typography.control.size / 0.875);
             div()
                 .flex()
                 .flex_col()
