@@ -1,11 +1,11 @@
 use gpui_kit::{
-    App, ClickEvent, ElementId, FontWeight, Hsla, IntoElement, ParentElement, RenderOnce,
-    SharedString, Styled, Window, div, prelude::*, px,
+    App, ClickEvent, ElementId, Hsla, IntoElement, ParentElement, RenderOnce, SharedString, Styled,
+    Window, div, prelude::*, px,
 };
 
 use crate::components::{icon_button, text_tooltip};
 use crate::icon::IconName;
-use crate::theme::ActiveTheme;
+use crate::theme::{ActiveTheme, TextRoleExt};
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
@@ -120,20 +120,22 @@ impl RenderOnce for Tab {
             .pl_3()
             .pr_1()
             .max_w(px(220.0))
+            .tooltip(text_tooltip(self.title.clone()))
             .bg(background)
             .border_1()
             .border_color(border_color)
             .rounded(theme.sizes.button_radius)
             .when(self.active, |element| element.shadow(theme.shadow_chip()))
             .group(self.hover_group.clone())
-            .text_size(px(13.0))
+            .text_role(
+                theme,
+                if self.active {
+                    theme.typography.body_medium
+                } else {
+                    theme.typography.body
+                },
+            )
             .text_color(text_color)
-            .font_family(theme.fonts.ui_family.clone())
-            .font_weight(if self.active {
-                FontWeight::MEDIUM
-            } else {
-                FontWeight::NORMAL
-            })
             .when(!self.active, |element| {
                 element.hover(move |style| style.bg(hover_background).text_color(theme.colors.text))
             })

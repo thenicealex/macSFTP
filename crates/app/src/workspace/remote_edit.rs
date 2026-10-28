@@ -1,19 +1,18 @@
 use std::collections::HashSet;
 
-use gpui_kit::{
-    Context, FontWeight, IntoElement, ParentElement, Styled, Window, div, prelude::*, px,
-};
+use gpui_kit::{Context, IntoElement, ParentElement, Styled, Window, div, prelude::*, px};
 use macsftp_core::{
-    AppCommand, BeginEdit, DispatchRollback, EditEffect, EditNotice, EditPhase, EditSessionId,
-    EntryPath, LocalPath, RemotePath, TabId, Timestamp, UploadRequest, is_bidi_or_control,
+    AppCommand, BeginEdit, EditEffect, EditNotice, EditPhase, EditSessionId, EntryPath, LocalPath,
+    RemotePath, RemoteSnapshot, TabId, Timestamp, UploadRequest, is_bidi_or_control,
 };
-use macsftp_ui::{ActiveTheme, format_size, text_button};
+use macsftp_ui::{ActiveTheme, TextRoleExt, format_size, text_button};
 use tracing::warn;
 
 pub(crate) use macsftp_core::{ConflictChoice, PendingEdit, conflict_remote_path};
 
-use crate::event_coordinator::{open_edit_temp, workspace_windows};
-use crate::resources::ActiveResources;
+use crate::edit_effects::{EditEffectHost, execute_edit_effects};
+use crate::event_coordinator::workspace_windows;
+use crate::resources::{ActiveResources, AppResources};
 use crate::workspace::Workspace;
 use crate::workspace::helpers::connected_edit_session;
 use crate::workspace::overlay::OverlayFade;
@@ -80,11 +79,35 @@ pub(crate) fn edit_notice_text(notice: EditNotice) -> String {
     }
 }
 
-fn file_name_of(path: &RemotePath) -> String {
-    std::path::Path::new(path.as_str())
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_default()
+/// Executes edit effects from inside a `Workspace` update, where the window
+/// that owns the tab is borrowed rather than discovered.
+struct WorkspaceEditHost<'a, 'ctx> {
+    workspace: &'a mut Workspace,
+    cx: &'a mut Context<'ctx, Workspace>,
+}
+
+impl EditEffectHost for WorkspaceEditHost<'_, '_> {
+    fn resources(&self) -> &AppResources {
+        self.cx.resources()
+    }
+
+    fn resources_mut(&mut self) -> &mut AppResources {
+        self.cx.resources_mut()
+    }
+
+    fn dispatch(&mut self, _tab_id: TabId, command: AppCommand) -> bool {
+        self.workspace.send_command(command, self.cx)
+    }
+
+    fn notify(&mut self, tab_id: TabId, notice: EditNotice) {
+        let message = edit_notice_text(notice);
+        self.workspace.set_edit_status(tab_id, message, self.cx);
+    }
+
+    fn sync_listing(&mut self, tab_id: TabId, path: &RemotePath, snapshot: RemoteSnapshot) -> bool {
+        self.workspace
+            .sync_remote_entry_snapshot(tab_id, path, snapshot)
+    }
 }
 
 impl Workspace {
@@ -423,74 +446,14 @@ impl Workspace {
 
     /// Execute lifecycle effects produced by a user action in this window.
     ///
-    /// A failed dispatch rolls the session back through the lifecycle (the
-    /// effect names its rollback), so a command that never entered the channel
-    /// cannot strand a phase. The coordinator has its own executor for effects
-    /// that arrive process-wide.
+    /// The policy lives in [`crate::edit_effects`]; this adapter supplies the
+    /// window's own runtime client, tab-scoped status, and listing.
     pub(crate) fn apply_edit_effects(&mut self, effects: Vec<EditEffect>, cx: &mut Context<Self>) {
-        for effect in effects {
-            match effect {
-                EditEffect::Dispatch {
-                    session_id,
-                    command,
-                    rollback,
-                    ..
-                } => {
-                    if self.send_command(command, cx) {
-                        continue;
-                    }
-                    let file_name = cx
-                        .resources()
-                        .edit_sessions
-                        .session(session_id)
-                        .map(|session| file_name_of(&session.remote_path))
-                        .unwrap_or_default();
-                    let follow_up = cx
-                        .resources_mut()
-                        .edit_sessions
-                        .dispatch_failed(session_id, rollback);
-                    match rollback {
-                        DispatchRollback::AbortDownload => {
-                            self.show_edit_notice(EditNotice::DownloadFailed { file_name }, cx)
-                        }
-                        DispatchRollback::RevertCheck | DispatchRollback::RestoreConflict => {
-                            self.show_edit_notice(EditNotice::UploadStartFailed, cx)
-                        }
-                    }
-                    // A rollback can itself schedule cleanup (an aborted
-                    // download's temp directory); those effects never dispatch.
-                    self.apply_edit_effects(follow_up, cx);
-                }
-                EditEffect::OpenEditor { temp_path, .. } => {
-                    let config = cx.resources().config.config();
-                    let file_name = std::path::Path::new(temp_path.as_str())
-                        .file_name()
-                        .map(|name| name.to_string_lossy().to_string())
-                        .unwrap_or_default();
-                    let editor = macsftp_core::resolve_editor_app(
-                        &file_name,
-                        &config.editor_rules,
-                        config.external_editor.as_deref(),
-                    );
-                    match open_edit_temp(&temp_path, editor) {
-                        Ok(()) => self.show_edit_notice(EditNotice::CopyOpen, cx),
-                        Err(error) => {
-                            warn!(error = %error, "could not open editor for remote edit");
-                            self.show_edit_notice(EditNotice::CopyOpenFailed, cx);
-                        }
-                    }
-                }
-                EditEffect::DeleteTempDir { path } => cleanup_edit_temp_dir(&path),
-                EditEffect::RebaseListing {
-                    tab_id,
-                    path,
-                    snapshot,
-                } => {
-                    self.sync_remote_entry_snapshot(tab_id, &path, snapshot);
-                }
-                EditEffect::Notice { notice, .. } => self.show_edit_notice(notice, cx),
-            }
-        }
+        let mut host = WorkspaceEditHost {
+            workspace: self,
+            cx,
+        };
+        execute_edit_effects(&mut host, effects);
     }
 
     pub(crate) fn render_large_edit_modal(
@@ -521,17 +484,15 @@ impl Workspace {
             .border_color(theme.colors.border)
             .rounded(theme.sizes.modal_radius)
             .shadow(theme.shadow_modal())
-            .font_family(theme.fonts.ui_family.clone())
             .child(
                 div()
-                    .text_size(px(14.0))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_role(&theme, theme.typography.title)
                     .text_color(theme.colors.text)
                     .child("Edit Large File?"),
             )
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_role(&theme, theme.typography.secondary)
                     .text_color(theme.colors.text_muted)
                     .child(body),
             )
@@ -617,17 +578,15 @@ impl Workspace {
             .border_color(theme.colors.border)
             .rounded(theme.sizes.modal_radius)
             .shadow(theme.shadow_modal())
-            .font_family(theme.fonts.ui_family.clone())
             .child(
                 div()
-                    .text_size(px(14.0))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_role(&theme, theme.typography.title)
                     .text_color(theme.colors.text)
                     .child("Server File Changed"),
             )
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_role(&theme, theme.typography.secondary)
                     .text_color(theme.colors.text_muted)
                     .child(
                         "The server file changed after you opened it. Replacing it will discard those changes.",
@@ -636,7 +595,7 @@ impl Workspace {
             .when(!diff_tool_available, |card| {
                 card.child(
                     div()
-                        .text_size(px(11.0))
+                        .text_role(&theme, theme.typography.secondary)
                         .text_color(theme.colors.text_muted)
                         .child("No supported diff tool found (/usr/bin/opendiff or code)."),
                 )
@@ -644,7 +603,7 @@ impl Workspace {
             .when_some(compare_error, |card, error| {
                 card.child(
                     div()
-                        .text_size(px(11.0))
+                        .text_role(&theme, theme.typography.secondary)
                         .text_color(theme.colors.error)
                         .child(error.to_string()),
                 )

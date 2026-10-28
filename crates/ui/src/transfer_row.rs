@@ -5,8 +5,8 @@ use gpui_kit::{
 use macsftp_core::TransferDirection;
 
 use crate::components::{icon_button, text_tooltip};
-use crate::icon::{IconName, icon};
-use crate::theme::ActiveTheme;
+use crate::icon::{ICON_SIZE, IconName, icon};
+use crate::theme::{ActiveTheme, TextRoleExt};
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
@@ -124,6 +124,7 @@ impl RenderOnce for TransferRow {
         });
         let detail_id =
             ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "detail".into());
+        let title_id = ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "title".into());
 
         div()
             .id(self.id)
@@ -137,7 +138,6 @@ impl RenderOnce for TransferRow {
             .gap_1()
             .rounded(theme.sizes.button_radius)
             .hover(|style| style.bg(theme.colors.element_hover))
-            .font_family(theme.fonts.ui_family.clone())
             .child(
                 div()
                     .flex()
@@ -146,17 +146,19 @@ impl RenderOnce for TransferRow {
                     .child(icon(direction_icon, theme.colors.text_muted))
                     .child(
                         div()
+                            .id(title_id)
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(12.0))
+                            .text_role(theme, theme.typography.secondary)
                             .text_color(theme.colors.text)
+                            .tooltip(text_tooltip(self.title.clone()))
                             .child(self.title),
                     )
                     .child(
                         div()
                             .flex_none()
-                            .text_size(px(11.0))
+                            .text_role(theme, theme.typography.label)
                             .text_color(self.state_color)
                             .child(self.state_label),
                     )
@@ -169,7 +171,9 @@ impl RenderOnce for TransferRow {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .pl(px(22.0))
+                    // The width of the direction icon above, so the rail starts
+                    // under the title text instead of 1.5px right of it.
+                    .child(div().flex_none().w(ICON_SIZE))
                     .child(
                         div()
                             .flex_1()
@@ -196,9 +200,8 @@ impl RenderOnce for TransferRow {
                             .max_w(px(160.0))
                             .min_w_0()
                             .truncate()
-                            .text_size(px(10.0))
+                            .text_role(theme, theme.typography.mono)
                             .text_color(theme.colors.text_muted)
-                            .font_family(theme.fonts.mono_family.clone())
                             .when(!self.detail_label.is_empty(), |el| {
                                 el.tooltip(text_tooltip(self.detail_label.clone()))
                             })

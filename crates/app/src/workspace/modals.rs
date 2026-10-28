@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use gpui_kit::{
-    Context, FontWeight, IntoElement, KeyDownEvent, ParentElement, SharedString, Styled, Window,
-    div, prelude::*, px,
+    Context, IntoElement, KeyDownEvent, ParentElement, SharedString, Styled, Window, div,
+    prelude::*, px,
 };
 use macsftp_core::{
     AppCommand, AuthMethodKind, ConflictDecision, ConflictDecisionCommand, ConflictRequestId,
@@ -12,7 +12,7 @@ use macsftp_core::{
     TrustRequestId,
 };
 use macsftp_ui::{
-    ActiveTheme, InputKeyResult, InputState, TextFieldModel, copy_name, format_size,
+    ActiveTheme, InputKeyResult, InputState, TextFieldModel, TextRoleExt, copy_name, format_size,
     format_timestamp, plain_text_field, text_button, text_field,
 };
 
@@ -551,17 +551,15 @@ impl crate::workspace::Workspace {
                         .border_color(theme.colors.border)
                         .rounded(theme.sizes.modal_radius)
                         .shadow(theme.shadow_modal())
-                        .font_family(theme.fonts.ui_family.clone())
                         .child(
                             div()
-                                .text_size(px(14.0))
-                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_role(&theme, theme.typography.title)
                                 .text_color(theme.colors.text)
                                 .child(format!("Go to Folder ({side_label})")),
                         )
                         .child(
                             div()
-                                .text_size(px(12.0))
+                                .text_role(&theme, theme.typography.secondary)
                                 .text_color(theme.colors.text_muted)
                                 .child(if self.go_to_path.input.value().is_empty() {
                                     "Enter a full folder path. Press Enter to open or Esc to cancel."
@@ -573,7 +571,7 @@ impl crate::workspace::Workspace {
                         .when_some(self.go_to_path.error.clone(), |card, error| {
                             card.child(
                                 div()
-                                    .text_size(px(11.0))
+                                    .text_role(&theme, theme.typography.secondary)
                                     .text_color(theme.colors.error)
                                     .child(error),
                             )
@@ -643,7 +641,7 @@ impl crate::workspace::Workspace {
                     div()
                         .w(px(96.0))
                         .flex_none()
-                        .text_size(px(11.0))
+                        .text_role(&theme, theme.typography.label)
                         .text_color(theme.colors.text_muted)
                         .child(label),
                 )
@@ -740,11 +738,9 @@ impl crate::workspace::Workspace {
             .border_color(theme.colors.border)
             .rounded(theme.sizes.modal_radius)
             .shadow(theme.shadow_modal())
-            .font_family(theme.fonts.ui_family.clone())
             .child(
                 div()
-                    .text_size(px(14.0))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_role(&theme, theme.typography.title)
                     .text_color(theme.colors.text)
                     .child("Connect to Server"),
             );
@@ -752,7 +748,7 @@ impl crate::workspace::Workspace {
         if let Some(error) = &form.error {
             card = card.child(
                 div()
-                    .text_size(px(12.0))
+                    .text_role(&theme, theme.typography.secondary)
                     .text_color(theme.colors.error)
                     .child(error.clone()),
             );
@@ -771,7 +767,7 @@ impl crate::workspace::Workspace {
                     div()
                         .w(px(96.0))
                         .flex_none()
-                        .text_size(px(11.0))
+                        .text_role(&theme, theme.typography.label)
                         .text_color(theme.colors.text_muted)
                         .child("Saved Connection"),
                 )
@@ -801,14 +797,14 @@ impl crate::workspace::Workspace {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(12.0))
+                                .text_role(&theme, theme.typography.body)
                                 .text_color(theme.colors.text)
                                 .child(trigger_label),
                         )
                         .child(
                             div()
                                 .flex_none()
-                                .text_size(px(10.0))
+                                .text_role(&theme, theme.typography.label)
                                 .text_color(theme.colors.text_muted)
                                 .child(if profile_picker_open { "▴" } else { "▾" }),
                         ),
@@ -852,7 +848,7 @@ impl crate::workspace::Workspace {
                     div()
                         .px_2()
                         .py_1()
-                        .text_size(px(12.0))
+                        .text_role(&theme, theme.typography.secondary)
                         .text_color(theme.colors.text_muted)
                         .child("No saved connections. Add one in Settings."),
                 );
@@ -861,7 +857,7 @@ impl crate::workspace::Workspace {
                     div()
                         .px_2()
                         .py_1()
-                        .text_size(px(12.0))
+                        .text_role(&theme, theme.typography.secondary)
                         .text_color(theme.colors.text_muted)
                         .child("No matching items"),
                 );
@@ -875,9 +871,9 @@ impl crate::workspace::Workspace {
                         .py_1()
                         .min_w_0()
                         .truncate()
-                        .rounded_sm()
+                        .rounded(theme.sizes.button_radius)
                         .cursor_pointer()
-                        .text_size(px(12.0))
+                        .text_role(&theme, theme.typography.body)
                         .text_color(theme.colors.text)
                         .hover(|style| style.bg(theme.colors.element_hover))
                         .on_click(cx.listener(move |workspace, _event, _window, cx| {
@@ -892,9 +888,9 @@ impl crate::workspace::Workspace {
                     .px_2()
                     .py_1()
                     .min_w_0()
-                    .rounded_sm()
+                    .rounded(theme.sizes.button_radius)
                     .cursor_pointer()
-                    .text_size(px(12.0))
+                    .text_role(&theme, theme.typography.body)
                     .text_color(theme.colors.text_muted)
                     .hover(|style| style.bg(theme.colors.element_hover))
                     .on_click(cx.listener(|workspace, _event, _window, cx| {
@@ -907,7 +903,8 @@ impl crate::workspace::Workspace {
             );
             let picker_panel = div()
                 .id("profile-picker-panel")
-                .ml(px(104.0))
+                // Start under the field column: 96px label width + gap_2.
+                .ml(px(96.0 + 6.5))
                 .max_h(px(200.0))
                 .relative()
                 .border_1()
@@ -940,7 +937,7 @@ impl crate::workspace::Workspace {
         if form.source_profile_id.is_some() {
             card = card.child(
                 div()
-                    .text_size(px(10.0))
+                    .text_role(&theme, theme.typography.secondary)
                     .text_color(theme.colors.text_muted)
                     .child("Saved sign-in details are loaded from your Mac’s Keychain."),
             );
@@ -980,7 +977,7 @@ impl crate::workspace::Workspace {
                         div()
                             .w(px(96.0))
                             .flex_none()
-                            .text_size(px(11.0))
+                            .text_role(&theme, theme.typography.label)
                             .text_color(theme.colors.text_muted)
                             .child("Sign-In Method"),
                     )
@@ -1044,7 +1041,7 @@ impl crate::workspace::Workspace {
                 )),
             AuthMethodKind::KeyboardInteractive => card.child(
                 div()
-                    .text_size(px(11.0))
+                    .text_role(&theme, theme.typography.secondary)
                     .text_color(theme.colors.text_muted)
                     .child("After connecting, answer the server’s sign-in prompts."),
             ),
@@ -1059,7 +1056,7 @@ impl crate::workspace::Workspace {
                 ))
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_role(&theme, theme.typography.secondary)
                         .text_color(theme.colors.text_muted)
                         .child("Uses keys from your SSH agent, including RSA keys."),
                 ),
@@ -1178,7 +1175,7 @@ impl crate::workspace::Workspace {
             .gap_3()
             .w(px(520.0))
             .max_w_full()
-            .p_5()
+            .p_4()
             .rounded(theme.sizes.modal_radius)
             .border_1()
             .border_color(theme.colors.border)
@@ -1186,8 +1183,7 @@ impl crate::workspace::Workspace {
             .shadow(theme.shadow_modal())
             .child(
                 div()
-                    .text_size(px(16.0))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_role(&theme, theme.typography.title)
                     .text_color(theme.colors.text)
                     .child(if prompt.name.is_empty() {
                         "Complete Sign-In".to_string()
@@ -1198,7 +1194,7 @@ impl crate::workspace::Workspace {
         if !prompt.instruction.is_empty() {
             card = card.child(
                 div()
-                    .text_size(px(12.0))
+                    .text_role(&theme, theme.typography.secondary)
                     .text_color(theme.colors.text_muted)
                     .child(prompt.instruction.clone()),
             );
@@ -1224,7 +1220,7 @@ impl crate::workspace::Workspace {
                     }))
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_role(&theme, theme.typography.label)
                             .text_color(theme.colors.text_muted)
                             .child(field.prompt.clone()),
                     )
@@ -1297,7 +1293,7 @@ impl crate::workspace::Workspace {
                     div()
                         .w(px(96.0))
                         .flex_none()
-                        .text_size(px(11.0))
+                        .text_role(&theme, theme.typography.label)
                         .text_color(theme.colors.text_muted)
                         .child(label),
                 )
@@ -1306,11 +1302,15 @@ impl crate::workspace::Workspace {
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .text_size(if mono { px(11.0) } else { px(12.0) })
+                        .text_role(
+                            &theme,
+                            if mono {
+                                theme.typography.mono
+                            } else {
+                                theme.typography.body
+                            },
+                        )
                         .text_color(theme.colors.text)
-                        .when(mono, |value_cell| {
-                            value_cell.font_family(theme.fonts.mono_family.clone())
-                        })
                         .child(value),
                 )
         };
@@ -1340,17 +1340,15 @@ impl crate::workspace::Workspace {
                         .border_color(theme.colors.border)
                         .rounded(theme.sizes.modal_radius)
                         .shadow(theme.shadow_modal())
-                        .font_family(theme.fonts.ui_family.clone())
                         .child(
                             div()
-                                .text_size(px(14.0))
-                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_role(&theme, theme.typography.title)
                                 .text_color(theme.colors.text)
                                 .child("Verify Server"),
                         )
                         .child(
                             div()
-                                .text_size(px(12.0))
+                                .text_role(&theme, theme.typography.secondary)
                                 .text_color(theme.colors.text_muted)
                                 .child(
                                     "This server’s identity isn’t verified. Check its fingerprint with your administrator before trusting it.",
@@ -1437,7 +1435,7 @@ impl crate::workspace::Workspace {
                     div()
                         .w(px(96.0))
                         .flex_none()
-                        .text_size(px(11.0))
+                        .text_role(&theme, theme.typography.label)
                         .text_color(theme.colors.text_muted)
                         .child(label),
                 )
@@ -1446,7 +1444,7 @@ impl crate::workspace::Workspace {
                         .flex_1()
                         .min_w_0()
                         .truncate()
-                        .text_size(px(11.0))
+                        .text_role(&theme, theme.typography.body)
                         .text_color(theme.colors.text)
                         .child(value),
                 )
@@ -1490,17 +1488,15 @@ impl crate::workspace::Workspace {
                         .border_color(theme.colors.border)
                         .rounded(theme.sizes.modal_radius)
                         .shadow(theme.shadow_modal())
-                        .font_family(theme.fonts.ui_family.clone())
                         .child(
                             div()
-                                .text_size(px(14.0))
-                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_role(&theme, theme.typography.title)
                                 .text_color(theme.colors.text)
                                 .child("File Already Exists"),
                         )
                         .child(
                             div()
-                                .text_size(px(12.0))
+                                .text_role(&theme, theme.typography.secondary)
                                 .text_color(theme.colors.text_muted)
                                 .child("A file with this name already exists. Choose what to do."),
                         )
@@ -1524,13 +1520,13 @@ impl crate::workspace::Workspace {
                         )
                         .child(
                             div()
-                                .text_size(px(11.0))
+                                .text_role(&theme, theme.typography.secondary)
                                 .text_color(theme.colors.text_muted)
                                 .child("“All” applies only to remaining name conflicts in this transfer."),
                         )
                         .child(
                             div()
-                                .text_size(px(11.0))
+                                .text_role(&theme, theme.typography.secondary)
                                 .text_color(theme.colors.text_muted)
                                 .child("Press Enter to rename or Esc to cancel."),
                         )
@@ -1543,7 +1539,7 @@ impl crate::workspace::Workspace {
                                     div()
                                         .w(px(96.0))
                                         .flex_none()
-                                        .text_size(px(11.0))
+                                        .text_role(&theme, theme.typography.label)
                                         .text_color(theme.colors.text_muted)
                                         .child("New Name"),
                                 )
@@ -1554,7 +1550,7 @@ impl crate::workspace::Workspace {
                             |card, error| {
                                 card.child(
                                     div()
-                                        .text_size(px(11.0))
+                                        .text_role(&theme, theme.typography.secondary)
                                         .text_color(theme.colors.error)
                                         .child(error),
                                 )
@@ -1670,17 +1666,15 @@ impl crate::workspace::Workspace {
             .border_color(theme.colors.border)
             .rounded(theme.sizes.modal_radius)
             .shadow(theme.shadow_modal())
-            .font_family(theme.fonts.ui_family.clone())
             .child(
                 div()
-                    .text_size(px(14.0))
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_role(&theme, theme.typography.title)
                     .text_color(theme.colors.text)
                     .child("Delete Saved Connection?"),
             )
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_role(&theme, theme.typography.secondary)
                     .text_color(theme.colors.text_muted)
                     .child(body),
             )

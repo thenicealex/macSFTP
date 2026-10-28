@@ -1,0 +1,380 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-28T03:15:05Z",
+  "title": "Design System: macSFTP",
+  "extensions": {
+    "colorMeta": {
+      "accent": {
+        "role": "primary",
+        "displayName": "System Signal Blue",
+        "canonical": "#007aff",
+        "tonalRamp": ["#000044", "#001175", "#0034a7", "#0056d7", "#0c7cff", "#4ba3ff", "#7ecaff", "#b2f1ff"]
+      },
+      "accent-dark": {
+        "role": "primary",
+        "displayName": "System Signal Blue (Dark)",
+        "canonical": "#0a84ff",
+        "tonalRamp": ["#000040", "#001770", "#0038a1", "#005acf", "#037ff7", "#4aa5ff", "#7eccff", "#b3f2ff"]
+      },
+      "background": {
+        "role": "neutral",
+        "displayName": "Bench White",
+        "canonical": "#ffffff",
+        "tonalRamp": ["#0b0b0b", "#252525", "#424242", "#616161", "#828282", "#a5a5a5", "#c9c9c9", "#eeeeee"]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Cool Fog",
+        "canonical": "#f5f5f7",
+        "tonalRamp": ["#0b0b0c", "#252526", "#424243", "#616163", "#828284", "#a5a5a6", "#c9c9ca", "#eeeeef"]
+      },
+      "elevated-surface": {
+        "role": "neutral",
+        "displayName": "Bench White (Elevated)",
+        "canonical": "#ffffff",
+        "tonalRamp": ["#0b0b0b", "#252525", "#424242", "#616161", "#828282", "#a5a5a5", "#c9c9c9", "#eeeeee"]
+      },
+      "background-dark": {
+        "role": "neutral",
+        "displayName": "Bench Graphite",
+        "canonical": "#1e1e1e",
+        "tonalRamp": ["#0b0b0b", "#252525", "#424242", "#616161", "#828282", "#a5a5a5", "#c9c9c9", "#eeeeee"]
+      },
+      "surface-dark": {
+        "role": "neutral",
+        "displayName": "Graphite Chrome",
+        "canonical": "#262628",
+        "tonalRamp": ["#0b0b0c", "#252526", "#424244", "#616163", "#828284", "#a5a5a7", "#c9c9cb", "#eeeef0"]
+      },
+      "elevated-surface-dark": {
+        "role": "neutral",
+        "displayName": "Graphite Lift",
+        "canonical": "#2c2c2e",
+        "tonalRamp": ["#0b0b0c", "#252526", "#424244", "#616163", "#828284", "#a5a5a7", "#c9c9cb", "#eeeef0"]
+      },
+      "border": {
+        "role": "neutral",
+        "displayName": "Rule Gray",
+        "canonical": "#d1d1d6",
+        "tonalRamp": ["#0b0b0d", "#252528", "#424245", "#616165", "#828286", "#a4a4a9", "#c9c9cc", "#eeeef1"]
+      },
+      "border-dark": {
+        "role": "neutral",
+        "displayName": "Rule Graphite",
+        "canonical": "#38383a",
+        "tonalRamp": ["#0b0b0c", "#252526", "#424244", "#616163", "#828284", "#a5a5a7", "#c9c9cb", "#eeeef0"]
+      },
+      "text": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "canonical": "#1d1d1f",
+        "tonalRamp": ["#0b0b0c", "#252526", "#424244", "#616163", "#828284", "#a5a5a7", "#c9c9cb", "#eeeef0"]
+      },
+      "text-dark": {
+        "role": "neutral",
+        "displayName": "Paper Ink",
+        "canonical": "#f5f5f7",
+        "tonalRamp": ["#0b0b0c", "#252526", "#424243", "#616163", "#828284", "#a5a5a6", "#c9c9ca", "#eeeeef"]
+      },
+      "text-muted": {
+        "role": "neutral",
+        "displayName": "Muted Gray",
+        "canonical": "#86868b",
+        "tonalRamp": ["#0b0b0d", "#252528", "#414145", "#616165", "#828287", "#a4a4a9", "#c9c9cd", "#eeeef2"]
+      },
+      "text-muted-dark": {
+        "role": "neutral",
+        "displayName": "Muted Graphite",
+        "canonical": "#8e8e93",
+        "tonalRamp": ["#0b0b0d", "#252528", "#414145", "#616165", "#828287", "#a4a4a9", "#c9c9cd", "#eeeef1"]
+      },
+      "error": {
+        "role": "tertiary",
+        "displayName": "Ember Red",
+        "canonical": "#ff3b30",
+        "tonalRamp": ["#340000", "#630000", "#930000", "#c20000", "#ec2821", "#ff6252", "#ff9582", "#ffc7b5"]
+      },
+      "warning": {
+        "role": "tertiary",
+        "displayName": "Amber",
+        "canonical": "#ff9500",
+        "tonalRamp": ["#270000", "#4f0100", "#782000", "#a14000", "#c76400", "#e98b1a", "#ffb463", "#ffde9f"]
+      },
+      "success": {
+        "role": "tertiary",
+        "displayName": "Signal Green",
+        "canonical": "#34c759",
+        "tonalRamp": ["#001500", "#003500", "#005700", "#007b00", "#009f33", "#45c260", "#7ee48e", "#b5ffbe"]
+      },
+      "info": {
+        "role": "tertiary",
+        "displayName": "Deep Teal",
+        "canonical": "#0071a4",
+        "tonalRamp": ["#000c26", "#00284c", "#004773", "#00699a", "#318bbf", "#60aee0", "#90d2fe", "#c1f7ff"]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "The ⇄ mark in the About window — the only display moment."
+      },
+      "brand": {
+        "displayName": "Brand",
+        "purpose": "The macSFTP wordmark in About."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Page and sheet titles: Settings, modal and palette headers, and the first-connection card."
+      },
+      "heading": {
+        "displayName": "Heading",
+        "purpose": "Section titles inside a page or sheet, such as Settings cards and the transfer drawer header."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "File rows, tabs, palette rows, and form text."
+      },
+      "body-medium": {
+        "displayName": "Body Medium",
+        "purpose": "Selection and emphasis: selected row names, the current breadcrumb segment, switch titles, and empty-state leads."
+      },
+      "secondary": {
+        "displayName": "Secondary",
+        "purpose": "Explanatory prose, field hints, errors, tooltips, transfer titles, and breadcrumb parents."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Table headers, section eyebrows, status counts, transfer state labels, and field labels."
+      },
+      "control": {
+        "displayName": "Control Label",
+        "purpose": "Button and input labels at 0.875 times the 13px base."
+      },
+      "mono": {
+        "displayName": "Mono Data",
+        "purpose": "Size and modified columns, remote endpoints, and transfer detail."
+      },
+      "shortcut": {
+        "displayName": "Shortcut",
+        "purpose": "Inline shortcuts and key glyphs in the palette, connection entry, and menus."
+      }
+    },
+    "shadows": [
+      {
+        "name": "chip",
+        "value": "0 1px 3px -1px rgba(0, 0, 0, 0.08)",
+        "purpose": "Tooltips, the active tab, and other one-line affordances."
+      },
+      {
+        "name": "popover",
+        "value": "0 4px 6px -1px rgba(0, 0, 0, 0.10), 0 2px 4px -2px rgba(0, 0, 0, 0.10)",
+        "purpose": "Command palette, tab switcher, and drag previews."
+      },
+      {
+        "name": "modal",
+        "value": "0 8px 16px -4px rgba(0, 0, 0, 0.12), 0 2px 6px -2px rgba(0, 0, 0, 0.12)",
+        "purpose": "Task modals and sheets."
+      },
+      {
+        "name": "chrome-highlight",
+        "value": "1px top rule: rgba(255, 255, 255, 0.08) in dark appearance, rgba(0, 0, 0, 0.06) in light appearance",
+        "purpose": "The window's top edge; the only material cue the chrome gets."
+      },
+      {
+        "name": "scrim",
+        "value": "rgba(0, 0, 0, 0.45)",
+        "purpose": "Shared dimming layer behind every overlay."
+      }
+    ],
+    "motion": [
+      {
+        "name": "drawer-spring",
+        "value": "300ms critically damped spring, 0.5px settling tolerance",
+        "purpose": "Transfer drawer open, close, and resize settle."
+      },
+      {
+        "name": "overlay-fade",
+        "value": "150ms opacity in, instant out",
+        "purpose": "Command palette, tab switcher, About, Go to Path, and dialog overlays."
+      },
+      {
+        "name": "progress-interpolation",
+        "value": "200ms",
+        "purpose": "The drawn progress bar approaches the real fraction; the text still reports the real value."
+      },
+      {
+        "name": "busy-rotation",
+        "value": "900ms per revolution, linear, infinite",
+        "purpose": "The loading glyph, replacing a static refresh mark."
+      },
+      {
+        "name": "state-change",
+        "value": "instant, no transition",
+        "purpose": "Hover, press, selection, and focus change immediately."
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Accent-filled action for the main next step. Filled buttons keep their fill on hover and darken while pressed.",
+      "html": "<button class=\"ds-btn ds-btn-primary\">Continue</button>",
+      "css": ".ds-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6.5px; height: 26px; padding: 0 9.75px; min-width: 19.5px; border-radius: 5px; font: 400 11.375px/1.25 -apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, sans-serif; cursor: default; } .ds-btn-primary { background: #007aff; color: #ffffff; border: 1px solid #007aff; } .ds-btn-primary:hover { background: #007aff; } .ds-btn-primary:active { background: #0068d9; border-color: #0068d9; } .ds-btn-primary:focus-visible { outline: none; box-shadow: 0 0 0 4px rgba(0, 122, 255, 0.5); }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Plain bordered action for cancel and non-primary choices.",
+      "html": "<button class=\"ds-btn ds-btn-secondary\">Cancel</button>",
+      "css": ".ds-btn { display: inline-flex; align-items: center; justify-content: center; height: 26px; padding: 0 9.75px; min-width: 19.5px; border-radius: 5px; font: 400 11.375px/1.25 -apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, sans-serif; cursor: default; } .ds-btn-secondary { background: #f5f5f7; color: #1d1d1f; border: 1px solid #d1d1d6; } .ds-btn-secondary:hover { background: rgba(0, 0, 0, 0.05); border-color: #f5f5f7; } .ds-btn-secondary:active { background: rgba(0, 0, 0, 0.09); border-color: #f5f5f7; } .ds-btn-secondary:focus-visible { outline: none; box-shadow: 0 0 0 4px rgba(0, 122, 255, 0.5); }"
+    },
+    {
+      "name": "Danger Button",
+      "kind": "button",
+      "refersTo": "button-danger",
+      "description": "Destructive confirmation fill; same geometry and press behavior as the primary button.",
+      "html": "<button class=\"ds-btn ds-btn-danger\">Delete</button>",
+      "css": ".ds-btn { display: inline-flex; align-items: center; justify-content: center; height: 26px; padding: 0 9.75px; min-width: 19.5px; border-radius: 5px; font: 400 11.375px/1.25 -apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, sans-serif; cursor: default; } .ds-btn-danger { background: #ff3b30; color: #ffffff; border: 1px solid #ff3b30; } .ds-btn-danger:hover { background: #ff3b30; } .ds-btn-danger:active { background: #d93229; border-color: #d93229; } .ds-btn-danger:focus-visible { outline: none; box-shadow: 0 0 0 4px rgba(0, 122, 255, 0.5); }"
+    },
+    {
+      "name": "Connection Entry",
+      "kind": "button",
+      "refersTo": "connection-entry",
+      "description": "The first-connection action in an empty remote pane: larger than a text button, with its shortcut at the trailing edge and a dimming hover.",
+      "html": "<button class=\"ds-connect\"><span>Connect…</span><span class=\"ds-connect-shortcut\">⌘⇧R</span></button>",
+      "css": ".ds-connect { display: inline-flex; align-items: center; justify-content: space-between; width: 160px; height: 34px; padding: 0 9.75px; background: #007aff; color: #ffffff; border: 1px solid #007aff; border-radius: 5px; font: 400 13px/1.35 -apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, sans-serif; cursor: pointer; } .ds-connect:hover { opacity: 0.9; } .ds-connect:active { opacity: 0.8; } .ds-connect:focus-visible { outline: none; box-shadow: 0 0 0 4px rgba(0, 122, 255, 0.5); } .ds-connect-shortcut { font: 400 12px/1.25 Menlo, \"SF Mono\", monospace; color: #ffffff; opacity: 0.6; }"
+    },
+    {
+      "name": "Icon Button",
+      "kind": "button",
+      "refersTo": "icon-button",
+      "description": "A 26×22px hit area for a 16px glyph with a mandatory tooltip; hover and press use shared fills.",
+      "html": "<button class=\"ds-icon\" aria-label=\"Refresh\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M13.5 8a5.5 5.5 0 1 1-1.7-4\"/><path d=\"M13.5 2.5V5.2h-2.7\"/></svg></button>",
+      "css": ".ds-icon { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 22px; padding: 0; border: none; border-radius: 5px; background: transparent; color: #1d1d1f; opacity: 0.65; cursor: default; } .ds-icon:hover { background: rgba(0, 0, 0, 0.05); } .ds-icon:active { background: rgba(0, 0, 0, 0.09); } .ds-icon:disabled { opacity: 0.25; } .ds-icon:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.5); }"
+    },
+    {
+      "name": "Text Field",
+      "kind": "input",
+      "refersTo": "text-field",
+      "description": "Compact single-line field; focus turns the border to System Signal Blue and adds the shared ring.",
+      "html": "<input class=\"ds-field\" type=\"text\" placeholder=\"host.example.com\" />",
+      "css": ".ds-field { box-sizing: border-box; width: 220px; height: 19.5px; padding: 2px 8px; border: 1px solid #d1d1d6; border-radius: 5px; background: #ffffff; color: #1d1d1f; font: 400 11.375px/1.25 -apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, sans-serif; } .ds-field::placeholder { color: #86868b; } .ds-field:hover { border-color: #c4c4c9; } .ds-field:focus { outline: none; border-color: #007aff; box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.5); }"
+    },
+    {
+      "name": "Active Tab",
+      "kind": "nav",
+      "refersTo": "tab-active",
+      "description": "The selected connection tab: canvas fill, hairline border, chip shadow, a status dot, and a circular close affordance.",
+      "html": "<div class=\"ds-tab\"><span class=\"ds-tab-dot\"></span><span class=\"ds-tab-title\">deploy.example.com</span><button class=\"ds-tab-close\" aria-label=\"Close Tab\">×</button></div>",
+      "css": ".ds-tab { display: inline-flex; align-items: center; gap: 6.5px; height: 26px; max-width: 220px; padding-left: 9.75px; padding-right: 3.25px; background: #ffffff; border: 1px solid #d1d1d6; border-radius: 5px; box-shadow: 0 1px 3px -1px rgba(0, 0, 0, 0.08); font: 500 13px/1.35 -apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, sans-serif; color: #1d1d1f; } .ds-tab-dot { width: 8px; height: 8px; border-radius: 9999px; background: #34c759; flex: none; } .ds-tab-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-tab-close { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border: none; border-radius: 9999px; background: transparent; color: #86868b; font-size: 11px; line-height: 1.2; } .ds-tab-close:hover { background: rgba(0, 0, 0, 0.06); color: #1d1d1f; }"
+    },
+    {
+      "name": "Selected File Row",
+      "kind": "custom",
+      "refersTo": "file-row-selected",
+      "description": "A selected entry in a virtualized file list: accent tint, medium name weight, and full-contrast metadata.",
+      "html": "<div class=\"ds-row\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"#007aff\" stroke-width=\"1.4\" stroke-linejoin=\"round\"><path d=\"M1.8 4.6a1 1 0 0 1 1-1h3.1L7.4 5.1h5.8a1 1 0 0 1 1 1v6.3a1 1 0 0 1-1 1H2.8a1 1 0 0 1-1-1z\"/></svg><span class=\"ds-row-name\">releases</span><span class=\"ds-row-size\">—</span><span class=\"ds-row-date\">Oct 27, 2026, 09:41</span></div>",
+      "css": ".ds-row { display: flex; align-items: center; gap: 6.5px; height: 26px; padding: 0 4px; border-radius: 5px; background: rgba(0, 122, 255, 0.14); font: 400 13px/1.35 -apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, sans-serif; color: #1d1d1f; } .ds-row svg { flex: none; } .ds-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; } .ds-row-size { width: 80px; text-align: right; font: 400 11px/1.25 Menlo, \"SF Mono\", monospace; } .ds-row-date { width: 130px; font: 400 11px/1.25 Menlo, \"SF Mono\", monospace; }"
+    },
+    {
+      "name": "Transfer Row",
+      "kind": "custom",
+      "refersTo": "transfer-row",
+      "description": "One job in the shared drawer: direction, title, state, a 3px progress bar, and mono detail.",
+      "html": "<div class=\"ds-transfer\"><div class=\"ds-transfer-top\"><span class=\"ds-transfer-title\">release.tar.gz · local → server</span><span class=\"ds-transfer-state\">Running</span></div><div class=\"ds-transfer-bottom\"><span class=\"ds-transfer-track\"><span class=\"ds-transfer-fill\"></span></span><span class=\"ds-transfer-detail\">12.4 MB / 20.0 MB</span></div></div>",
+      "css": ".ds-transfer { display: flex; flex-direction: column; justify-content: center; gap: 3.25px; height: 44px; padding: 0 6.5px; border-radius: 5px; font-family: -apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, sans-serif; } .ds-transfer:hover { background: rgba(0, 0, 0, 0.05); } .ds-transfer-top { display: flex; align-items: center; gap: 6.5px; } .ds-transfer-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 1.35; color: #1d1d1f; } .ds-transfer-state { font-size: 11px; line-height: 1.2; font-weight: 500; color: #34c759; flex: none; } .ds-transfer-bottom { display: flex; align-items: center; gap: 6.5px; padding-left: 22px; } .ds-transfer-track { flex: 1; height: 3px; border-radius: 9999px; background: rgba(0, 0, 0, 0.09); overflow: hidden; } .ds-transfer-fill { display: block; width: 62%; height: 100%; border-radius: 9999px; background: #007aff; } .ds-transfer-detail { max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 400 11px/1.25 Menlo, \"SF Mono\", monospace; color: #86868b; }"
+    },
+    {
+      "name": "Command Palette",
+      "kind": "card",
+      "refersTo": "palette-card",
+      "description": "The elevated search card over the shared scrim: 520px wide, 10px radius, 15px semibold title, selected row on the accent tint at medium weight.",
+      "html": "<div class=\"ds-palette\"><div class=\"ds-palette-head\"><span class=\"ds-palette-title\">Find an Action</span><span class=\"ds-palette-chord\">⌘⇧P</span></div><input class=\"ds-palette-input\" type=\"text\" placeholder=\"Find an action…\" /><div class=\"ds-palette-row ds-palette-row-selected\"><span>New Connection</span><span class=\"ds-palette-key\">⌘T</span></div><div class=\"ds-palette-row\"><span>Close Tab</span><span class=\"ds-palette-key\">⌘W</span></div><div class=\"ds-palette-foot\">↑↓ to select · Enter to run · Esc to close</div></div>",
+      "css": ".ds-palette { display: flex; flex-direction: column; gap: 6.5px; width: 520px; padding: 9.75px; background: #ffffff; border: 1px solid #d1d1d6; border-radius: 10px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.10), 0 2px 4px -2px rgba(0, 0, 0, 0.10); font-family: -apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, sans-serif; } .ds-palette-head { display: flex; align-items: center; justify-content: space-between; } .ds-palette-title { font-size: 15px; line-height: 1.2; font-weight: 600; color: #1d1d1f; } .ds-palette-chord { font: 400 12px/1.25 Menlo, \"SF Mono\", monospace; color: #86868b; } .ds-palette-input { box-sizing: border-box; height: 19.5px; padding: 2px 8px; border: 1px solid #007aff; border-radius: 5px; box-shadow: 0 0 0 3px rgba(0, 122, 255, 0.5); font: 400 11.375px/1.25 -apple-system, BlinkMacSystemFont, \"SF Pro Text\", system-ui, sans-serif; color: #1d1d1f; } .ds-palette-input::placeholder { color: #86868b; } .ds-palette-row { display: flex; align-items: center; justify-content: space-between; gap: 6.5px; padding: 3.25px 6.5px; border-radius: 5px; font-size: 13px; line-height: 1.35; color: #1d1d1f; } .ds-palette-row-selected { background: rgba(0, 122, 255, 0.14); font-weight: 500; } .ds-palette-key { min-width: 56px; text-align: right; font: 400 12px/1.25 Menlo, \"SF Mono\", monospace; color: #86868b; } .ds-palette-foot { font-size: 12px; line-height: 1.35; color: #86868b; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Instrument Bench",
+    "overview": "macSFTP is a precision workbench for files. The two panes are the bench surface, the chrome is the rack around it, and every readout — path, status dot, transfer progress, conflict state — must be legible at a glance. The system is built for repeated, consequential operations, so familiarity outranks novelty and exactness outranks expression. Nothing decorates the space between the user and the file.\n\nBoth appearances share one grammar: tonal surfaces, 1px hairlines, and system blue reserved for action and focus. Depth is a soft edge on floating layers, never a hierarchy device. Controls are 26px tall, file rows are 26px, labels are 11px; density is the point, not a compromise. The result should feel like a well-machined tool that happens to be software: quiet at rest, unambiguous under the pointer.\n\nMotion is limited to state. The transfer drawer settles on a critically damped 300ms spring, overlays fade in over 150ms and dismiss instantly, progress interpolates over 200ms, and the busy glyph turns once every 900ms. Every one of these follows the system reduced-motion switch. When nothing is changing, nothing moves.",
+    "keyCharacteristics": [
+      "Fixed dual-pane shell: connection tabs above, local and remote file panes side by side, transfer drawer below, status bar at the edge.",
+      "A single type family (the macOS system font) at 11–15px, with 18px and 22px reserved for the About window and Menlo reserved for machine facts.",
+      "26px controls and file rows; 5px radii on controls, 10px on cards.",
+      "Hairline separation everywhere; no glass, gradients, or heavy shadows.",
+      "System blue rationed to action, focus, folders, and selection tint.",
+      "Four fixed-meaning status colors: error, warning, success, info."
+    ],
+    "rules": [
+      {
+        "name": "The One Signal Rule",
+        "body": "System Signal Blue marks action, focus, selection, folders, and active sorting. If blue is not telling the user what they can do or where they are, it is decoration and must go.",
+        "section": "colors"
+      },
+      {
+        "name": "The Hairline Rule",
+        "body": "Regions are separated by a 1px border in the border token. Never use a shadow to divide panes, bars, or rows.",
+        "section": "colors"
+      },
+      {
+        "name": "The Fixed-Meaning Rule",
+        "body": "Error, warning, success, and info never change roles. State must also be carried by text or shape so color is never the only signal.",
+        "section": "colors"
+      },
+      {
+        "name": "The Two-Appearance Rule",
+        "body": "Every color token exists in both appearances. Components read tokens; they never hardcode a hex.",
+        "section": "colors"
+      },
+      {
+        "name": "The One-Family Rule",
+        "body": "No display or decorative face enters the UI. The system font carries every label, heading, and row. Menlo is reserved for numbers, timestamps, shortcuts, and machine-generated strings.",
+        "section": "typography"
+      },
+      {
+        "name": "The Seven-Size Rule",
+        "body": "The scale is 11 / 11.375 / 12 / 13 / 15 / 18 / 22. Functional text stays between 11 and 15px; 18 and 22 appear only in About. The window rem is 13px, so micro-spacing steps in 3.25px increments and Control is 0.875rem. Anything outside the set is a defect, not a local tweak.",
+        "section": "typography"
+      },
+      {
+        "name": "The Four-Axis Rule",
+        "body": "Hierarchy is size, weight, leading, and color together. A title is not merely bigger — it is 600 weight at 1.2 leading; a label is not merely smaller — it is 500 weight at 1.2. Prose takes 1.35 leading, controls 1.25. Never change size alone.",
+        "section": "typography"
+      },
+      {
+        "name": "The Frozen-Height Rule",
+        "body": "Chrome, controls, and rows keep fixed heights. Hover, loading, progress, and error states change color and text, never geometry.",
+        "section": "layout"
+      },
+      {
+        "name": "The Edge-Light Rule",
+        "body": "A shadow may only soften the edge of a floating layer. It never establishes hierarchy, never lifts a row, and never divides a region.",
+        "section": "elevation"
+      },
+      {
+        "name": "The One Scrim Rule",
+        "body": "Every overlay uses the same 45% scrim. There is no second dimming value and no blur-behind.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do keep the 26px row and control rhythm; the interface should read as one machined grid.",
+      "Do separate regions with a 1px border in the border token.",
+      "Do reserve System Signal Blue for action, focus, selection, folders, and active sorting.",
+      "Do pair every icon-only control with a tooltip and an accessibility label.",
+      "Do carry state through text, weight, and shape as well as color.",
+      "Do keep floating layers flat and let the three-step edge-light scale do the work."
+    ],
+    "donts": [
+      "Don't use gradients, glass, translucency, or heavy shadows.",
+      "Don't fill large areas with brand color or turn chrome into decoration.",
+      "Don't introduce a landing page, hero, marketing illustration, or decorative empty state.",
+      "Don't lift rows or cards with shadows; hierarchy comes from tone and hairlines.",
+      "Don't change chrome or row heights between states.",
+      "Don't use Menlo for prose or the system font for machine data.",
+      "Don't animate anything that is not a state change, and never bypass reduced-motion."
+    ]
+  }
+}

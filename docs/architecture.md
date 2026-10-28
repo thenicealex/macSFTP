@@ -147,6 +147,8 @@ route 支持 Direct、单跳 saved-profile JumpHost（jump profile 自身必须 
 
 session、id/check-id 分配、临时目录命名和全部 phase transition 由 `macsftp_core::remote_edit::RemoteEditLifecycle` 独占。调用方只表达意图（`begin`、`request_upload`、`on_check_result`、`on_transfer_finished`、`resolve_conflict` 等），lifecycle 校验 phase/epoch/check id/路径并返回 `EditEffect`：runtime dispatch、打开编辑器、删除临时目录、rebase listing 和 `EditNotice`。`app` 负责连接与文件名校验、modal、编辑器解析、watcher 接线和 command 发送；dispatch 失败时按 effect 声明的 rollback（`RevertCheck`/`RestoreConflict`/`AbortDownload`）回调 lifecycle。lifecycle 不做文件系统 I/O，也不持有 GPUI、Tokio 或 platform 类型；本地 size/mtime 等事实由 app 读取后传入。
 
+`EditEffect` 的执行策略只在 `app` 的 `edit_effects` 模块定义一次（ADR-0005）：失败 dispatch 的 rollback 与 notice 选择、编辑器解析、临时目录清理和 listing rebase 都在 `execute_edit_effects` 中。窗口内的用户动作和进程级事件分别通过 `EditEffectHost` 的两个 adapter 提供执行环境——`WorkspaceEditHost` 用本窗口自己的 runtime client 与 tab 级状态栏，`ProcessEditHost` 先解析拥有该 tab 的窗口；两个 adapter 的最终提示都是同一个 `EditNotice` 文案。
+
 应用监视编辑会话临时目录中的保存动作，但只用于在文件列表和状态栏显示 dirty 标记；它绝不触发上传，也不因此放宽远端一致性检查。应用自身写入临时副本（下载完成、`DiscardLocal` 重新下载）必须按 size+mtime baseline 抑制，不能被误报成本地修改。用户在选中已打开编辑的远端文件后，通过明确的 **Upload Changes** 操作发起上传。上传不能依赖 UI 缓存的目录 listing 授权覆盖远端文件。流程为：
 
 ```text

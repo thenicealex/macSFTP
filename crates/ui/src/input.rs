@@ -7,12 +7,12 @@ use gpui_kit::{
     AccessibleAction, App, AppContext as _, Context, ElementId, Entity, EntityInputHandler as _,
     Focusable as _, InteractiveElement, IntoElement, Keystroke, MouseButton, ParentElement,
     RenderOnce, Role, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, div,
-    px, relative,
+    px,
 };
 use std::rc::Rc;
 use zeroize::Zeroize;
 
-use crate::theme::ActiveTheme;
+use crate::theme::{ActiveTheme, TextRoleExt};
 
 /// Check whether a character is an ASCII/Unicode control character or a
 /// Unicode bidirectional formatting control (e.g. RTL/LTR overrides, isolates).
@@ -176,9 +176,7 @@ impl RenderOnce for OrdinaryTextField {
             .h(theme.sizes.input_height)
             .px(theme.sizes.input_padding_x)
             .py(theme.sizes.input_padding_y)
-            .text_size(theme.sizes.input_text_size)
-            .line_height(relative(1.25))
-            .font_family(theme.fonts.ui_family.clone())
+            .text_role(&theme, theme.typography.control)
             .bg(theme.input_background(disabled))
             .rounded(theme.sizes.input_radius)
             .border_1()
@@ -466,21 +464,38 @@ pub fn text_field(
 
     div()
         .id(id.into())
+        .relative()
         .flex()
         .items_center()
         .w_full()
-        .h(px(26.0))
-        .px_2()
-        .rounded_sm()
+        .h(theme.sizes.input_height)
+        .px(theme.sizes.input_padding_x)
+        .py(theme.sizes.input_padding_y)
+        .rounded(theme.sizes.input_radius)
         .border_1()
         .border_color(if model.focused {
             theme.colors.border_focused
         } else {
             theme.colors.border
         })
-        .bg(theme.colors.background)
-        .text_size(px(12.0))
-        .font_family(theme.fonts.mono_family.clone())
+        .bg(theme.input_background(false))
+        .text_role(theme, theme.typography.control)
+        .when(model.focused, |field| {
+            field.child(
+                div()
+                    .absolute()
+                    .top(-theme.sizes.input_focus_ring - px(1.0))
+                    .left(-theme.sizes.input_focus_ring - px(1.0))
+                    .right(-theme.sizes.input_focus_ring - px(1.0))
+                    .bottom(-theme.sizes.input_focus_ring - px(1.0))
+                    .border(theme.sizes.input_focus_ring)
+                    .rounded(theme.sizes.input_radius + theme.sizes.input_focus_ring)
+                    .border_color(gpui_kit::Hsla {
+                        a: 0.5,
+                        ..theme.colors.border_focused
+                    }),
+            )
+        })
         .child(
             div()
                 .flex()
@@ -490,7 +505,7 @@ pub fn text_field(
                 .when(is_empty && !model.focused, |field| {
                     field.child(
                         div()
-                            .text_color(theme.colors.text_disabled)
+                            .text_color(theme.colors.input_placeholder)
                             .child(SharedString::from(model.placeholder.to_string())),
                     )
                 })
@@ -505,7 +520,7 @@ pub fn text_field(
                             field.child(
                                 div()
                                     .w(px(1.0))
-                                    .h(px(15.0))
+                                    .h(px(14.0))
                                     .flex_none()
                                     .bg(theme.colors.accent),
                             )
@@ -555,7 +570,7 @@ mod tests {
         ) -> impl gpui_kit::IntoElement {
             use crate::theme::ActiveTheme as _;
             use gpui_kit::{InteractiveElement as _, ParentElement as _, Styled as _};
-            window.set_rem_size(cx.theme().sizes.input_text_size / 0.875);
+            window.set_rem_size(cx.theme().typography.control.size / 0.875);
             gpui_kit::div().flex().flex_col().w_full().child(
                 gpui_kit::div()
                     .debug_selector(|| "base-input".into())

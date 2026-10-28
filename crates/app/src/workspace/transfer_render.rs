@@ -10,7 +10,7 @@ use macsftp_core::{
     TransferStore,
 };
 use macsftp_ui::{
-    ActiveTheme, IconName, connection_status, format_size, icon, icon_button,
+    ActiveTheme, IconName, TextRoleExt, connection_status, format_size, icon, icon_button,
     section_header_static, text_tooltip, transfer_row, transfer_title,
 };
 
@@ -337,13 +337,13 @@ impl crate::workspace::Workspace {
                 .h(px(28.0))
                 .px_2()
                 .min_w_0()
-                .text_size(px(11.0))
+                .text_role(&theme, theme.typography.label)
                 .text_color(theme.colors.text_muted)
                 .child(icon(IconName::Transfers, theme.colors.text))
                 .child(
                     div()
                         .flex_none()
-                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_role(&theme, theme.typography.heading)
                         .text_color(theme.colors.text)
                         .child("Transfers"),
                 )
@@ -418,15 +418,14 @@ impl crate::workspace::Workspace {
                     .gap_1()
                     .child(
                         div()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::MEDIUM)
+                            .text_role(&theme, theme.typography.body_medium)
                             .text_color(theme.colors.text)
                             .child("No transfers yet"),
                     )
                     .when(self.transfer_drawer.height >= px(90.0), |empty| {
                         empty.child(
                             div()
-                                .text_size(px(11.0))
+                                .text_role(&theme, theme.typography.secondary)
                                 .text_color(theme.colors.text_muted)
                                 .child("Select files to upload or download."),
                         )
@@ -465,8 +464,7 @@ impl crate::workspace::Workspace {
                         .gap_1()
                         .h(px(24.0))
                         .px_2()
-                        .text_size(px(11.0))
-                        .font_weight(FontWeight::MEDIUM)
+                        .text_role(&theme, theme.typography.label)
                         .text_color(theme.colors.text_muted)
                         .hover(|style| style.bg(theme.colors.element_hover))
                         .on_click(cx.listener(move |workspace, _event, _window, cx| {
@@ -514,7 +512,7 @@ impl crate::workspace::Workspace {
                         .gap_1()
                         .h(px(24.0))
                         .px_2()
-                        .text_size(px(11.0))
+                        .text_role(&theme, theme.typography.label)
                         .text_color(theme.colors.accent)
                         .cursor_pointer()
                         .hover(|style| style.bg(theme.colors.element_hover))
@@ -784,7 +782,7 @@ impl crate::workspace::Workspace {
             .bg(theme.colors.surface)
             .border_t_1()
             .border_color(theme.colors.border)
-            .text_size(px(11.0))
+            .text_role(&theme, theme.typography.label)
             .text_color(theme.colors.text_muted)
             .id("status-bar")
             .role(Role::Status)
@@ -799,18 +797,12 @@ impl crate::workspace::Workspace {
                     .min_w_0()
                     .child(
                         div()
-                            .size(px(7.0))
+                            .size(px(8.0))
                             .flex_none()
                             .rounded_full()
                             .bg(status_color),
                     )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child(status_text),
-                    )
+                    .child(div().min_w_0().truncate().child(status_text))
                     .when(selected_count > 0, |row| {
                         row.child(
                             div()
@@ -859,7 +851,7 @@ impl crate::workspace::Workspace {
                                     } else {
                                         theme.colors.surface
                                     })
-                                    .text_size(px(11.0))
+                                    .text_role(&theme, theme.typography.control)
                                     .text_color(if is_modified {
                                         theme.colors.accent
                                     } else {
@@ -900,8 +892,8 @@ impl crate::workspace::Workspace {
                             .flex_none()
                             .items_center()
                             .gap_1()
-                            .px(px(6.0))
-                            .py(px(2.0))
+                            .px_2()
+                            .py_0p5()
                             .rounded(theme.sizes.button_radius)
                             .cursor_pointer()
                             .when(self.transfer_drawer.open, |btn| {

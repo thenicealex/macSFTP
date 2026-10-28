@@ -3,15 +3,15 @@
 use std::path::Path;
 
 use gpui_kit::{
-    Context, FontWeight, IntoElement, KeyDownEvent, ParentElement, SharedString, Styled, Window,
-    div, prelude::*, px,
+    Context, IntoElement, KeyDownEvent, ParentElement, SharedString, Styled, Window, div,
+    prelude::*, px,
 };
 use macsftp_core::{
     AppCommand, ConnectionState, EntryPath, FileKind, FsCommand, FsEntryRef, FsOp, FsPath, FsScope,
     TabId, UserFacingError, is_bidi_or_control,
 };
 use macsftp_platform::{create_directory, delete_entry, local_fs_error, rename_entry};
-use macsftp_ui::{ActiveTheme, IconName, InputState, icon, text_button};
+use macsftp_ui::{ActiveTheme, IconName, InputState, TextRoleExt, icon, text_button};
 
 use crate::resources::ActiveResources;
 use crate::workspace::overlay::OverlayFade;
@@ -448,7 +448,7 @@ impl crate::workspace::Workspace {
             .flex()
             .flex_col()
             .min_w_0()
-            .rounded_sm()
+            .rounded(theme.sizes.input_radius)
             .border_1()
             .border_color(theme.colors.border)
             .bg(theme.colors.surface);
@@ -470,7 +470,7 @@ impl crate::workspace::Workspace {
                     .when(index > 0, |row| {
                         row.border_t_1().border_color(theme.colors.border)
                     })
-                    .text_size(px(12.0))
+                    .text_role(&theme, theme.typography.body)
                     .text_color(theme.colors.text)
                     .child(icon(entry_icon, theme.colors.text_muted))
                     .child(div().min_w_0().truncate().child(name)),
@@ -483,7 +483,7 @@ impl crate::workspace::Workspace {
                     .py_1()
                     .border_t_1()
                     .border_color(theme.colors.border)
-                    .text_size(px(12.0))
+                    .text_role(&theme, theme.typography.secondary)
                     .text_color(theme.colors.text_muted)
                     .child(format!("and {} more", presentation.overflow)),
             );
@@ -507,13 +507,12 @@ impl crate::workspace::Workspace {
             .gap_4()
             .w_full()
             .max_w(px(440.0))
-            .p_5()
+            .p_4()
             .bg(theme.colors.elevated_surface)
             .border_1()
             .border_color(theme.colors.border)
             .rounded(theme.sizes.modal_radius)
             .shadow(theme.shadow_modal())
-            .font_family(theme.fonts.ui_family.clone())
             .child(
                 div()
                     .flex()
@@ -527,15 +526,17 @@ impl crate::workspace::Workspace {
                             .items_center()
                             .justify_center()
                             .rounded_full()
-                            .bg(gpui_kit::hsla(0.0, 0.55, 0.45, 0.15))
+                            .bg(gpui_kit::Hsla {
+                                a: 0.15,
+                                ..theme.colors.error
+                            })
                             .child(icon(IconName::Trash, theme.colors.error)),
                     )
                     .child(
                         div()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(15.0))
-                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_role(&theme, theme.typography.title)
                             .text_color(theme.colors.text)
                             .child(presentation.title.clone()),
                     ),
@@ -550,15 +551,14 @@ impl crate::workspace::Workspace {
                 .child(
                     div()
                         .mt(px(1.0))
-                        .text_size(px(12.0))
-                        .font_weight(FontWeight::BOLD)
+                        .text_role(&theme, theme.typography.heading)
                         .text_color(theme.colors.error)
                         .child("!"),
                 )
                 .child(
                     div()
                         .min_w_0()
-                        .text_size(px(12.0))
+                        .text_role(&theme, theme.typography.secondary)
                         .text_color(theme.colors.text_muted)
                         .child(presentation.risk_message),
                 ),
@@ -588,13 +588,13 @@ impl crate::workspace::Workspace {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_size(px(11.0))
+                            .text_role(&theme, theme.typography.label)
                             .text_color(theme.colors.accent)
                             .child(if checked { "✓" } else { "" }),
                     )
                     .child(
                         div()
-                            .text_size(px(12.0))
+                            .text_role(&theme, theme.typography.secondary)
                             .text_color(theme.colors.text_muted)
                             .child("Don’t ask before deleting"),
                     ),

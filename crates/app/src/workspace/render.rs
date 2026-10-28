@@ -1,14 +1,14 @@
 use crate::workspace::TextInputTarget;
 use gpui_kit::base::TestSupportExt as _;
 use gpui_kit::{
-    AppContext, Context, FontWeight, IntoElement, ParentElement, Role, SharedString, Styled,
-    Window, WindowControlArea, div, prelude::*, px, uniform_list,
+    AppContext, Context, IntoElement, ParentElement, Role, SharedString, Styled, Window,
+    WindowControlArea, div, prelude::*, px, uniform_list,
 };
 use macsftp_core::{ConnectionState, EntryPath, LocalPath, RemotePath};
 use macsftp_ui::{
-    ActiveTheme, DragPreview, FileRowModel, IconName, connection_status, empty_state, file_row,
-    file_table_header, format_size_label, format_timestamp, icon, icon_button, loading_state, tab,
-    text_button, text_tooltip,
+    ActiveTheme, DragPreview, FileRowModel, IconName, TextRoleExt, connection_status, empty_state,
+    file_row, file_table_header, format_size_label, format_timestamp, icon, icon_button,
+    loading_state, tab, text_button, text_tooltip,
 };
 use std::collections::HashSet;
 
@@ -241,14 +241,14 @@ impl crate::workspace::Workspace {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(13.0))
+                                .text_role(&theme, theme.typography.body)
                                 .text_color(theme.colors.text)
                                 .child(title),
                         )
                         .child(
                             div()
                                 .flex_none()
-                                .text_size(px(11.0))
+                                .text_role(&theme, theme.typography.label)
                                 .text_color(theme.colors.text_muted)
                                 .child(status_label),
                         ),
@@ -282,10 +282,9 @@ impl crate::workspace::Workspace {
                         .border_color(theme.colors.border)
                         .rounded(theme.sizes.modal_radius)
                         .shadow(theme.shadow_popover())
-                        .font_family(theme.fonts.ui_family.clone())
                         .child(
                             div()
-                                .text_size(px(12.0))
+                                .text_role(&theme, theme.typography.secondary)
                                 .text_color(theme.colors.text_muted)
                                 .child("Switch Tabs · Enter to select · Esc to cancel"),
                         )
@@ -591,7 +590,7 @@ impl crate::workspace::Workspace {
                     None => {
                         trail = trail.child(
                             div()
-                                .text_size(px(12.0))
+                                .text_role(&theme, theme.typography.secondary)
                                 .text_color(text_color)
                                 .truncate()
                                 .child(pane_name.to_string()),
@@ -611,7 +610,7 @@ impl crate::workspace::Workspace {
                                 trail = trail.child(
                                     div()
                                         .flex_none()
-                                        .text_size(px(11.0))
+                                        .text_role(&theme, theme.typography.secondary)
                                         .text_color(muted_color)
                                         .child("/"),
                                 );
@@ -624,7 +623,7 @@ impl crate::workspace::Workspace {
                                     trail = trail.child(
                                         div()
                                             .flex_none()
-                                            .text_size(px(12.0))
+                                            .text_role(&theme, theme.typography.secondary)
                                             .text_color(muted_color)
                                             .child("…"),
                                     );
@@ -656,15 +655,17 @@ impl crate::workspace::Workspace {
                                                 seg.flex_shrink(3.0).min_w(px(16.0))
                                             })
                                             .truncate()
-                                            .px(px(3.0))
-                                            .py(px(1.0))
+                                            .px_1()
+                                            .py_0p5()
                                             .rounded(theme.sizes.button_radius)
-                                            .text_size(px(12.0))
-                                            .font_weight(if is_last {
-                                                FontWeight::MEDIUM
-                                            } else {
-                                                FontWeight::NORMAL
-                                            })
+                                            .text_role(
+                                                &theme,
+                                                if is_last {
+                                                    theme.typography.body_medium
+                                                } else {
+                                                    theme.typography.secondary
+                                                },
+                                            )
                                             .text_color(if is_last {
                                                 text_color
                                             } else {
@@ -711,7 +712,7 @@ impl crate::workspace::Workspace {
                 bar.child(
                     div()
                         .flex_none()
-                        .text_size(px(11.0))
+                        .text_role(&theme, theme.typography.label)
                         .text_color(theme.colors.text_muted)
                         .child("Refreshing…"),
                 )
@@ -908,9 +909,7 @@ impl crate::workspace::Workspace {
                                     .when_some(title, |container, title| {
                                         container.child(
                                             div()
-                                                .text_size(px(15.0))
-                                                .line_height(gpui_kit::relative(1.2))
-                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_role(theme, theme.typography.title)
                                                 .text_color(theme.colors.text)
                                                 .child(title),
                                         )
@@ -918,8 +917,7 @@ impl crate::workspace::Workspace {
                                     .when_some(detail, |container, detail| {
                                         container.child(
                                             div()
-                                                .text_size(px(13.0))
-                                                .line_height(gpui_kit::relative(1.25))
+                                                .text_role(theme, theme.typography.body)
                                                 .text_color(theme.colors.text_muted)
                                                 .text_center()
                                                 .child(detail),
@@ -940,25 +938,25 @@ impl crate::workspace::Workspace {
                                 div()
                                     .flex()
                                     .flex_col()
+                                    .gap_1()
                                     .w_full()
-                                    .mt(px(24.0))
+                                    .mt_6()
                                     .child(
                                         div()
-                                            .mb(px(8.0))
-                                            .text_size(px(11.0))
+                                            .mb_1()
+                                            .text_role(theme, theme.typography.label)
                                             .text_color(theme.colors.text_muted)
                                             .child("Recent Connections"),
                                     )
-                                    .children(rows.into_iter().map(
-                                        |(id, primary, endpoint, full)| {
+                                    .child(div().flex().flex_col().gap_1().w_full().children(
+                                        rows.into_iter().map(|(id, primary, endpoint, full)| {
                                             div()
                                                 .id(SharedString::from(format!("recent-{id}")))
                                                 .flex()
                                                 .items_center()
                                                 .gap_2()
                                                 .h(px(30.0))
-                                                .mb(px(2.0))
-                                                .px(px(10.0))
+                                                .px_2p5()
                                                 .rounded_md()
                                                 .cursor_pointer()
                                                 .tooltip(text_tooltip(full))
@@ -975,7 +973,7 @@ impl crate::workspace::Workspace {
                                                         .flex_1()
                                                         .min_w_0()
                                                         .truncate()
-                                                        .text_size(px(13.0))
+                                                        .text_role(theme, theme.typography.body)
                                                         .text_color(theme.colors.text)
                                                         .child(primary),
                                                 )
@@ -985,7 +983,7 @@ impl crate::workspace::Workspace {
                                                             .flex_none()
                                                             .max_w(px(150.0))
                                                             .truncate()
-                                                            .text_size(px(11.0))
+                                                            .text_role(theme, theme.typography.secondary)
                                                             .text_color(theme.colors.text_muted)
                                                             .child(endpoint),
                                                     )
@@ -1012,7 +1010,7 @@ impl crate::workspace::Workspace {
                                                         },
                                                     ),
                                                 )
-                                        },
+                                            })
                                     )),
                             )
                         }),
@@ -1074,10 +1072,9 @@ impl crate::workspace::Workspace {
                         } else {
                             theme.colors.accent
                         })
-                        .line_height(gpui_kit::relative(1.25))
                         .cursor_pointer()
                         .bg(theme.colors.accent)
-                        .text_size(px(13.0))
+                        .text_role(&theme, theme.typography.body)
                         .text_color(theme.colors.text_on_accent)
                         .hover(|style| style.opacity(0.9))
                         .active(|style| style.opacity(0.8))
@@ -1098,7 +1095,12 @@ impl crate::workspace::Workspace {
                             )
                         })
                         .child("Connect…")
-                        .child(div().opacity(0.6).child("⌘⇧R"))
+                        .child(
+                            div()
+                                .opacity(0.6)
+                                .text_role(&theme, theme.typography.shortcut)
+                                .child("⌘⇧R"),
+                        )
                         .on_click(cx.listener(|workspace, _event, window, cx| {
                             workspace.request_connect(window, cx);
                         }))
@@ -1484,7 +1486,7 @@ impl crate::workspace::Workspace {
                         .bg(theme.colors.surface)
                         .child(
                             div()
-                                .text_size(px(11.0))
+                                .text_role(&theme, theme.typography.label)
                                 .text_color(theme.colors.text_muted)
                                 .child("Filter Files:"),
                         )
@@ -1506,8 +1508,7 @@ impl crate::workspace::Workspace {
                                 .when(!explicit_focus, |row| {
                                     row.child(
                                         div()
-                                            .text_size(px(12.0))
-                                            .font_family(theme.fonts.mono_family.clone())
+                                            .text_role(&theme, theme.typography.mono)
                                             .text_color(theme.colors.text)
                                             .truncate()
                                             .child(query_display),
@@ -1517,7 +1518,7 @@ impl crate::workspace::Workspace {
                         .child(
                             div()
                                 .flex_none()
-                                .text_size(px(11.0))
+                                .text_role(&theme, theme.typography.label)
                                 .text_color(theme.colors.text_muted)
                                 .child(format!("· {matched}/{total_after_hidden}")),
                         )
@@ -1554,7 +1555,7 @@ impl crate::workspace::Workspace {
                     .bg(theme.colors.surface)
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_role(&theme, theme.typography.label)
                             .text_color(theme.colors.text_muted)
                             .child(label),
                     )
@@ -1600,7 +1601,7 @@ impl crate::workspace::Workspace {
                 if let Some(error) = &edit.error {
                     banner = banner.child(
                         div()
-                            .text_size(px(11.0))
+                            .text_role(&theme, theme.typography.secondary)
                             .text_color(theme.colors.error)
                             .child(error.clone()),
                     );
@@ -1666,8 +1667,7 @@ impl crate::workspace::Workspace {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .text_size(px(22.0))
-                    .font_weight(FontWeight::BOLD)
+                    .text_role(&theme, theme.typography.display)
                     .text_color(theme.colors.accent)
                     .child("⇄"),
             );
@@ -1700,19 +1700,18 @@ impl crate::workspace::Workspace {
                         .child(mark)
                         .child(
                             div()
-                                .text_size(px(18.0))
-                                .font_weight(FontWeight::MEDIUM)
+                                .text_role(&theme, theme.typography.brand)
                                 .child("macSFTP"),
                         )
                         .child(
                             div()
-                                .text_size(px(12.0))
+                                .text_role(&theme, theme.typography.secondary)
                                 .text_color(theme.colors.text_muted)
                                 .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
                         )
                         .child(
                             div()
-                                .text_size(px(12.0))
+                                .text_role(&theme, theme.typography.secondary)
                                 .text_color(theme.colors.text_muted)
                                 .child("Browse and transfer server files from your Mac."),
                         )

@@ -1,9 +1,7 @@
-use gpui_kit::{
-    Context, FontWeight, Hsla, IntoElement, Render, SharedString, Window, div, prelude::*, px,
-};
+use gpui_kit::{Context, Hsla, IntoElement, Render, SharedString, Window, div, prelude::*, px};
 use macsftp_core::{ConnectionState, TransferEndpoint, TransferJob};
 
-use crate::{ActiveTheme, Theme};
+use crate::{ActiveTheme, TextRoleExt, Theme};
 
 /// Static section header used in the transfer drawer.
 pub fn section_header_static(label: &str, count: usize, theme: &Theme) -> impl IntoElement + use<> {
@@ -13,8 +11,7 @@ pub fn section_header_static(label: &str, count: usize, theme: &Theme) -> impl I
         .items_center()
         .h(px(24.0))
         .px_2()
-        .text_size(px(11.0))
-        .font_weight(FontWeight::MEDIUM)
+        .text_role(theme, theme.typography.label)
         .text_color(theme.colors.text_muted)
         .child(format!("{label} ({count})"))
 }
@@ -78,7 +75,7 @@ impl Render for DragPreview {
             .bg(theme.colors.element_selected)
             .text_color(theme.colors.text)
             .shadow(theme.shadow_popover())
-            .text_size(px(12.0))
+            .text_role(&theme, theme.typography.secondary)
             .child(self.label.clone())
     }
 }

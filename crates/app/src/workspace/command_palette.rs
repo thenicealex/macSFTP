@@ -3,11 +3,11 @@
 use crate::workspace::TextInputTarget;
 
 use gpui_kit::{
-    Context, FontWeight, IntoElement, KeyDownEvent, ParentElement, SharedString, Styled, Window,
-    div, prelude::*, px,
+    Context, IntoElement, KeyDownEvent, ParentElement, SharedString, Styled, Window, div,
+    prelude::*, px,
 };
 use macsftp_core::ConnectionState;
-use macsftp_ui::ActiveTheme;
+use macsftp_ui::{ActiveTheme, TextRoleExt};
 
 use crate::palette_commands::{PaletteCommand, PaletteContext, filter_palette_commands};
 use crate::workspace::Workspace;
@@ -128,7 +128,6 @@ impl Workspace {
         };
 
         let has_results = !commands.is_empty();
-        let mono_family = theme.fonts.mono_family.clone();
         let transfers_open = self.transfer_drawer.open;
         let rows = commands.into_iter().enumerate().map(|(index, command)| {
             let is_selected = index == selected;
@@ -149,7 +148,6 @@ impl Workspace {
                 theme.colors.elevated_surface
             };
             let hover_background = theme.colors.element_hover;
-            let mono = mono_family.clone();
 
             div()
                 .id(("palette-row", index))
@@ -171,12 +169,15 @@ impl Workspace {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_size(px(13.0))
-                        .font_weight(if is_selected {
-                            FontWeight::MEDIUM
-                        } else {
-                            FontWeight::NORMAL
-                        })
+                        .truncate()
+                        .text_role(
+                            &theme,
+                            if is_selected {
+                                theme.typography.body_medium
+                            } else {
+                                theme.typography.body
+                            },
+                        )
                         .text_color(theme.colors.text)
                         .child(title),
                 )
@@ -185,8 +186,7 @@ impl Workspace {
                         div()
                             .flex_none()
                             .min_w(px(56.0))
-                            .text_size(px(12.0))
-                            .font_family(mono)
+                            .text_role(&theme, theme.typography.shortcut)
                             .text_color(theme.colors.text_muted)
                             .child(binding),
                     )
@@ -240,7 +240,6 @@ impl Workspace {
                         .border_color(theme.colors.border)
                         .rounded(theme.sizes.modal_radius)
                         .shadow(theme.shadow_popover())
-                        .font_family(theme.fonts.ui_family.clone())
                         .child(
                             div()
                                 .flex()
@@ -248,15 +247,13 @@ impl Workspace {
                                 .justify_between()
                                 .child(
                                     div()
-                                        .text_size(px(14.0))
-                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_role(&theme, theme.typography.title)
                                         .text_color(theme.colors.text)
                                         .child("Find an Action"),
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(12.0))
-                                        .font_family(theme.fonts.mono_family.clone())
+                                        .text_role(&theme, theme.typography.shortcut)
                                         .text_color(theme.colors.text_muted)
                                         .child("⌘⇧P"),
                                 ),
@@ -277,7 +274,7 @@ impl Workspace {
                                         div()
                                             .px_2()
                                             .py_2()
-                                            .text_size(px(13.0))
+                                            .text_role(&theme, theme.typography.body)
                                             .text_color(theme.colors.text_muted)
                                             .child("No matching actions"),
                                     )
@@ -293,7 +290,7 @@ impl Workspace {
                         })
                         .child(
                             div()
-                                .text_size(px(11.0))
+                                .text_role(&theme, theme.typography.secondary)
                                 .text_color(theme.colors.text_muted)
                                 .child("↑↓ to select · Enter to run · Esc to close"),
                         ),

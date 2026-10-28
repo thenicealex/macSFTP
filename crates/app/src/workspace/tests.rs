@@ -4804,6 +4804,39 @@ fn resolve_conflict_overwrite_uploads(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn full_command_channel_restores_conflict_and_surfaces_upload_failure(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+
+    let id = register_conflict_session(
+        &workspace,
+        &mut cx,
+        RemotePath::new("/home/tester/edit.txt"),
+        LocalPath::new("/tmp/macsftp-conflict-dispatch/edit.txt"),
+    );
+    while channels.command_rx.try_recv().is_ok() {}
+    fill_command_channel(&channels);
+
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.resolve_edit_conflict(id, ConflictChoice::Overwrite, cx);
+    });
+
+    workspace.read_with(&cx, |workspace, cx| {
+        assert_eq!(
+            cx.resources()
+                .edit_sessions
+                .session(id)
+                .map(|session| session.phase.clone()),
+            Some(EditPhase::RemoteConflict),
+            "an upload that never entered the channel must restore the conflict"
+        );
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some("The upload couldn’t start. Try again.")
+        );
+    });
+}
+
+#[gpui_kit::test]
 fn resolve_conflict_double_overwrite_dispatches_once(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
 
@@ -9952,6 +9985,70 @@ fn regenerate_workspace_ux_evidence() {
     cx.run_until_parked();
     capture(&mut cx, "light-settings-saved-connections-720x480.png");
 
+    // Capture 10b (light): long connection values at the minimum window. The
+    // list truncates its name and endpoint, and the compact editor stacks
+    // labels above the fields so a long host keeps the detail width.
+    cx.update(|cx| {
+        workspace.update(cx, |_workspace, cx| {
+            cx.resources_mut()
+                .profiles
+                .save_request(ProfileSaveRequest {
+                    profile_id: ProfileId(3),
+                    name: "Production EU West (Read-Only Mirror)".into(),
+                    host: "prod-eu-west-mirror-01.internal.example.corporate".into(),
+                    port: 22,
+                    username: "deployment-service-account".into(),
+                    auth: ProfileAuthUpdate::Password {
+                        password: Some("fixture-password".into()),
+                    },
+                    route: macsftp_core::ConnectionRoute::Direct,
+                    default_remote_path: Some(macsftp_core::RemotePath::new(
+                        "/srv/mirrors/production/current",
+                    )),
+                })
+                .expect("seed long profile fixture");
+        });
+    });
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                workspace.set_appearance(AppearancePreference::Light, window, cx);
+                workspace.set_settings_section(SettingsSection::Profiles, cx);
+                workspace.select_profile_in_settings(ProfileId(3), cx);
+                window.focus(&workspace.workspace_focus, cx);
+                cx.notify();
+            })
+            .expect("workspace must be live");
+    });
+    cx.run_until_parked();
+    cx.run_until_parked();
+    capture(&mut cx, "light-settings-saved-connections-long-720x480.png");
+
+    // Capture 10c (light): a long rule pattern and app name truncate inside the
+    // row instead of pushing Remove out of the card.
+    cx.update(|cx| {
+        workspace.update(cx, |_workspace, cx| {
+            cx.resources_mut()
+                .config
+                .set_editor_rules(vec![macsftp_core::EditorRule::new(
+                    "*.very-long-extension-name.component.tsx",
+                    "Visual Studio Code - Insiders Preview",
+                )])
+                .expect("seed long editor rule fixture");
+        });
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                workspace.set_settings_section(SettingsSection::Editor, cx);
+                window.focus(&workspace.workspace_focus, cx);
+                cx.notify();
+            })
+            .expect("workspace must be live");
+    });
+    cx.run_until_parked();
+    capture(&mut cx, "light-settings-editor-long-720x480.png");
+
     // Capture 11 (dark): Settings → General. The switch track and knob tokens
     // must keep their contrast when the surface and controls both go dark.
     cx.update(|cx| {
@@ -9967,6 +10064,194 @@ fn regenerate_workspace_ux_evidence() {
     });
     cx.run_until_parked();
     capture(&mut cx, "dark-settings-general-720x480.png");
+
+    // Captures 12–14 (light): Settings → General at the desktop widths it has
+    // to hold. The form keeps its 640 pt measure centered, so a wider window
+    // adds outer margin instead of stretching the controls or the sidebar.
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                workspace.set_appearance(AppearancePreference::Light, window, cx);
+                workspace.settings.section = SettingsSection::General;
+                window.focus(&workspace.workspace_focus, cx);
+                cx.notify();
+            })
+            .expect("workspace must be live");
+    });
+    for (width, height) in [(1024.0, 720.0), (1280.0, 800.0), (1440.0, 900.0)] {
+        cx.update_window(window, |_, window, cx| {
+            window.resize(size(px(width), px(height)));
+            // The test platform only records the new bounds; this is the
+            // callback a real platform fires to relayout the root view.
+            window.bounds_changed(cx);
+        })
+        .expect("window resize must succeed");
+        cx.run_until_parked();
+        cx.run_until_parked();
+        capture(
+            &mut cx,
+            &format!(
+                "light-settings-general-{}x{}.png",
+                width as u32, height as u32
+            ),
+        );
+    }
+
+    // Capture 14b (light): Saved Connections at a desktop width. Above the
+    // 820pt threshold the editor returns to its 112px label column beside the
+    // fields, with the long profile still holding the detail width.
+    cx.update_window(window, |_, window, cx| {
+        window.resize(size(px(1280.0), px(800.0)));
+        window.bounds_changed(cx);
+    })
+    .expect("window resize must succeed");
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                workspace.set_settings_section(SettingsSection::Profiles, cx);
+                workspace.select_profile_in_settings(ProfileId(3), cx);
+                window.focus(&workspace.workspace_focus, cx);
+                cx.notify();
+            })
+            .expect("workspace must be live");
+    });
+    cx.run_until_parked();
+    cx.run_until_parked();
+    capture(&mut cx, "light-settings-saved-connections-1280x800.png");
+
+    // Capture 15 (light): the workspace at the default desktop size. The shell
+    // keeps its fixed chrome and splits the remaining width between the panes.
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                workspace.surface = WorkspaceSurface::Files;
+                workspace.set_local_path(
+                    LocalPath::new(fixture.to_string_lossy().into_owned()),
+                    window,
+                    cx,
+                );
+                window.focus(&workspace.workspace_focus, cx);
+                cx.notify();
+            })
+            .expect("workspace must be live");
+    });
+    cx.update_window(window, |_, window, cx| {
+        window.resize(size(px(1280.0), px(800.0)));
+        window.bounds_changed(cx);
+    })
+    .expect("window resize must succeed");
+    cx.run_until_parked();
+    cx.run_until_parked();
+    capture(&mut cx, "light-1280x800.png");
+
+    // Capture 16 (light): the Connect form with its password field focused and
+    // filled. The secret field follows the Base input contract — same height,
+    // radius, type and focus ring as the ordinary fields — while rendering
+    // bullets.
+    cx.update_window(window, |_, window, cx| {
+        window.resize(size(px(720.0), px(480.0)));
+        window.bounds_changed(cx);
+    })
+    .expect("window resize must succeed");
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                use crate::workspace::connect_form::ConnectField;
+                workspace.set_appearance(AppearancePreference::Light, window, cx);
+                workspace.open_connect_form(window, cx);
+                let form = workspace
+                    .connect_form_ui
+                    .form
+                    .as_mut()
+                    .expect("Connect form must be open");
+                form.password.set_value("fixture-secret".to_string());
+                form.focused_field = ConnectField::Password;
+                cx.notify();
+            })
+            .expect("workspace must be live");
+    });
+    cx.run_until_parked();
+    cx.run_until_parked();
+    capture(&mut cx, "light-connect-form-720x480.png");
+
+    // Capture 17 (light): the delete confirmation. It shares the task-modal
+    // padding, the 5px nested-list radius and the token-derived danger badge.
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                workspace.close_connect_form(window, cx);
+                let tab_id = workspace.active_tab().expect("capture window has a tab").id;
+                workspace.modal_inputs.delete_confirm = Some(super::file_ops::DeleteConfirmState {
+                    scope: macsftp_core::FsScope::Local { tab_id },
+                    entries: vec![
+                        macsftp_core::FsEntryRef {
+                            path: macsftp_core::FsPath::Local(LocalPath::new(
+                                "/tmp/test/beta-report.pdf",
+                            )),
+                            is_dir: false,
+                        },
+                        macsftp_core::FsEntryRef {
+                            path: macsftp_core::FsPath::Local(LocalPath::new("/tmp/test/releases")),
+                            is_dir: true,
+                        },
+                    ],
+                    dont_ask_again: false,
+                });
+                window.focus(&workspace.modal_focus, cx);
+                cx.notify();
+            })
+            .expect("workspace must be live");
+    });
+    cx.run_until_parked();
+    cx.run_until_parked();
+    capture(&mut cx, "light-delete-confirm-720x480.png");
+
+    // Capture 18 (dark): the keyboard-interactive prompt, with one masked and
+    // one echoed field, on the dark surface.
+    let request_id = KeyboardInteractiveRequestId(91);
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                workspace.modal_inputs.delete_confirm = None;
+                workspace.set_appearance(AppearancePreference::Dark, window, cx);
+                let tab = workspace.active_tab().expect("capture window has a tab");
+                let prompt = KeyboardInteractivePrompt {
+                    request_id,
+                    scope: RemoteEventScope::new(tab.id, SessionId(1), tab.session_epoch),
+                    name: "Two-Factor Verification".into(),
+                    instruction: "Enter the 6-digit code from your authenticator app.".into(),
+                    prompts: vec![
+                        KeyboardInteractivePromptField {
+                            prompt: "Verification code".into(),
+                            echo: false,
+                        },
+                        KeyboardInteractivePromptField {
+                            prompt: "Device label (optional)".into(),
+                            echo: true,
+                        },
+                    ],
+                };
+                workspace.present_keyboard_interactive(prompt, window, cx);
+                let inputs = workspace
+                    .modal_inputs
+                    .keyboard_interactive
+                    .get_mut(&request_id)
+                    .expect("prompt creates input state");
+                inputs.inputs[0].state_mut().set_value("123456");
+                inputs.inputs[1].state_mut().set_value("Studio Mac");
+                cx.notify();
+            })
+            .expect("workspace must be live");
+    });
+    cx.run_until_parked();
+    cx.run_until_parked();
+    capture(&mut cx, "dark-keyboard-interactive-720x480.png");
 }
 
 /// Local pane with a real, sorted fixture listing; returns the fixture dir so
