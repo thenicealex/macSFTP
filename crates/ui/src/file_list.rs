@@ -8,6 +8,7 @@ use gpui_kit::{
 };
 use macsftp_core::{FileKind, FileSort, FileSortField, SortDirection, Timestamp};
 
+use crate::components::text_tooltip;
 use crate::icon::{ICON_SIZE, IconName, icon, icon_with_size};
 use crate::theme::{ActiveTheme, TextRoleExt};
 
@@ -218,6 +219,7 @@ pub fn file_row(
         .gap_2()
         .rounded(theme.sizes.button_radius)
         .text_role(theme, theme.typography.body)
+        .tooltip(text_tooltip(model.name.clone()))
         .when(model.selected, |row| row.bg(theme.colors.element_selected))
         .when(!model.selected, |row| {
             row.hover(move |style| style.bg(hover_background))

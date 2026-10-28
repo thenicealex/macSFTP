@@ -23,12 +23,15 @@ The dark-maximized and light form-focus captures remain the original 2026-10-11 
 | [Type-select, 720×480](light-type-select-720x480.jpg) | Typing `b` jumps the selection to the first match; the list stays complete and the filter bar stays hidden |
 | [Settings General, 720×480](light-settings-general-720x480.jpg) | Three sections in the sidebar; the behavior switches and the start of the transfer preferences stay visible while the form scrolls instead of clipping |
 | [Settings Editor, 720×480](dark-settings-editor-720x480.jpg) | The editor page owns the external-editor field and association rules; dark theme tokens apply to the whole surface |
-| [Settings Saved Connections, 720×480](light-settings-saved-connections-720x480.jpg) | The profile list and its selected editor share one surface; no credential value is rendered |
+| [Settings Saved Connections, 720×480](light-settings-saved-connections-720x480.jpg) | The profile list and its selected editor share one surface; at the minimum window the editor stacks labels above its fields, and no credential value is rendered |
 | [Settings General, dark, 720×480](dark-settings-general-720x480.jpg) | The same switches keep their track/knob contrast on the dark surface |
 | [Settings General, 1024×720](light-settings-general-1024x720.jpg) | The 640pt form stays centered in the remaining pane; sections keep 16.25px gaps and single controls sit outside cards |
 | [Settings General, 1280×800](light-settings-general-1280x800.jpg) | The form measure does not stretch with the window; the sidebar keeps its 176px width |
 | [Settings General, 1440×900](light-settings-general-1440x900.jpg) | Extra width becomes outer margin; title, description, and content keep their grouping |
 | [Workspace, 1280×800](light-1280x800.jpg) | The shell keeps its fixed chrome and splits the width between the panes; recent rows stay aligned with the Name column |
+| [Saved Connections, 1280×800](light-settings-saved-connections-1280x800.jpg) | Above 820pt the editor returns to its 112px label column beside the fields; the 640pt form stays centered in the detail pane |
+| [Saved Connections, long values, 720×480](light-settings-saved-connections-long-720x480.jpg) | A long name and endpoint truncate in the list; the compact editor stacks labels above fields so the host and username keep the detail width |
+| [Editor, long rule, 720×480](light-settings-editor-long-720x480.jpg) | A long pattern and app name ellipsize inside the rule row, keeping **Remove** in place; the full values are available as tooltips |
 
 Refresh the headless captures with (the test writes PNGs because the renderer hands back RGBA; the committed files are JPEG):
 
@@ -41,7 +44,9 @@ for name in light-720x480 dark-720x480 light-recents-scroll-720x480 \
     dark-settings-editor-720x480 light-settings-saved-connections-720x480 \
     dark-settings-general-720x480 light-settings-general-1024x720 \
     light-settings-general-1280x800 light-settings-general-1440x900 \
-    light-1280x800; do
+    light-1280x800 light-settings-saved-connections-1280x800 \
+    light-settings-saved-connections-long-720x480 \
+    light-settings-editor-long-720x480; do
     sips -s format jpeg -s formatOptions high "$name.png" --out "$name.jpg" && rm "$name.png"
 done
 ```
@@ -53,5 +58,7 @@ Manual checks also covered the drawer header collapse button, reopening through 
 The 2026-10-28 typography pass refreshed every capture because semantic text roles replaced the ad-hoc sizes across the shell, file lists, palette, modals and Settings: body 13/1.35, secondary 12/1.35, labels 11/500, titles 15/600, with the 14px and 16px steps removed.
 
 The 2026-10-28 layout pass then normalized spacing to the quarter-rem scale and refreshed every capture again: Settings pads 16.25px, centers a 640px form measure, keeps cards only for multi-row groups, and uses a 176px sidebar with 48px profile rows; the recent-connections list and breadcrumb pills now use scale gaps instead of raw 24/8/2/10/3/1px offsets. Four captures were added at 1024, 1280 and 1440 wide so the form measure and the fixed shell chrome can be compared across widths; 720×480 remains the narrow case. The evidence test resizes the headless window and calls `Window::bounds_changed` before each capture, because the test platform otherwise records the new bounds without relayouting the root view.
+
+The 2026-10-28 adaptation pass added long-value evidence at the minimum window: below 820px the Saved Connections editor stacks labels above fields (side by side would leave ~185px values), so a long host and username keep the full detail width, and at 1280 the same profile shows the editor back in its side-by-side label column; the long editor rule truncates its pattern and app name while **Remove** stays in the card. File rows, transfer titles and editor rule values now expose their full truncated text through tooltips; prose and fingerprints wrap instead of truncating. Type stays at logical points — native macOS desktop apps do not scale with a system text-size setting, so display scaling is the only text-size axis — and the 720×480 minimum, 1024, 1280 and 1440 widths are all covered.
 
 Validation: `bash scripts/check.sh` (839 tests plus 2 ignored across the workspace, including 45 UI tests), Clippy with `-D warnings`, formatting, architecture isolation and sensitive-log checks passed. These captures document disconnected workspace behavior; live SFTP and active-transfer visuals were outside this layout change.

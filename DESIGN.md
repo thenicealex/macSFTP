@@ -283,6 +283,15 @@ Empty states center a 13px medium lead line, an optional 12px muted detail cappe
 
 Settings is a fixed 176px sidebar plus a scrollable content pane. General and Editor pad the pane 16.25px and center a 640px measure, so a wider window gains margin instead of stretching switches and fields; sections stack at 16.25px. Only groups with several rows take a card (Behavior, Transfers, Editor Associations, the profile form sections); a single control — the appearance segmented control, the File Editor field, the Troubleshooting buttons — sits directly under its header, and description text always stays closer to its own section than to the one above. Saved Connections keeps its 195px profile list beside the editor, with 48px profile rows and the same card rules.
 
+### Adaptation
+
+The window is the only size axis; there is no phone or tablet layout to switch to, so adaptation restructures inside the same shell. The window minimum is 720×480, the default is 1200×800, and the layout is verified at 720, 1024, 1280 and 1440.
+
+- **Fixed columns, flexible middle.** The 176px Settings sidebar, the 195px profile list, the 34px tab bar, the 32px path bars and the 26px rows never scale with the window. Remaining width goes to the file panes, the form measure, or the detail pane.
+- **Stack instead of squeeze.** Below an 820px window the profile editor's detail pane can no longer give a side-by-side field ~240px, so labels move above their fields and choice buttons wrap under their own label. Above it, labels keep their 112px column.
+- **Long values truncate, descriptions wrap.** File names, transfer titles, rule patterns and app names, profile names, endpoints, breadcrumbs and tab titles ellipsize at the end of their slot and keep the full value in a tooltip; the row's actions always keep their place. Prose (section descriptions, errors) wraps instead, and security-critical fingerprints wrap rather than truncate because the full text is the content.
+- **Type does not scale with a system text-size setting.** Native macOS desktop interfaces keep type at logical points; the seven-size scale and the 26px control floor are fixed, and the display's backing scale handles Retina rendering.
+
 ### Spacing
 
 Spacing is the 13px window rem in quarter steps, so every gap is a multiple of 3.25px: 1.625, 3.25, 4.875, 6.5, 8.125, 9.75, 11.375, 13, 16.25, 19.5, 26. Layouts use gap first; margins are reserved for a single offset, and new scattered margins are a defect.

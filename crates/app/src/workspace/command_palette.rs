@@ -169,6 +169,7 @@ impl Workspace {
                     div()
                         .flex_1()
                         .min_w_0()
+                        .truncate()
                         .text_role(
                             &theme,
                             if is_selected {

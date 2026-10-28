@@ -9952,6 +9952,70 @@ fn regenerate_workspace_ux_evidence() {
     cx.run_until_parked();
     capture(&mut cx, "light-settings-saved-connections-720x480.png");
 
+    // Capture 10b (light): long connection values at the minimum window. The
+    // list truncates its name and endpoint, and the compact editor stacks
+    // labels above the fields so a long host keeps the detail width.
+    cx.update(|cx| {
+        workspace.update(cx, |_workspace, cx| {
+            cx.resources_mut()
+                .profiles
+                .save_request(ProfileSaveRequest {
+                    profile_id: ProfileId(3),
+                    name: "Production EU West (Read-Only Mirror)".into(),
+                    host: "prod-eu-west-mirror-01.internal.example.corporate".into(),
+                    port: 22,
+                    username: "deployment-service-account".into(),
+                    auth: ProfileAuthUpdate::Password {
+                        password: Some("fixture-password".into()),
+                    },
+                    route: macsftp_core::ConnectionRoute::Direct,
+                    default_remote_path: Some(macsftp_core::RemotePath::new(
+                        "/srv/mirrors/production/current",
+                    )),
+                })
+                .expect("seed long profile fixture");
+        });
+    });
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                workspace.set_appearance(AppearancePreference::Light, window, cx);
+                workspace.set_settings_section(SettingsSection::Profiles, cx);
+                workspace.select_profile_in_settings(ProfileId(3), cx);
+                window.focus(&workspace.workspace_focus, cx);
+                cx.notify();
+            })
+            .expect("workspace must be live");
+    });
+    cx.run_until_parked();
+    cx.run_until_parked();
+    capture(&mut cx, "light-settings-saved-connections-long-720x480.png");
+
+    // Capture 10c (light): a long rule pattern and app name truncate inside the
+    // row instead of pushing Remove out of the card.
+    cx.update(|cx| {
+        workspace.update(cx, |_workspace, cx| {
+            cx.resources_mut()
+                .config
+                .set_editor_rules(vec![macsftp_core::EditorRule::new(
+                    "*.very-long-extension-name.component.tsx",
+                    "Visual Studio Code - Insiders Preview",
+                )])
+                .expect("seed long editor rule fixture");
+        });
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                workspace.set_settings_section(SettingsSection::Editor, cx);
+                window.focus(&workspace.workspace_focus, cx);
+                cx.notify();
+            })
+            .expect("workspace must be live");
+    });
+    cx.run_until_parked();
+    capture(&mut cx, "light-settings-editor-long-720x480.png");
+
     // Capture 11 (dark): Settings → General. The switch track and knob tokens
     // must keep their contrast when the surface and controls both go dark.
     cx.update(|cx| {
@@ -10000,6 +10064,29 @@ fn regenerate_workspace_ux_evidence() {
             ),
         );
     }
+
+    // Capture 14b (light): Saved Connections at a desktop width. Above the
+    // 820pt threshold the editor returns to its 112px label column beside the
+    // fields, with the long profile still holding the detail width.
+    cx.update_window(window, |_, window, cx| {
+        window.resize(size(px(1280.0), px(800.0)));
+        window.bounds_changed(cx);
+    })
+    .expect("window resize must succeed");
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                workspace.set_settings_section(SettingsSection::Profiles, cx);
+                workspace.select_profile_in_settings(ProfileId(3), cx);
+                window.focus(&workspace.workspace_focus, cx);
+                cx.notify();
+            })
+            .expect("workspace must be live");
+    });
+    cx.run_until_parked();
+    cx.run_until_parked();
+    capture(&mut cx, "light-settings-saved-connections-1280x800.png");
 
     // Capture 15 (light): the workspace at the default desktop size. The shell
     // keeps its fixed chrome and splits the remaining width between the panes.

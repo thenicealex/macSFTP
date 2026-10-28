@@ -649,27 +649,40 @@ impl crate::workspace::Workspace {
                             div()
                                 .flex()
                                 .items_center()
+                                .flex_1()
+                                .min_w_0()
                                 .gap_2p5()
                                 .child(
                                     div()
+                                        .id(("editor-rule-pattern", index))
+                                        .flex_none()
+                                        .max_w(px(180.0))
+                                        .truncate()
                                         .px_2()
                                         .py_0p5()
                                         .rounded(theme.sizes.button_radius)
                                         .bg(theme.colors.element_active)
                                         .text_role(&theme, theme.typography.mono)
                                         .text_color(theme.colors.text)
+                                        .tooltip(text_tooltip(rule.pattern.clone()))
                                         .child(rule.pattern.clone()),
                                 )
                                 .child(
                                     div()
+                                        .flex_none()
                                         .text_role(&theme, theme.typography.secondary)
                                         .text_color(theme.colors.text_muted)
                                         .child("→"),
                                 )
                                 .child(
                                     div()
+                                        .id(("editor-rule-app", index))
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
                                         .text_role(&theme, theme.typography.body_medium)
                                         .text_color(theme.colors.text)
+                                        .tooltip(text_tooltip(rule.app_name.clone()))
                                         .child(rule.app_name.clone()),
                                 ),
                         )
@@ -780,6 +793,10 @@ impl crate::workspace::Workspace {
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         let theme = cx.theme().clone();
+        // Below this window width the profile editor's detail pane leaves a
+        // side-by-side field under ~240 pt, so labels stack above their fields
+        // instead of squeezing the values.
+        let compact_editor = window.viewport_size().width < px(820.0);
         let profiles = cx.resources().profiles.profiles().to_vec();
         let total_count = profiles.len();
         let filtered = self.filtered_profiles(&profiles);
@@ -921,7 +938,7 @@ impl crate::workspace::Workspace {
         };
 
         let detail = if self.settings.profile_editor.is_some() {
-            self.render_profile_editor(cx)
+            self.render_profile_editor(compact_editor, cx)
         } else if total_count == 0 {
             div()
                 .text_role(&theme, theme.typography.body)
@@ -1008,7 +1025,11 @@ impl crate::workspace::Workspace {
             .into_any_element()
     }
 
-    pub(crate) fn render_profile_editor(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+    pub(crate) fn render_profile_editor(
+        &self,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
         let Some(editor) = self.settings.profile_editor.as_ref() else {
             return div().into_any_element();
         };
@@ -1025,6 +1046,30 @@ impl crate::workspace::Workspace {
             .map(|profile| (profile.id, profile.name.clone()))
             .collect::<Vec<_>>();
 
+        // One labeled control row. Side by side at normal widths; at compact
+        // widths the label sits above the control so the value keeps the full
+        // detail-pane width.
+        let labeled_row = |label: &'static str, content: gpui_kit::AnyElement| {
+            div()
+                .flex()
+                .when(compact, |row| row.flex_col().items_start().gap_1p5())
+                .when(!compact, |row| row.items_start().gap_2())
+                .child(
+                    div()
+                        .when(!compact, |el| el.w(px(112.0)).flex_none().pt_1())
+                        .text_role(&theme, theme.typography.label)
+                        .text_color(theme.colors.text_muted)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .min_w_0()
+                        .when(compact, |el| el.w_full())
+                        .when(!compact, |el| el.flex_1())
+                        .child(content),
+                )
+        };
+
         let field_row = |label: &'static str,
                          field: ProfileEditorField,
                          state: &InputState,
@@ -1032,11 +1077,31 @@ impl crate::workspace::Workspace {
                          masked: bool,
                          focused: ProfileEditorField,
                          cx: &mut Context<Self>| {
-            div()
+            let input = if masked {
+                text_field(
+                    ("profile-editor-input", field as usize),
+                    TextFieldModel {
+                        state,
+                        placeholder,
+                        focused: focused == field,
+                        masked,
+                    },
+                    cx,
+                )
+                .into_any_element()
+            } else {
+                plain_text_field(
+                    ("profile-editor-input", field as usize),
+                    editor
+                        .inputs
+                        .get(&field)
+                        .expect("visible ordinary fields must have prepared component inputs"),
+                    cx,
+                )
+                .into_any_element()
+            };
+            labeled_row(label, input)
                 .id(("profile-editor-field", field as usize))
-                .flex()
-                .items_center()
-                .gap_2()
                 .on_click(cx.listener(move |workspace, _event, window, cx| {
                     workspace.settings.profile_filter_focused = false;
                     if let Some(editor) = workspace.settings.profile_editor.as_mut() {
@@ -1053,37 +1118,6 @@ impl crate::workspace::Workspace {
                         window.focus(&workspace.modal_focus, cx);
                     }
                     cx.notify();
-                }))
-                .child(
-                    div()
-                        .w(px(112.0))
-                        .flex_none()
-                        .text_role(&theme, theme.typography.label)
-                        .text_color(theme.colors.text_muted)
-                        .child(label),
-                )
-                .child(div().flex_1().min_w_0().child(if masked {
-                    text_field(
-                        ("profile-editor-input", field as usize),
-                        TextFieldModel {
-                            state,
-                            placeholder,
-                            focused: focused == field,
-                            masked,
-                        },
-                        cx,
-                    )
-                    .into_any_element()
-                } else {
-                    plain_text_field(
-                        ("profile-editor-input", field as usize),
-                        editor
-                            .inputs
-                            .get(&field)
-                            .expect("visible ordinary fields must have prepared component inputs"),
-                        cx,
-                    )
-                    .into_any_element()
                 }))
                 .into_any_element()
         };
@@ -1257,54 +1291,43 @@ impl crate::workspace::Workspace {
 
         // Section 2: Authentication
         let mut auth_elements = vec![
-            div()
-                .flex()
-                .items_start()
-                .gap_2()
-                .child(
-                    div()
-                        .w(px(112.0))
-                        .flex_none()
-                        .pt_1()
-                        .text_role(&theme, theme.typography.label)
-                        .text_color(theme.colors.text_muted)
-                        .child("Sign-In Method"),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_1p5()
-                        .child(auth_toggle(
-                            "Password",
-                            AuthMethodKind::Password,
-                            "profile-auth-password",
-                            auth_method,
-                            cx,
-                        ))
-                        .child(auth_toggle(
-                            "Key File",
-                            AuthMethodKind::PrivateKey,
-                            "profile-auth-private-key",
-                            auth_method,
-                            cx,
-                        ))
-                        .child(auth_toggle(
-                            "Server Prompts",
-                            AuthMethodKind::KeyboardInteractive,
-                            "profile-auth-keyboard-interactive",
-                            auth_method,
-                            cx,
-                        ))
-                        .child(auth_toggle(
-                            "SSH Agent",
-                            AuthMethodKind::SshAgent,
-                            "profile-auth-agent",
-                            auth_method,
-                            cx,
-                        )),
-                )
-                .into_any_element(),
+            labeled_row(
+                "Sign-In Method",
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_1p5()
+                    .child(auth_toggle(
+                        "Password",
+                        AuthMethodKind::Password,
+                        "profile-auth-password",
+                        auth_method,
+                        cx,
+                    ))
+                    .child(auth_toggle(
+                        "Key File",
+                        AuthMethodKind::PrivateKey,
+                        "profile-auth-private-key",
+                        auth_method,
+                        cx,
+                    ))
+                    .child(auth_toggle(
+                        "Server Prompts",
+                        AuthMethodKind::KeyboardInteractive,
+                        "profile-auth-keyboard-interactive",
+                        auth_method,
+                        cx,
+                    ))
+                    .child(auth_toggle(
+                        "SSH Agent",
+                        AuthMethodKind::SshAgent,
+                        "profile-auth-agent",
+                        auth_method,
+                        cx,
+                    ))
+                    .into_any_element(),
+            )
+            .into_any_element(),
         ];
 
         match auth_method {
@@ -1335,47 +1358,36 @@ impl crate::workspace::Workspace {
                     cx,
                 ));
                 auth_elements.push(
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap_2()
-                        .child(
-                            div()
-                                .w(px(112.0))
-                                .flex_none()
-                                .pt_1()
-                                .text_role(&theme, theme.typography.label)
-                                .text_color(theme.colors.text_muted)
-                                .child("Key Password"),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_wrap()
-                                .gap_1p5()
-                                .child(passphrase_policy_toggle(
-                                    "No Password",
-                                    PassphrasePolicy::NoPassphrase,
-                                    "profile-pass-none",
-                                    policy,
-                                    cx,
-                                ))
-                                .child(passphrase_policy_toggle(
-                                    "Ask Every Time",
-                                    PassphrasePolicy::AskEveryTime,
-                                    "profile-pass-ask",
-                                    policy,
-                                    cx,
-                                ))
-                                .child(passphrase_policy_toggle(
-                                    "Remember Password",
-                                    PassphrasePolicy::Remember,
-                                    "profile-pass-remember",
-                                    policy,
-                                    cx,
-                                )),
-                        )
-                        .into_any_element(),
+                    labeled_row(
+                        "Key Password",
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_1p5()
+                            .child(passphrase_policy_toggle(
+                                "No Password",
+                                PassphrasePolicy::NoPassphrase,
+                                "profile-pass-none",
+                                policy,
+                                cx,
+                            ))
+                            .child(passphrase_policy_toggle(
+                                "Ask Every Time",
+                                PassphrasePolicy::AskEveryTime,
+                                "profile-pass-ask",
+                                policy,
+                                cx,
+                            ))
+                            .child(passphrase_policy_toggle(
+                                "Remember Password",
+                                PassphrasePolicy::Remember,
+                                "profile-pass-remember",
+                                policy,
+                                cx,
+                            ))
+                            .into_any_element(),
+                    )
+                    .into_any_element(),
                 );
                 if policy != PassphrasePolicy::NoPassphrase {
                     let placeholder = match (policy, editor.secret_present_hint) {
@@ -1413,47 +1425,36 @@ impl crate::workspace::Workspace {
         // Section 3: Connection Route
         let route_kind = editor.route_kind;
         let mut route_elements = vec![
-            div()
-                .flex()
-                .items_start()
-                .gap_2()
-                .child(
-                    div()
-                        .w(px(112.0))
-                        .flex_none()
-                        .pt_1()
-                        .text_role(&theme, theme.typography.label)
-                        .text_color(theme.colors.text_muted)
-                        .child("Connection Method"),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap_1p5()
-                        .child(route_toggle(
-                            "Direct",
-                            ProfileRouteKind::Direct,
-                            "profile-route-direct",
-                            route_kind,
-                            cx,
-                        ))
-                        .child(route_toggle(
-                            "Via Another Server",
-                            ProfileRouteKind::JumpHost,
-                            "profile-route-jump",
-                            route_kind,
-                            cx,
-                        ))
-                        .child(route_toggle(
-                            "Run a Command",
-                            ProfileRouteKind::ProxyCommand,
-                            "profile-route-command",
-                            route_kind,
-                            cx,
-                        )),
-                )
-                .into_any_element(),
+            labeled_row(
+                "Connection Method",
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_1p5()
+                    .child(route_toggle(
+                        "Direct",
+                        ProfileRouteKind::Direct,
+                        "profile-route-direct",
+                        route_kind,
+                        cx,
+                    ))
+                    .child(route_toggle(
+                        "Via Another Server",
+                        ProfileRouteKind::JumpHost,
+                        "profile-route-jump",
+                        route_kind,
+                        cx,
+                    ))
+                    .child(route_toggle(
+                        "Run a Command",
+                        ProfileRouteKind::ProxyCommand,
+                        "profile-route-command",
+                        route_kind,
+                        cx,
+                    ))
+                    .into_any_element(),
+            )
+            .into_any_element(),
         ];
 
         match route_kind {
@@ -1472,7 +1473,9 @@ impl crate::workspace::Workspace {
                     div()
                         .flex()
                         .gap_2()
-                        .child(div().w(px(112.0)).flex_none())
+                        .when(!compact, |row| {
+                            row.child(div().w(px(112.0)).flex_none())
+                        })
                         .child(
                             div()
                                 .flex_1()
@@ -1512,20 +1515,7 @@ impl crate::workspace::Workspace {
                     );
                 }
                 route_elements.push(
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap_2()
-                        .child(
-                            div()
-                                .w(px(112.0))
-                                .flex_none()
-                                .pt_1()
-                                .text_role(&theme, theme.typography.label)
-                                .text_color(theme.colors.text_muted)
-                                .child("Intermediate Server"),
-                        )
-                        .child(choices)
+                    labeled_row("Intermediate Server", choices.into_any_element())
                         .into_any_element(),
                 );
             }

@@ -120,6 +120,7 @@ impl RenderOnce for Tab {
             .pl_3()
             .pr_1()
             .max_w(px(220.0))
+            .tooltip(text_tooltip(self.title.clone()))
             .bg(background)
             .border_1()
             .border_color(border_color)

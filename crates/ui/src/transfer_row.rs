@@ -124,6 +124,7 @@ impl RenderOnce for TransferRow {
         });
         let detail_id =
             ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "detail".into());
+        let title_id = ElementId::NamedChild(std::sync::Arc::new(self.id.clone()), "title".into());
 
         div()
             .id(self.id)
@@ -145,11 +146,13 @@ impl RenderOnce for TransferRow {
                     .child(icon(direction_icon, theme.colors.text_muted))
                     .child(
                         div()
+                            .id(title_id)
                             .flex_1()
                             .min_w_0()
                             .truncate()
                             .text_role(theme, theme.typography.secondary)
                             .text_color(theme.colors.text)
+                            .tooltip(text_tooltip(self.title.clone()))
                             .child(self.title),
                     )
                     .child(
