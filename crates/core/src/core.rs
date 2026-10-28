@@ -759,9 +759,9 @@ impl AppState {
     ///
     /// Remote-scoped events (directory listings, connection state
     /// changes, host key prompts) are checked against the live tab
-    /// session. Global events (transfers, tab lifecycle, local
-    /// directory listings) are always accepted.
-    pub fn should_accept_event(&self, event: &AppEvent) -> bool {
+    /// session. Window events without a remote scope (tab lifecycle,
+    /// local directory listings) are always accepted.
+    pub fn should_accept_event(&self, event: &WindowEvent) -> bool {
         match event.remote_scope() {
             Some(scope) => self.tabs.accepts_remote_event(&scope),
             None => true,
@@ -801,11 +801,28 @@ impl AppState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TabStore {
-    pub tabs: Vec<TabState>,
-    pub active_tab_id: Option<TabId>,
+    tabs: Vec<TabState>,
+    active_tab_id: Option<TabId>,
+    recent_tabs: Vec<TabId>,
 }
 
 impl TabStore {
+    pub fn tabs(&self) -> &[TabState] {
+        &self.tabs
+    }
+
+    pub fn tabs_mut(&mut self) -> impl Iterator<Item = &mut TabState> {
+        self.tabs.iter_mut()
+    }
+
+    pub fn active_tab_id(&self) -> Option<TabId> {
+        self.active_tab_id
+    }
+
+    pub fn recent_tabs(&self) -> &[TabId] {
+        &self.recent_tabs
+    }
+
     pub fn find_tab(&self, tab_id: TabId) -> Option<&TabState> {
         self.tabs.iter().find(|tab| tab.id == tab_id)
     }
@@ -836,27 +853,48 @@ impl TabStore {
         }
     }
 
-    /// Add a new tab to the store. If no tab is active yet, the new
-    /// tab becomes active.
+    /// Add a tab without changing an existing active tab. The new tab is
+    /// placed at the front of the recent order, as when restoring a session.
     pub fn open_tab(&mut self, tab: TabState) {
+        let tab_id = tab.id;
         if self.active_tab_id.is_none() {
-            self.active_tab_id = Some(tab.id);
+            self.active_tab_id = Some(tab_id);
         }
         self.tabs.push(tab);
+        self.touch_recent_tab(tab_id);
+    }
+
+    /// Activate an existing tab, returning whether it was found.
+    pub fn activate_tab(&mut self, tab_id: TabId) -> bool {
+        if self.find_tab(tab_id).is_none() {
+            return false;
+        }
+        self.active_tab_id = Some(tab_id);
+        self.touch_recent_tab(tab_id);
+        true
+    }
+
+    fn touch_recent_tab(&mut self, tab_id: TabId) {
+        self.recent_tabs.retain(|id| *id != tab_id);
+        self.recent_tabs.insert(0, tab_id);
     }
 
     /// Remove a tab from the store. After this, any late-arriving
     /// remote event for this tab is rejected by `accepts_remote_event`
     /// because the tab no longer exists.
     ///
-    /// If the closed tab was active, the next remaining tab (by order)
-    /// becomes active. Returns the removed tab if it existed.
+    /// If the closed tab was active, the first remaining tab becomes active.
+    /// Returns the removed tab if it existed.
     pub fn close_tab(&mut self, tab_id: TabId) -> Option<TabState> {
         let position = self.tabs.iter().position(|tab| tab.id == tab_id)?;
         let removed = self.tabs.remove(position);
+        self.recent_tabs.retain(|id| *id != tab_id);
 
         if self.active_tab_id == Some(tab_id) {
             self.active_tab_id = self.tabs.first().map(|tab| tab.id);
+        }
+        if let Some(active_tab_id) = self.active_tab_id {
+            self.touch_recent_tab(active_tab_id);
         }
 
         Some(removed)
@@ -992,13 +1030,13 @@ impl TransferStore {
     /// The reducer is deliberately idempotent: replaying an event must not
     /// duplicate plans, jobs, warnings, or conflicts. Window views observe
     /// this store but never replay runtime transfer events themselves.
-    pub fn apply_event(&mut self, event: &AppEvent, now: Timestamp) -> bool {
+    pub fn apply_event(&mut self, event: &TransferEvent, now: Timestamp) -> bool {
         self.just_finished_plan = None;
         match event {
-            AppEvent::TransferPlanStarted(snapshot) => {
+            TransferEvent::PlanStarted(snapshot) => {
                 self.insert_plan(snapshot.plan.clone()) | self.insert_job(snapshot.root_job.clone())
             }
-            AppEvent::TransferPlanProgress(progress) => {
+            TransferEvent::PlanProgress(progress) => {
                 let mut changed = false;
                 if let Some(plan) = self
                     .plans
@@ -1069,7 +1107,7 @@ impl TransferStore {
                 }
                 changed
             }
-            AppEvent::TransferPlanCompleted { plan_id } => {
+            TransferEvent::PlanCompleted { plan_id } => {
                 let Some(plan) = self.plans.iter_mut().find(|plan| plan.id == *plan_id) else {
                     return false;
                 };
@@ -1107,8 +1145,8 @@ impl TransferStore {
                 }
                 changed
             }
-            AppEvent::TransferPlanCancelled { plan_id } => self.set_plan_cancelled(*plan_id),
-            AppEvent::TransferPlanFailed { plan_id, error } => self.set_plan_terminal_state(
+            TransferEvent::PlanCancelled { plan_id } => self.set_plan_cancelled(*plan_id),
+            TransferEvent::PlanFailed { plan_id, error } => self.set_plan_terminal_state(
                 *plan_id,
                 TransferPlanState::Failed {
                     error: error.clone(),
@@ -1118,8 +1156,8 @@ impl TransferStore {
                     error: error.clone(),
                 },
             ),
-            AppEvent::TransferRunning(snapshot) => self.upsert_job(snapshot.job.clone()),
-            AppEvent::TransferConflict(prompt) => {
+            TransferEvent::Running(snapshot) => self.upsert_job(snapshot.job.clone()),
+            TransferEvent::Conflict(prompt) => {
                 let waiting = self.set_job_state(
                     prompt.transfer_id,
                     TransferState::WaitingForConflictDecision {
@@ -1138,7 +1176,7 @@ impl TransferStore {
                 .with_source_details(prompt.source_size, prompt.source_modified_at);
                 waiting | self.upsert_conflict(conflict)
             }
-            AppEvent::TransferProgress(progress) => {
+            TransferEvent::Progress(progress) => {
                 let Some(job_index) = self.find_job_index(progress.transfer_id) else {
                     return false;
                 };
@@ -1168,7 +1206,7 @@ impl TransferStore {
                     true
                 }
             }
-            AppEvent::TransferWarning(warning) => {
+            TransferEvent::Warning(warning) => {
                 let Some(job_index) = self.find_job_index(warning.transfer_id) else {
                     return false;
                 };
@@ -1180,20 +1218,19 @@ impl TransferStore {
                     true
                 }
             }
-            AppEvent::TransferCompleted { transfer_id } => {
+            TransferEvent::Completed { transfer_id } => {
                 self.set_transfer_terminal(*transfer_id, TransferState::Completed)
             }
-            AppEvent::TransferSkipped { transfer_id } => {
+            TransferEvent::Skipped { transfer_id } => {
                 self.set_transfer_terminal(*transfer_id, TransferState::Skipped)
             }
-            AppEvent::TransferFailed(failure) => self.set_transfer_terminal(
+            TransferEvent::Failed(failure) => self.set_transfer_terminal(
                 failure.transfer_id,
                 TransferState::Failed {
                     retryable: failure.error.retryable,
                     error: failure.error.clone(),
                 },
             ),
-            _ => false,
         }
     }
 
@@ -2327,14 +2364,232 @@ impl<T> RemoteScoped<T> {
     }
 }
 
+/// An event applied once by the process-wide event coordinator.
+///
+/// These events mutate stores that live in `AppResources` or the shared
+/// transfer store, so broadcasting them would let windows race to apply the
+/// same outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProcessEvent {
+    Transfer(TransferEvent),
+    EditCheck(EditCheckEvent),
+    /// A temporary `.macsftp-part-*` file was created for an in-flight
+    /// transfer. The app persists it so a crash or hard-kill can be
+    /// reconciled on the next launch (current architecture §8).
+    ResidualTempCreated(ResidualTempRecord),
+    /// The temporary file for `transfer_id` at `path` was cleaned, so its
+    /// residual record can be dropped.
+    ResidualTempCleared {
+        transfer_id: TransferId,
+        path: String,
+    },
+    /// A local edit file in `<edits_dir>/<edit_run_id>/<session_id>/...` was
+    /// modified by an external editor. FSEvents watcher emits this.
+    LocalEditModified {
+        session_id: EditSessionId,
+        temp_path: String,
+    },
+}
+
+/// The transfer events `TransferStore` reduces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransferEvent {
+    PlanStarted(Box<TransferPlanSnapshot>),
+    PlanProgress(TransferPlanProgress),
+    PlanCompleted {
+        plan_id: TransferPlanId,
+    },
+    PlanCancelled {
+        plan_id: TransferPlanId,
+    },
+    PlanFailed {
+        plan_id: TransferPlanId,
+        error: UserFacingError,
+    },
+    Conflict(TransferConflictPrompt),
+    Running(TransferSnapshot),
+    Progress(TransferProgress),
+    Warning(TransferWarning),
+    Completed {
+        transfer_id: TransferId,
+    },
+    Skipped {
+        transfer_id: TransferId,
+    },
+    Failed(TransferFailure),
+}
+
+/// The authoritative remote-edit check outcomes, applied once by the
+/// coordinator because edit sessions are process-global.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditCheckEvent {
+    Checked(RemoteScoped<RemoteEditSnapshotChecked>),
+    CheckFailed(RemoteScoped<RemoteEditSnapshotCheckFailed>),
+    DispatchFailed(RemoteEditSnapshotDispatchFailed),
+}
+
+/// An event delivered to every window; each window's stale-event guard decides
+/// whether it owns the referenced tab.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WindowEvent {
+    TabConnecting {
+        tab_id: TabId,
+    },
+    HostKeyUnknown(HostKeyPrompt),
+    HostKeyMismatch(HostKeyMismatch),
+    TabConnected(RemoteScoped<TabConnected>),
+    TabDisconnected(RemoteScoped<TabDisconnected>),
+    AuthFailed(RemoteScoped<AuthFailure>),
+    KeyboardInteractivePrompt(KeyboardInteractivePrompt),
+    RemoteDirLoading(RemoteScoped<RemoteDirLoading>),
+    RemoteDirLoaded(RemoteScoped<RemoteDirSnapshot>),
+    RemoteOperationFailed(RemoteScoped<RemoteOperationFailure>),
+    /// Result of opening one remote entry. Carries the actor's live scope so a
+    /// resolution that completes after a reconnect or tab close is dropped.
+    RemoteEntryResolved(RemoteScoped<RemoteEntryResolution>),
+    /// The runtime could not route an entry resolution to a live actor (session
+    /// already gone, or its mailbox has no browsing actor). No legitimate
+    /// `SessionId` exists here, so this is epoch-correlated: the UI clears its
+    /// pending state only when the tab still matches `tab_id`/`session_epoch`.
+    RemoteEntryResolveFailed(RemoteEntryResolveFailure),
+    /// Create / rename / delete failure shared by local and remote.
+    FsOperationFailed {
+        scope: FsScope,
+        failure: UserFacingError,
+    },
+}
+
+/// The single owner that applies an [`AppEvent`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoutedEvent {
+    Process(ProcessEvent),
+    Window(WindowEvent),
+}
+
 impl AppEvent {
+    /// Split the runtime event into the one owner that applies it.
+    ///
+    /// Transfer, edit-check, residual-temp, and local-edit events mutate
+    /// process-global state and are applied exactly once by the coordinator.
+    /// Everything else is broadcast to the windows, whose stale-event guard
+    /// decides whether they own the referenced tab.
+    pub fn route(self) -> RoutedEvent {
+        match self {
+            Self::TabConnecting { tab_id } => {
+                RoutedEvent::Window(WindowEvent::TabConnecting { tab_id })
+            }
+            Self::HostKeyUnknown(prompt) => {
+                RoutedEvent::Window(WindowEvent::HostKeyUnknown(prompt))
+            }
+            Self::HostKeyMismatch(mismatch) => {
+                RoutedEvent::Window(WindowEvent::HostKeyMismatch(mismatch))
+            }
+            Self::TabConnected(scoped) => RoutedEvent::Window(WindowEvent::TabConnected(scoped)),
+            Self::TabDisconnected(scoped) => {
+                RoutedEvent::Window(WindowEvent::TabDisconnected(scoped))
+            }
+            Self::AuthFailed(scoped) => RoutedEvent::Window(WindowEvent::AuthFailed(scoped)),
+            Self::KeyboardInteractivePrompt(prompt) => {
+                RoutedEvent::Window(WindowEvent::KeyboardInteractivePrompt(prompt))
+            }
+            Self::RemoteDirLoading(scoped) => {
+                RoutedEvent::Window(WindowEvent::RemoteDirLoading(scoped))
+            }
+            Self::RemoteDirLoaded(scoped) => {
+                RoutedEvent::Window(WindowEvent::RemoteDirLoaded(scoped))
+            }
+            Self::RemoteOperationFailed(scoped) => {
+                RoutedEvent::Window(WindowEvent::RemoteOperationFailed(scoped))
+            }
+            Self::RemoteEntryResolved(scoped) => {
+                RoutedEvent::Window(WindowEvent::RemoteEntryResolved(scoped))
+            }
+            Self::RemoteEntryResolveFailed(failure) => {
+                RoutedEvent::Window(WindowEvent::RemoteEntryResolveFailed(failure))
+            }
+            Self::FsOperationFailed { scope, failure } => {
+                RoutedEvent::Window(WindowEvent::FsOperationFailed { scope, failure })
+            }
+            Self::TransferPlanStarted(snapshot) => {
+                RoutedEvent::Process(ProcessEvent::Transfer(TransferEvent::PlanStarted(snapshot)))
+            }
+            Self::TransferPlanProgress(progress) => RoutedEvent::Process(ProcessEvent::Transfer(
+                TransferEvent::PlanProgress(progress),
+            )),
+            Self::TransferPlanCompleted { plan_id } => {
+                RoutedEvent::Process(ProcessEvent::Transfer(TransferEvent::PlanCompleted {
+                    plan_id,
+                }))
+            }
+            Self::TransferPlanCancelled { plan_id } => {
+                RoutedEvent::Process(ProcessEvent::Transfer(TransferEvent::PlanCancelled {
+                    plan_id,
+                }))
+            }
+            Self::TransferPlanFailed { plan_id, error } => {
+                RoutedEvent::Process(ProcessEvent::Transfer(TransferEvent::PlanFailed {
+                    plan_id,
+                    error,
+                }))
+            }
+            Self::TransferConflict(prompt) => {
+                RoutedEvent::Process(ProcessEvent::Transfer(TransferEvent::Conflict(prompt)))
+            }
+            Self::TransferRunning(snapshot) => {
+                RoutedEvent::Process(ProcessEvent::Transfer(TransferEvent::Running(snapshot)))
+            }
+            Self::TransferProgress(progress) => {
+                RoutedEvent::Process(ProcessEvent::Transfer(TransferEvent::Progress(progress)))
+            }
+            Self::TransferWarning(warning) => {
+                RoutedEvent::Process(ProcessEvent::Transfer(TransferEvent::Warning(warning)))
+            }
+            Self::TransferCompleted { transfer_id } => {
+                RoutedEvent::Process(ProcessEvent::Transfer(TransferEvent::Completed {
+                    transfer_id,
+                }))
+            }
+            Self::TransferSkipped { transfer_id } => {
+                RoutedEvent::Process(ProcessEvent::Transfer(TransferEvent::Skipped {
+                    transfer_id,
+                }))
+            }
+            Self::TransferFailed(failure) => {
+                RoutedEvent::Process(ProcessEvent::Transfer(TransferEvent::Failed(failure)))
+            }
+            Self::ResidualTempCreated(record) => {
+                RoutedEvent::Process(ProcessEvent::ResidualTempCreated(record))
+            }
+            Self::ResidualTempCleared { transfer_id, path } => {
+                RoutedEvent::Process(ProcessEvent::ResidualTempCleared { transfer_id, path })
+            }
+            Self::RemoteEditSnapshotChecked(scoped) => {
+                RoutedEvent::Process(ProcessEvent::EditCheck(EditCheckEvent::Checked(scoped)))
+            }
+            Self::RemoteEditSnapshotCheckFailed(scoped) => {
+                RoutedEvent::Process(ProcessEvent::EditCheck(EditCheckEvent::CheckFailed(scoped)))
+            }
+            Self::RemoteEditSnapshotDispatchFailed(payload) => RoutedEvent::Process(
+                ProcessEvent::EditCheck(EditCheckEvent::DispatchFailed(payload)),
+            ),
+            Self::LocalEditModified {
+                session_id,
+                temp_path,
+            } => RoutedEvent::Process(ProcessEvent::LocalEditModified {
+                session_id,
+                temp_path,
+            }),
+        }
+    }
+}
+
+impl WindowEvent {
     /// Extract the remote event scope from tab-scoped events.
     ///
     /// Returns `Some` for events that originate from a remote session
     /// and must pass the stale event guard before mutating state.
-    /// Returns `None` for global events (tab lifecycle, transfers,
-    /// local directory listings) that don't depend on a specific
-    /// session being live.
+    /// Returns `None` for window events (tab lifecycle, local directory
+    /// listings) that don't depend on a specific session being live.
     ///
     /// `HostKeyUnknown` is included because the prompt carries the
     /// same `(tab_id, session_id, session_epoch)` triple — a stale
@@ -2361,40 +2616,11 @@ impl AppEvent {
                 prompt.session_epoch,
             )),
             Self::HostKeyMismatch(mismatch) => Some(mismatch.scope.clone()),
-            // Both authoritative edit-check outcomes carry the actor's live
-            // scope, so a stale scope must not advance or conflict a
-            // replacement session. `RemoteEditSnapshotDispatchFailed` is
-            // intentionally excluded: no SessionId exists when routing never
-            // reached a live actor, so it is epoch-correlated instead.
-            Self::RemoteEditSnapshotChecked(scoped) => Some(scoped.scope.clone()),
-            Self::RemoteEditSnapshotCheckFailed(scoped) => Some(scoped.scope.clone()),
-            // FsOperationFailed is filtered in the app by tab_id + epoch
-            // (FsScope has no session_id, so it cannot use the full remote
-            // guard without a false SessionId).
-            _ => None,
+            // TabConnecting has no session yet. FsOperationFailed is filtered
+            // in the app by tab_id + epoch (FsScope has no session_id, so it
+            // cannot use the full remote guard without a false SessionId).
+            Self::TabConnecting { .. } | Self::FsOperationFailed { .. } => None,
         }
-    }
-
-    /// Returns `true` if this event is a transfer event that does
-    /// not depend on tab survival. The event drain task should route
-    /// these directly to `TransferStore` without checking the stale
-    /// event guard.
-    pub fn is_transfer_event(&self) -> bool {
-        matches!(
-            self,
-            Self::TransferPlanStarted(_)
-                | Self::TransferPlanProgress(_)
-                | Self::TransferPlanCompleted { .. }
-                | Self::TransferPlanCancelled { .. }
-                | Self::TransferPlanFailed { .. }
-                | Self::TransferConflict(_)
-                | Self::TransferRunning(_)
-                | Self::TransferProgress(_)
-                | Self::TransferWarning(_)
-                | Self::TransferCompleted { .. }
-                | Self::TransferSkipped { .. }
-                | Self::TransferFailed(_)
-        )
     }
 }
 
@@ -3321,11 +3547,12 @@ mod tests {
         ConflictRequest, ConflictRequestId, ConnectionKey, ConnectionPoolIdentity,
         ConnectionProfile, ConnectionSettings, ConnectionState, DisconnectReason, EditCheckId,
         EditPhase, EditSessionId, EditSessionStore, HostKeyMismatch, HostKeyPrompt, LocalPath,
-        MetadataPolicy, ModalRequest, ModalRequestId, ProfileId, RemoteEditSnapshotCheckFailed,
-        RemoteEditSnapshotChecked, RemoteEditSnapshotDispatchFailed, RemoteEventScope, RemotePath,
-        RemoteScoped, RuntimeBridgeConfig, SecretRef, SessionId, TabId, TabState, Timestamp,
-        TransferDirection, TransferEndpoint, TransferId, TransferJob, TransferPlan, TransferPlanId,
-        TransferPlanState, TransferState, TransferStore, TrustRequest, TrustRequestId,
+        MetadataPolicy, ModalRequest, ModalRequestId, ProcessEvent, ProfileId,
+        RemoteEditSnapshotCheckFailed, RemoteEditSnapshotChecked, RemoteEditSnapshotDispatchFailed,
+        RemoteEventScope, RemotePath, RemoteScoped, RoutedEvent, RuntimeBridgeConfig, SecretRef,
+        SessionId, TabId, TabState, Timestamp, TransferDirection, TransferEndpoint, TransferEvent,
+        TransferId, TransferJob, TransferPlan, TransferPlanId, TransferPlanState, TransferState,
+        TransferStore, TrustRequest, TrustRequestId, WindowEvent,
     };
 
     #[test]
@@ -3515,8 +3742,7 @@ mod tests {
     #[test]
     fn app_state_keeps_long_lived_state_in_stores() {
         let mut state = AppState::new();
-        state.tabs.tabs.push(TabState::new(TabId(1), "example.com"));
-        state.tabs.active_tab_id = Some(TabId(1));
+        state.tabs.open_tab(TabState::new(TabId(1), "example.com"));
 
         let active_tab = match state.tabs.active_tab() {
             Some(tab) => tab,
@@ -3597,7 +3823,7 @@ mod tests {
         state.tabs.open_tab(tab);
 
         // While the tab exists, the event is accepted.
-        let live_event = AppEvent::RemoteDirLoaded(RemoteScoped::new(
+        let live_event = WindowEvent::RemoteDirLoaded(RemoteScoped::new(
             RemoteEventScope::new(TabId(1), SessionId(10), 1),
             super::RemoteDirSnapshot {
                 path: RemotePath::new("/home/alex"),
@@ -3639,7 +3865,7 @@ mod tests {
             .complete_connect(SessionId(11), Timestamp::from_secs_since_epoch(200));
 
         // Old session's TabDisconnected must not overwrite the new Connected state.
-        let stale_disconnect = AppEvent::TabDisconnected(RemoteScoped::new(
+        let stale_disconnect = WindowEvent::TabDisconnected(RemoteScoped::new(
             RemoteEventScope::new(TabId(1), SessionId(10), 1),
             super::TabDisconnected {
                 reason: DisconnectReason::ConnectionLost,
@@ -3651,7 +3877,7 @@ mod tests {
         );
 
         // New session's event is accepted.
-        let live_event = AppEvent::RemoteDirLoaded(RemoteScoped::new(
+        let live_event = WindowEvent::RemoteDirLoaded(RemoteScoped::new(
             RemoteEventScope::new(TabId(1), SessionId(11), 2),
             super::RemoteDirSnapshot {
                 path: RemotePath::new("/home/alex"),
@@ -3700,32 +3926,26 @@ mod tests {
     }
 
     #[test]
-    fn transfer_events_survive_tab_close() {
-        let mut state = AppState::new();
-        state.tabs.open_tab(connected_tab(1, 10, 1));
-
-        // Close the tab.
-        state.tabs.close_tab(TabId(1));
-
-        // Transfer events should still be accepted — they flow to the
-        // global TransferStore, not to the tab.
+    fn transfer_events_route_to_the_process_owner() {
+        // Transfer events flow to the global TransferStore, never through a
+        // window's stale-event guard, so tab survival is irrelevant.
         let transfer_progress = AppEvent::TransferProgress(super::TransferProgress {
             transfer_id: TransferId(42),
             bytes_done: 1024,
             bytes_total: Some(4096),
         });
-        assert!(
-            state.should_accept_event(&transfer_progress),
-            "transfer events must not depend on tab survival"
-        );
+        assert!(matches!(
+            transfer_progress.route(),
+            RoutedEvent::Process(ProcessEvent::Transfer(TransferEvent::Progress(_)))
+        ));
 
         let transfer_completed = AppEvent::TransferCompleted {
             transfer_id: TransferId(42),
         };
-        assert!(
-            state.should_accept_event(&transfer_completed),
-            "transfer completed must be accepted after tab close"
-        );
+        assert!(matches!(
+            transfer_completed.route(),
+            RoutedEvent::Process(ProcessEvent::Transfer(TransferEvent::Completed { .. }))
+        ));
     }
 
     #[test]
@@ -3755,7 +3975,7 @@ mod tests {
             conflict_policy: super::ConflictPolicy::default(),
         };
         let started =
-            AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot { plan, root_job }));
+            TransferEvent::PlanStarted(Box::new(super::TransferPlanSnapshot { plan, root_job }));
         let child_job = super::TransferJob {
             id: TransferId(2),
             direction: TransferDirection::Upload,
@@ -3767,13 +3987,13 @@ mod tests {
             warnings: Vec::new(),
             created_at: now,
         };
-        let progress = AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+        let progress = TransferEvent::PlanProgress(super::TransferPlanProgress {
             plan_id,
             child_jobs: vec![child_job.clone()],
             planned_count: 1,
             total_bytes: Some(4),
         });
-        let conflict = AppEvent::TransferConflict(super::TransferConflictPrompt {
+        let conflict = TransferEvent::Conflict(super::TransferConflictPrompt {
             request_id: ConflictRequestId(7),
             plan_id,
             transfer_id: child_job.id,
@@ -3833,14 +4053,11 @@ mod tests {
         };
         let mut store = super::TransferStore::default();
         store.apply_event(
-            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
-                plan,
-                root_job,
-            })),
+            &TransferEvent::PlanStarted(Box::new(super::TransferPlanSnapshot { plan, root_job })),
             now,
         );
         store.apply_event(
-            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+            &TransferEvent::PlanProgress(super::TransferPlanProgress {
                 plan_id,
                 child_jobs: vec![child_job],
                 planned_count: 1,
@@ -3848,8 +4065,8 @@ mod tests {
             }),
             now,
         );
-        store.apply_event(&AppEvent::TransferPlanCompleted { plan_id }, now);
-        let completed = AppEvent::TransferCompleted {
+        store.apply_event(&TransferEvent::PlanCompleted { plan_id }, now);
+        let completed = TransferEvent::Completed {
             transfer_id: TransferId(2),
         };
         assert!(store.apply_event(&completed, now));
@@ -3905,14 +4122,14 @@ mod tests {
 
         let mut store = TransferStore::default();
         store.apply_event(
-            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
+            &TransferEvent::PlanStarted(Box::new(super::TransferPlanSnapshot {
                 plan: plan.clone(),
                 root_job: root_job.clone(),
             })),
             now,
         );
         store.apply_event(
-            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+            &TransferEvent::PlanProgress(super::TransferPlanProgress {
                 plan_id,
                 child_jobs: vec![child_a.clone(), child_b.clone()],
                 planned_count: 2,
@@ -3922,7 +4139,7 @@ mod tests {
         );
 
         let applied = store.apply_event(
-            &AppEvent::TransferPlanFailed {
+            &TransferEvent::PlanFailed {
                 plan_id,
                 error: error.clone(),
             },
@@ -3946,7 +4163,7 @@ mod tests {
 
         assert!(
             !store.apply_event(
-                &AppEvent::TransferPlanFailed {
+                &TransferEvent::PlanFailed {
                     plan_id,
                     error: error.clone()
                 },
@@ -3995,14 +4212,14 @@ mod tests {
 
         let mut store = TransferStore::default();
         store.apply_event(
-            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
+            &TransferEvent::PlanStarted(Box::new(super::TransferPlanSnapshot {
                 plan: plan.clone(),
                 root_job: root_job.clone(),
             })),
             now,
         );
         store.apply_event(
-            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+            &TransferEvent::PlanProgress(super::TransferPlanProgress {
                 plan_id,
                 child_jobs: vec![child_a, child_b],
                 planned_count: 2,
@@ -4011,7 +4228,7 @@ mod tests {
             now,
         );
 
-        let applied = store.apply_event(&AppEvent::TransferPlanCancelled { plan_id }, now);
+        let applied = store.apply_event(&TransferEvent::PlanCancelled { plan_id }, now);
         assert!(applied, "a terminal planning event must change state");
 
         assert_eq!(store.plans[0].state, super::TransferPlanState::Cancelled);
@@ -4021,7 +4238,7 @@ mod tests {
         assert_eq!(store.jobs[2].state, skipped, "child B must be skipped");
 
         assert!(
-            !store.apply_event(&AppEvent::TransferPlanCancelled { plan_id }, now),
+            !store.apply_event(&TransferEvent::PlanCancelled { plan_id }, now),
             "replaying a terminal event must be a no-op"
         );
     }
@@ -4054,23 +4271,20 @@ mod tests {
         };
         let mut store = TransferStore::default();
         store.apply_event(
-            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
-                plan,
-                root_job,
-            })),
+            &TransferEvent::PlanStarted(Box::new(super::TransferPlanSnapshot { plan, root_job })),
             now,
         );
 
         // A childless plan becomes `Completed` when planning ends, then its
         // root finishes. A late cancel must not rewrite either of them.
-        store.apply_event(&AppEvent::TransferPlanCompleted { plan_id }, now);
+        store.apply_event(&TransferEvent::PlanCompleted { plan_id }, now);
         store.apply_event(
-            &AppEvent::TransferCompleted {
+            &TransferEvent::Completed {
                 transfer_id: TransferId(1),
             },
             now,
         );
-        assert!(!store.apply_event(&AppEvent::TransferPlanCancelled { plan_id }, now));
+        assert!(!store.apply_event(&TransferEvent::PlanCancelled { plan_id }, now));
 
         assert_eq!(store.jobs[0].state, super::TransferState::Completed);
         assert_eq!(store.plans[0].state, super::TransferPlanState::Completed);
@@ -4109,14 +4323,11 @@ mod tests {
         };
         let mut store = TransferStore::default();
         store.apply_event(
-            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
-                plan,
-                root_job,
-            })),
+            &TransferEvent::PlanStarted(Box::new(super::TransferPlanSnapshot { plan, root_job })),
             now,
         );
         store.apply_event(
-            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+            &TransferEvent::PlanProgress(super::TransferPlanProgress {
                 plan_id,
                 child_jobs: vec![child],
                 planned_count: 1,
@@ -4126,12 +4337,12 @@ mod tests {
         );
 
         store.apply_event(
-            &AppEvent::TransferCompleted {
+            &TransferEvent::Completed {
                 transfer_id: TransferId(1),
             },
             now,
         );
-        let applied = store.apply_event(&AppEvent::TransferPlanCancelled { plan_id }, now);
+        let applied = store.apply_event(&TransferEvent::PlanCancelled { plan_id }, now);
         assert!(applied, "the still-queued child must be cancelled");
 
         assert_eq!(
@@ -4183,15 +4394,12 @@ mod tests {
 
         let mut store = TransferStore::default();
         store.apply_event(
-            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
-                plan,
-                root_job,
-            })),
+            &TransferEvent::PlanStarted(Box::new(super::TransferPlanSnapshot { plan, root_job })),
             now,
         );
         for chunk in child_jobs.chunks(1000) {
             store.apply_event(
-                &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+                &TransferEvent::PlanProgress(super::TransferPlanProgress {
                     plan_id,
                     child_jobs: chunk.to_vec(),
                     planned_count: 10_000,
@@ -4202,7 +4410,7 @@ mod tests {
         }
 
         // Cancelling skips all non-terminal children in a single O(N) pass.
-        assert!(store.apply_event(&AppEvent::TransferPlanCancelled { plan_id }, now));
+        assert!(store.apply_event(&TransferEvent::PlanCancelled { plan_id }, now));
         assert_eq!(store.plans[0].state, super::TransferPlanState::Cancelled);
         for job in &store.jobs {
             if job.id == TransferId(1) || job.id.0 % 2 == 0 {
@@ -4282,7 +4490,7 @@ mod tests {
 
         let mut store = TransferStore::default();
         store.apply_event(
-            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
+            &TransferEvent::PlanStarted(Box::new(super::TransferPlanSnapshot {
                 plan,
                 root_job: root_job.clone(),
             })),
@@ -4301,7 +4509,7 @@ mod tests {
                 })
                 .collect();
             store.apply_event(
-                &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+                &TransferEvent::PlanProgress(super::TransferPlanProgress {
                     plan_id,
                     child_jobs: batch,
                     planned_count: 5_000,
@@ -4316,7 +4524,7 @@ mod tests {
         // Completing the first child should fast-reject without scanning all 5,000 jobs
         let start = std::time::Instant::now();
         store.apply_event(
-            &AppEvent::TransferCompleted {
+            &TransferEvent::Completed {
                 transfer_id: TransferId(2),
             },
             now,
@@ -4332,7 +4540,7 @@ mod tests {
         // Complete all remaining children except the last one
         for id in 3..=5000 {
             store.apply_event(
-                &AppEvent::TransferCompleted {
+                &TransferEvent::Completed {
                     transfer_id: TransferId(id),
                 },
                 now,
@@ -4342,7 +4550,7 @@ mod tests {
 
         // Completing the final child (5001) transitions the plan to Completed
         store.apply_event(
-            &AppEvent::TransferCompleted {
+            &TransferEvent::Completed {
                 transfer_id: TransferId(5001),
             },
             now,
@@ -4370,7 +4578,7 @@ mod tests {
             created_at: now,
         };
         store.apply_event(
-            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
+            &TransferEvent::PlanStarted(Box::new(super::TransferPlanSnapshot {
                 plan: super::TransferPlan {
                     id: plan_1_id,
                     root_job_id: root_1.id,
@@ -4395,7 +4603,7 @@ mod tests {
             })
             .collect();
         store.apply_event(
-            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+            &TransferEvent::PlanProgress(super::TransferPlanProgress {
                 plan_id: plan_1_id,
                 child_jobs: batch_1,
                 planned_count: 1000,
@@ -4417,7 +4625,7 @@ mod tests {
             created_at: now,
         };
         store.apply_event(
-            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
+            &TransferEvent::PlanStarted(Box::new(super::TransferPlanSnapshot {
                 plan: super::TransferPlan {
                     id: plan_2_id,
                     root_job_id: root_2.id,
@@ -4442,7 +4650,7 @@ mod tests {
             })
             .collect();
         store.apply_event(
-            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+            &TransferEvent::PlanProgress(super::TransferPlanProgress {
                 plan_id: plan_2_id,
                 child_jobs: batch_2,
                 planned_count: 1000,
@@ -4462,7 +4670,7 @@ mod tests {
         // Complete Plan 1's children; Plan 2 must remain unfinished
         for id in 2..=1001 {
             store.apply_event(
-                &AppEvent::TransferCompleted {
+                &TransferEvent::Completed {
                     transfer_id: TransferId(id),
                 },
                 now,
@@ -4476,7 +4684,7 @@ mod tests {
         // Complete Plan 2's children
         for id in 1003..=2002 {
             store.apply_event(
-                &AppEvent::TransferCompleted {
+                &TransferEvent::Completed {
                     transfer_id: TransferId(id),
                 },
                 now,
@@ -4505,7 +4713,7 @@ mod tests {
             created_at: now,
         };
         store.apply_event(
-            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
+            &TransferEvent::PlanStarted(Box::new(super::TransferPlanSnapshot {
                 plan: super::TransferPlan {
                     id: plan_1_id,
                     root_job_id: root_1.id,
@@ -4536,7 +4744,7 @@ mod tests {
             created_at: now,
         };
         store.apply_event(
-            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
+            &TransferEvent::PlanStarted(Box::new(super::TransferPlanSnapshot {
                 plan: super::TransferPlan {
                     id: plan_2_id,
                     root_job_id: root_2.id,
@@ -4565,7 +4773,7 @@ mod tests {
             ..root_1.clone()
         };
         store.apply_event(
-            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+            &TransferEvent::PlanProgress(super::TransferPlanProgress {
                 plan_id: plan_1_id,
                 child_jobs: vec![child_1, child_2],
                 planned_count: 2,
@@ -4625,14 +4833,14 @@ mod tests {
 
         let mut store = TransferStore::default();
         store.apply_event(
-            &AppEvent::TransferPlanStarted(Box::new(super::TransferPlanSnapshot {
+            &TransferEvent::PlanStarted(Box::new(super::TransferPlanSnapshot {
                 plan: plan.clone(),
                 root_job: root_job.clone(),
             })),
             now,
         );
         store.apply_event(
-            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+            &TransferEvent::PlanProgress(super::TransferPlanProgress {
                 plan_id,
                 child_jobs: vec![child_a],
                 planned_count: 1,
@@ -4641,7 +4849,7 @@ mod tests {
             now,
         );
         store.apply_event(
-            &AppEvent::TransferPlanFailed {
+            &TransferEvent::PlanFailed {
                 plan_id,
                 error: super::UserFacingError::new(
                     super::ErrorCode::Unknown,
@@ -4653,7 +4861,7 @@ mod tests {
         );
 
         let late_changed = store.apply_event(
-            &AppEvent::TransferPlanProgress(super::TransferPlanProgress {
+            &TransferEvent::PlanProgress(super::TransferPlanProgress {
                 plan_id,
                 child_jobs: vec![late_child],
                 planned_count: 2,
@@ -4671,10 +4879,10 @@ mod tests {
     }
 
     #[test]
-    fn remote_scope_extracts_from_remote_scoped_events() {
+    fn window_events_expose_their_remote_scope() {
         let scope = RemoteEventScope::new(TabId(3), SessionId(7), 2);
 
-        let dir_loaded = AppEvent::RemoteDirLoaded(RemoteScoped::new(
+        let dir_loaded = WindowEvent::RemoteDirLoaded(RemoteScoped::new(
             scope.clone(),
             super::RemoteDirSnapshot {
                 path: RemotePath::new("/srv"),
@@ -4682,17 +4890,14 @@ mod tests {
             },
         ));
         assert_eq!(dir_loaded.remote_scope(), Some(scope));
-        assert!(dir_loaded.remote_scope().is_some());
-        assert!(!dir_loaded.is_transfer_event());
 
-        let tab_connected = AppEvent::TabConnected(RemoteScoped::new(
+        let tab_connected = WindowEvent::TabConnected(RemoteScoped::new(
             RemoteEventScope::new(TabId(1), SessionId(5), 1),
             super::TabConnected {
                 remote_root: RemotePath::new("/home/alex"),
             },
         ));
         assert!(tab_connected.remote_scope().is_some());
-        assert!(!tab_connected.is_transfer_event());
     }
 
     #[test]
@@ -4707,7 +4912,7 @@ mod tests {
             algorithm: "ssh-ed25519".to_string(),
             fingerprint_sha256: "SHA256:xyz".to_string(),
         };
-        let event = AppEvent::HostKeyUnknown(prompt);
+        let event = WindowEvent::HostKeyUnknown(prompt);
 
         let scope = event
             .remote_scope()
@@ -4715,13 +4920,12 @@ mod tests {
         assert_eq!(scope.tab_id, TabId(2));
         assert_eq!(scope.session_id, SessionId(4));
         assert_eq!(scope.session_epoch, 3);
-        assert!(event.remote_scope().is_some());
     }
 
     #[test]
     fn remote_scope_extracts_from_host_key_mismatch() {
         let scope = RemoteEventScope::new(TabId(4), SessionId(6), 3);
-        let event = AppEvent::HostKeyMismatch(HostKeyMismatch {
+        let event = WindowEvent::HostKeyMismatch(HostKeyMismatch {
             scope: scope.clone(),
             host: "example.com".to_string(),
             port: 22,
@@ -4730,12 +4934,10 @@ mod tests {
         });
 
         assert_eq!(event.remote_scope(), Some(scope));
-        assert!(event.remote_scope().is_some());
-        assert!(!event.is_transfer_event());
     }
 
     #[test]
-    fn transfer_events_have_no_remote_scope() {
+    fn process_events_route_away_from_windows() {
         let events = [
             AppEvent::TransferProgress(super::TransferProgress {
                 transfer_id: TransferId(1),
@@ -4745,20 +4947,16 @@ mod tests {
             AppEvent::TransferCompleted {
                 transfer_id: TransferId(1),
             },
+            AppEvent::LocalEditModified {
+                session_id: EditSessionId(4),
+                temp_path: "/tmp/a".to_string(),
+            },
         ];
 
-        for event in &events {
+        for event in events {
             assert!(
-                event.remote_scope().is_none(),
-                "transfer events must not carry remote scope"
-            );
-            assert!(
-                event.is_transfer_event(),
-                "transfer events should be classified as such"
-            );
-            assert!(
-                event.remote_scope().is_none(),
-                "transfer events are not remote-scoped"
+                matches!(event.route(), RoutedEvent::Process(_)),
+                "process-owned events must be routed before any window sees them"
             );
         }
     }
@@ -4792,6 +4990,51 @@ mod tests {
 
         // Close non-existent tab — returns None.
         assert!(store.close_tab(TabId(99)).is_none());
+    }
+
+    #[test]
+    fn tab_store_remembers_distinct_activation_histories() {
+        let mut first = super::TabStore::default();
+        for id in 1..=3 {
+            first.open_tab(TabState::new(TabId(id), "host"));
+        }
+        let mut second = first.clone();
+
+        assert!(first.activate_tab(TabId(2)));
+        assert!(first.activate_tab(TabId(1)));
+        assert!(second.activate_tab(TabId(3)));
+        assert!(second.activate_tab(TabId(1)));
+
+        assert_eq!(first.recent_tabs(), &[TabId(1), TabId(2), TabId(3)]);
+        assert_eq!(second.recent_tabs(), &[TabId(1), TabId(3), TabId(2)]);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn tab_store_recency_tracks_open_activate_and_close() {
+        let mut store = super::TabStore::default();
+        for id in 1..=3 {
+            store.open_tab(TabState::new(TabId(id), "host"));
+        }
+        assert_eq!(store.active_tab_id(), Some(TabId(1)));
+        assert_eq!(store.recent_tabs(), &[TabId(3), TabId(2), TabId(1)]);
+        assert!(store.activate_tab(TabId(2)));
+        assert!(store.activate_tab(TabId(2)));
+        assert_eq!(store.recent_tabs(), &[TabId(2), TabId(3), TabId(1)]);
+        assert!(!store.activate_tab(TabId(99)));
+        assert_eq!(store.active_tab_id(), Some(TabId(2)));
+        assert_eq!(store.recent_tabs(), &[TabId(2), TabId(3), TabId(1)]);
+
+        assert!(store.close_tab(TabId(2)).is_some());
+        assert_eq!(store.active_tab_id(), Some(TabId(1)));
+        assert_eq!(store.recent_tabs(), &[TabId(1), TabId(3)]);
+        assert!(store.close_tab(TabId(99)).is_none());
+        assert!(store.close_tab(TabId(3)).is_some());
+        assert_eq!(store.active_tab_id(), Some(TabId(1)));
+        assert_eq!(store.recent_tabs(), &[TabId(1)]);
+        assert!(store.close_tab(TabId(1)).is_some());
+        assert_eq!(store.active_tab_id(), None);
+        assert!(store.recent_tabs().is_empty());
     }
 
     #[test]
@@ -4837,7 +5080,7 @@ mod tests {
             .begin_reconnect(SessionId(11));
 
         // Old host key prompt (epoch 1) should be rejected.
-        let stale_prompt = AppEvent::HostKeyUnknown(HostKeyPrompt {
+        let stale_prompt = WindowEvent::HostKeyUnknown(HostKeyPrompt {
             request_id: TrustRequestId(1),
             tab_id: TabId(1),
             session_id: SessionId(10),
@@ -4853,7 +5096,7 @@ mod tests {
         );
 
         // New host key prompt (epoch 2) should be accepted.
-        let live_prompt = AppEvent::HostKeyUnknown(HostKeyPrompt {
+        let live_prompt = WindowEvent::HostKeyUnknown(HostKeyPrompt {
             request_id: TrustRequestId(2),
             tab_id: TabId(1),
             session_id: SessionId(11),
@@ -4874,7 +5117,7 @@ mod tests {
         let mut state = AppState::new();
         state.tabs.open_tab(connected_tab(1, 11, 2));
 
-        let event = AppEvent::HostKeyMismatch(HostKeyMismatch {
+        let event = WindowEvent::HostKeyMismatch(HostKeyMismatch {
             scope: RemoteEventScope::new(TabId(1), SessionId(10), 1),
             host: "example.com".to_string(),
             port: 22,
@@ -4893,7 +5136,7 @@ mod tests {
         let mut state = AppState::new();
         state.tabs.open_tab(connected_tab(1, 11, 2));
 
-        let event = AppEvent::HostKeyMismatch(HostKeyMismatch {
+        let event = WindowEvent::HostKeyMismatch(HostKeyMismatch {
             scope: RemoteEventScope::new(TabId(1), SessionId(11), 2),
             host: "example.com".to_string(),
             port: 22,
@@ -5363,19 +5606,25 @@ mod tests {
                 ),
             });
 
-        // The two actor outcomes carry the live scope and pass the stale guard.
-        assert_eq!(checked.remote_scope(), Some(scope.clone()));
-        assert!(checked.remote_scope().is_some());
-        assert_eq!(failed.remote_scope(), Some(scope.clone()));
-        assert!(failed.remote_scope().is_some());
-        // The dispatch failure has no SessionId; it must not be treated as
-        // remote-scoped (it is epoch-correlated instead).
-        assert_eq!(dispatch_failed.remote_scope(), None);
-        assert!(dispatch_failed.remote_scope().is_none());
-        // None of the three are transfer events.
-        assert!(!checked.is_transfer_event());
-        assert!(!failed.is_transfer_event());
-        assert!(!dispatch_failed.is_transfer_event());
+        // The two actor outcomes carry the live scope for the edit-check sink.
+        let AppEvent::RemoteEditSnapshotChecked(checked_payload) = &checked else {
+            panic!("expected a checked outcome");
+        };
+        assert_eq!(checked_payload.scope, scope);
+        let AppEvent::RemoteEditSnapshotCheckFailed(failed_payload) = &failed else {
+            panic!("expected a failed outcome");
+        };
+        assert_eq!(failed_payload.scope, scope);
+
+        // All three outcomes are applied by the process-owned edit-check sink,
+        // so no window's stale-event guard sees them. The dispatch failure is
+        // epoch-correlated and carries no scope.
+        for event in [checked, failed, dispatch_failed] {
+            assert!(matches!(
+                event.route(),
+                RoutedEvent::Process(ProcessEvent::EditCheck(_))
+            ));
+        }
     }
 
     #[test]
@@ -5914,16 +6163,17 @@ mod tests {
     #[test]
     fn keyboard_interactive_prompt_is_remote_scoped() {
         let scope = crate::RemoteEventScope::new(crate::TabId(2), crate::SessionId(3), 4);
-        let event = crate::AppEvent::KeyboardInteractivePrompt(crate::KeyboardInteractivePrompt {
-            request_id: crate::KeyboardInteractiveRequestId(5),
-            scope: scope.clone(),
-            name: "Verification".into(),
-            instruction: "Enter code".into(),
-            prompts: vec![crate::KeyboardInteractivePromptField {
-                prompt: "Code:".into(),
-                echo: false,
-            }],
-        });
+        let event =
+            crate::WindowEvent::KeyboardInteractivePrompt(crate::KeyboardInteractivePrompt {
+                request_id: crate::KeyboardInteractiveRequestId(5),
+                scope: scope.clone(),
+                name: "Verification".into(),
+                instruction: "Enter code".into(),
+                prompts: vec![crate::KeyboardInteractivePromptField {
+                    prompt: "Code:".into(),
+                    echo: false,
+                }],
+            });
         assert_eq!(event.remote_scope(), Some(scope));
     }
 
@@ -6073,7 +6323,7 @@ mod tests {
         let started = std::time::Instant::now();
         for index in 0..CHILDREN {
             store.apply_event(
-                &AppEvent::TransferCompleted {
+                &TransferEvent::Completed {
                     transfer_id: TransferId(index + 2),
                 },
                 now,
@@ -6141,7 +6391,7 @@ mod tests {
 
         // Cancel the plan and ensure all children become Skipped quickly
         let started = std::time::Instant::now();
-        store.apply_event(&AppEvent::TransferPlanCancelled { plan_id }, now);
+        store.apply_event(&TransferEvent::PlanCancelled { plan_id }, now);
         let elapsed = started.elapsed();
 
         assert_eq!(store.plans[0].state, super::TransferPlanState::Cancelled);

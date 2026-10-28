@@ -46,8 +46,13 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Install ripgrep
+        run: brew install ripgrep
+
       - name: Run quality gate
-        run: bash scripts/check.sh
+        run: |
+          python3 -B scripts/test_sensitive_logs.py
+          bash scripts/check.sh
 
       - name: Build app bundle
         run: bash scripts/build_app.sh

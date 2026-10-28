@@ -523,7 +523,7 @@ impl crate::workspace::Workspace {
         let tab = self
             .state
             .tabs
-            .active_tab_id
+            .active_tab_id()
             .and_then(|id| self.state.tabs.find_tab(id));
         let cached_settings = tab.and_then(|tab| tab.connection_settings.clone());
         let restored_target = tab.and_then(|tab| tab.restored_target.clone());

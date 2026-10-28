@@ -564,7 +564,6 @@ async fn command_dispatch_loop(
                         );
 
                         let event_tx_clone = event_tx.clone();
-                        let next_conflict_id_clone = next_conflict_id.clone();
                         let cancel_clone = cancel.clone();
                         let host_clone = cmd.settings.host.clone();
                         let port = cmd.settings.port;
@@ -629,7 +628,6 @@ async fn command_dispatch_loop(
                                                 shared_connection,
                                                 sftp,
                                                 event_tx_clone,
-                                                next_conflict_id_clone,
                                             );
                                             actor.run(cancel_clone, request_rx).await;
                                         }
@@ -1568,8 +1566,9 @@ async fn emit_remote_edit_dispatch_failure(
 /// `RemoteEditSnapshotDispatchFailed` so the coordinator can reset the exact
 /// pending `(tab_id, session_epoch, edit_session_id, check_id, path)` tuple and
 /// retry the save. No fabricated `SessionId`/`RemoteEventScope` is used because
-/// routing never reached a live actor — the event is epoch-correlated, not
-/// remote-session-scoped (see `AppEvent::remote_scope`).
+/// routing never reached a live actor — the event is epoch-correlated, and
+/// [`macsftp_core::AppEvent::route`] sends it to the process-owned edit-check
+/// sink rather than to a window.
 async fn route_check_remote_edit_snapshot(
     command: CheckRemoteEditSnapshotCommand,
     sessions: &HashMap<TabId, RemoteSessionHandle>,
@@ -2055,7 +2054,11 @@ mod tests {
         ));
         std::fs::write(&fixture_path, b"cancel me").expect("write planning fixture");
 
-        let mut controller = RuntimeController::start_mock(RuntimeBridgeConfig::default());
+        let config = RuntimeBridgeConfig {
+            event_channel_capacity: 1,
+            ..RuntimeBridgeConfig::default()
+        };
+        let mut controller = RuntimeController::start_mock(config);
         let client = controller.client();
         let mut events = controller
             .take_event_receiver()
@@ -2077,41 +2080,62 @@ mod tests {
                 }))
                 .expect("start transfer should send");
 
-            let started = recv_timeout(&mut events, "TransferPlanStarted").await;
-            let (plan_id, root_job_id) = match started {
-                AppEvent::TransferPlanStarted(snapshot) => (snapshot.plan.id, snapshot.root_job.id),
-                other => panic!("expected TransferPlanStarted, got {other:?}"),
-            };
+            // Leave the one-slot channel full with PlanStarted. The planner
+            // cannot finish or reach handoff until the event is consumed.
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !controller.event_sender().is_full() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("plan start should fill the event channel");
 
-            // Cancel the plan by its root job id
+            // IDs start at one for a new runtime; the only possible queued
+            // event is the start of its first plan.
             client
                 .try_send(AppCommand::CancelTransfer {
-                    transfer_id: root_job_id,
-                    plan_id: Some(plan_id),
+                    transfer_id: TransferId(1),
+                    plan_id: Some(TransferPlanId(1)),
                 })
                 .expect("cancel should send");
 
-            let mut seen_cancelled = false;
-            while let Ok(Some(event)) =
-                tokio::time::timeout(Duration::from_millis(500), events.recv()).await
-            {
-                match event {
+            // A later dispatcher command acknowledges that the cancel was handled.
+            let request_id = TrustRequestId(100);
+            let (responder, response) = oneshot::channel();
+            controller.trust_registry.register(
+                request_id,
+                crate::trust::TrustRegistryEntry {
+                    tab_id: TabId(99),
+                    session_epoch: 1,
+                    responder,
+                },
+            );
+            client
+                .try_send(AppCommand::RejectHostKey { request_id })
+                .expect("barrier command should send");
+            tokio::time::timeout(Duration::from_secs(2), response)
+                .await
+                .expect("cancel should be processed while planning is blocked")
+                .expect("barrier response should arrive");
+
+            let (plan_id, root_job_id) = match recv_timeout(&mut events, "plan started").await {
+                AppEvent::TransferPlanStarted(snapshot) => (snapshot.plan.id, snapshot.root_job.id),
+                other => panic!("expected TransferPlanStarted, got {other:?}"),
+            };
+            assert_eq!((plan_id, root_job_id), (TransferPlanId(1), TransferId(1)));
+
+            loop {
+                match recv_timeout(&mut events, "plan cancelled").await {
                     AppEvent::TransferPlanProgress(_) => {}
-                    AppEvent::TransferPlanCompleted { .. } => {}
                     AppEvent::TransferPlanCancelled {
                         plan_id: cancelled_id,
                     } => {
                         assert_eq!(cancelled_id, plan_id);
-                        seen_cancelled = true;
                         break;
                     }
-                    AppEvent::TransferFailed(failure) => {
-                        panic!("cancelled plan must not fail jobs: {failure:?}");
-                    }
-                    other => panic!("unexpected event: {other:?}"),
+                    other => panic!("expected cancellation, got {other:?}"),
                 }
             }
-            assert!(seen_cancelled, "must emit TransferPlanCancelled");
         });
 
         controller.shutdown();
@@ -2221,8 +2245,8 @@ mod tests {
                 .expect("start transfer should send");
 
             let started = recv_timeout(&mut events, "TransferPlanStarted").await;
-            let plan_id = match started {
-                AppEvent::TransferPlanStarted(snapshot) => snapshot.plan.id,
+            let (plan_id, root_job_id) = match started {
+                AppEvent::TransferPlanStarted(snapshot) => (snapshot.plan.id, snapshot.root_job.id),
                 other => panic!("expected TransferPlanStarted, got {other:?}"),
             };
             let progress = recv_timeout(&mut events, "TransferPlanProgress").await;
@@ -2268,6 +2292,34 @@ mod tests {
                     "missing failure event for child {id:?}"
                 );
             }
+
+            client
+                .try_send(AppCommand::CancelTransfer {
+                    transfer_id: root_job_id,
+                    plan_id: Some(plan_id),
+                })
+                .expect("late cancel should send");
+            let request_id = TrustRequestId(100);
+            let (responder, response) = oneshot::channel();
+            controller.trust_registry.register(
+                request_id,
+                crate::trust::TrustRegistryEntry {
+                    tab_id: TabId(99),
+                    session_epoch: 1,
+                    responder,
+                },
+            );
+            client
+                .try_send(AppCommand::RejectHostKey { request_id })
+                .expect("barrier command should send");
+            tokio::time::timeout(Duration::from_secs(2), response)
+                .await
+                .expect("late cancel should be processed")
+                .expect("barrier response should arrive");
+            assert!(
+                events.try_recv().is_none(),
+                "late cancellation must not replace the handoff failure"
+            );
         });
 
         controller.shutdown();
@@ -2837,10 +2889,14 @@ mod tests {
             }
             other => panic!("expected RemoteEditSnapshotDispatchFailed, got {other:?}"),
         }
-        assert_eq!(
-            event.remote_scope(),
-            None,
-            "dispatch failure is epoch-correlated, not remote-session-scoped"
+        assert!(
+            matches!(
+                event.route(),
+                macsftp_core::RoutedEvent::Process(macsftp_core::ProcessEvent::EditCheck(
+                    macsftp_core::EditCheckEvent::DispatchFailed(_)
+                ))
+            ),
+            "dispatch failure is epoch-correlated and process-owned"
         );
     }
 

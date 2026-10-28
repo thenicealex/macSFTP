@@ -67,7 +67,7 @@ impl crate::workspace::Workspace {
     }
 
     pub(crate) fn active_host_key_prompt(&self) -> Option<&HostKeyPrompt> {
-        let active_tab_id = self.state.tabs.active_tab_id?;
+        let active_tab_id = self.state.tabs.active_tab_id()?;
         self.state
             .modals
             .active
@@ -79,7 +79,7 @@ impl crate::workspace::Workspace {
             })
     }
     pub(crate) fn active_keyboard_interactive_prompt(&self) -> Option<&KeyboardInteractivePrompt> {
-        let active_tab_id = self.state.tabs.active_tab_id?;
+        let active_tab_id = self.state.tabs.active_tab_id()?;
         self.state
             .modals
             .active

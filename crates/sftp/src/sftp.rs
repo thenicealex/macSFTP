@@ -8,6 +8,7 @@ pub(crate) mod pipelined_writer;
 pub mod pool;
 mod runtime;
 mod session_actor;
+mod transfer_job;
 mod transfer_manager;
 mod transfer_planner;
 mod trust;

@@ -107,9 +107,9 @@ impl crate::workspace::Workspace {
 
     pub(crate) fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
-        let active_tab_id = self.state.tabs.active_tab_id;
+        let active_tab_id = self.state.tabs.active_tab_id();
 
-        let tabs = self.state.tabs.tabs.iter().map(|tab_state| {
+        let tabs = self.state.tabs.tabs().iter().map(|tab_state| {
             let tab_id = tab_state.id;
             let (status_color, status_label) = connection_status(&tab_state.connection, &theme);
             tab(
@@ -188,14 +188,14 @@ impl crate::workspace::Workspace {
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
         let fade = OverlayFade::sample("tab-switcher", self.tab_switcher.open, window, cx);
-        if !self.tab_switcher.open || self.tab_mru.is_empty() {
+        let recent_tabs = self.state.tabs.recent_tabs();
+        if !self.tab_switcher.open || recent_tabs.is_empty() {
             return None;
         }
         let theme = cx.theme().clone();
-        let selected = self.tab_switcher.index.min(self.tab_mru.len() - 1);
+        let selected = self.tab_switcher.index.min(recent_tabs.len() - 1);
 
-        let rows = self
-            .tab_mru
+        let rows = recent_tabs
             .iter()
             .enumerate()
             .filter_map(|(index, tab_id)| {

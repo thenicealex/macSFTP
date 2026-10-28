@@ -44,7 +44,7 @@ test_support -> core
 
 ## 3. 状态所有权
 
-每个 `Workspace` 拥有一个窗口的 `AppState`/`TabStore`、window-local modal 队列，以及 focus、popover、filter、scroll handle 等 view state。
+每个 `Workspace` 拥有一个窗口的 `AppState`/`TabStore`、window-local modal 队列，以及 focus、popover、filter、scroll handle 等 view state。`TabStore` 同时维护 tab 的创建顺序、活动 tab 和最近使用顺序，并在打开、激活、关闭时更新；关闭活动 tab 时选择创建顺序中的第一个剩余 tab。session 恢复按快照顺序重建最近使用顺序，再将恢复的活动 tab 移到最前。tab switcher 的展开、选中项和焦点仍属于窗口 view state。
 
 进程级 GPUI globals 拥有 Profile、配置、最近连接和 residual-temp stores、全局 `TransferStore` 与速率采样、远程编辑 session（`RemoteEditLifecycle`）、runtime event receiver 和多窗口 session checkpoint 协调。
 
@@ -62,8 +62,8 @@ GPUI action
   -> Tokio command dispatcher
   -> browsing actor / TransferManager
   -> AppEvent
-  -> process-wide AppEventCoordinator
-  -> global reducer or owning Workspace
+  -> AppEvent::route()  (process-wide AppEventCoordinator)
+  -> ProcessEvent (global sink) | WindowEvent (owning Workspace)
   -> cx.notify / refresh_windows
 ```
 
@@ -78,7 +78,12 @@ GPUI action
 
 `AppCommand` 只包含 runtime 实际消费的操作：连接生命周期、远端读取、文件操作、传输、host trust、keyboard-interactive、远程编辑校验和 shutdown。本地目录读取由 app/platform 后台任务处理，不进入 SFTP runtime 协议。tab 的创建和关闭先更新 UI/core；只有需要释放 runtime session 时才发送关闭 command。
 
-`AppEvent` 分三类：带 `RemoteEventScope` 的 browsing-session event；不依赖 tab 存活的全局 transfer event；只按 tab/epoch/check-id 相关联、但尚未到达 actor 的 dispatch failure。
+`AppEvent` 是 runtime 产出的扁平 wire enum。事件所有权只在 `AppEvent::route()` 一处派生，返回 `RoutedEvent::Process(ProcessEvent)` 或 `RoutedEvent::Window(WindowEvent)`（见 ADR-0003）。
+
+- `ProcessEvent` 由 `AppEventCoordinator` 在进程内应用一次：`Transfer(TransferEvent)` 交给全局 `TransferStore` 与速率采样，`EditCheck(EditCheckEvent)` 交给远程编辑校验 sink，另有残余临时文件记录和本地编辑通知。这些事件不依赖 tab 存活，不经过窗口的 stale-event guard。
+- `WindowEvent` 广播给每个 `Workspace`，携带 `RemoteEventScope` 的 browsing-session event 先经过 `AppState::should_accept_event`。只按 tab/epoch/check-id 相关联、尚未到达 actor 的 dispatch failure 没有 `SessionId`，由自己的 handler 做 epoch 校验。
+
+新增 `AppEvent` variant 必须先更新 `route()`，否则编译失败；`Workspace::handle_window_event` 必须穷尽 `WindowEvent`，禁止用兜底分支或 `debug_assert!(false)` 接收 process-owned event。`TransferStore::apply_event` 与 edit-check handler 接收各自类型的 enum，不得用 `_ =>` 吞掉新增 variant。
 
 不要为未来功能预留 enum variant。新增 variant 时必须同时存在生产者、消费者和测试。
 
@@ -115,9 +120,9 @@ route 支持 Direct、单跳 saved-profile JumpHost（jump profile 自身必须 
 
 ## 8. 传输模型
 
-目录传输必须使用 `TransferPlan`，不能伪装成单文件 job。planning 流式发布 child jobs；首个 child 立即可见，后续批量发布。`TransferManager` 是进程级 owner，传输状态至少区分 planning、queued、running、waiting-for-conflict、completed、skipped、cancelled 和 failed。
+目录传输必须使用 `TransferPlan`，不能伪装成单文件 job。planning 流式发布 child jobs；首个 child 立即可见，后续批量发布。`TransferManager` 是唯一的进程级传输调度 owner，runtime 将传输、取消、重试和冲突决定交给它；browsing actor 只提供连接 lease 与远端下载 planning 所需的独立 channel，不维护另一条传输队列（ADR-0004）。传输状态至少区分 planning、queued、running、waiting-for-conflict、completed、skipped、cancelled 和 failed。
 
-传输 session 按 plan + 方向复用，不为每个文件新开 channel。channel open、subsystem、SFTP INIT 和 limits 协商要 4 个 RTT，在大量小文件的目录传输里比数据本身更贵：`TransferManager` 在 plan 内保留 idle 的 `TransferSessionSlot`，job 正常完成才归还，plan 没有 pending/running/retry 时立即丢弃（server 端的 sftp 进程随之退出）。session 必须在 job task 内打开，禁止在调度循环里 await——否则每个 start 串行付出 4 个 RTT，小文件吞吐会被钉在一组 RTT 一个文件。
+传输 session 按 plan + 方向复用，不为每个文件新开 channel。channel open、subsystem、SFTP INIT 和 limits 协商要 4 个 RTT，在大量小文件的目录传输里比数据本身更贵：`TransferManager` 在 plan 内保留 idle 的 `TransferSessionSlot`，job 正常完成或上传在冲突判定阶段跳过后才归还；下载冲突、传输过程中取消或失败的 session 不复用。plan 没有 pending/running/retry 时立即丢弃（server 端的 sftp 进程随之退出）。session 必须在 job task 内打开，禁止在调度循环里 await——否则每个 start 串行付出 4 个 RTT，小文件吞吐会被钉在一组 RTT 一个文件。
 
 复用的 session 同时携带本 plan 已确认的远端事实，只减少 RTT、不改变冲突与失败语义：已验证存在的目录（后续文件用一次完整路径 stat 代替逐段 stat）和已证明支持 atomic hardlink commit 的目标目录（按目录而非按 session 记录，因为子目录可能是另一个 mount）。session 数量受三条上限约束：单 plan 8 个 job、全局 12 个、每条物理连接 9 条 channel（OpenSSH 默认 `MaxSessions=10`，browsing session 占一条）。下载的 SSH receive window 为 8 MiB、读取管道 16 × 256 KiB；upload 使用 `PipelinedUploadWriter` 保持滑动窗口并发写入（16 个在途 `SSH_FXP_WRITE`，分块根据 OpenSSH `limits@openssh.com` 的 `max_write_len` 协商，默认 256 KiB），高延迟网络下免于逐包 RTT 串行等待。
 

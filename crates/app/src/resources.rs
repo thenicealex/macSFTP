@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui_kit::{App, Global};
 use macsftp_core::{
-    AppEvent, LocalPath, RemoteEditLifecycle, SessionId, TabId, Timestamp, TransferId,
+    LocalPath, RemoteEditLifecycle, SessionId, TabId, Timestamp, TransferEvent, TransferId,
     TransferState, TransferStore,
 };
 use macsftp_platform::AppPaths;
@@ -180,7 +180,7 @@ impl Global for SharedTransfers {}
 pub trait ActiveTransfers {
     fn transfers(&self) -> &TransferStore;
     fn rates(&self) -> &crate::rate_sampler::TransferRateBook;
-    fn apply_transfer_event(&mut self, event: &AppEvent, now: Timestamp) -> bool;
+    fn apply_transfer_event(&mut self, event: &TransferEvent, now: Timestamp) -> bool;
     fn mark_transfer_cancelling(&mut self, transfer_id: TransferId) -> bool;
     fn remove_transfer_conflict(&mut self, request_id: macsftp_core::ConflictRequestId) -> bool;
     fn clear_terminal_transfers(&mut self) -> bool;
@@ -201,10 +201,10 @@ impl ActiveTransfers for App {
         &self.global::<SharedTransfers>().rates
     }
 
-    fn apply_transfer_event(&mut self, event: &AppEvent, now: Timestamp) -> bool {
+    fn apply_transfer_event(&mut self, event: &TransferEvent, now: Timestamp) -> bool {
         let transfers = self.global_mut::<SharedTransfers>();
         match event {
-            AppEvent::TransferRunning(snapshot) => {
+            TransferEvent::Running(snapshot) => {
                 if let macsftp_core::TransferState::Running { bytes_done, .. } = snapshot.job.state
                 {
                     transfers
@@ -212,14 +212,15 @@ impl ActiveTransfers for App {
                         .observe(snapshot.job.id, bytes_done, std::time::Instant::now());
                 }
             }
-            AppEvent::TransferProgress(progress) => transfers.rates.observe(
+            TransferEvent::Progress(progress) => transfers.rates.observe(
                 progress.transfer_id,
                 progress.bytes_done,
                 std::time::Instant::now(),
             ),
-            AppEvent::TransferCompleted { transfer_id }
-            | AppEvent::TransferSkipped { transfer_id } => transfers.rates.clear(*transfer_id),
-            AppEvent::TransferFailed(failure) => transfers.rates.clear(failure.transfer_id),
+            TransferEvent::Completed { transfer_id } | TransferEvent::Skipped { transfer_id } => {
+                transfers.rates.clear(*transfer_id);
+            }
+            TransferEvent::Failed(failure) => transfers.rates.clear(failure.transfer_id),
             _ => {}
         }
         transfers.store.apply_event(event, now)

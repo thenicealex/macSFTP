@@ -16,8 +16,8 @@ use crate::workspace::overlay::OverlayFade;
 impl Workspace {
     pub(crate) fn palette_context(&self) -> PaletteContext {
         PaletteContext {
-            has_tabs: !self.state.tabs.tabs.is_empty(),
-            has_active_tab: self.state.tabs.active_tab_id.is_some(),
+            has_tabs: !self.state.tabs.tabs().is_empty(),
+            has_active_tab: self.state.tabs.active_tab_id().is_some(),
             remote_connected: self
                 .active_tab()
                 .is_some_and(|tab| matches!(tab.connection, ConnectionState::Connected { .. })),
