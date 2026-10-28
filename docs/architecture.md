@@ -62,8 +62,8 @@ GPUI action
   -> Tokio command dispatcher
   -> browsing actor / TransferManager
   -> AppEvent
-  -> process-wide AppEventCoordinator
-  -> global reducer or owning Workspace
+  -> AppEvent::route()  (process-wide AppEventCoordinator)
+  -> ProcessEvent (global sink) | WindowEvent (owning Workspace)
   -> cx.notify / refresh_windows
 ```
 
@@ -78,7 +78,12 @@ GPUI action
 
 `AppCommand` 只包含 runtime 实际消费的操作：连接生命周期、远端读取、文件操作、传输、host trust、keyboard-interactive、远程编辑校验和 shutdown。本地目录读取由 app/platform 后台任务处理，不进入 SFTP runtime 协议。tab 的创建和关闭先更新 UI/core；只有需要释放 runtime session 时才发送关闭 command。
 
-`AppEvent` 分三类：带 `RemoteEventScope` 的 browsing-session event；不依赖 tab 存活的全局 transfer event；只按 tab/epoch/check-id 相关联、但尚未到达 actor 的 dispatch failure。
+`AppEvent` 是 runtime 产出的扁平 wire enum。事件所有权只在 `AppEvent::route()` 一处派生，返回 `RoutedEvent::Process(ProcessEvent)` 或 `RoutedEvent::Window(WindowEvent)`（见 ADR-0003）。
+
+- `ProcessEvent` 由 `AppEventCoordinator` 在进程内应用一次：`Transfer(TransferEvent)` 交给全局 `TransferStore` 与速率采样，`EditCheck(EditCheckEvent)` 交给远程编辑校验 sink，另有残余临时文件记录和本地编辑通知。这些事件不依赖 tab 存活，不经过窗口的 stale-event guard。
+- `WindowEvent` 广播给每个 `Workspace`，携带 `RemoteEventScope` 的 browsing-session event 先经过 `AppState::should_accept_event`。只按 tab/epoch/check-id 相关联、尚未到达 actor 的 dispatch failure 没有 `SessionId`，由自己的 handler 做 epoch 校验。
+
+新增 `AppEvent` variant 必须先更新 `route()`，否则编译失败；`Workspace::handle_window_event` 必须穷尽 `WindowEvent`，禁止用兜底分支或 `debug_assert!(false)` 接收 process-owned event。`TransferStore::apply_event` 与 edit-check handler 接收各自类型的 enum，不得用 `_ =>` 吞掉新增 variant。
 
 不要为未来功能预留 enum variant。新增 variant 时必须同时存在生产者、消费者和测试。
 
