@@ -9,10 +9,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use macsftp_core::{
-    AppCommand, AppEvent, AuthCredential, ConflictDecision, ConnectCommand, ConnectionPoolIdentity,
-    ConnectionSettings, DisconnectReason, EditCheckId, EditSessionId, ErrorCode, FileKind,
-    ProfileId, RemoteEventScope, RemotePath, RuntimeBridgeConfig, SessionId, TabId, Timestamp,
-    TransferDirection, TransferEndpoint, TransferId, TransferJob, TransferState, TrustDecision,
+    AppCommand, AppEvent, AuthCredential, ConflictDecision, ConflictDecisionCommand,
+    ConflictPolicy, ConnectCommand, ConnectionPoolIdentity, ConnectionSettings, DisconnectReason,
+    EditCheckId, EditSessionId, ErrorCode, FileKind, ProfileId, RemoteEventScope, RemotePath,
+    RuntimeBridgeConfig, SessionId, StartTransferCommand, TabId, TransferDirection,
+    TransferEndpoint, TransferId, TrustDecision,
 };
 use macsftp_sftp::pool::ConnectionManager;
 use macsftp_sftp::{
@@ -107,15 +108,7 @@ fn spawn_actor_with_route(
             && channel.request_subsystem(true, "sftp").await.is_ok()
             && let Ok(sftp) = russh_sftp::client::SftpSession::new(channel.into_stream()).await
         {
-            let actor = RemoteSessionActor::new(
-                TAB,
-                SESSION,
-                EPOCH,
-                shared,
-                sftp,
-                event_tx,
-                Arc::new(std::sync::atomic::AtomicU64::new(1)),
-            );
+            let actor = RemoteSessionActor::new(TAB, SESSION, EPOCH, shared, sftp, event_tx);
             actor.run(actor_cancel, request_rx).await;
         }
     });
@@ -145,42 +138,110 @@ async fn next_runtime_event(events: &mut EventReceiver, label: &str) -> AppEvent
     }
 }
 
-async fn wait_for_transfer_completion(fixture: &ActorFixture, transfer_id: TransferId) {
-    loop {
-        match next_event(fixture, "transfer event").await {
-            AppEvent::TransferRunning(snapshot) if snapshot.job.id == transfer_id => {}
-            AppEvent::TransferProgress(progress) if progress.transfer_id == transfer_id => {}
-            AppEvent::TransferCompleted {
-                transfer_id: completed_id,
-            } if completed_id == transfer_id => return,
-            AppEvent::TransferFailed(failure) if failure.transfer_id == transfer_id => {
-                panic!("transfer failed: {:?}", failure.error)
-            }
-            AppEvent::ResidualTempCreated(_) | AppEvent::ResidualTempCleared { .. } => {}
-            other => panic!("unexpected transfer event: {other:?}"),
-        }
-    }
+async fn connected_transfer_runtime(server: &SshTestServer) -> (RuntimeController, EventReceiver) {
+    let known_hosts_path = server.fixture_dir.join("transfer_test_known_hosts");
+    std::fs::write(
+        &known_hosts_path,
+        format!("[127.0.0.1]:{} {}\n", server.port, server.host_public_key),
+    )
+    .expect("prefill transfer test known_hosts");
+    let mut controller = RuntimeController::start(
+        RuntimeBridgeConfig::default(),
+        HostTrustConfig::new(known_hosts_path, None),
+    );
+    let mut events = controller
+        .take_event_receiver()
+        .expect("event receiver should be available once");
+    controller
+        .client()
+        .try_send(AppCommand::ConnectTab(ConnectCommand {
+            tab_id: TAB,
+            session_id: SESSION,
+            session_epoch: EPOCH,
+            profile_id: ProfileId(1),
+            pool_identity: ConnectionPoolIdentity::Ephemeral(SESSION),
+            settings: ConnectionSettings {
+                host: "127.0.0.1".to_string(),
+                port: server.port,
+                username: server.username.clone(),
+                auth: client_key_auth(server),
+                route: macsftp_core::ResolvedConnectionRoute::Direct,
+            },
+        }))
+        .expect("connect command should send");
+    assert!(matches!(
+        next_runtime_event(&mut events, "TabConnecting").await,
+        AppEvent::TabConnecting { tab_id: TAB }
+    ));
+    assert!(matches!(
+        next_runtime_event(&mut events, "TabConnected").await,
+        AppEvent::TabConnected(_)
+    ));
+    (controller, events)
+}
+
+fn start_transfer(
+    controller: &RuntimeController,
+    direction: TransferDirection,
+    source: TransferEndpoint,
+    destination: TransferEndpoint,
+    conflict_policy: ConflictPolicy,
+) {
+    controller
+        .client()
+        .try_send(AppCommand::StartTransfer(StartTransferCommand {
+            tab_id: TAB,
+            session_epoch: EPOCH,
+            profile_id: ProfileId(1),
+            direction,
+            sources: vec![source],
+            destination,
+            metadata_policy: macsftp_core::MetadataPolicy::default(),
+            conflict_policy,
+        }))
+        .expect("transfer command should send");
+}
+
+fn local_endpoint(path: &std::path::Path) -> TransferEndpoint {
+    TransferEndpoint::Local(macsftp_core::LocalPath::new(path.display().to_string()))
+}
+
+fn remote_endpoint(path: &std::path::Path) -> TransferEndpoint {
+    TransferEndpoint::Remote(RemotePath::new(path.display().to_string()))
+}
+
+fn shutdown_transfer_runtime(controller: RuntimeController) {
+    std::thread::spawn(move || controller.shutdown())
+        .join()
+        .expect("runtime shutdown thread should finish");
 }
 
 #[cfg(unix)]
-async fn wait_for_transfer_failure(
-    fixture: &ActorFixture,
-    transfer_id: TransferId,
+async fn wait_for_runtime_transfer_failure(
+    events: &mut EventReceiver,
 ) -> macsftp_core::TransferFailure {
+    let mut transfer_id = None;
     loop {
-        match next_event(fixture, "transfer event").await {
-            AppEvent::TransferRunning(snapshot) if snapshot.job.id == transfer_id => {}
-            AppEvent::TransferProgress(progress) if progress.transfer_id == transfer_id => {}
-            AppEvent::TransferCompleted {
-                transfer_id: completed_id,
-            } if completed_id == transfer_id => {
-                panic!("transfer should have failed");
+        match next_runtime_event(events, "runtime transfer failure event").await {
+            AppEvent::TransferPlanStarted(_) | AppEvent::TransferPlanCompleted { .. } => {}
+            AppEvent::TransferPlanProgress(progress) => {
+                assert_eq!(progress.child_jobs.len(), 1);
+                transfer_id = Some(progress.child_jobs[0].id);
             }
-            AppEvent::TransferFailed(failure) if failure.transfer_id == transfer_id => {
+            AppEvent::TransferRunning(snapshot) => assert_eq!(Some(snapshot.job.id), transfer_id),
+            AppEvent::TransferProgress(progress) => {
+                assert_eq!(Some(progress.transfer_id), transfer_id)
+            }
+            AppEvent::TransferCompleted { .. } => panic!("transfer should have failed"),
+            AppEvent::TransferFailed(failure) => {
+                assert_eq!(Some(failure.transfer_id), transfer_id);
                 return failure;
             }
+            AppEvent::TransferPlanFailed { error, .. } => {
+                panic!("transfer planning failed: {error:?}")
+            }
             AppEvent::ResidualTempCreated(_) | AppEvent::ResidualTempCleared { .. } => {}
-            other => panic!("unexpected transfer event: {other:?}"),
+            other => panic!("unexpected runtime transfer failure event: {other:?}"),
         }
     }
 }
@@ -191,7 +252,8 @@ async fn wait_for_runtime_transfer_completion(events: &mut EventReceiver) -> Tra
         match next_runtime_event(events, "runtime transfer event").await {
             AppEvent::TransferPlanStarted(_) | AppEvent::TransferPlanCompleted { .. } => {}
             AppEvent::TransferPlanProgress(progress) => {
-                transfer_id = progress.child_jobs.first().map(|job| job.id);
+                assert_eq!(progress.child_jobs.len(), 1);
+                transfer_id = Some(progress.child_jobs[0].id);
             }
             AppEvent::TransferRunning(snapshot) => {
                 assert_eq!(Some(snapshot.job.id), transfer_id);
@@ -208,25 +270,6 @@ async fn wait_for_runtime_transfer_completion(events: &mut EventReceiver) -> Tra
             AppEvent::ResidualTempCreated(_) | AppEvent::ResidualTempCleared { .. } => {}
             other => panic!("unexpected runtime transfer event: {other:?}"),
         }
-    }
-}
-
-fn transfer_job(
-    id: u64,
-    direction: TransferDirection,
-    source: TransferEndpoint,
-    destination: TransferEndpoint,
-) -> TransferJob {
-    TransferJob {
-        id: TransferId(id),
-        direction,
-        source,
-        destination,
-        state: TransferState::Queued,
-        metadata_policy: macsftp_core::MetadataPolicy::default(),
-        conflict_policy: macsftp_core::ConflictPolicy::default(),
-        warnings: Vec::new(),
-        created_at: Timestamp::from_secs_since_epoch(1),
     }
 }
 
@@ -689,85 +732,63 @@ async fn read_dir_handles_ten_thousand_entries() {
     fixture.cancel.cancel();
 }
 
+fn assert_transfer_temp_removed(destination: &std::path::Path, transfer_id: TransferId) {
+    let file_name = destination
+        .file_name()
+        .expect("transfer destination has a file name")
+        .to_string_lossy();
+    let temp = destination
+        .parent()
+        .expect("transfer destination has a parent")
+        .join(format!(".{file_name}.macsftp-part-{}", transfer_id.0));
+    assert!(
+        !temp.exists(),
+        "transfer must clean temporary file {temp:?}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn single_file_upload_and_download_use_independent_sftp_channels() {
     let Some(server) = SshTestServer::spawn() else {
         return;
     };
-    let fixture = spawn_actor(
-        &server,
-        client_key_auth(&server),
-        Some(&server.host_public_key),
-    );
-    let _ = next_event(&fixture, "TabConnected").await;
+    let (controller, mut events) = connected_transfer_runtime(&server).await;
 
     let upload_source = server.fixture_dir.join("upload-source.txt");
     let upload_destination = server.fixture_dir.join("uploaded.txt");
     std::fs::write(&upload_source, b"uploaded through sftp").expect("write upload source");
-    let upload = transfer_job(
-        101,
+    start_transfer(
+        &controller,
         TransferDirection::Upload,
-        TransferEndpoint::Local(macsftp_core::LocalPath::new(
-            upload_source.display().to_string(),
-        )),
-        TransferEndpoint::Remote(RemotePath::new(upload_destination.display().to_string())),
+        local_endpoint(&upload_source),
+        remote_endpoint(&upload_destination),
+        ConflictPolicy::default(),
     );
-    fixture
-        .requests
-        .send_async(RemoteSessionRequest::RunTransferJobs {
-            plan_id: macsftp_core::TransferPlanId(1),
-            jobs: vec![upload],
-        })
-        .await
-        .expect("upload request should reach actor");
-    wait_for_transfer_completion(&fixture, TransferId(101)).await;
+    let upload_id = wait_for_runtime_transfer_completion(&mut events).await;
     assert_eq!(
         std::fs::read(&upload_destination).expect("read uploaded file"),
         b"uploaded through sftp"
     );
-    assert!(
-        !upload_destination
-            .parent()
-            .expect("upload destination has parent")
-            .join(".uploaded.txt.macsftp-part-101")
-            .exists(),
-        "successful upload must remove its remote temporary file"
-    );
+    assert_transfer_temp_removed(&upload_destination, upload_id);
 
     let download_source = server.fixture_dir.join("download-source.txt");
     let download_destination = server.fixture_dir.join("downloaded.txt");
     std::fs::write(&download_source, b"downloaded through sftp").expect("write download source");
-    let download = transfer_job(
-        102,
+    start_transfer(
+        &controller,
         TransferDirection::Download,
-        TransferEndpoint::Remote(RemotePath::new(download_source.display().to_string())),
-        TransferEndpoint::Local(macsftp_core::LocalPath::new(
-            download_destination.display().to_string(),
-        )),
+        remote_endpoint(&download_source),
+        local_endpoint(&download_destination),
+        ConflictPolicy::default(),
     );
-    fixture
-        .requests
-        .send_async(RemoteSessionRequest::RunTransferJobs {
-            plan_id: macsftp_core::TransferPlanId(2),
-            jobs: vec![download],
-        })
-        .await
-        .expect("download request should reach actor");
-    wait_for_transfer_completion(&fixture, TransferId(102)).await;
+    let download_id = wait_for_runtime_transfer_completion(&mut events).await;
     assert_eq!(
         std::fs::read(&download_destination).expect("read downloaded file"),
         b"downloaded through sftp"
     );
-    assert!(
-        !download_destination
-            .parent()
-            .expect("download destination has parent")
-            .join(".downloaded.txt.macsftp-part-102")
-            .exists(),
-        "successful download must remove its local temporary file"
-    );
+    assert_transfer_temp_removed(&download_destination, download_id);
 
-    fixture.cancel.cancel();
+    shutdown_transfer_runtime(controller);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -775,46 +796,25 @@ async fn overwrite_uses_temporary_files_without_leaving_residue() {
     let Some(server) = SshTestServer::spawn() else {
         return;
     };
-    let fixture = spawn_actor(
-        &server,
-        client_key_auth(&server),
-        Some(&server.host_public_key),
-    );
-    let _ = next_event(&fixture, "TabConnected").await;
+    let (controller, mut events) = connected_transfer_runtime(&server).await;
 
     let upload_source = server.fixture_dir.join("overwrite-upload-source.txt");
     let upload_destination = server.fixture_dir.join("overwrite-upload-destination.txt");
     std::fs::write(&upload_source, b"new remote content").expect("write upload source");
     std::fs::write(&upload_destination, b"old remote content").expect("write upload destination");
-    let mut upload = transfer_job(
-        103,
+    start_transfer(
+        &controller,
         TransferDirection::Upload,
-        TransferEndpoint::Local(macsftp_core::LocalPath::new(
-            upload_source.display().to_string(),
-        )),
-        TransferEndpoint::Remote(RemotePath::new(upload_destination.display().to_string())),
+        local_endpoint(&upload_source),
+        remote_endpoint(&upload_destination),
+        ConflictPolicy::OverwriteAll,
     );
-    upload.conflict_policy = macsftp_core::ConflictPolicy::OverwriteAll;
-    fixture
-        .requests
-        .send_async(RemoteSessionRequest::RunTransferJobs {
-            plan_id: macsftp_core::TransferPlanId(8),
-            jobs: vec![upload],
-        })
-        .await
-        .expect("overwrite upload should reach actor");
-    wait_for_transfer_completion(&fixture, TransferId(103)).await;
+    let upload_id = wait_for_runtime_transfer_completion(&mut events).await;
     assert_eq!(
         std::fs::read(&upload_destination).expect("read overwritten remote file"),
         b"new remote content"
     );
-    assert!(
-        !server
-            .fixture_dir
-            .join(".overwrite-upload-destination.txt.macsftp-part-103")
-            .exists(),
-        "overwrite upload must clean temporary file"
-    );
+    assert_transfer_temp_removed(&upload_destination, upload_id);
 
     let download_source = server.fixture_dir.join("overwrite-download-source.txt");
     let download_destination = server
@@ -823,37 +823,21 @@ async fn overwrite_uses_temporary_files_without_leaving_residue() {
     std::fs::write(&download_source, b"new local content").expect("write download source");
     std::fs::write(&download_destination, b"old local content")
         .expect("write download destination");
-    let mut download = transfer_job(
-        104,
+    start_transfer(
+        &controller,
         TransferDirection::Download,
-        TransferEndpoint::Remote(RemotePath::new(download_source.display().to_string())),
-        TransferEndpoint::Local(macsftp_core::LocalPath::new(
-            download_destination.display().to_string(),
-        )),
+        remote_endpoint(&download_source),
+        local_endpoint(&download_destination),
+        ConflictPolicy::OverwriteAll,
     );
-    download.conflict_policy = macsftp_core::ConflictPolicy::OverwriteAll;
-    fixture
-        .requests
-        .send_async(RemoteSessionRequest::RunTransferJobs {
-            plan_id: macsftp_core::TransferPlanId(8),
-            jobs: vec![download],
-        })
-        .await
-        .expect("overwrite download should reach actor");
-    wait_for_transfer_completion(&fixture, TransferId(104)).await;
+    let download_id = wait_for_runtime_transfer_completion(&mut events).await;
     assert_eq!(
         std::fs::read(&download_destination).expect("read overwritten local file"),
         b"new local content"
     );
-    assert!(
-        !server
-            .fixture_dir
-            .join(".overwrite-download-destination.txt.macsftp-part-104")
-            .exists(),
-        "overwrite download must clean temporary file"
-    );
+    assert_transfer_temp_removed(&download_destination, download_id);
 
-    fixture.cancel.cancel();
+    shutdown_transfer_runtime(controller);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -861,217 +845,251 @@ async fn pipelined_upload_large_file_transfers_intact() {
     let Some(server) = SshTestServer::spawn() else {
         return;
     };
-    let fixture = spawn_actor(
-        &server,
-        client_key_auth(&server),
-        Some(&server.host_public_key),
-    );
-    let _ = next_event(&fixture, "TabConnected").await;
+    let (controller, mut events) = connected_transfer_runtime(&server).await;
 
-    // 1 MiB payload to span multiple negotiated SFTP write chunks and pipeline window slots
+    // Span multiple negotiated SFTP write chunks and pipeline window slots.
     let payload: Vec<u8> = (0..1_048_576).map(|i| (i % 251) as u8).collect();
     let upload_source = server.fixture_dir.join("pipelined-upload-large-source.bin");
     let upload_destination = server.fixture_dir.join("pipelined-upload-large-dest.bin");
     std::fs::write(&upload_source, &payload).expect("write large upload source");
-
-    let upload = transfer_job(
-        105,
+    start_transfer(
+        &controller,
         TransferDirection::Upload,
-        TransferEndpoint::Local(macsftp_core::LocalPath::new(
-            upload_source.display().to_string(),
-        )),
-        TransferEndpoint::Remote(RemotePath::new(upload_destination.display().to_string())),
+        local_endpoint(&upload_source),
+        remote_endpoint(&upload_destination),
+        ConflictPolicy::default(),
     );
-    fixture
-        .requests
-        .send_async(RemoteSessionRequest::RunTransferJobs {
-            plan_id: macsftp_core::TransferPlanId(9),
-            jobs: vec![upload],
-        })
-        .await
-        .expect("pipelined upload request should reach actor");
-    wait_for_transfer_completion(&fixture, TransferId(105)).await;
-
+    let upload_id = wait_for_runtime_transfer_completion(&mut events).await;
     assert_eq!(
         std::fs::read(&upload_destination).expect("read uploaded large file"),
         payload
     );
-    assert!(
-        !upload_destination
-            .parent()
-            .expect("upload destination has parent")
-            .join(".pipelined-upload-large-dest.bin.macsftp-part-105")
-            .exists(),
-        "successful pipelined upload must remove its remote temporary file"
-    );
+    assert_transfer_temp_removed(&upload_destination, upload_id);
 
-    fixture.cancel.cancel();
+    shutdown_transfer_runtime(controller);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn conflict_decision_pauses_job_and_applies_skip_to_later_plan_jobs() {
-    let Some(server) = SshTestServer::spawn() else {
-        return;
-    };
-    let fixture = spawn_actor(
-        &server,
-        client_key_auth(&server),
-        Some(&server.host_public_key),
-    );
-    let _ = next_event(&fixture, "TabConnected").await;
-    let source = server.fixture_dir.join("conflict-source.txt");
-    let first_destination = server.fixture_dir.join("conflict-first.txt");
-    let second_destination = server.fixture_dir.join("conflict-second.txt");
-    std::fs::write(&source, b"new data").expect("write source");
-    std::fs::write(&first_destination, b"old data").expect("write first destination");
-    std::fs::write(&second_destination, b"old data").expect("write second destination");
-
-    let first = transfer_job(
-        71,
-        TransferDirection::Upload,
-        TransferEndpoint::Local(macsftp_core::LocalPath::new(source.display().to_string())),
-        TransferEndpoint::Remote(RemotePath::new(first_destination.display().to_string())),
-    );
-    fixture
-        .requests
-        .send_async(RemoteSessionRequest::RunTransferJobs {
-            plan_id: macsftp_core::TransferPlanId(7),
-            jobs: vec![first],
-        })
-        .await
-        .expect("first transfer request should reach actor");
-    let conflict = next_event(&fixture, "first conflict prompt").await;
-    let request_id = match conflict {
-        AppEvent::TransferConflict(prompt) => {
-            assert_eq!(prompt.plan_id, macsftp_core::TransferPlanId(7));
-            assert_eq!(prompt.transfer_id, TransferId(71));
-            assert_eq!(prompt.source_size, Some(8));
-            assert!(
-                prompt.source_modified_at.is_some(),
-                "conflict prompt should show the source mtime"
-            );
-            prompt.request_id
-        }
-        other => panic!("expected transfer conflict, got {other:?}"),
-    };
-    fixture
-        .requests
-        .send_async(RemoteSessionRequest::ResolveTransferConflict {
-            request_id,
-            decision: ConflictDecision::Skip { apply_to_all: true },
-        })
-        .await
-        .expect("conflict decision should reach actor");
-    assert!(matches!(
-        next_event(&fixture, "first skipped").await,
-        AppEvent::TransferSkipped {
-            transfer_id: TransferId(71)
-        }
-    ));
-
-    let second = transfer_job(
-        72,
-        TransferDirection::Upload,
-        TransferEndpoint::Local(macsftp_core::LocalPath::new(source.display().to_string())),
-        TransferEndpoint::Remote(RemotePath::new(second_destination.display().to_string())),
-    );
-    fixture
-        .requests
-        .send_async(RemoteSessionRequest::RunTransferJobs {
-            plan_id: macsftp_core::TransferPlanId(7),
-            jobs: vec![second],
-        })
-        .await
-        .expect("second transfer request should reach actor");
-    assert!(matches!(
-        next_event(&fixture, "second skipped by plan policy").await,
-        AppEvent::TransferSkipped {
-            transfer_id: TransferId(72)
-        }
-    ));
-    assert_eq!(
-        std::fs::read(&first_destination).expect("read first destination"),
-        b"old data"
-    );
-    assert_eq!(
-        std::fs::read(&second_destination).expect("read second destination"),
-        b"old data"
-    );
-
-    fixture.cancel.cancel();
+async fn skip_all_resolves_waiting_conflicts_and_later_jobs_only_in_the_same_plan() {
+    assert_skip_all_conflicts_resolved(9).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn skip_all_resolves_other_conflicts_already_waiting_in_the_same_plan() {
+async fn skip_all_refills_many_queued_conflicts() {
+    assert_skip_all_conflicts_resolved(16).await;
+}
+
+async fn assert_skip_all_conflicts_resolved(file_count: usize) {
+    use std::collections::HashSet;
+
     let Some(server) = SshTestServer::spawn() else {
         return;
     };
-    let fixture = spawn_actor(
-        &server,
-        client_key_auth(&server),
-        Some(&server.host_public_key),
-    );
-    let _ = next_event(&fixture, "TabConnected").await;
-    let source = server.fixture_dir.join("skip-all-source.txt");
-    std::fs::write(&source, b"new data").expect("write source");
-
-    let mut jobs = Vec::new();
-    for index in 0..4 {
-        let destination = server.fixture_dir.join(format!("skip-all-{index}.txt"));
-        std::fs::write(&destination, b"old data").expect("write destination");
-        jobs.push(transfer_job(
-            90 + index,
-            TransferDirection::Upload,
-            TransferEndpoint::Local(macsftp_core::LocalPath::new(source.display().to_string())),
-            TransferEndpoint::Remote(RemotePath::new(destination.display().to_string())),
-        ));
+    let (controller, mut events) = connected_transfer_runtime(&server).await;
+    let source_root = server.fixture_dir.join("conflict-source");
+    let destination_parent = server.fixture_dir.join("conflict-destination");
+    let destination_root = destination_parent.join("conflict-source");
+    std::fs::create_dir(&source_root).expect("create conflict source directory");
+    std::fs::create_dir_all(&destination_root).expect("create conflict destination directory");
+    for index in 0..file_count {
+        let name = format!("conflict-{index}.txt");
+        std::fs::write(source_root.join(&name), b"new data").expect("write source file");
+        std::fs::write(destination_root.join(&name), b"old data").expect("write destination file");
     }
-    fixture
-        .requests
-        .send_async(RemoteSessionRequest::RunTransferJobs {
-            plan_id: macsftp_core::TransferPlanId(9),
-            jobs,
-        })
-        .await
-        .expect("transfer requests should reach actor");
+    start_transfer(
+        &controller,
+        TransferDirection::Upload,
+        local_endpoint(&source_root),
+        remote_endpoint(&destination_parent),
+        ConflictPolicy::default(),
+    );
 
+    let mut plan_id = None;
+    let mut planned = HashSet::new();
+    let mut prompted = HashSet::new();
     let mut first_request_id = None;
-    for _ in 0..4 {
-        match next_event(&fixture, "conflict prompt").await {
+    let mut root_id = None;
+    let mut completed = HashSet::new();
+    let mut planning_completed = false;
+    // Eight running file jobs fill the per-plan limit, leaving the rest queued.
+    while prompted.len() < 8 || !planning_completed {
+        match next_runtime_event(&mut events, "waiting conflict event").await {
+            AppEvent::TransferPlanStarted(snapshot) => plan_id = Some(snapshot.plan.id),
+            AppEvent::TransferPlanProgress(progress) => {
+                assert_eq!(Some(progress.plan_id), plan_id);
+                for job in progress.child_jobs {
+                    if job.source == local_endpoint(&source_root) {
+                        assert!(root_id.replace(job.id).is_none(), "one directory root");
+                    }
+                    assert!(planned.insert(job.id), "each child must be planned once");
+                }
+            }
+            AppEvent::TransferPlanCompleted {
+                plan_id: completed_plan,
+            } => {
+                assert_eq!(Some(completed_plan), plan_id);
+                planning_completed = true;
+            }
             AppEvent::TransferConflict(prompt) => {
+                assert_eq!(Some(prompt.plan_id), plan_id);
+                assert!(planned.contains(&prompt.transfer_id));
+                assert_eq!(prompt.source_size, Some(8));
+                assert!(
+                    prompt.source_modified_at.is_some(),
+                    "prompt must show source mtime"
+                );
+                assert!(
+                    prompted.insert(prompt.transfer_id),
+                    "conflict must be unique"
+                );
                 first_request_id.get_or_insert(prompt.request_id);
             }
-            other => panic!("expected transfer conflict, got {other:?}"),
+            AppEvent::TransferCompleted { transfer_id } => {
+                assert_eq!(
+                    Some(transfer_id),
+                    root_id,
+                    "only the directory should complete"
+                );
+                assert!(
+                    completed.insert(transfer_id),
+                    "directory must complete once"
+                );
+            }
+            AppEvent::TransferRunning(_) | AppEvent::TransferProgress(_) => {}
+            AppEvent::TransferFailed(failure) => {
+                panic!("conflict plan failed: {:?}", failure.error)
+            }
+            other => panic!("unexpected event while waiting for conflicts: {other:?}"),
         }
     }
-    fixture
-        .requests
-        .send_async(RemoteSessionRequest::ResolveTransferConflict {
-            request_id: first_request_id.expect("at least one conflict prompt"),
-            decision: ConflictDecision::Skip { apply_to_all: true },
-        })
-        .await
-        .expect("skip all should reach actor");
+    for index in 0..file_count {
+        assert_eq!(
+            std::fs::read(destination_root.join(format!("conflict-{index}.txt")))
+                .expect("read destination before decision"),
+            b"old data",
+            "waiting conflicts must not overwrite their destinations"
+        );
+    }
+    let plan_id = plan_id.expect("plan must have started");
+    controller
+        .client()
+        .try_send(AppCommand::ResolveTransferConflict(
+            ConflictDecisionCommand {
+                plan_id,
+                request_id: first_request_id.expect("at least one conflict prompt"),
+                decision: ConflictDecision::Skip { apply_to_all: true },
+            },
+        ))
+        .expect("skip all command should send");
 
-    let mut skipped = Vec::new();
-    while skipped.len() < 4 {
-        match next_event(&fixture, "skipped transfer").await {
-            AppEvent::TransferSkipped { transfer_id } => skipped.push(transfer_id),
-            other => panic!("skip all should not require another decision, got {other:?}"),
+    let mut skipped = HashSet::new();
+    while skipped.len() < file_count || completed.is_empty() {
+        match next_runtime_event(&mut events, "skip all event").await {
+            AppEvent::TransferPlanCompleted {
+                plan_id: completed_plan,
+            } => {
+                assert_eq!(completed_plan, plan_id);
+            }
+            AppEvent::TransferConflict(prompt) => {
+                assert_eq!(prompt.plan_id, plan_id);
+                assert!(planned.contains(&prompt.transfer_id));
+                assert!(
+                    prompted.insert(prompt.transfer_id),
+                    "conflict must be unique"
+                );
+            }
+            AppEvent::TransferSkipped { transfer_id } => {
+                assert!(planned.contains(&transfer_id));
+                assert!(skipped.insert(transfer_id), "child must be skipped once");
+            }
+            AppEvent::TransferCompleted { transfer_id } => {
+                assert_eq!(
+                    Some(transfer_id),
+                    root_id,
+                    "only the directory should complete"
+                );
+                assert!(
+                    completed.insert(transfer_id),
+                    "directory must complete once"
+                );
+            }
+            AppEvent::TransferRunning(_) | AppEvent::TransferProgress(_) => {}
+            AppEvent::TransferFailed(failure) => {
+                panic!("conflict plan failed: {:?}", failure.error)
+            }
+            other => panic!("unexpected event after skip all: {other:?}"),
         }
     }
-    skipped.sort_by_key(|transfer_id| transfer_id.0);
     assert_eq!(
-        skipped,
-        vec![
-            TransferId(90),
-            TransferId(91),
-            TransferId(92),
-            TransferId(93)
-        ]
+        planned.len(),
+        file_count + 1,
+        "plan must include directory and files"
     );
+    assert_eq!(completed.len(), 1, "only the directory must complete");
+    assert!(
+        prompted.is_subset(&skipped),
+        "all waiting conflicts must be skipped"
+    );
+    assert_eq!(prompted.len(), 8, "queued jobs must use the plan policy");
+    assert_eq!(
+        skipped.union(&completed).copied().collect::<HashSet<_>>(),
+        planned,
+        "every planned job must have exactly one terminal outcome"
+    );
+    for index in 0..file_count {
+        assert_eq!(
+            std::fs::read(destination_root.join(format!("conflict-{index}.txt")))
+                .expect("read skipped destination"),
+            b"old data"
+        );
+    }
 
-    fixture.cancel.cancel();
+    let other_source = server.fixture_dir.join("other-plan-source.txt");
+    let other_destination = server.fixture_dir.join("other-plan-destination.txt");
+    std::fs::write(&other_source, b"new data").expect("write other plan source");
+    std::fs::write(&other_destination, b"old data").expect("write other plan destination");
+    start_transfer(
+        &controller,
+        TransferDirection::Upload,
+        local_endpoint(&other_source),
+        remote_endpoint(&other_destination),
+        ConflictPolicy::default(),
+    );
+    let other_prompt = loop {
+        match next_runtime_event(&mut events, "other plan conflict event").await {
+            AppEvent::TransferPlanStarted(_)
+            | AppEvent::TransferPlanProgress(_)
+            | AppEvent::TransferPlanCompleted { .. } => {}
+            AppEvent::TransferConflict(prompt) => break prompt,
+            AppEvent::TransferFailed(failure) => panic!("other plan failed: {:?}", failure.error),
+            other => panic!("other plan must request its own decision, got {other:?}"),
+        }
+    };
+    assert_ne!(
+        other_prompt.plan_id, plan_id,
+        "skip all must be scoped to one plan"
+    );
+    controller
+        .client()
+        .try_send(AppCommand::ResolveTransferConflict(
+            ConflictDecisionCommand {
+                plan_id: other_prompt.plan_id,
+                request_id: other_prompt.request_id,
+                decision: ConflictDecision::Skip {
+                    apply_to_all: false,
+                },
+            },
+        ))
+        .expect("other plan decision should send");
+    assert!(matches!(
+        next_runtime_event(&mut events, "other plan skipped").await,
+        AppEvent::TransferSkipped { transfer_id } if transfer_id == other_prompt.transfer_id
+    ));
+    assert_eq!(
+        std::fs::read(other_destination).expect("read other destination"),
+        b"old data"
+    );
+    shutdown_transfer_runtime(controller);
 }
 
 #[cfg(unix)]
@@ -1082,12 +1100,7 @@ async fn upload_preserves_requested_permissions_and_mtime() {
     let Some(server) = SshTestServer::spawn() else {
         return;
     };
-    let fixture = spawn_actor(
-        &server,
-        client_key_auth(&server),
-        Some(&server.host_public_key),
-    );
-    let _ = next_event(&fixture, "TabConnected").await;
+    let (controller, mut events) = connected_transfer_runtime(&server).await;
     let source = server.fixture_dir.join("metadata-source.txt");
     let destination = server.fixture_dir.join("metadata-destination.txt");
     std::fs::write(&source, b"metadata").expect("write source");
@@ -1098,22 +1111,14 @@ async fn upload_preserves_requested_permissions_and_mtime() {
         .expect("open source for timestamps")
         .set_times(std::fs::FileTimes::new().set_modified(expected_mtime))
         .expect("set source mtime");
-
-    let job = transfer_job(
-        81,
+    start_transfer(
+        &controller,
         TransferDirection::Upload,
-        TransferEndpoint::Local(macsftp_core::LocalPath::new(source.display().to_string())),
-        TransferEndpoint::Remote(RemotePath::new(destination.display().to_string())),
+        local_endpoint(&source),
+        remote_endpoint(&destination),
+        ConflictPolicy::default(),
     );
-    fixture
-        .requests
-        .send_async(RemoteSessionRequest::RunTransferJobs {
-            plan_id: macsftp_core::TransferPlanId(8),
-            jobs: vec![job],
-        })
-        .await
-        .expect("metadata transfer request should reach actor");
-    wait_for_transfer_completion(&fixture, TransferId(81)).await;
+    wait_for_runtime_transfer_completion(&mut events).await;
 
     let destination_metadata = std::fs::metadata(&destination).expect("read destination metadata");
     assert_eq!(destination_metadata.permissions().mode() & 0o777, 0o640);
@@ -1125,7 +1130,7 @@ async fn upload_preserves_requested_permissions_and_mtime() {
         .as_secs();
     assert_eq!(destination_mtime, 1_700_000_000);
 
-    fixture.cancel.cancel();
+    shutdown_transfer_runtime(controller);
 }
 
 #[cfg(unix)]
@@ -1136,34 +1141,21 @@ async fn single_file_symlinks_are_copied_without_dereferencing() {
     let Some(server) = SshTestServer::spawn() else {
         return;
     };
-    let fixture = spawn_actor(
-        &server,
-        client_key_auth(&server),
-        Some(&server.host_public_key),
-    );
-    let _ = next_event(&fixture, "TabConnected").await;
+    let (controller, mut events) = connected_transfer_runtime(&server).await;
 
     let local_target = server.fixture_dir.join("symlink-upload-target.txt");
     let local_link = server.fixture_dir.join("symlink-upload-source");
     let remote_link = server.fixture_dir.join("symlink-upload-destination");
     std::fs::write(&local_target, b"upload target").expect("write upload target");
     symlink("symlink-upload-target.txt", &local_link).expect("create upload source symlink");
-    fixture
-        .requests
-        .send_async(RemoteSessionRequest::RunTransferJobs {
-            plan_id: macsftp_core::TransferPlanId(10),
-            jobs: vec![transfer_job(
-                101,
-                TransferDirection::Upload,
-                TransferEndpoint::Local(macsftp_core::LocalPath::new(
-                    local_link.display().to_string(),
-                )),
-                TransferEndpoint::Remote(RemotePath::new(remote_link.display().to_string())),
-            )],
-        })
-        .await
-        .expect("symlink upload should reach actor");
-    wait_for_transfer_completion(&fixture, TransferId(101)).await;
+    start_transfer(
+        &controller,
+        TransferDirection::Upload,
+        local_endpoint(&local_link),
+        remote_endpoint(&remote_link),
+        ConflictPolicy::default(),
+    );
+    wait_for_runtime_transfer_completion(&mut events).await;
     assert_eq!(
         std::fs::read_link(&remote_link).expect("read uploaded symlink"),
         std::path::PathBuf::from("symlink-upload-target.txt")
@@ -1174,22 +1166,14 @@ async fn single_file_symlinks_are_copied_without_dereferencing() {
     let local_destination = server.fixture_dir.join("symlink-download-destination");
     std::fs::write(&remote_target, b"download target").expect("write download target");
     symlink("symlink-download-target.txt", &remote_source).expect("create remote source symlink");
-    fixture
-        .requests
-        .send_async(RemoteSessionRequest::RunTransferJobs {
-            plan_id: macsftp_core::TransferPlanId(11),
-            jobs: vec![transfer_job(
-                102,
-                TransferDirection::Download,
-                TransferEndpoint::Remote(RemotePath::new(remote_source.display().to_string())),
-                TransferEndpoint::Local(macsftp_core::LocalPath::new(
-                    local_destination.display().to_string(),
-                )),
-            )],
-        })
-        .await
-        .expect("symlink download should reach actor");
-    wait_for_transfer_completion(&fixture, TransferId(102)).await;
+    start_transfer(
+        &controller,
+        TransferDirection::Download,
+        remote_endpoint(&remote_source),
+        local_endpoint(&local_destination),
+        ConflictPolicy::default(),
+    );
+    wait_for_runtime_transfer_completion(&mut events).await;
     assert_eq!(
         std::fs::read_link(&local_destination).expect("read downloaded symlink"),
         std::path::PathBuf::from("symlink-download-target.txt")
@@ -1198,31 +1182,21 @@ async fn single_file_symlinks_are_copied_without_dereferencing() {
     let remote_unsafe_source = server.fixture_dir.join("symlink-unsafe-source");
     let local_unsafe_destination = server.fixture_dir.join("symlink-unsafe-destination");
     symlink("/etc/passwd", &remote_unsafe_source).expect("create remote unsafe symlink");
-    fixture
-        .requests
-        .send_async(RemoteSessionRequest::RunTransferJobs {
-            plan_id: macsftp_core::TransferPlanId(12),
-            jobs: vec![transfer_job(
-                103,
-                TransferDirection::Download,
-                TransferEndpoint::Remote(RemotePath::new(
-                    remote_unsafe_source.display().to_string(),
-                )),
-                TransferEndpoint::Local(macsftp_core::LocalPath::new(
-                    local_unsafe_destination.display().to_string(),
-                )),
-            )],
-        })
-        .await
-        .expect("unsafe symlink download should reach actor");
-    let failure = wait_for_transfer_failure(&fixture, TransferId(103)).await;
+    start_transfer(
+        &controller,
+        TransferDirection::Download,
+        remote_endpoint(&remote_unsafe_source),
+        local_endpoint(&local_unsafe_destination),
+        ConflictPolicy::default(),
+    );
+    let failure = wait_for_runtime_transfer_failure(&mut events).await;
     assert_eq!(
         failure.error.code,
         macsftp_core::ErrorCode::UnsupportedSymlink
     );
     assert_eq!(failure.error.title, "Unsafe Link Target");
     assert!(
-        !local_unsafe_destination.exists(),
+        std::fs::symlink_metadata(&local_unsafe_destination).is_err(),
         "local link must not be created"
     );
 
@@ -1233,30 +1207,20 @@ async fn single_file_symlinks_are_copied_without_dereferencing() {
         &remote_relative_source,
     )
     .expect("create remote relative source symlink");
-    fixture
-        .requests
-        .send_async(RemoteSessionRequest::RunTransferJobs {
-            plan_id: macsftp_core::TransferPlanId(13),
-            jobs: vec![transfer_job(
-                104,
-                TransferDirection::Download,
-                TransferEndpoint::Remote(RemotePath::new(
-                    remote_relative_source.display().to_string(),
-                )),
-                TransferEndpoint::Local(macsftp_core::LocalPath::new(
-                    local_relative_destination.display().to_string(),
-                )),
-            )],
-        })
-        .await
-        .expect("in-tree relative symlink download should reach actor");
-    wait_for_transfer_completion(&fixture, TransferId(104)).await;
+    start_transfer(
+        &controller,
+        TransferDirection::Download,
+        remote_endpoint(&remote_relative_source),
+        local_endpoint(&local_relative_destination),
+        ConflictPolicy::default(),
+    );
+    wait_for_runtime_transfer_completion(&mut events).await;
     assert_eq!(
         std::fs::read_link(&local_relative_destination).expect("read downloaded relative symlink"),
         std::path::PathBuf::from("sub/../symlink-download-target.txt")
     );
 
-    fixture.cancel.cancel();
+    shutdown_transfer_runtime(controller);
 }
 
 #[cfg(unix)]
@@ -1454,26 +1418,18 @@ async fn resolve_entry_reports_symlink_targets_without_dereferencing_during_list
         .target
         .clone()
         .expect("file link resolves to a write-through target");
-    let mut job = transfer_job(
-        201,
-        TransferDirection::Upload,
-        TransferEndpoint::Local(macsftp_core::LocalPath::new(
-            edit_source.display().to_string(),
-        )),
-        TransferEndpoint::Remote(write_through_target),
-    );
     // The write-through upload targets an existing file by design; the edit
     // flow decides overwrite before it reaches here.
-    job.conflict_policy = macsftp_core::ConflictPolicy::OverwriteAll;
-    fixture
-        .requests
-        .send_async(RemoteSessionRequest::RunTransferJobs {
-            plan_id: macsftp_core::TransferPlanId(20),
-            jobs: vec![job],
-        })
-        .await
-        .expect("write-through upload should reach actor");
-    wait_for_transfer_completion(&fixture, TransferId(201)).await;
+    let (controller, mut events) = connected_transfer_runtime(&server).await;
+    start_transfer(
+        &controller,
+        TransferDirection::Upload,
+        local_endpoint(&edit_source),
+        TransferEndpoint::Remote(write_through_target),
+        ConflictPolicy::OverwriteAll,
+    );
+    wait_for_runtime_transfer_completion(&mut events).await;
+    shutdown_transfer_runtime(controller);
     assert_eq!(
         std::fs::read(base.join("symlink-resolve-file.txt")).expect("read target after upload"),
         b"edited payload"
