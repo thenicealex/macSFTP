@@ -801,11 +801,28 @@ impl AppState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TabStore {
-    pub tabs: Vec<TabState>,
-    pub active_tab_id: Option<TabId>,
+    tabs: Vec<TabState>,
+    active_tab_id: Option<TabId>,
+    recent_tabs: Vec<TabId>,
 }
 
 impl TabStore {
+    pub fn tabs(&self) -> &[TabState] {
+        &self.tabs
+    }
+
+    pub fn tabs_mut(&mut self) -> impl Iterator<Item = &mut TabState> {
+        self.tabs.iter_mut()
+    }
+
+    pub fn active_tab_id(&self) -> Option<TabId> {
+        self.active_tab_id
+    }
+
+    pub fn recent_tabs(&self) -> &[TabId] {
+        &self.recent_tabs
+    }
+
     pub fn find_tab(&self, tab_id: TabId) -> Option<&TabState> {
         self.tabs.iter().find(|tab| tab.id == tab_id)
     }
@@ -836,27 +853,48 @@ impl TabStore {
         }
     }
 
-    /// Add a new tab to the store. If no tab is active yet, the new
-    /// tab becomes active.
+    /// Add a tab without changing an existing active tab. The new tab is
+    /// placed at the front of the recent order, as when restoring a session.
     pub fn open_tab(&mut self, tab: TabState) {
+        let tab_id = tab.id;
         if self.active_tab_id.is_none() {
-            self.active_tab_id = Some(tab.id);
+            self.active_tab_id = Some(tab_id);
         }
         self.tabs.push(tab);
+        self.touch_recent_tab(tab_id);
+    }
+
+    /// Activate an existing tab, returning whether it was found.
+    pub fn activate_tab(&mut self, tab_id: TabId) -> bool {
+        if self.find_tab(tab_id).is_none() {
+            return false;
+        }
+        self.active_tab_id = Some(tab_id);
+        self.touch_recent_tab(tab_id);
+        true
+    }
+
+    fn touch_recent_tab(&mut self, tab_id: TabId) {
+        self.recent_tabs.retain(|id| *id != tab_id);
+        self.recent_tabs.insert(0, tab_id);
     }
 
     /// Remove a tab from the store. After this, any late-arriving
     /// remote event for this tab is rejected by `accepts_remote_event`
     /// because the tab no longer exists.
     ///
-    /// If the closed tab was active, the next remaining tab (by order)
-    /// becomes active. Returns the removed tab if it existed.
+    /// If the closed tab was active, the first remaining tab becomes active.
+    /// Returns the removed tab if it existed.
     pub fn close_tab(&mut self, tab_id: TabId) -> Option<TabState> {
         let position = self.tabs.iter().position(|tab| tab.id == tab_id)?;
         let removed = self.tabs.remove(position);
+        self.recent_tabs.retain(|id| *id != tab_id);
 
         if self.active_tab_id == Some(tab_id) {
             self.active_tab_id = self.tabs.first().map(|tab| tab.id);
+        }
+        if let Some(active_tab_id) = self.active_tab_id {
+            self.touch_recent_tab(active_tab_id);
         }
 
         Some(removed)
@@ -3515,8 +3553,7 @@ mod tests {
     #[test]
     fn app_state_keeps_long_lived_state_in_stores() {
         let mut state = AppState::new();
-        state.tabs.tabs.push(TabState::new(TabId(1), "example.com"));
-        state.tabs.active_tab_id = Some(TabId(1));
+        state.tabs.open_tab(TabState::new(TabId(1), "example.com"));
 
         let active_tab = match state.tabs.active_tab() {
             Some(tab) => tab,
@@ -4792,6 +4829,51 @@ mod tests {
 
         // Close non-existent tab — returns None.
         assert!(store.close_tab(TabId(99)).is_none());
+    }
+
+    #[test]
+    fn tab_store_remembers_distinct_activation_histories() {
+        let mut first = super::TabStore::default();
+        for id in 1..=3 {
+            first.open_tab(TabState::new(TabId(id), "host"));
+        }
+        let mut second = first.clone();
+
+        assert!(first.activate_tab(TabId(2)));
+        assert!(first.activate_tab(TabId(1)));
+        assert!(second.activate_tab(TabId(3)));
+        assert!(second.activate_tab(TabId(1)));
+
+        assert_eq!(first.recent_tabs(), &[TabId(1), TabId(2), TabId(3)]);
+        assert_eq!(second.recent_tabs(), &[TabId(1), TabId(3), TabId(2)]);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn tab_store_recency_tracks_open_activate_and_close() {
+        let mut store = super::TabStore::default();
+        for id in 1..=3 {
+            store.open_tab(TabState::new(TabId(id), "host"));
+        }
+        assert_eq!(store.active_tab_id(), Some(TabId(1)));
+        assert_eq!(store.recent_tabs(), &[TabId(3), TabId(2), TabId(1)]);
+        assert!(store.activate_tab(TabId(2)));
+        assert!(store.activate_tab(TabId(2)));
+        assert_eq!(store.recent_tabs(), &[TabId(2), TabId(3), TabId(1)]);
+        assert!(!store.activate_tab(TabId(99)));
+        assert_eq!(store.active_tab_id(), Some(TabId(2)));
+        assert_eq!(store.recent_tabs(), &[TabId(2), TabId(3), TabId(1)]);
+
+        assert!(store.close_tab(TabId(2)).is_some());
+        assert_eq!(store.active_tab_id(), Some(TabId(1)));
+        assert_eq!(store.recent_tabs(), &[TabId(1), TabId(3)]);
+        assert!(store.close_tab(TabId(99)).is_none());
+        assert!(store.close_tab(TabId(3)).is_some());
+        assert_eq!(store.active_tab_id(), Some(TabId(1)));
+        assert_eq!(store.recent_tabs(), &[TabId(1)]);
+        assert!(store.close_tab(TabId(1)).is_some());
+        assert_eq!(store.active_tab_id(), None);
+        assert!(store.recent_tabs().is_empty());
     }
 
     #[test]

@@ -44,7 +44,7 @@ test_support -> core
 
 ## 3. 状态所有权
 
-每个 `Workspace` 拥有一个窗口的 `AppState`/`TabStore`、window-local modal 队列，以及 focus、popover、filter、scroll handle 等 view state。
+每个 `Workspace` 拥有一个窗口的 `AppState`/`TabStore`、window-local modal 队列，以及 focus、popover、filter、scroll handle 等 view state。`TabStore` 同时维护 tab 的创建顺序、活动 tab 和最近使用顺序，并在打开、激活、关闭时更新；关闭活动 tab 时选择创建顺序中的第一个剩余 tab。session 恢复按快照顺序重建最近使用顺序，再将恢复的活动 tab 移到最前。tab switcher 的展开、选中项和焦点仍属于窗口 view state。
 
 进程级 GPUI globals 拥有 Profile、配置、最近连接和 residual-temp stores、全局 `TransferStore` 与速率采样、远程编辑 session（`RemoteEditLifecycle`）、runtime event receiver 和多窗口 session checkpoint 协调。
 

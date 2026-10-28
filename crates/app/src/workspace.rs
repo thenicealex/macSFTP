@@ -188,9 +188,6 @@ pub struct Workspace {
     /// Command palette (`cmd-shift-p`).
     palette: view_state::CommandPaletteUi,
 
-    /// MRU tab order for ctrl-tab switcher only (front = most recent).
-    /// `cmd-shift-[/]` still walk creation order in `state.tabs.tabs`.
-    tab_mru: Vec<TabId>,
     tab_switcher: view_state::TabSwitcherUi,
 
     /// Files copied out of a pane, waiting to be pasted into the other.
@@ -310,7 +307,6 @@ impl Workspace {
             modal_inputs: view_state::ModalInputsUi::new(),
             go_to_path: view_state::GoToPathUi::new(),
             palette: view_state::CommandPaletteUi::new(),
-            tab_mru: Vec::new(),
             tab_switcher: view_state::TabSwitcherUi::new(),
             file_clipboard: view_state::FileClipboard::default(),
             pane_split_ratio: pane_split::DEFAULT_SPLIT_RATIO,
@@ -337,7 +333,7 @@ impl Workspace {
             }
             workspace.restore_session_tabs(snapshot, window, cx);
         }
-        if workspace.state.tabs.tabs.is_empty() {
+        if workspace.state.tabs.tabs().is_empty() {
             workspace.open_new_tab(window, cx);
         }
         workspace.register_runtime_tabs(cx);
@@ -410,14 +406,12 @@ impl Workspace {
             self.state.tabs.open_tab(tab);
             self.request_local_directory(tab_id, local_path, cx);
             restored_ids.push(tab_id);
-            self.touch_mru(tab_id);
         }
         let active_index = snapshot
             .active_tab_index
             .min(restored_ids.len().saturating_sub(1));
         if let Some(active_id) = restored_ids.get(active_index).copied() {
-            self.state.tabs.active_tab_id = Some(active_id);
-            self.touch_mru(active_id);
+            self.state.tabs.activate_tab(active_id);
         }
         self.clear_filters();
         self.reset_scroll_positions();
@@ -429,7 +423,7 @@ impl Workspace {
         let tabs: Vec<SessionTabSnapshot> = self
             .state
             .tabs
-            .tabs
+            .tabs()
             .iter()
             .map(|tab| {
                 let settings = tab.connection_settings.as_ref();
@@ -466,8 +460,8 @@ impl Workspace {
         let active_tab_index = self
             .state
             .tabs
-            .active_tab_id
-            .and_then(|id| self.state.tabs.tabs.iter().position(|t| t.id == id))
+            .active_tab_id()
+            .and_then(|id| self.state.tabs.tabs().iter().position(|t| t.id == id))
             .unwrap_or(0);
         SessionWindowSnapshot {
             id: self.window_session_id,
@@ -481,7 +475,7 @@ impl Workspace {
         self.state.tabs.active_tab()
     }
     pub(crate) fn active_tab_mut(&mut self) -> Option<&mut TabState> {
-        let active_tab_id = self.state.tabs.active_tab_id?;
+        let active_tab_id = self.state.tabs.active_tab_id()?;
         self.state.tabs.find_tab_mut(active_tab_id)
     }
     pub(crate) fn pane_focus(&self, side: PaneSide) -> &FocusHandle {
@@ -534,8 +528,7 @@ impl Workspace {
         self.state.tabs.open_tab(tab);
         self.register_runtime_tab(tab_id, cx);
         self.request_local_directory(tab_id, local_path, cx);
-        self.state.tabs.active_tab_id = Some(tab_id);
-        self.touch_mru(tab_id);
+        self.state.tabs.activate_tab(tab_id);
         self.clear_filters();
         self.reset_scroll_positions();
         self.focus_pane(PaneSide::Local, window, cx);
@@ -563,18 +556,13 @@ impl Workspace {
         // session would block re-editing the file forever (find_active keys on
         // connection+path, not tab).
         cleanup_edit_sessions_for_tab(cx, tab_id);
-        self.tab_mru.retain(|id| *id != tab_id);
-        // Keep MRU front aligned with the newly active tab after close
-        // (TabStore promotes another tab without going through activate_tab).
-        if let Some(active_id) = self.state.tabs.active_tab_id {
-            self.touch_mru(active_id);
-        }
         if self.tab_switcher.open {
-            if self.tab_mru.is_empty() {
+            let recent_tabs = self.state.tabs.recent_tabs();
+            if recent_tabs.is_empty() {
                 self.tab_switcher.open = false;
                 self.tab_switcher.index = 0;
             } else {
-                self.tab_switcher.index = self.tab_switcher.index.min(self.tab_mru.len() - 1);
+                self.tab_switcher.index = self.tab_switcher.index.min(recent_tabs.len() - 1);
             }
         }
         // Tell the runtime to cancel the tab's actor and reject its
@@ -588,7 +576,7 @@ impl Workspace {
         // Modals bound to the closed tab's session are now stale; drop
         // them so their confirm buttons can never act (current architecture §6).
         self.drain_expired_modals();
-        if self.state.tabs.tabs.is_empty() {
+        if self.state.tabs.tabs().is_empty() {
             window.focus(&self.workspace_focus, cx);
         }
         self.reset_scroll_positions();
@@ -600,10 +588,8 @@ impl Workspace {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.state.tabs.find_tab(tab_id).is_some() {
-            let previous_tab = self.state.tabs.active_tab_id;
-            self.state.tabs.active_tab_id = Some(tab_id);
-            self.touch_mru(tab_id);
+        let previous_tab = self.state.tabs.active_tab_id();
+        if self.state.tabs.activate_tab(tab_id) {
             if self.tab_switcher.open {
                 self.tab_switcher.open = false;
                 self.tab_switcher.index = 0;
@@ -620,11 +606,6 @@ impl Workspace {
             cx.notify();
         }
     }
-    /// Move `tab_id` to the front of the MRU list (most recently used).
-    pub(crate) fn touch_mru(&mut self, tab_id: TabId) {
-        self.tab_mru.retain(|id| *id != tab_id);
-        self.tab_mru.insert(0, tab_id);
-    }
     /// Creation-order cycle for `cmd-shift-[` / `]`. Does **not** walk MRU.
     pub(crate) fn activate_tab_in_direction(
         &mut self,
@@ -632,14 +613,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let tabs = &self.state.tabs.tabs;
+        let tabs = self.state.tabs.tabs();
         if tabs.is_empty() {
             return;
         }
         let current_index = self
             .state
             .tabs
-            .active_tab_id
+            .active_tab_id()
             .and_then(|active_tab_id| tabs.iter().position(|tab| tab.id == active_tab_id))
             .unwrap_or(0);
         let tab_count = tabs.len() as isize;
@@ -648,32 +629,32 @@ impl Workspace {
         self.activate_tab(next_tab_id, window, cx);
     }
     pub(crate) fn tab_switcher_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tab_mru.is_empty() {
+        let count = self.state.tabs.recent_tabs().len();
+        if count == 0 {
             return;
         }
         if !self.tab_switcher.open {
             self.tab_switcher.open = true;
             // First press targets the previous tab (MRU[1]), matching OS switchers.
-            self.tab_switcher.index = if self.tab_mru.len() > 1 { 1 } else { 0 };
+            self.tab_switcher.index = if count > 1 { 1 } else { 0 };
             window.focus(&self.modal_focus, cx);
         } else {
-            let count = self.tab_mru.len();
             self.tab_switcher.index = (self.tab_switcher.index + 1) % count;
         }
         cx.notify();
     }
     pub(crate) fn tab_switcher_prev(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tab_mru.is_empty() {
+        let count = self.state.tabs.recent_tabs().len();
+        if count == 0 {
             return;
         }
         if !self.tab_switcher.open {
             self.tab_switcher.open = true;
-            self.tab_switcher.index = self.tab_mru.len() - 1;
+            self.tab_switcher.index = count - 1;
             window.focus(&self.modal_focus, cx);
         } else {
-            let count = self.tab_mru.len() as isize;
             self.tab_switcher.index =
-                (self.tab_switcher.index as isize - 1).rem_euclid(count) as usize;
+                (self.tab_switcher.index as isize - 1).rem_euclid(count as isize) as usize;
         }
         cx.notify();
     }
@@ -690,11 +671,15 @@ impl Workspace {
         if !self.tab_switcher.open {
             return;
         }
-        let tab_id = self.tab_mru.get(self.tab_switcher.index).copied();
+        let tab_id = self
+            .state
+            .tabs
+            .recent_tabs()
+            .get(self.tab_switcher.index)
+            .copied();
         self.tab_switcher.open = false;
         self.tab_switcher.index = 0;
         if let Some(tab_id) = tab_id {
-            // activate_tab also touch_mru's and would no-op the open flag.
             self.activate_tab(tab_id, window, cx);
         }
         self.focus_pane(self.focused_side, window, cx);
@@ -724,7 +709,7 @@ impl Workspace {
         if !cx.has_global::<SessionCoordinator>() {
             return;
         }
-        let tab_ids = self.state.tabs.tabs.iter().map(|tab| tab.id);
+        let tab_ids = self.state.tabs.tabs().iter().map(|tab| tab.id);
         cx.global_mut::<SessionCoordinator>().register_runtime_tabs(
             self.window_session_id,
             self.runtime_client.clone(),
@@ -797,7 +782,7 @@ impl Workspace {
     /// closes to garbage-collect edit sessions whose owning tab no longer
     /// exists in any window.
     pub(crate) fn tab_ids(&self) -> Vec<TabId> {
-        self.state.tabs.tabs.iter().map(|tab| tab.id).collect()
+        self.state.tabs.tabs().iter().map(|tab| tab.id).collect()
     }
     /// The most recent remote `(size, mtime)` for `remote_path` from the tab's
     /// existing directory listing, or `None` when the tab or entry is absent.
@@ -1232,7 +1217,7 @@ impl Workspace {
             return;
         };
 
-        if let Some(tab_id) = self.state.tabs.active_tab_id {
+        if let Some(tab_id) = self.state.tabs.active_tab_id() {
             let remote_path = entry
                 .last_remote_path
                 .as_ref()
@@ -1291,7 +1276,7 @@ impl Render for Workspace {
         self.prepare_profile_inputs(window, cx);
         self.prepare_text_inputs(window, cx);
         let theme = cx.theme().clone();
-        let has_tabs = !self.state.tabs.tabs.is_empty();
+        let has_tabs = !self.state.tabs.tabs().is_empty();
 
         // Open and close settle instead of jumping, and a resize drag suspends
         // travel so the height stays glued to the pointer. The drawer stays in
@@ -1392,7 +1377,7 @@ impl Render for Workspace {
                 workspace.open_new_tab(window, cx);
             }))
             .on_action(cx.listener(|workspace, _: &CloseTab, window, cx| {
-                if let Some(active_tab_id) = workspace.state.tabs.active_tab_id {
+                if let Some(active_tab_id) = workspace.state.tabs.active_tab_id() {
                     workspace.close_tab_by_id(active_tab_id, window, cx);
                 }
             }))

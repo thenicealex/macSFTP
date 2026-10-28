@@ -523,7 +523,7 @@ impl crate::workspace::Workspace {
         cx.spawn_in(window, async move |workspace, cx| {
             let result = stat_task.await;
             let _ = workspace.update_in(cx, |workspace, window, cx| {
-                let still_applicable = workspace.state.tabs.active_tab_id == Some(tab_id)
+                let still_applicable = workspace.state.tabs.active_tab_id() == Some(tab_id)
                     && workspace
                         .state
                         .tabs
@@ -645,7 +645,7 @@ impl crate::workspace::Workspace {
             return;
         };
         let request_epoch = tab.local.begin_local_read();
-        if !preserve_view && self.state.tabs.active_tab_id == Some(tab_id) {
+        if !preserve_view && self.state.tabs.active_tab_id() == Some(tab_id) {
             self.show_status(LOCAL_LOADING_STATUS.into(), cx);
         }
         let read_path = path.clone();
@@ -655,7 +655,7 @@ impl crate::workspace::Workspace {
         cx.spawn(async move |workspace, cx| {
             let result = read_task.await;
             let _ = workspace.update(cx, |workspace, cx| {
-                let is_active = workspace.state.tabs.active_tab_id == Some(tab_id);
+                let is_active = workspace.state.tabs.active_tab_id() == Some(tab_id);
                 let Some(tab) = workspace.state.tabs.find_tab_mut(tab_id) else {
                     return;
                 };
@@ -854,7 +854,7 @@ impl crate::workspace::Workspace {
         let matches: Vec<(TabId, Option<LocalPath>, Option<RemotePath>, bool)> = self
             .state
             .tabs
-            .tabs
+            .tabs()
             .iter()
             .map(|tab| {
                 let local = tab

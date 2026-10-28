@@ -226,7 +226,7 @@ impl crate::workspace::Workspace {
                 let session_epoch = scoped.scope.session_epoch;
                 let resolution = scoped.payload;
                 let entry = EntryPath::Remote(resolution.path.clone());
-                let applies = self.state.tabs.active_tab_id == Some(tab_id)
+                let applies = self.state.tabs.active_tab_id() == Some(tab_id)
                     && self
                         .state
                         .tabs

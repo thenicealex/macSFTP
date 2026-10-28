@@ -337,8 +337,8 @@ fn new_tab_and_close_tab_actions_manage_tab_store(cx: &mut TestAppContext) {
     let (workspace, mut cx, _channels) = init_workspace(cx);
 
     workspace.read_with(&cx, |workspace, _| {
-        assert_eq!(workspace.state.tabs.tabs.len(), 1, "starts with one tab");
-        assert_eq!(workspace.state.tabs.active_tab_id, Some(TabId(1)));
+        assert_eq!(workspace.state.tabs.tabs().len(), 1, "starts with one tab");
+        assert_eq!(workspace.state.tabs.active_tab_id(), Some(TabId(1)));
         let tab = workspace.state.tabs.active_tab().expect("tab must exist");
         assert_eq!(
             tab.connection,
@@ -349,9 +349,9 @@ fn new_tab_and_close_tab_actions_manage_tab_store(cx: &mut TestAppContext) {
 
     cx.dispatch_action(NewTab);
     workspace.read_with(&cx, |workspace, _| {
-        assert_eq!(workspace.state.tabs.tabs.len(), 2);
+        assert_eq!(workspace.state.tabs.tabs().len(), 2);
         assert_eq!(
-            workspace.state.tabs.active_tab_id,
+            workspace.state.tabs.active_tab_id(),
             Some(TabId(2)),
             "new tab becomes active"
         );
@@ -359,9 +359,9 @@ fn new_tab_and_close_tab_actions_manage_tab_store(cx: &mut TestAppContext) {
 
     cx.dispatch_action(CloseTab);
     workspace.read_with(&cx, |workspace, _| {
-        assert_eq!(workspace.state.tabs.tabs.len(), 1);
+        assert_eq!(workspace.state.tabs.tabs().len(), 1);
         assert_eq!(
-            workspace.state.tabs.active_tab_id,
+            workspace.state.tabs.active_tab_id(),
             Some(TabId(1)),
             "closing the active tab activates the remaining tab"
         );
@@ -369,8 +369,8 @@ fn new_tab_and_close_tab_actions_manage_tab_store(cx: &mut TestAppContext) {
 
     cx.dispatch_action(CloseTab);
     workspace.read_with(&cx, |workspace, _| {
-        assert!(workspace.state.tabs.tabs.is_empty());
-        assert_eq!(workspace.state.tabs.active_tab_id, None);
+        assert!(workspace.state.tabs.tabs().is_empty());
+        assert_eq!(workspace.state.tabs.active_tab_id(), None);
     });
 }
 
@@ -381,12 +381,12 @@ fn tab_switching_cycles_through_tabs(cx: &mut TestAppContext) {
 
     cx.dispatch_action(ActivateNextTab);
     workspace.read_with(&cx, |workspace, _| {
-        assert_eq!(workspace.state.tabs.active_tab_id, Some(TabId(1)));
+        assert_eq!(workspace.state.tabs.active_tab_id(), Some(TabId(1)));
     });
 
     cx.dispatch_action(ActivatePrevTab);
     workspace.read_with(&cx, |workspace, _| {
-        assert_eq!(workspace.state.tabs.active_tab_id, Some(TabId(2)));
+        assert_eq!(workspace.state.tabs.active_tab_id(), Some(TabId(2)));
     });
 }
 
@@ -397,7 +397,7 @@ fn keyboard_shortcut_opens_new_tab(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-t");
     workspace.read_with(&cx, |workspace, _| {
         assert_eq!(
-            workspace.state.tabs.tabs.len(),
+            workspace.state.tabs.tabs().len(),
             2,
             "cmd-t must dispatch NewTab via the Workspace key context"
         );
@@ -6158,7 +6158,7 @@ fn remote_entry_resolution_for_a_non_active_tab_is_ignored(cx: &mut TestAppConte
         };
         second.remote.path = Some(RemotePath::new("/srv/other"));
         workspace.state.tabs.open_tab(second);
-        workspace.state.tabs.active_tab_id = Some(TabId(1));
+        assert!(workspace.state.tabs.activate_tab(TabId(1)));
         workspace.begin_link_check(
             TabId(2),
             EntryPath::Remote(RemotePath::new("/srv/other/latest")),
@@ -7863,7 +7863,7 @@ fn close_tab_notifies_runtime(cx: &mut TestAppContext) {
         .expect("close command must be enqueued");
     assert!(matches!(command, AppCommand::CloseTab { tab_id: TabId(1) }));
     workspace.read_with(&cx, |workspace, _| {
-        assert!(workspace.state.tabs.tabs.is_empty());
+        assert!(workspace.state.tabs.tabs().is_empty());
     });
 }
 
@@ -8591,7 +8591,7 @@ fn window_title_follows_the_active_tab(cx: &mut TestAppContext) {
     let (workspace, mut cx, _) = init_workspace(cx);
     cx.dispatch_action(NewTab);
     cx.run_until_parked();
-    workspace.update(&mut cx, |workspace, _| {
+    workspace.update_in(&mut cx, |workspace, window, cx| {
         // A fresh tab is named for what it is; a connected one carries the
         // connection name. The native title (Mission Control, the Window
         // menu) is the same string the tab bar shows, and the app name stands
@@ -8602,11 +8602,20 @@ fn window_title_follows_the_active_tab(cx: &mut TestAppContext) {
         workspace.active_tab_mut().unwrap().title = "example.com".to_string();
         assert_eq!(workspace.window_title(), "example.com");
 
-        let first_tab = workspace.state.tabs.tabs[0].id;
-        workspace.state.tabs.active_tab_id = Some(first_tab);
+        let first_tab = workspace.state.tabs.tabs()[0].id;
+        workspace.activate_tab(first_tab, window, cx);
         assert_eq!(workspace.window_title(), "New Connection");
 
-        workspace.state.tabs.active_tab_id = None;
+        let tab_ids: Vec<_> = workspace
+            .state
+            .tabs
+            .tabs()
+            .iter()
+            .map(|tab| tab.id)
+            .collect();
+        for tab_id in tab_ids {
+            workspace.close_tab_by_id(tab_id, window, cx);
+        }
         assert_eq!(workspace.window_title(), crate::APP_NAME);
     });
 }
@@ -8852,8 +8861,11 @@ fn activate_tab_updates_mru_front(cx: &mut TestAppContext) {
     cx.dispatch_action(NewTab); // tabs 1,2 active 2
     cx.dispatch_action(NewTab); // tabs 1,2,3 active 3
     workspace.read_with(&cx, |ws, _| {
-        assert_eq!(ws.tab_mru.first(), Some(&TabId(3)));
-        assert_eq!(ws.tab_mru, vec![TabId(3), TabId(2), TabId(1)]);
+        assert_eq!(ws.state.tabs.recent_tabs().first(), Some(&TabId(3)));
+        assert_eq!(
+            ws.state.tabs.recent_tabs(),
+            vec![TabId(3), TabId(2), TabId(1)]
+        );
     });
 
     workspace.update_in(&mut cx, |ws, window, cx| {
@@ -8863,14 +8875,22 @@ fn activate_tab_updates_mru_front(cx: &mut TestAppContext) {
         ws.activate_tab(TabId(3), window, cx);
     });
     workspace.read_with(&cx, |ws, _| {
-        assert_eq!(ws.tab_mru[0], TabId(3), "most recent activation is front");
+        assert_eq!(
+            ws.state.tabs.recent_tabs()[0],
+            TabId(3),
+            "most recent activation is front"
+        );
         let pos2 = ws
-            .tab_mru
+            .state
+            .tabs
+            .recent_tabs()
             .iter()
             .position(|id| *id == TabId(2))
             .expect("tab 2 stays in mru");
         let pos1 = ws
-            .tab_mru
+            .state
+            .tabs
+            .recent_tabs()
             .iter()
             .position(|id| *id == TabId(1))
             .expect("tab 1 stays in mru");
@@ -8891,8 +8911,11 @@ fn cmd_shift_tab_still_creation_order(cx: &mut TestAppContext) {
         ws.activate_tab(TabId(3), window, cx);
     });
     workspace.read_with(&cx, |ws, _| {
-        assert_eq!(ws.tab_mru, vec![TabId(3), TabId(1), TabId(2)]);
-        assert_eq!(ws.state.tabs.active_tab_id, Some(TabId(3)));
+        assert_eq!(
+            ws.state.tabs.recent_tabs(),
+            vec![TabId(3), TabId(1), TabId(2)]
+        );
+        assert_eq!(ws.state.tabs.active_tab_id(), Some(TabId(3)));
     });
 
     // From tab 1 in creation order: ActivateNextTab → tab 2 (not MRU next).
@@ -8902,7 +8925,7 @@ fn cmd_shift_tab_still_creation_order(cx: &mut TestAppContext) {
     cx.dispatch_action(ActivateNextTab);
     workspace.read_with(&cx, |ws, _| {
         assert_eq!(
-            ws.state.tabs.active_tab_id,
+            ws.state.tabs.active_tab_id(),
             Some(TabId(2)),
             "cmd-shift-] must walk creation order, not MRU"
         );
@@ -8918,14 +8941,14 @@ fn close_tab_removes_from_mru(cx: &mut TestAppContext) {
         ws.activate_tab(TabId(2), window, cx);
     });
     workspace.read_with(&cx, |ws, _| {
-        assert!(ws.tab_mru.contains(&TabId(3)));
+        assert!(ws.state.tabs.recent_tabs().contains(&TabId(3)));
     });
     workspace.update_in(&mut cx, |ws, window, cx| {
         ws.close_tab_by_id(TabId(3), window, cx);
     });
     workspace.read_with(&cx, |ws, _| {
-        assert!(!ws.tab_mru.contains(&TabId(3)));
-        assert_eq!(ws.tab_mru.len(), 2);
+        assert!(!ws.state.tabs.recent_tabs().contains(&TabId(3)));
+        assert_eq!(ws.state.tabs.recent_tabs().len(), 2);
     });
 }
 
@@ -9037,13 +9060,13 @@ fn close_active_tab_touches_mru_with_new_active(cx: &mut TestAppContext) {
     cx.dispatch_action(NewTab); // mru: 2, 1
     cx.dispatch_action(NewTab); // mru: 3, 2, 1; active 3
     workspace.update_in(&mut cx, |ws, window, cx| {
-        assert_eq!(ws.state.tabs.active_tab_id, Some(TabId(3)));
-        assert_eq!(ws.tab_mru[0], TabId(3));
+        assert_eq!(ws.state.tabs.active_tab_id(), Some(TabId(3)));
+        assert_eq!(ws.state.tabs.recent_tabs()[0], TabId(3));
         ws.close_tab_by_id(TabId(3), window, cx);
-        let active = ws.state.tabs.active_tab_id.expect("a tab remains");
+        let active = ws.state.tabs.active_tab_id().expect("a tab remains");
         assert_ne!(active, TabId(3));
         assert_eq!(
-            ws.tab_mru.first().copied(),
+            ws.state.tabs.recent_tabs().first().copied(),
             Some(active),
             "after closing the active tab, MRU front must match the new active tab"
         );
@@ -9059,11 +9082,11 @@ fn tab_switcher_next_and_enter_activates_mru(cx: &mut TestAppContext) {
         ws.tab_switcher_next(window, cx);
         assert!(ws.tab_switcher.open);
         assert_eq!(ws.tab_switcher.index, 1, "first open starts at MRU[1]");
-        assert_eq!(ws.tab_mru[1], TabId(2));
+        assert_eq!(ws.state.tabs.recent_tabs()[1], TabId(2));
         ws.confirm_tab_switcher(window, cx);
         assert!(!ws.tab_switcher.open);
-        assert_eq!(ws.state.tabs.active_tab_id, Some(TabId(2)));
-        assert_eq!(ws.tab_mru[0], TabId(2));
+        assert_eq!(ws.state.tabs.active_tab_id(), Some(TabId(2)));
+        assert_eq!(ws.state.tabs.recent_tabs()[0], TabId(2));
     });
 }
 
@@ -9073,13 +9096,13 @@ fn tab_switcher_esc_cancels_without_switch(cx: &mut TestAppContext) {
     cx.dispatch_action(NewTab);
     cx.dispatch_action(NewTab); // active 3
     workspace.update_in(&mut cx, |ws, window, cx| {
-        assert_eq!(ws.state.tabs.active_tab_id, Some(TabId(3)));
+        assert_eq!(ws.state.tabs.active_tab_id(), Some(TabId(3)));
         ws.tab_switcher_next(window, cx);
         assert_eq!(ws.tab_switcher.index, 1);
         ws.cancel_active_modal(window, cx);
         assert!(!ws.tab_switcher.open);
         assert_eq!(
-            ws.state.tabs.active_tab_id,
+            ws.state.tabs.active_tab_id(),
             Some(TabId(3)),
             "Esc must not change the active tab"
         );
@@ -9128,7 +9151,7 @@ fn cancel_modal_closes_palette_before_switcher(cx: &mut TestAppContext) {
 fn command_palette_filters_and_runs_new_tab(cx: &mut TestAppContext) {
     let (workspace, mut cx, _) = init_workspace(cx);
     workspace.update_in(&mut cx, |ws, window, cx| {
-        assert_eq!(ws.state.tabs.tabs.len(), 1);
+        assert_eq!(ws.state.tabs.tabs().len(), 1);
         ws.open_command_palette(window, cx);
         assert!(ws.palette.open);
         ws.palette.input.set_value("new tab");
@@ -9139,7 +9162,7 @@ fn command_palette_filters_and_runs_new_tab(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     workspace.read_with(&cx, |ws, _| {
-        assert_eq!(ws.state.tabs.tabs.len(), 2);
+        assert_eq!(ws.state.tabs.tabs().len(), 2);
     });
 }
 
@@ -9291,6 +9314,15 @@ fn restore_session_rebuilds_tabs_without_connect(cx: &mut TestAppContext) {
                     local_path: None,
                     remote_path: Some("/var/www".into()),
                 },
+                SessionTabSnapshot {
+                    title: "gamma.example".into(),
+                    profile_id: None,
+                    host: "gamma.example".into(),
+                    port: 22,
+                    username: "carol".into(),
+                    local_path: None,
+                    remote_path: None,
+                },
             ],
         }],
     });
@@ -9301,19 +9333,23 @@ fn restore_session_rebuilds_tabs_without_connect(cx: &mut TestAppContext) {
     let (workspace, cx, channels) = init_workspace_with_paths(cx, app_paths, true);
 
     workspace.read_with(&cx, |workspace, _| {
-        assert_eq!(workspace.state.tabs.tabs.len(), 2);
-        assert_eq!(workspace.state.tabs.tabs[0].title, "alpha.example");
-        assert_eq!(workspace.state.tabs.tabs[1].title, "beta.example");
-        assert_eq!(workspace.state.tabs.tabs[0].profile_id, Some(ProfileId(3)));
+        assert_eq!(workspace.state.tabs.tabs().len(), 3);
+        assert_eq!(workspace.state.tabs.tabs()[0].title, "alpha.example");
+        assert_eq!(workspace.state.tabs.tabs()[1].title, "beta.example");
+        assert_eq!(workspace.state.tabs.tabs()[2].title, "gamma.example");
         assert_eq!(
-            workspace.state.tabs.tabs[0].remote.path,
+            workspace.state.tabs.tabs()[0].profile_id,
+            Some(ProfileId(3))
+        );
+        assert_eq!(
+            workspace.state.tabs.tabs()[0].remote.path,
             Some(RemotePath::new("/home/alice/proj"))
         );
         assert_eq!(
-            workspace.state.tabs.tabs[1].remote.path,
+            workspace.state.tabs.tabs()[1].remote.path,
             Some(RemotePath::new("/var/www"))
         );
-        for tab in &workspace.state.tabs.tabs {
+        for tab in workspace.state.tabs.tabs() {
             assert_eq!(
                 tab.connection,
                 ConnectionState::Empty,
@@ -9321,9 +9357,14 @@ fn restore_session_rebuilds_tabs_without_connect(cx: &mut TestAppContext) {
             );
         }
         assert_eq!(
-            workspace.state.tabs.active_tab_id,
+            workspace.state.tabs.active_tab_id(),
             Some(TabId(2)),
             "active_tab_index 1 selects the second restored tab"
+        );
+        assert_eq!(
+            workspace.state.tabs.recent_tabs(),
+            &[TabId(2), TabId(3), TabId(1)],
+            "restore promotes the active tab after rebuilding recent order"
         );
     });
 
@@ -9354,7 +9395,7 @@ fn build_session_snapshot_round_trips_active_tab_and_paths(cx: &mut TestAppConte
             tab.remote.path = Some(RemotePath::new("/home/b"));
         }
         // Activate the first tab so active index is 0.
-        let first_id = workspace.state.tabs.tabs[0].id;
+        let first_id = workspace.state.tabs.tabs()[0].id;
         workspace.activate_tab(first_id, window, cx);
 
         let snapshot = workspace.build_session_snapshot();

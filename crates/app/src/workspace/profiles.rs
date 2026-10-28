@@ -839,7 +839,7 @@ impl crate::workspace::Workspace {
                             "could not decouple recents from deleted profile"
                         );
                     }
-                    for tab in self.state.tabs.tabs.iter_mut() {
+                    for tab in self.state.tabs.tabs_mut() {
                         if tab.profile_id == Some(profile_id) {
                             tab.profile_id = None;
                         }
