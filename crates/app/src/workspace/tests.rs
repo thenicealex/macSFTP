@@ -4804,6 +4804,39 @@ fn resolve_conflict_overwrite_uploads(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn full_command_channel_restores_conflict_and_surfaces_upload_failure(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+
+    let id = register_conflict_session(
+        &workspace,
+        &mut cx,
+        RemotePath::new("/home/tester/edit.txt"),
+        LocalPath::new("/tmp/macsftp-conflict-dispatch/edit.txt"),
+    );
+    while channels.command_rx.try_recv().is_ok() {}
+    fill_command_channel(&channels);
+
+    workspace.update(&mut cx, |workspace, cx| {
+        workspace.resolve_edit_conflict(id, ConflictChoice::Overwrite, cx);
+    });
+
+    workspace.read_with(&cx, |workspace, cx| {
+        assert_eq!(
+            cx.resources()
+                .edit_sessions
+                .session(id)
+                .map(|session| session.phase.clone()),
+            Some(EditPhase::RemoteConflict),
+            "an upload that never entered the channel must restore the conflict"
+        );
+        assert_eq!(
+            workspace.status_message_for_test().as_deref(),
+            Some("The upload couldn’t start. Try again.")
+        );
+    });
+}
+
+#[gpui_kit::test]
 fn resolve_conflict_double_overwrite_dispatches_once(cx: &mut TestAppContext) {
     let (workspace, mut cx, channels) = init_workspace(cx);
 

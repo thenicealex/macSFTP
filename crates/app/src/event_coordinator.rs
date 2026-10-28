@@ -1,15 +1,17 @@
 use gpui_kit::base::Root;
 use gpui_kit::{AnyWindowHandle, App, Context, Global, Task, Window, WindowHandle};
 use macsftp_core::{
-    AppEvent, ConflictRequest, DispatchRollback, EditCheckEvent, EditCheckOutcome, EditCheckResult,
+    AppCommand, AppEvent, ConflictRequest, EditCheckEvent, EditCheckOutcome, EditCheckResult,
     EditEffect, EditNotice, EditPhase, EditSessionId, EditTransferFinished, LocalFileFacts,
-    LocalPath, ProcessEvent, RoutedEvent, TabId, Timestamp, TransferConflictPrompt,
-    TransferDirection, TransferEndpoint, TransferEvent, TransferId, TransferPlanId, WindowEvent,
+    LocalPath, ProcessEvent, RemotePath, RemoteSnapshot, RoutedEvent, TabId, Timestamp,
+    TransferConflictPrompt, TransferDirection, TransferEndpoint, TransferEvent, TransferId,
+    TransferPlanId, WindowEvent,
 };
 use macsftp_sftp::EventReceiver;
 use tracing::warn;
 
-use crate::resources::{ActiveResources, ActiveTransfers};
+use crate::edit_effects::{EditEffectHost, execute_edit_effects};
+use crate::resources::{ActiveResources, ActiveTransfers, AppResources};
 use crate::workspace::Workspace;
 use crate::workspace::edit_notice_text;
 
@@ -385,97 +387,62 @@ fn read_local_facts(path: &LocalPath) -> Option<LocalFileFacts> {
     })
 }
 
-/// Execute lifecycle effects produced by a process-wide event.
-///
-/// A failed dispatch rolls the session back through the lifecycle (the effect
-/// names its rollback), so a command that never entered the channel cannot
-/// strand a phase.
-fn apply_edit_effects(cx: &mut App, effects: Vec<EditEffect>) {
-    for effect in effects {
-        match effect {
-            EditEffect::Dispatch {
-                tab_id,
-                session_id,
-                command,
-                rollback,
-            } => {
-                let client = workspace_windows(cx).into_iter().find_map(|window| {
-                    window
-                        .read(cx)
-                        .ok()
-                        .filter(|workspace| workspace.owns_tab(tab_id))
-                        .map(|workspace| workspace.runtime_client())
-                });
-                let sent = match client {
-                    Some(client) => client.try_send(command).is_ok(),
-                    None => {
-                        warn!(tab_id = ?tab_id, "no window owns the tab for an edit command");
-                        false
-                    }
-                };
-                if sent {
-                    continue;
-                }
-                warn!(session_id = ?session_id, "edit command could not be dispatched");
-                let file_name = cx
-                    .resources()
-                    .edit_sessions
-                    .session(session_id)
-                    .map(|session| file_name_of(session.remote_path.as_str()))
-                    .unwrap_or_default();
-                let follow_up = cx
-                    .resources_mut()
-                    .edit_sessions
-                    .dispatch_failed(session_id, rollback);
-                match rollback {
-                    DispatchRollback::AbortDownload => {
-                        show_edit_notice(cx, tab_id, EditNotice::DownloadFailed { file_name })
-                    }
-                    DispatchRollback::RevertCheck | DispatchRollback::RestoreConflict => {
-                        show_edit_notice(cx, tab_id, EditNotice::UploadStartFailed)
-                    }
-                }
-                // A rollback can itself schedule cleanup (an aborted
-                // download's temp directory); those effects never dispatch.
-                apply_edit_effects(cx, follow_up);
+/// The process-wide adapter for [`execute_edit_effects`]: effects arrive
+/// outside any window's update, so dispatch and notices must first resolve the
+/// window that owns the effect's tab.
+struct ProcessEditHost<'a> {
+    cx: &'a mut App,
+}
+
+impl EditEffectHost for ProcessEditHost<'_> {
+    fn resources(&self) -> &AppResources {
+        self.cx.resources()
+    }
+
+    fn resources_mut(&mut self) -> &mut AppResources {
+        self.cx.resources_mut()
+    }
+
+    fn dispatch(&mut self, tab_id: TabId, command: AppCommand) -> bool {
+        let client = workspace_windows(self.cx).into_iter().find_map(|window| {
+            window
+                .read(self.cx)
+                .ok()
+                .filter(|workspace| workspace.owns_tab(tab_id))
+                .map(|workspace| workspace.runtime_client())
+        });
+        match client {
+            Some(client) => client.try_send(command).is_ok(),
+            None => {
+                warn!(tab_id = ?tab_id, "no window owns the tab for an edit command");
+                false
             }
-            EditEffect::OpenEditor { tab_id, temp_path } => {
-                let config = cx.resources().config.config();
-                let editor = macsftp_core::resolve_editor_app(
-                    &file_name_of(temp_path.as_str()),
-                    &config.editor_rules,
-                    config.external_editor.as_deref(),
-                )
-                .map(str::to_string);
-                match open_edit_temp(&temp_path, editor.as_deref()) {
-                    Ok(()) => show_edit_notice(cx, tab_id, EditNotice::CopyOpen),
-                    Err(error) => {
-                        warn!(error = %error, "could not open editor for remote edit");
-                        show_edit_notice(cx, tab_id, EditNotice::CopyOpenFailed);
-                    }
-                }
-            }
-            EditEffect::DeleteTempDir { path } => crate::workspace::cleanup_edit_temp_dir(&path),
-            EditEffect::RebaseListing {
-                tab_id,
-                path,
-                snapshot,
-            } => {
-                // Keep the listing baseline in step with the rebased snapshot.
-                // Only one window/tab owns the tab, so stop after the first
-                // entry we update.
-                for window in workspace_windows(cx) {
-                    let synced = window.update(cx, |workspace, _window, _cx| {
-                        workspace.sync_remote_entry_snapshot(tab_id, &path, snapshot)
-                    });
-                    if matches!(synced, Ok(true)) {
-                        break;
-                    }
-                }
-            }
-            EditEffect::Notice { tab_id, notice } => show_edit_notice(cx, tab_id, notice),
         }
     }
+
+    fn notify(&mut self, tab_id: TabId, notice: EditNotice) {
+        show_edit_status(self.cx, tab_id, &edit_notice_text(notice));
+    }
+
+    fn sync_listing(&mut self, tab_id: TabId, path: &RemotePath, snapshot: RemoteSnapshot) -> bool {
+        // Only one window/tab owns the tab, so stop after the first entry we
+        // update.
+        for window in workspace_windows(self.cx) {
+            let synced = window.update(self.cx, |workspace, _window, _cx| {
+                workspace.sync_remote_entry_snapshot(tab_id, path, snapshot)
+            });
+            if matches!(synced, Ok(true)) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Execute lifecycle effects produced by a process-wide event.
+fn apply_edit_effects(cx: &mut App, effects: Vec<EditEffect>) {
+    let mut host = ProcessEditHost { cx };
+    execute_edit_effects(&mut host, effects);
 }
 
 /// Apply one authoritative remote-edit check result exactly once. Edit
@@ -563,10 +530,6 @@ fn apply_remote_edit_check_event(event: &EditCheckEvent, cx: &mut App) {
         .on_check_result(result, current_local_mtime);
     apply_edit_effects(cx, effects);
     cx.refresh_windows();
-}
-
-fn show_edit_notice(cx: &mut App, tab_id: TabId, notice: EditNotice) {
-    show_edit_status(cx, tab_id, &edit_notice_text(notice));
 }
 
 /// Surface an edit status message in the window that owns `tab_id`.
@@ -671,17 +634,6 @@ pub(crate) fn workspace_windows(cx: &App) -> Vec<WorkspaceWindow> {
 fn active_workspace_window(cx: &App) -> Option<WorkspaceWindow> {
     cx.active_window()
         .and_then(|window| WorkspaceWindow::from_handle(window, cx))
-}
-
-/// The trailing path component of a remote path, for user-facing messages.
-/// Falls back to the whole path when there is no separator.
-fn file_name_of(remote_path: &str) -> String {
-    remote_path
-        .rsplit('/')
-        .next()
-        .filter(|name| !name.is_empty())
-        .unwrap_or(remote_path)
-        .to_string()
 }
 
 fn conflict_prompt(conflict: ConflictRequest) -> TransferConflictPrompt {

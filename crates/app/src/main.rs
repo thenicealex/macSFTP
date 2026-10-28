@@ -1,6 +1,7 @@
 mod app_actions;
 mod app_menus;
 mod assets;
+mod edit_effects;
 mod event_coordinator;
 mod m7_regression;
 mod palette_commands;
