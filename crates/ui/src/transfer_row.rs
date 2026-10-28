@@ -5,7 +5,7 @@ use gpui_kit::{
 use macsftp_core::TransferDirection;
 
 use crate::components::{icon_button, text_tooltip};
-use crate::icon::{IconName, icon};
+use crate::icon::{ICON_SIZE, IconName, icon};
 use crate::theme::{ActiveTheme, TextRoleExt};
 
 type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -171,7 +171,9 @@ impl RenderOnce for TransferRow {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .pl(px(22.0))
+                    // The width of the direction icon above, so the rail starts
+                    // under the title text instead of 1.5px right of it.
+                    .child(div().flex_none().w(ICON_SIZE))
                     .child(
                         div()
                             .flex_1()

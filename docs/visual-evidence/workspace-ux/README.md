@@ -32,6 +32,9 @@ The dark-maximized and light form-focus captures remain the original 2026-10-11 
 | [Saved Connections, 1280×800](light-settings-saved-connections-1280x800.jpg) | Above 820pt the editor returns to its 112px label column beside the fields; the 640pt form stays centered in the detail pane |
 | [Saved Connections, long values, 720×480](light-settings-saved-connections-long-720x480.jpg) | A long name and endpoint truncate in the list; the compact editor stacks labels above fields so the host and username keep the detail width |
 | [Editor, long rule, 720×480](light-settings-editor-long-720x480.jpg) | A long pattern and app name ellipsize inside the rule row, keeping **Remove** in place; the full values are available as tooltips |
+| [Connect form, 720×480](light-connect-form-720x480.jpg) | The masked password field matches the ordinary fields — height, 5px radius, control type and 3px focus ring — and renders bullets |
+| [Delete confirmation, 720×480](light-delete-confirm-720x480.jpg) | The task modal pads 13px; the name list takes the 5px control radius; the danger badge is the error token at 15% |
+| [Keyboard-interactive, dark, 720×480](dark-keyboard-interactive-720x480.jpg) | Masked and echoed sign-in fields share the input contract on the dark surface |
 
 Refresh the headless captures with (the test writes PNGs because the renderer hands back RGBA; the committed files are JPEG):
 
@@ -46,7 +49,9 @@ for name in light-720x480 dark-720x480 light-recents-scroll-720x480 \
     light-settings-general-1280x800 light-settings-general-1440x900 \
     light-1280x800 light-settings-saved-connections-1280x800 \
     light-settings-saved-connections-long-720x480 \
-    light-settings-editor-long-720x480; do
+    light-settings-editor-long-720x480 \
+    light-connect-form-720x480 light-delete-confirm-720x480 \
+    dark-keyboard-interactive-720x480; do
     sips -s format jpeg -s formatOptions high "$name.png" --out "$name.jpg" && rm "$name.png"
 done
 ```
@@ -60,5 +65,7 @@ The 2026-10-28 typography pass refreshed every capture because semantic text rol
 The 2026-10-28 layout pass then normalized spacing to the quarter-rem scale and refreshed every capture again: Settings pads 16.25px, centers a 640px form measure, keeps cards only for multi-row groups, and uses a 176px sidebar with 48px profile rows; the recent-connections list and breadcrumb pills now use scale gaps instead of raw 24/8/2/10/3/1px offsets. Four captures were added at 1024, 1280 and 1440 wide so the form measure and the fixed shell chrome can be compared across widths; 720×480 remains the narrow case. The evidence test resizes the headless window and calls `Window::bounds_changed` before each capture, because the test platform otherwise records the new bounds without relayouting the root view.
 
 The 2026-10-28 adaptation pass added long-value evidence at the minimum window: below 820px the Saved Connections editor stacks labels above fields (side by side would leave ~185px values), so a long host and username keep the full detail width, and at 1280 the same profile shows the editor back in its side-by-side label column; the long editor rule truncates its pattern and app name while **Remove** stays in the card. File rows, transfer titles and editor rule values now expose their full truncated text through tooltips; prose and fingerprints wrap instead of truncating. Type stays at logical points — native macOS desktop apps do not scale with a system text-size setting, so display scaling is the only text-size axis — and the 720×480 minimum, 1024, 1280 and 1440 widths are all covered.
+
+The 2026-10-28 polish pass made the components agree with the documented system: the connect form's password and passphrase fields now use the same 19.5px input as every other field (5px radius, 11.375px control type, 3px focus ring) instead of a 26px mono field with no ring; the delete confirmation and keyboard-interactive prompts pad 13px like the other task modals; the profile picker starts at the field column (96px label + 6.5px gap) and its rows take the 5px control radius; the delete name list uses that radius and its danger badge is the error token at 15% instead of a fixed red; the transfer progress rail starts under its title, and the status-bar dot is 8px like the tab dot. Three captures were added for the connect form and the two prompts.
 
 Validation: `bash scripts/check.sh` (839 tests plus 2 ignored across the workspace, including 45 UI tests), Clippy with `-D warnings`, formatting, architecture isolation and sensitive-log checks passed. These captures document disconnected workspace behavior; live SFTP and active-transfer visuals were outside this layout change.

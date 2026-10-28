@@ -10113,6 +10113,112 @@ fn regenerate_workspace_ux_evidence() {
     cx.run_until_parked();
     cx.run_until_parked();
     capture(&mut cx, "light-1280x800.png");
+
+    // Capture 16 (light): the Connect form with its password field focused and
+    // filled. The secret field follows the Base input contract — same height,
+    // radius, type and focus ring as the ordinary fields — while rendering
+    // bullets.
+    cx.update_window(window, |_, window, cx| {
+        window.resize(size(px(720.0), px(480.0)));
+        window.bounds_changed(cx);
+    })
+    .expect("window resize must succeed");
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                use crate::workspace::connect_form::ConnectField;
+                workspace.set_appearance(AppearancePreference::Light, window, cx);
+                workspace.open_connect_form(window, cx);
+                let form = workspace
+                    .connect_form_ui
+                    .form
+                    .as_mut()
+                    .expect("Connect form must be open");
+                form.password.set_value("fixture-secret".to_string());
+                form.focused_field = ConnectField::Password;
+                cx.notify();
+            })
+            .expect("workspace must be live");
+    });
+    cx.run_until_parked();
+    cx.run_until_parked();
+    capture(&mut cx, "light-connect-form-720x480.png");
+
+    // Capture 17 (light): the delete confirmation. It shares the task-modal
+    // padding, the 5px nested-list radius and the token-derived danger badge.
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                workspace.close_connect_form(window, cx);
+                let tab_id = workspace.active_tab().expect("capture window has a tab").id;
+                workspace.modal_inputs.delete_confirm = Some(super::file_ops::DeleteConfirmState {
+                    scope: macsftp_core::FsScope::Local { tab_id },
+                    entries: vec![
+                        macsftp_core::FsEntryRef {
+                            path: macsftp_core::FsPath::Local(LocalPath::new(
+                                "/tmp/test/beta-report.pdf",
+                            )),
+                            is_dir: false,
+                        },
+                        macsftp_core::FsEntryRef {
+                            path: macsftp_core::FsPath::Local(LocalPath::new("/tmp/test/releases")),
+                            is_dir: true,
+                        },
+                    ],
+                    dont_ask_again: false,
+                });
+                window.focus(&workspace.modal_focus, cx);
+                cx.notify();
+            })
+            .expect("workspace must be live");
+    });
+    cx.run_until_parked();
+    cx.run_until_parked();
+    capture(&mut cx, "light-delete-confirm-720x480.png");
+
+    // Capture 18 (dark): the keyboard-interactive prompt, with one masked and
+    // one echoed field, on the dark surface.
+    let request_id = KeyboardInteractiveRequestId(91);
+    cx.update(|cx| {
+        workspace
+            .downgrade()
+            .update_in(cx, |workspace, window, cx| {
+                workspace.modal_inputs.delete_confirm = None;
+                workspace.set_appearance(AppearancePreference::Dark, window, cx);
+                let tab = workspace.active_tab().expect("capture window has a tab");
+                let prompt = KeyboardInteractivePrompt {
+                    request_id,
+                    scope: RemoteEventScope::new(tab.id, SessionId(1), tab.session_epoch),
+                    name: "Two-Factor Verification".into(),
+                    instruction: "Enter the 6-digit code from your authenticator app.".into(),
+                    prompts: vec![
+                        KeyboardInteractivePromptField {
+                            prompt: "Verification code".into(),
+                            echo: false,
+                        },
+                        KeyboardInteractivePromptField {
+                            prompt: "Device label (optional)".into(),
+                            echo: true,
+                        },
+                    ],
+                };
+                workspace.present_keyboard_interactive(prompt, window, cx);
+                let inputs = workspace
+                    .modal_inputs
+                    .keyboard_interactive
+                    .get_mut(&request_id)
+                    .expect("prompt creates input state");
+                inputs.inputs[0].state_mut().set_value("123456");
+                inputs.inputs[1].state_mut().set_value("Studio Mac");
+                cx.notify();
+            })
+            .expect("workspace must be live");
+    });
+    cx.run_until_parked();
+    cx.run_until_parked();
+    capture(&mut cx, "dark-keyboard-interactive-720x480.png");
 }
 
 /// Local pane with a real, sorted fixture listing; returns the fixture dir so

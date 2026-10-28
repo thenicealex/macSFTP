@@ -797,7 +797,7 @@ impl crate::workspace::Workspace {
                     .min_w_0()
                     .child(
                         div()
-                            .size(px(7.0))
+                            .size(px(8.0))
                             .flex_none()
                             .rounded_full()
                             .bg(status_color),

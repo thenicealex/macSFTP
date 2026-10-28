@@ -448,7 +448,7 @@ impl crate::workspace::Workspace {
             .flex()
             .flex_col()
             .min_w_0()
-            .rounded_sm()
+            .rounded(theme.sizes.input_radius)
             .border_1()
             .border_color(theme.colors.border)
             .bg(theme.colors.surface);
@@ -507,7 +507,7 @@ impl crate::workspace::Workspace {
             .gap_4()
             .w_full()
             .max_w(px(440.0))
-            .p_5()
+            .p_4()
             .bg(theme.colors.elevated_surface)
             .border_1()
             .border_color(theme.colors.border)
@@ -526,7 +526,10 @@ impl crate::workspace::Workspace {
                             .items_center()
                             .justify_center()
                             .rounded_full()
-                            .bg(gpui_kit::hsla(0.0, 0.55, 0.45, 0.15))
+                            .bg(gpui_kit::Hsla {
+                                a: 0.15,
+                                ..theme.colors.error
+                            })
                             .child(icon(IconName::Trash, theme.colors.error)),
                     )
                     .child(

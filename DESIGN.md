@@ -279,7 +279,7 @@ The path bar is grouped into four clusters — navigation, breadcrumb, file acti
 
 Lists are virtualized and keep a fixed rhythm: names take the remaining width, size is an 80px right-aligned column, modified is 130px, both in Menlo at 11px. Row height never changes with content, hover, selection, or progress. The transfer drawer opens at 160px, can shrink to 40px or grow to the smaller of half the content area and 480px, and resizes through a 5px grip. Its rows are 44px.
 
-Empty states center a 13px medium lead line, an optional 12px muted detail capped at 320px wide, and at most a short row of actions. The first-connection card is the larger sibling: a 15px semibold title over 13px muted detail, with the 160×34px Connect entry as its decision. They state the next step, never a feature tour. Overlays are centered: the command palette is 520px wide with 48px top padding and a viewport-adaptive height; task modals are 460px wide.
+Empty states center a 13px medium lead line, an optional 12px muted detail capped at 320px wide, and at most a short row of actions. The first-connection card is the larger sibling: a 15px semibold title over 13px muted detail, with the 160×34px Connect entry as its decision. They state the next step, never a feature tour. Overlays are centered: the command palette is 520px wide with 48px top padding and a viewport-adaptive height; task modals are 460px wide, narrowing to 420px for short prompts and widening to 520px when a sign-in prompt needs the room.
 
 Settings is a fixed 176px sidebar plus a scrollable content pane. General and Editor pad the pane 16.25px and center a 640px measure, so a wider window gains margin instead of stretching switches and fields; sections stack at 16.25px. Only groups with several rows take a card (Behavior, Transfers, Editor Associations, the profile form sections); a single control — the appearance segmented control, the File Editor field, the Troubleshooting buttons — sits directly under its header, and description text always stays closer to its own section than to the one above. Saved Connections keeps its 195px profile list beside the editor, with 48px profile rows and the same card rules.
 
@@ -341,6 +341,7 @@ Controls, rows, tabs, and inputs use a 5px radius. Tooltips take a subtler step 
 - **Style:** 19.5px height (1.5 × 13px), 5px radius, 1px border, 2px × 8px padding, 11.375px text. In dark appearance the field background is the canvas at 30% alpha.
 - **Focus:** the border turns System Signal Blue and a 3px 50% ring appears outside it.
 - **Placeholder:** Muted Gray. Disabled fields drop to 40% background alpha and muted text.
+- **Secrets:** masked fields keep the same height, radius, type, and focus ring, render bullets, and carry a Show/Hide action rather than a separate field style.
 
 ### Tabs
 - **Active:** Bench White fill, 1px border, chip shadow, Ink text at medium weight, close button always visible.
@@ -360,7 +361,7 @@ Controls, rows, tabs, and inputs use a 5px radius. Tooltips take a subtler step 
 - **Actions:** reveal, cancel, and retry appear as 26×22 icon buttons only when the state allows them.
 
 ### Palette and Modals
-- **Card:** 520px (palette) or 460px (modal), 10px radius, 1px border, elevated fill, popover or modal shadow. The palette pads 9.75px; task modals pad 13px.
+- **Card:** 520px (palette) or 460px (modal, 420–520px when a prompt's content calls for it), 10px radius, 1px border, elevated fill, popover or modal shadow. The palette pads 9.75px; task modals pad 13px.
 - **Scrim:** the shared 45% dim; overlays enter with a 150ms fade and leave instantly.
 - **Palette rows:** 13px text, a 56px shortcut column in Menlo 12px, selected row on the accent tint.
 - **Modal actions:** the primary action sits right, with a clear cancel path; modal titles take the 15px Title role, and section titles inside a sheet take the 13px Heading role.

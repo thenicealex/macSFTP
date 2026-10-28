@@ -464,20 +464,38 @@ pub fn text_field(
 
     div()
         .id(id.into())
+        .relative()
         .flex()
         .items_center()
         .w_full()
-        .h(px(26.0))
-        .px_2()
-        .rounded_sm()
+        .h(theme.sizes.input_height)
+        .px(theme.sizes.input_padding_x)
+        .py(theme.sizes.input_padding_y)
+        .rounded(theme.sizes.input_radius)
         .border_1()
         .border_color(if model.focused {
             theme.colors.border_focused
         } else {
             theme.colors.border
         })
-        .bg(theme.colors.background)
-        .text_role(theme, theme.typography.mono)
+        .bg(theme.input_background(false))
+        .text_role(theme, theme.typography.control)
+        .when(model.focused, |field| {
+            field.child(
+                div()
+                    .absolute()
+                    .top(-theme.sizes.input_focus_ring - px(1.0))
+                    .left(-theme.sizes.input_focus_ring - px(1.0))
+                    .right(-theme.sizes.input_focus_ring - px(1.0))
+                    .bottom(-theme.sizes.input_focus_ring - px(1.0))
+                    .border(theme.sizes.input_focus_ring)
+                    .rounded(theme.sizes.input_radius + theme.sizes.input_focus_ring)
+                    .border_color(gpui_kit::Hsla {
+                        a: 0.5,
+                        ..theme.colors.border_focused
+                    }),
+            )
+        })
         .child(
             div()
                 .flex()
@@ -487,7 +505,7 @@ pub fn text_field(
                 .when(is_empty && !model.focused, |field| {
                     field.child(
                         div()
-                            .text_color(theme.colors.text_disabled)
+                            .text_color(theme.colors.input_placeholder)
                             .child(SharedString::from(model.placeholder.to_string())),
                     )
                 })
@@ -502,7 +520,7 @@ pub fn text_field(
                             field.child(
                                 div()
                                     .w(px(1.0))
-                                    .h(px(15.0))
+                                    .h(px(14.0))
                                     .flex_none()
                                     .bg(theme.colors.accent),
                             )
