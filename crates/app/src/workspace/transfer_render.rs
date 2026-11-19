@@ -611,6 +611,11 @@ impl crate::workspace::Workspace {
                     .unwrap_or("Transfer warning");
                 format!("{} · {warning}", error.message).into()
             }
+            TransferState::Skipped if !job.warnings.is_empty() => job
+                .warnings
+                .last()
+                .map(|warning| warning.message.clone().into())
+                .unwrap_or_else(|| "Skipped".into()),
             TransferState::Failed { error, .. } => error.message.clone().into(),
             _ => "".into(),
         };

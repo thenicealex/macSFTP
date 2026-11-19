@@ -760,6 +760,16 @@ pub(crate) async fn run_transfer_job(
             },
             TransferJobOutcome::Completed,
         ),
+        // A skipped special file never opened a handle, so the session stays
+        // clean and the rest of the plan can keep using it.
+        Err(error) if error.code == ErrorCode::UnsupportedFileType => (
+            AppEvent::TransferSkipped {
+                transfer_id: job.id,
+            },
+            TransferJobOutcome::Skipped {
+                reusable_session: true,
+            },
+        ),
         Err(error) if error.code == ErrorCode::Cancelled => (
             AppEvent::TransferSkipped {
                 transfer_id: job.id,
@@ -2009,6 +2019,47 @@ async fn download_symlink_raw(
         .map_err(|error| local_transfer_error("Local Link Creation Failed", &error))
 }
 
+/// Remote sockets, FIFOs, and device nodes are listed like regular files, but
+/// the server cannot serve their content: `open` waits for a peer that never
+/// arrives and the request only fails when the client request timeout fires.
+/// One such entry used to stall a directory download for the full request
+/// timeout and then fail the whole plan, so skip it with a warning instead.
+///
+/// `FileType::Other` is also what `russh-sftp` reports when the server omits
+/// the permissions attribute, so only treat the entry as special when the
+/// server actually reported a mode.
+fn is_unsupported_remote_file(attributes: &FileAttributes) -> bool {
+    attributes.permissions.is_some() && attributes.file_type() == SftpFileType::Other
+}
+
+async fn skip_unsupported_remote_file(
+    event_tx: &flume::Sender<AppEvent>,
+    job: &TransferJob,
+    source: &RemotePath,
+) {
+    emit_transfer_warning(
+        event_tx,
+        job.id,
+        ErrorCode::UnsupportedFileType,
+        "Special files cannot be transferred.",
+        format!(
+            "{} is a socket, FIFO, or device file and has no content to transfer.",
+            source.as_str()
+        ),
+    )
+    .await;
+}
+
+/// Marker error for a skipped special file. `run_transfer_job` maps this code
+/// to `TransferSkipped`, so the entry does not become a failure.
+fn unsupported_file_type_error() -> UserFacingError {
+    UserFacingError::new(
+        ErrorCode::UnsupportedFileType,
+        "Special file skipped",
+        "Sockets, FIFOs, and device files cannot be transferred.",
+    )
+}
+
 async fn download_single_file_pipelined(
     transfer_session: &TransferSessionSlot,
     raw: &Arc<RawSftpSession>,
@@ -2052,6 +2103,10 @@ async fn download_single_file_pipelined(
             may_clear_destination,
         )
         .await;
+    }
+    if is_unsupported_remote_file(&source_metadata) {
+        skip_unsupported_remote_file(event_tx, job, source).await;
+        return Err(unsupported_file_type_error());
     }
     let bytes_total = source_metadata.size;
     emit_transfer_running(event_tx, job, bytes_total).await?;
@@ -2190,6 +2245,10 @@ async fn download_single_file(
             may_clear_destination,
         )
         .await;
+    }
+    if is_unsupported_remote_file(&source_metadata) {
+        skip_unsupported_remote_file(event_tx, job, source).await;
+        return Err(unsupported_file_type_error());
     }
     let bytes_total = source_metadata.size;
     emit_transfer_running(event_tx, job, bytes_total).await?;
@@ -2979,14 +3038,44 @@ mod tests {
         TransferState,
     };
     use russh_sftp::client::error::Error as SftpError;
-    use russh_sftp::protocol::{Status, StatusCode};
+    use russh_sftp::protocol::{FileAttributes, FileType, Status, StatusCode};
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        TransferSessionSlot, local_download_destination, local_temporary_path,
-        prepare_download_destination, remote_planning_error, remote_temporary_path,
-        rename_destination, validate_download_symlink_target,
+        TransferSessionSlot, is_unsupported_remote_file, local_download_destination,
+        local_temporary_path, prepare_download_destination, remote_planning_error,
+        remote_temporary_path, rename_destination, validate_download_symlink_target,
     };
+
+    #[test]
+    fn special_file_detection_requires_a_reported_mode() {
+        let fifo = FileAttributes {
+            permissions: Some(0o010644),
+            ..Default::default()
+        };
+        assert!(is_unsupported_remote_file(&fifo), "a FIFO must be skipped");
+
+        let regular = FileAttributes {
+            permissions: Some(0o100644),
+            ..Default::default()
+        };
+        assert!(
+            !is_unsupported_remote_file(&regular),
+            "a regular file must be downloaded"
+        );
+
+        // `russh-sftp` reports `Other` when the server omits the mode, so an
+        // absent mode alone must not turn a regular file into a skipped entry.
+        let unreported = FileAttributes {
+            permissions: None,
+            ..Default::default()
+        };
+        assert_eq!(unreported.file_type(), FileType::Other);
+        assert!(
+            !is_unsupported_remote_file(&unreported),
+            "an unreported mode must fall back to a normal download"
+        );
+    }
 
     #[test]
     fn download_symlink_rejects_unsafe_targets() {
