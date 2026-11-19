@@ -50,7 +50,26 @@ if [[ -n "$direct_keychain_access" ]]; then
     exit 1
 fi
 
-PYTHONDONTWRITEBYTECODE=1 python3 scripts/test_unsafe_boundary.py
-python3 scripts/check_unsafe_boundary.py
+select_python() {
+    local candidate
+    for candidate in $(which -a python3 2>/dev/null) "$HOME/miniconda3/bin/python3" /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+        if command -v "$candidate" >/dev/null 2>&1 \
+            && "$candidate" -c 'import tomllib' >/dev/null 2>&1; then
+            echo "$candidate"
+            return 0
+        fi
+        if command -v "$candidate" >/dev/null 2>&1 \
+            && "$candidate" -c 'import tomli' >/dev/null 2>&1; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    echo "architecture check requires Python 3.11+ (tomllib) or 'tomli' installed in the active environment" >&2
+    return 1
+}
+
+PYTHON_BIN="$(select_python)"
+PYTHONDONTWRITEBYTECODE=1 "$PYTHON_BIN" scripts/test_unsafe_boundary.py
+"$PYTHON_BIN" scripts/check_unsafe_boundary.py
 
 assert_no_direct_dependency macsftp-native-menu macsftp-app macsftp-ui macsftp-core macsftp-sftp macsftp-storage macsftp-platform russh russh-sftp tokio
