@@ -23,6 +23,7 @@ pub enum IconName {
     Server,
     Eye,
     EyeOff,
+    Sliders,
 }
 
 impl IconName {
@@ -47,6 +48,7 @@ impl IconName {
             Self::Server => "icons/server.svg",
             Self::Eye => "icons/eye.svg",
             Self::EyeOff => "icons/eye_off.svg",
+            Self::Sliders => "icons/sliders.svg",
         }
     }
 }
