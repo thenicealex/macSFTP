@@ -48,7 +48,7 @@ is disconnected; `demo.example` and `deploy` are example connection details.
 
 - Local and remote panes with back/forward history, breadcrumbs, and go-to-path
 - Virtualized file lists that stay responsive at 10k entries
-- Filtering, sorting, multi-select, Finder-style type-select, and hidden files
+- Filtering, sorting, multi-select, Finder-style type-select, and per-pane hidden files (including macOS `UF_HIDDEN` items locally)
 - Rename, new folder, delete, and copy path in either pane; Show in Finder for
   local files
 - File and input context menus presented through native AppKit menus
@@ -115,7 +115,7 @@ matches the stored one blocks the connection.
 | `⌘[` / `⌘]` | Back / forward |
 | `⌘⇧G` | Go to folder |
 | `⌘F` | Filter files |
-| `⌘⇧.` | Show hidden files |
+| `⌘⇧.` | Toggle hidden files in focused pane |
 | `↩` / `F2` | Open / rename |
 | `⌘⇧N` / `⌘⌫` | New folder / delete |
 | `⌘⇧C` | Copy path |

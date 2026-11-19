@@ -5,9 +5,26 @@ pub use diagnostics::{prune_log_files, write_crash_marker};
 use macsftp_core::{FileKind, LocalEntry, LocalPath, Timestamp, is_bidi_or_control};
 
 use notify::Watcher;
+#[cfg(target_os = "macos")]
+use std::os::macos::fs::MetadataExt as _;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
+
+/// macOS `UF_HIDDEN` BSD file flag (`<sys/stat.h>`). Items with this flag
+/// (such as `~/Library`) are hidden in Finder even without a leading dot.
+#[cfg(target_os = "macos")]
+const UF_HIDDEN: u32 = 0x0000_8000;
+
+#[cfg(target_os = "macos")]
+fn metadata_is_hidden(metadata: &std::fs::Metadata) -> bool {
+    metadata.st_flags() & UF_HIDDEN != 0
+}
+
+#[cfg(not(target_os = "macos"))]
+fn metadata_is_hidden(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
 
 /// Deep link to the macOS Local Network privacy pane. GPUI owns URL opening;
 /// this crate owns the platform-specific destination.
@@ -83,6 +100,7 @@ pub struct LocalEntryDraft {
     pub permissions: Option<u32>,
     pub modified_at: Option<Timestamp>,
     pub link_target: Option<LocalPath>,
+    pub is_hidden: bool,
 }
 
 impl LocalEntryDraft {
@@ -95,6 +113,7 @@ impl LocalEntryDraft {
             permissions: self.permissions,
             modified_at: self.modified_at,
             link_target: self.link_target,
+            is_hidden: self.is_hidden,
         }
     }
 }
@@ -130,6 +149,7 @@ pub fn read_local_directory(path: &LocalPath) -> std::io::Result<Vec<LocalEntry>
         let name = entry.file_name().to_string_lossy().into_owned();
         let full_path = LocalPath::new(entry.path().to_string_lossy().into_owned());
 
+        let is_dotfile = name.starts_with('.');
         let file_type = match entry.file_type() {
             Ok(file_type) => file_type,
             Err(_) => {
@@ -142,6 +162,7 @@ pub fn read_local_directory(path: &LocalPath) -> std::io::Result<Vec<LocalEntry>
                         permissions: None,
                         modified_at: None,
                         link_target: None,
+                        is_hidden: is_dotfile,
                     }
                     .into_entry(),
                 );
@@ -163,7 +184,7 @@ pub fn read_local_directory(path: &LocalPath) -> std::io::Result<Vec<LocalEntry>
         // reports its own target-string size instead of the target's size.
         // The explicit `is_file` guard keeps the size column silent for a
         // link, since the link itself is not a transferable regular file.
-        let (size, permissions, modified_at) = match entry.metadata() {
+        let (size, permissions, modified_at, is_hidden) = match entry.metadata() {
             Ok(metadata) => (
                 if metadata.is_file() {
                     Some(metadata.len())
@@ -172,8 +193,9 @@ pub fn read_local_directory(path: &LocalPath) -> std::io::Result<Vec<LocalEntry>
                 },
                 Some(metadata.permissions().mode()),
                 metadata.modified().ok().map(Timestamp::from_system_time),
+                is_dotfile || metadata_is_hidden(&metadata),
             ),
-            Err(_) => (None, None, None),
+            Err(_) => (None, None, None, is_dotfile),
         };
 
         let link_target = if file_type.is_symlink() {
@@ -193,6 +215,7 @@ pub fn read_local_directory(path: &LocalPath) -> std::io::Result<Vec<LocalEntry>
                 permissions,
                 modified_at,
                 link_target,
+                is_hidden,
             }
             .into_entry(),
         );
@@ -904,6 +927,7 @@ mod tests {
             permissions: Some(0o755),
             modified_at: Some(Timestamp::from_secs_since_epoch(10)),
             link_target: None,
+            is_hidden: true,
         }
         .into_entry();
 
@@ -911,6 +935,40 @@ mod tests {
         assert_eq!(entry.path.as_str(), "/Users/alex/data");
         assert_eq!(entry.kind, FileKind::Directory);
         assert_eq!(entry.permissions, Some(0o755));
+        assert!(entry.is_hidden);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reads_macos_uf_hidden_flag_on_non_dotfiles() {
+        let dir = unique_temp_dir("uf_hidden");
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let visible_file = dir.join("visible.txt");
+        let flagged_file = dir.join("LibraryLike");
+        let dot_file = dir.join(".env");
+        std::fs::write(&visible_file, b"a").expect("write visible");
+        std::fs::write(&flagged_file, b"b").expect("write flagged");
+        std::fs::write(&dot_file, b"c").expect("write dotfile");
+
+        let status = std::process::Command::new("/usr/bin/chflags")
+            .arg("hidden")
+            .arg(&flagged_file)
+            .status()
+            .expect("run chflags hidden");
+        assert!(status.success(), "chflags hidden must succeed");
+
+        let base = LocalPath::new(dir.to_string_lossy().into_owned());
+        let entries = read_local_directory(&base).expect("read dir");
+        let hidden_by_name: std::collections::HashMap<_, _> = entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.is_hidden))
+            .collect();
+
+        assert_eq!(hidden_by_name.get("visible.txt"), Some(&false));
+        assert_eq!(hidden_by_name.get("LibraryLike"), Some(&true));
+        assert_eq!(hidden_by_name.get(".env"), Some(&true));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

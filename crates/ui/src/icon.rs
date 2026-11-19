@@ -21,6 +21,8 @@ pub enum IconName {
     ChevronRight,
     Transfers,
     Server,
+    Eye,
+    EyeOff,
 }
 
 impl IconName {
@@ -43,6 +45,8 @@ impl IconName {
             Self::ChevronRight => "icons/chevron_right.svg",
             Self::Transfers => "icons/transfers.svg",
             Self::Server => "icons/server.svg",
+            Self::Eye => "icons/eye.svg",
+            Self::EyeOff => "icons/eye_off.svg",
         }
     }
 }

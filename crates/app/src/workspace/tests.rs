@@ -647,6 +647,7 @@ fn shift_selection_replaces_filtered_out_anchor(cx: &mut TestAppContext) {
                 permissions: None,
                 modified_at: None,
                 link_target: None,
+                is_hidden: false,
             })
             .collect();
         workspace.select_index(PaneSide::Local, 0, cx);
@@ -687,6 +688,7 @@ fn shift_selection_preserves_visible_range_when_anchor_is_filtered(cx: &mut Test
                 permissions: None,
                 modified_at: None,
                 link_target: None,
+                is_hidden: false,
             })
             .collect();
         workspace.select_index(PaneSide::Local, 0, cx);
@@ -722,6 +724,7 @@ fn large_directory_selection_smoke(cx: &mut TestAppContext) {
                     permissions: None,
                     modified_at: None,
                     link_target: None,
+                    is_hidden: false,
                 })
                 .collect();
             tab.remote.entries = tab.local.entries.iter().map(|entry| RemoteEntry {
@@ -1613,8 +1616,12 @@ fn settings_sections_render_and_toggles_persist(cx: &mut TestAppContext) {
         assert_eq!(toggle.label(), Some("Confirm before delete"));
         assert_eq!(toggle.role(), Some(gpui_kit::Role::Button));
         assert_eq!(
-            window.find("settings-show-hidden-files").label(),
-            Some("Show hidden files")
+            window.find("settings-show-local-hidden-files").label(),
+            Some("Show hidden local files")
+        );
+        assert_eq!(
+            window.find("settings-show-remote-hidden-files").label(),
+            Some("Show hidden server files")
         );
     });
     cx.run_until_parked();
@@ -1626,13 +1633,15 @@ fn settings_sections_render_and_toggles_persist(cx: &mut TestAppContext) {
 
     // A taller window keeps every switch visible so the test can click each
     // one instead of calling its setter directly.
-    cx.simulate_resize(size(px(760.0), px(760.0)));
+    cx.simulate_resize(size(px(760.0), px(860.0)));
     cx.run_until_parked();
     cx.update(|window, cx| {
         window.render_frame(cx);
         window.click("settings-confirm-delete", cx);
         window.render_frame(cx);
-        window.click("settings-show-hidden-files", cx);
+        window.click("settings-show-local-hidden-files", cx);
+        window.render_frame(cx);
+        window.click("settings-show-remote-hidden-files", cx);
         window.render_frame(cx);
         window.click("settings-preserve-mtime", cx);
         window.render_frame(cx);
@@ -1644,7 +1653,11 @@ fn settings_sections_render_and_toggles_persist(cx: &mut TestAppContext) {
             "the clicked switch must repaint in its new state"
         );
         assert_eq!(
-            window.find("settings-show-hidden-files").checked(),
+            window.find("settings-show-local-hidden-files").checked(),
+            Some(true)
+        );
+        assert_eq!(
+            window.find("settings-show-remote-hidden-files").checked(),
             Some(true)
         );
         assert_eq!(
@@ -1659,7 +1672,8 @@ fn settings_sections_render_and_toggles_persist(cx: &mut TestAppContext) {
     workspace.read_with(&cx, |_workspace, cx| {
         let config = cx.resources().config.config();
         assert!(!config.confirm_delete);
-        assert!(config.show_hidden_files);
+        assert!(config.show_local_hidden_files);
+        assert!(config.show_remote_hidden_files);
         assert!(!config.metadata_policy.preserve_mtime);
         assert!(!config.metadata_policy.preserve_permissions);
     });
@@ -8231,23 +8245,36 @@ fn hidden_files_filtered_by_default(cx: &mut TestAppContext) {
             EntryPath::Remote(_) => panic!("local path expected"),
         }
 
+        workspace.focused_side = PaneSide::Local;
         workspace.toggle_hidden_files(cx);
         assert!(
-            cx.resources().config.config().show_hidden_files,
-            "toggle persists true"
+            cx.resources().config.config().show_local_hidden_files,
+            "local toggle persists true"
+        );
+        assert!(
+            !cx.resources().config.config().show_remote_hidden_files,
+            "local toggle leaves remote hidden setting unchanged"
         );
         assert_eq!(
             workspace.entry_count(PaneSide::Local, cx),
             2,
             "both entries after show_hidden"
         );
+
+        workspace.toggle_hidden_files_for(PaneSide::Remote, cx);
+        assert!(
+            cx.resources().config.config().show_remote_hidden_files,
+            "remote toggle persists independently"
+        );
+        workspace.toggle_hidden_files_for(PaneSide::Remote, cx);
+        assert!(!cx.resources().config.config().show_remote_hidden_files);
     });
 
     cx.dispatch_action(ToggleHiddenFiles);
     workspace.read_with(&cx, |workspace, cx| {
         assert!(
-            !cx.resources().config.config().show_hidden_files,
-            "action toggles back to false"
+            !cx.resources().config.config().show_local_hidden_files,
+            "action toggles focused pane back to false"
         );
         assert_eq!(workspace.entry_count(PaneSide::Local, cx), 1);
     });
@@ -11786,6 +11813,7 @@ fn opening_a_non_regular_local_entry_reports_instead_of_launching(cx: &mut TestA
             permissions: None,
             modified_at: None,
             link_target: None,
+            is_hidden: false,
         }];
         workspace.focused_side = PaneSide::Local;
         workspace.open_entry_at(PaneSide::Local, 0, window, cx);

@@ -198,7 +198,8 @@ impl crate::workspace::Workspace {
         let theme = cx.theme().clone();
         let selected_appearance = cx.resources().config.config().appearance;
         let confirm_delete = cx.resources().config.config().confirm_delete;
-        let show_hidden_files = cx.resources().config.config().show_hidden_files;
+        let show_local_hidden_files = cx.resources().config.config().show_local_hidden_files;
+        let show_remote_hidden_files = cx.resources().config.config().show_remote_hidden_files;
         let preserve_mtime = cx
             .resources()
             .config
@@ -304,8 +305,12 @@ impl crate::workspace::Workspace {
         let weak = cx.weak_entity();
         let on_confirm_delete =
             settings_toggle_handler(weak.clone(), Workspace::set_confirm_delete_setting);
-        let on_show_hidden =
-            settings_toggle_handler(weak.clone(), Workspace::set_show_hidden_files_setting);
+        let on_show_local_hidden =
+            settings_toggle_handler(weak.clone(), Workspace::set_show_local_hidden_files_setting);
+        let on_show_remote_hidden = settings_toggle_handler(
+            weak.clone(),
+            Workspace::set_show_remote_hidden_files_setting,
+        );
         let on_preserve_mtime =
             settings_toggle_handler(weak.clone(), Workspace::set_metadata_preserve_mtime);
         let on_preserve_permissions =
@@ -368,11 +373,20 @@ impl crate::workspace::Workspace {
                             ),
                             div().h(px(1.0)).bg(theme.colors.border).into_any_element(),
                             settings_switch_row(
-                                "settings-show-hidden-files",
-                                "Show hidden files",
-                                "Include items whose names start with a dot.",
-                                show_hidden_files,
-                                on_show_hidden,
+                                "settings-show-local-hidden-files",
+                                "Show hidden local files",
+                                "Include dotfiles and macOS hidden items in the My Mac pane.",
+                                show_local_hidden_files,
+                                on_show_local_hidden,
+                                &theme,
+                            ),
+                            div().h(px(1.0)).bg(theme.colors.border).into_any_element(),
+                            settings_switch_row(
+                                "settings-show-remote-hidden-files",
+                                "Show hidden server files",
+                                "Include items whose names start with a dot in the Server pane.",
+                                show_remote_hidden_files,
+                                on_show_remote_hidden,
                                 &theme,
                             ),
                         ],
@@ -546,16 +560,29 @@ impl crate::workspace::Workspace {
         cx.notify();
     }
 
-    pub(crate) fn set_show_hidden_files_setting(
+    pub(crate) fn set_show_local_hidden_files_setting(
         &mut self,
-        show_hidden_files: bool,
+        show_local_hidden_files: bool,
         cx: &mut Context<Self>,
     ) {
         let result = cx
             .resources_mut()
             .config
-            .set_show_hidden_files(show_hidden_files);
-        self.finish_config_change(result, "show_hidden_files", cx);
+            .set_show_local_hidden_files(show_local_hidden_files);
+        self.finish_config_change(result, "show_local_hidden_files", cx);
+        cx.notify();
+    }
+
+    pub(crate) fn set_show_remote_hidden_files_setting(
+        &mut self,
+        show_remote_hidden_files: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let result = cx
+            .resources_mut()
+            .config
+            .set_show_remote_hidden_files(show_remote_hidden_files);
+        self.finish_config_change(result, "show_remote_hidden_files", cx);
         cx.notify();
     }
 

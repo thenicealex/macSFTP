@@ -20,8 +20,10 @@ pub struct AppConfig {
     pub appearance: AppearancePreference,
     /// When true, delete actions open a confirmation modal first.
     pub confirm_delete: bool,
-    /// When true, file panes show dotfiles (`name` starts with `.`).
-    pub show_hidden_files: bool,
+    /// When true, the local file pane shows dotfiles and macOS `UF_HIDDEN` items.
+    pub show_local_hidden_files: bool,
+    /// When true, the remote file pane shows dotfiles (`name` starts with `.`).
+    pub show_remote_hidden_files: bool,
     /// 远程编辑用的外部编辑器应用名。None = 系统默认关联应用。
     #[serde(default)]
     pub external_editor: Option<String>,
@@ -66,7 +68,8 @@ impl Default for AppConfig {
             version: Self::CURRENT_VERSION,
             appearance: AppearancePreference::System,
             confirm_delete: true,
-            show_hidden_files: false,
+            show_local_hidden_files: false,
+            show_remote_hidden_files: false,
             external_editor: None,
             editor_rules: Vec::new(),
             metadata_policy: macsftp_core::MetadataPolicy::default(),
@@ -121,11 +124,30 @@ impl ConfigStore {
     /// Shared by `open` and the locked write transaction so both enforce the
     /// same version guard.
     fn load_from_disk(path: &LocalPath) -> Result<AppConfig, ConfigError> {
-        let config = match std::fs::read_to_string(path.as_str()) {
+        #[derive(Deserialize)]
+        struct LegacyHiddenFields {
+            show_hidden_files: Option<bool>,
+            show_local_hidden_files: Option<bool>,
+            show_remote_hidden_files: Option<bool>,
+        }
+
+        let mut config = match std::fs::read_to_string(path.as_str()) {
             Ok(contents) => {
-                serde_json::from_str(&contents).map_err(|error| ConfigError::Parse {
-                    message: error.to_string(),
-                })?
+                let mut parsed: AppConfig =
+                    serde_json::from_str(&contents).map_err(|error| ConfigError::Parse {
+                        message: error.to_string(),
+                    })?;
+                if let Ok(legacy) = serde_json::from_str::<LegacyHiddenFields>(&contents)
+                    && let Some(legacy_show) = legacy.show_hidden_files
+                {
+                    if legacy.show_local_hidden_files.is_none() {
+                        parsed.show_local_hidden_files = legacy_show;
+                    }
+                    if legacy.show_remote_hidden_files.is_none() {
+                        parsed.show_remote_hidden_files = legacy_show;
+                    }
+                }
+                parsed
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => AppConfig::default(),
             Err(error) => {
@@ -142,7 +164,6 @@ impl ConfigStore {
                 supported: AppConfig::CURRENT_VERSION,
             });
         }
-        let mut config = config;
         config.sanitize();
         Ok(config)
     }
@@ -217,8 +238,18 @@ impl ConfigStore {
         self.modify(|config| config.confirm_delete = confirm_delete)
     }
 
-    pub fn set_show_hidden_files(&mut self, show_hidden_files: bool) -> Result<(), ConfigError> {
-        self.modify(|config| config.show_hidden_files = show_hidden_files)
+    pub fn set_show_local_hidden_files(
+        &mut self,
+        show_local_hidden_files: bool,
+    ) -> Result<(), ConfigError> {
+        self.modify(|config| config.show_local_hidden_files = show_local_hidden_files)
+    }
+
+    pub fn set_show_remote_hidden_files(
+        &mut self,
+        show_remote_hidden_files: bool,
+    ) -> Result<(), ConfigError> {
+        self.modify(|config| config.show_remote_hidden_files = show_remote_hidden_files)
     }
 
     pub fn set_external_editor(&mut self, editor: Option<String>) -> Result<(), ConfigError> {
@@ -326,7 +357,7 @@ mod tests {
         cleanup(&path);
         std::fs::write(
             path.as_str(),
-            r#"{"version":1,"appearance":"system","confirm_delete":true,"show_hidden_files":false}"#,
+            r#"{"version":1,"appearance":"system","confirm_delete":true,"show_local_hidden_files":false,"show_remote_hidden_files":false}"#,
         )
         .expect("seed config");
 
@@ -339,8 +370,8 @@ mod tests {
             .set_appearance(AppearancePreference::Dark)
             .expect("first instance saves appearance");
         second
-            .set_show_hidden_files(true)
-            .expect("second instance saves hidden files");
+            .set_show_local_hidden_files(true)
+            .expect("second instance saves local hidden files");
 
         let final_config = ConfigStore::open(path.clone())
             .expect("reload after both writes")
@@ -351,7 +382,8 @@ mod tests {
             AppearancePreference::Dark,
             "second writer must not erase the first writer's change"
         );
-        assert!(final_config.show_hidden_files);
+        assert!(final_config.show_local_hidden_files);
+        assert!(!final_config.show_remote_hidden_files);
         cleanup(&path);
         let _ = std::fs::remove_file(format!("{}.lock", path.as_str()));
     }
@@ -379,24 +411,60 @@ mod tests {
     }
 
     #[test]
-    fn show_hidden_files_defaults_false_and_round_trips() {
+    fn show_hidden_files_defaults_false_and_round_trips_independently() {
         let path = temp_config_path("hidden");
         cleanup(&path);
 
         let store = ConfigStore::open(path.clone()).expect("defaults");
-        assert!(!store.config().show_hidden_files);
+        assert!(!store.config().show_local_hidden_files);
+        assert!(!store.config().show_remote_hidden_files);
 
-        // Missing field on disk still defaults to false.
+        // Missing fields on disk still default to false.
         std::fs::write(path.as_str(), r#"{"version":1,"appearance":"system"}"#)
             .expect("write partial config");
         let mut store = ConfigStore::open(path.clone()).expect("parse partial");
-        assert!(!store.config().show_hidden_files);
-        store
-            .set_show_hidden_files(true)
-            .expect("persist show_hidden_files");
+        assert!(!store.config().show_local_hidden_files);
+        assert!(!store.config().show_remote_hidden_files);
 
+        store
+            .set_show_local_hidden_files(true)
+            .expect("persist show_local_hidden_files");
         let restored = ConfigStore::open(path.clone()).expect("reload");
-        assert!(restored.config().show_hidden_files);
+        assert!(restored.config().show_local_hidden_files);
+        assert!(!restored.config().show_remote_hidden_files);
+
+        store
+            .set_show_remote_hidden_files(true)
+            .expect("persist show_remote_hidden_files");
+        let restored = ConfigStore::open(path.clone()).expect("reload");
+        assert!(restored.config().show_local_hidden_files);
+        assert!(restored.config().show_remote_hidden_files);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn legacy_show_hidden_files_migrates_to_both_panes() {
+        let path = temp_config_path("legacy-hidden");
+        cleanup(&path);
+
+        std::fs::write(
+            path.as_str(),
+            r#"{"version":1,"appearance":"system","show_hidden_files":true}"#,
+        )
+        .expect("write legacy config");
+        let store = ConfigStore::open(path.clone()).expect("parse legacy config");
+        assert!(store.config().show_local_hidden_files);
+        assert!(store.config().show_remote_hidden_files);
+
+        // Explicit per-pane values take precedence over legacy key.
+        std::fs::write(
+            path.as_str(),
+            r#"{"version":1,"show_hidden_files":true,"show_local_hidden_files":false,"show_remote_hidden_files":true}"#,
+        )
+        .expect("write mixed config");
+        let store = ConfigStore::open(path.clone()).expect("parse mixed config");
+        assert!(!store.config().show_local_hidden_files);
+        assert!(store.config().show_remote_hidden_files);
         cleanup(&path);
     }
 
@@ -438,10 +506,10 @@ mod tests {
         let mut store = ConfigStore::with_defaults_after_error(path.clone(), error);
 
         assert!(matches!(
-            store.set_show_hidden_files(true),
+            store.set_show_local_hidden_files(true),
             Err(ConfigError::RecoveryRequired { .. })
         ));
-        assert!(!store.config().show_hidden_files);
+        assert!(!store.config().show_local_hidden_files);
         assert_eq!(
             std::fs::read_to_string(path.as_str()).expect("read preserved corrupt config"),
             "{not json"
