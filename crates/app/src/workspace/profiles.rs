@@ -1,18 +1,20 @@
+use std::ops::{Deref, DerefMut};
+
 use gpui_kit::base::input::InputEvent;
 use gpui_kit::{App, Context, KeyDownEvent, SharedString, Window};
 use macsftp_core::{
-    AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionRoute, LocalPath, ProfileId,
-    RemotePath, is_bidi_or_control,
+    AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionRoute, ProfileId, RemotePath,
+    is_bidi_or_control,
 };
-use macsftp_storage::{
-    PrivateKeyPassphraseUpdate, ProfileAuthUpdate, ProfileMutationError, ProfileSaveRequest,
-};
-use macsftp_ui::{InputKeyResult, InputState, PlainInput, SecretInputState};
+use macsftp_storage::{ProfileMutationError, ProfileSaveRequest};
+use macsftp_ui::{InputKeyResult, InputState, PlainInput};
 use tracing::warn;
 
 use crate::resources::ActiveResources;
 use crate::workspace::WorkspaceSurface;
-use crate::workspace::helpers::expand_home;
+use crate::workspace::connection_fields::{
+    ConnectionFieldKind, ConnectionFields, step_field_focus,
+};
 
 /// Settings sidebar section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -46,17 +48,28 @@ pub(crate) enum ProfileRouteKind {
 }
 
 impl ProfileEditorField {
-    pub(crate) fn placeholder(self) -> &'static str {
+    pub(crate) const fn as_connection_field(self) -> Option<ConnectionFieldKind> {
         match self {
-            Self::Name => "optional",
-            Self::Host => "example.com",
-            Self::Port => "22",
-            Self::Username => "user",
-            Self::KeyPath => "~/.ssh/id_ed25519",
-            Self::AgentSocket => "SSH_AUTH_SOCK (optional)",
-            Self::ProxyCommand => "ssh -W %h:%p bastion",
-            Self::DefaultRemotePath => "/home/user",
-            Self::Password | Self::Passphrase => "",
+            Self::Host => Some(ConnectionFieldKind::Host),
+            Self::Port => Some(ConnectionFieldKind::Port),
+            Self::Username => Some(ConnectionFieldKind::Username),
+            Self::Password => Some(ConnectionFieldKind::Password),
+            Self::KeyPath => Some(ConnectionFieldKind::KeyPath),
+            Self::Passphrase => Some(ConnectionFieldKind::Passphrase),
+            Self::AgentSocket => Some(ConnectionFieldKind::AgentSocket),
+            Self::Name | Self::DefaultRemotePath | Self::ProxyCommand => None,
+        }
+    }
+
+    pub(crate) fn placeholder(self) -> &'static str {
+        match self.as_connection_field() {
+            Some(kind) => kind.placeholder(),
+            None => match self {
+                Self::Name => "optional",
+                Self::ProxyCommand => "ssh -W %h:%p bastion",
+                Self::DefaultRemotePath => "/home/user",
+                _ => "",
+            },
         }
     }
 }
@@ -81,14 +94,7 @@ pub(crate) struct ProfileEditorState {
     pub is_new: bool,
     pub profile_id: Option<ProfileId>,
     pub name: InputState,
-    pub host: InputState,
-    pub port: InputState,
-    pub username: InputState,
-    pub auth_method: AuthMethodKind,
-    pub password: SecretInputState,
-    pub key_path: InputState,
-    pub passphrase: SecretInputState,
-    pub agent_socket: InputState,
+    pub fields: ConnectionFields,
     pub passphrase_policy: PassphrasePolicy,
     pub route_kind: ProfileRouteKind,
     pub jump_profile_id: Option<ProfileId>,
@@ -99,6 +105,20 @@ pub(crate) struct ProfileEditorState {
     pub focused_field: ProfileEditorField,
 }
 
+impl Deref for ProfileEditorState {
+    type Target = ConnectionFields;
+
+    fn deref(&self) -> &Self::Target {
+        &self.fields
+    }
+}
+
+impl DerefMut for ProfileEditorState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.fields
+    }
+}
+
 impl ProfileEditorState {
     pub fn blank() -> Self {
         Self {
@@ -106,14 +126,7 @@ impl ProfileEditorState {
             is_new: true,
             profile_id: None,
             name: InputState::new(),
-            host: InputState::new(),
-            port: InputState::with_value("22"),
-            username: InputState::new(),
-            auth_method: AuthMethodKind::Password,
-            password: SecretInputState::new(),
-            key_path: InputState::new(),
-            passphrase: SecretInputState::new(),
-            agent_socket: InputState::new(),
+            fields: ConnectionFields::empty(),
             passphrase_policy: PassphrasePolicy::Remember,
             route_kind: ProfileRouteKind::Direct,
             jump_profile_id: None,
@@ -131,39 +144,22 @@ impl ProfileEditorState {
         editor.is_new = false;
         editor.profile_id = Some(profile.id);
         editor.name = InputState::with_value(profile.name.clone());
-        editor.host = InputState::with_value(profile.host.clone());
-        editor.port = InputState::with_value(profile.port.to_string());
-        editor.username = InputState::with_value(profile.username.clone());
+        editor.fields.prefill_from_profile(profile);
         editor.secret_present_hint = secret_present;
         if let Some(path) = &profile.default_remote_path {
             editor.default_remote_path = InputState::with_value(path.as_str().to_string());
         }
-        match &profile.auth {
-            AuthMethod::Password { .. } => {
-                editor.auth_method = AuthMethodKind::Password;
-            }
-            AuthMethod::PrivateKey {
-                key_path,
-                has_passphrase,
-                passphrase_ref,
-            } => {
-                editor.auth_method = AuthMethodKind::PrivateKey;
-                editor.key_path = InputState::with_value(key_path.as_str().to_string());
-                editor.passphrase_policy = match (has_passphrase, passphrase_ref) {
-                    (_, Some(_)) => PassphrasePolicy::Remember,
-                    (true, None) => PassphrasePolicy::AskEveryTime,
-                    (false, None) => PassphrasePolicy::NoPassphrase,
-                };
-            }
-            AuthMethod::KeyboardInteractive => {
-                editor.auth_method = AuthMethodKind::KeyboardInteractive;
-            }
-            AuthMethod::SshAgent { socket_path } => {
-                editor.auth_method = AuthMethodKind::SshAgent;
-                if let Some(socket_path) = socket_path {
-                    editor.agent_socket = InputState::with_value(socket_path.as_str().to_string());
-                }
-            }
+        if let AuthMethod::PrivateKey {
+            has_passphrase,
+            passphrase_ref,
+            ..
+        } = &profile.auth
+        {
+            editor.passphrase_policy = match (has_passphrase, passphrase_ref) {
+                (_, Some(_)) => PassphrasePolicy::Remember,
+                (true, None) => PassphrasePolicy::AskEveryTime,
+                (false, None) => PassphrasePolicy::NoPassphrase,
+            };
         }
         match &profile.route {
             ConnectionRoute::Direct => {}
@@ -253,17 +249,14 @@ impl ProfileEditorState {
     }
 
     pub(crate) fn field_state_mut(&mut self, field: ProfileEditorField) -> &mut InputState {
-        match field {
-            ProfileEditorField::Name => &mut self.name,
-            ProfileEditorField::Host => &mut self.host,
-            ProfileEditorField::Port => &mut self.port,
-            ProfileEditorField::Username => &mut self.username,
-            ProfileEditorField::Password => self.password.as_input_state_mut(),
-            ProfileEditorField::KeyPath => &mut self.key_path,
-            ProfileEditorField::Passphrase => self.passphrase.as_input_state_mut(),
-            ProfileEditorField::AgentSocket => &mut self.agent_socket,
-            ProfileEditorField::DefaultRemotePath => &mut self.default_remote_path,
-            ProfileEditorField::ProxyCommand => &mut self.proxy_command,
+        match field.as_connection_field() {
+            Some(kind) => self.fields.field_state_mut(kind),
+            None => match field {
+                ProfileEditorField::Name => &mut self.name,
+                ProfileEditorField::DefaultRemotePath => &mut self.default_remote_path,
+                ProfileEditorField::ProxyCommand => &mut self.proxy_command,
+                _ => unreachable!("non-connection field handled above"),
+            },
         }
     }
 
@@ -298,15 +291,7 @@ impl ProfileEditorState {
     }
 
     fn cycle_focus(&mut self, backwards: bool) {
-        let order = self.field_order();
-        let current_index = order
-            .iter()
-            .position(|field| *field == self.focused_field)
-            .unwrap_or(0);
-        let field_count = order.len() as isize;
-        let offset: isize = if backwards { -1 } else { 1 };
-        let next_index = (current_index as isize + offset).rem_euclid(field_count) as usize;
-        self.focused_field = order[next_index];
+        self.focused_field = step_field_focus(self.field_order(), self.focused_field, backwards);
     }
 }
 
@@ -524,111 +509,72 @@ impl crate::workspace::Workspace {
     /// Validate the profile editor and submit one storage transaction. An
     /// empty password on edit asks storage to keep the existing credential.
     pub(crate) fn save_profile_editor(&mut self, cx: &mut Context<Self>) {
-        let (
-            host,
-            port_text,
-            username,
-            is_new,
-            editor_profile_id,
-            entered_name,
-            default_remote_path_text,
-            auth_method,
-            password,
-            key_path_raw,
-            passphrase,
-            passphrase_policy,
-            agent_socket_raw,
-            route_kind,
-            jump_profile_id,
-            proxy_command,
-        ) = {
+        let validation = {
             let Some(editor) = self.settings.profile_editor.as_ref() else {
                 return;
             };
+            let endpoint = match editor.fields.validate_endpoint() {
+                Ok(endpoint) => endpoint,
+                Err(error) => {
+                    if let Some(editor) = self.settings.profile_editor.as_mut() {
+                        editor.error = Some(error);
+                    }
+                    cx.notify();
+                    return;
+                }
+            };
+            let entered_name = editor.name.value().trim().to_string();
+            if entered_name.chars().any(is_bidi_or_control) {
+                if let Some(editor) = self.settings.profile_editor.as_mut() {
+                    editor.error = Some("Connection name contains invalid characters.".into());
+                }
+                cx.notify();
+                return;
+            }
+            let default_remote_path_text = editor.default_remote_path.value().trim().to_string();
+            if default_remote_path_text.chars().any(is_bidi_or_control) {
+                if let Some(editor) = self.settings.profile_editor.as_mut() {
+                    editor.error = Some("Initial folder path contains invalid characters.".into());
+                }
+                cx.notify();
+                return;
+            }
+            let auth = match editor.fields.build_profile_auth(editor.passphrase_policy) {
+                Ok(auth) => auth,
+                Err(error) => {
+                    if let Some(editor) = self.settings.profile_editor.as_mut() {
+                        editor.error = Some(error);
+                    }
+                    cx.notify();
+                    return;
+                }
+            };
             (
-                editor.host.value().trim().to_string(),
-                editor.port.value().trim().to_string(),
-                editor.username.value().trim().to_string(),
+                endpoint,
                 editor.is_new,
                 editor.profile_id,
-                editor.name.value().trim().to_string(),
-                editor.default_remote_path.value().trim().to_string(),
-                editor.auth_method,
-                editor.password.value().to_string(),
-                editor.key_path.value().trim().to_string(),
-                editor.passphrase.value().to_string(),
-                editor.passphrase_policy,
-                editor.agent_socket.value().trim().to_string(),
+                entered_name,
+                default_remote_path_text,
+                auth,
                 editor.route_kind,
                 editor.jump_profile_id,
                 editor.proxy_command.value().trim().to_string(),
             )
         };
-
-        if host.is_empty() {
-            if let Some(editor) = self.settings.profile_editor.as_mut() {
-                editor.error = Some("Enter a server address.".into());
-            }
-            cx.notify();
-            return;
-        }
-        if host
-            .chars()
-            .any(|c| c.is_whitespace() || is_bidi_or_control(c))
-        {
-            if let Some(editor) = self.settings.profile_editor.as_mut() {
-                editor.error = Some("Server address contains invalid characters.".into());
-            }
-            cx.notify();
-            return;
-        }
-        let port: u16 = if port_text.is_empty() {
-            22
-        } else {
-            match port_text.parse() {
-                Ok(port) if port > 0 => port,
-                _ => {
-                    if let Some(editor) = self.settings.profile_editor.as_mut() {
-                        editor.error = Some("Enter a whole number from 1 to 65535.".into());
-                    }
-                    cx.notify();
-                    return;
-                }
-            }
-        };
-        if username.is_empty() {
-            if let Some(editor) = self.settings.profile_editor.as_mut() {
-                editor.error = Some("Enter a username.".into());
-            }
-            cx.notify();
-            return;
-        }
-        if username
-            .chars()
-            .any(|c| c.is_whitespace() || is_bidi_or_control(c))
-        {
-            if let Some(editor) = self.settings.profile_editor.as_mut() {
-                editor.error = Some("Username contains invalid characters.".into());
-            }
-            cx.notify();
-            return;
-        }
-
-        if entered_name.chars().any(is_bidi_or_control) {
-            if let Some(editor) = self.settings.profile_editor.as_mut() {
-                editor.error = Some("Connection name contains invalid characters.".into());
-            }
-            cx.notify();
-            return;
-        }
-
-        if default_remote_path_text.chars().any(is_bidi_or_control) {
-            if let Some(editor) = self.settings.profile_editor.as_mut() {
-                editor.error = Some("Initial folder path contains invalid characters.".into());
-            }
-            cx.notify();
-            return;
-        }
+        let (
+            endpoint,
+            is_new,
+            editor_profile_id,
+            entered_name,
+            default_remote_path_text,
+            auth,
+            route_kind,
+            jump_profile_id,
+            proxy_command,
+        ) = validation;
+        let host = endpoint.host;
+        let port = endpoint.port;
+        let username = endpoint.username;
 
         let profile_id = match (is_new, editor_profile_id) {
             (false, Some(id)) if cx.resources().profiles.find_profile(id).is_some() => id,
@@ -641,71 +587,14 @@ impl crate::workspace::Workspace {
             }
         };
 
-        let name = {
-            if entered_name.is_empty() {
-                format!("{username}@{host}")
-            } else {
-                entered_name
-            }
+        let name = if entered_name.is_empty() {
+            format!("{username}@{host}")
+        } else {
+            entered_name
         };
 
         let default_remote_path = (!default_remote_path_text.is_empty())
             .then(|| RemotePath::new(default_remote_path_text));
-
-        let auth = match auth_method {
-            AuthMethodKind::Password => ProfileAuthUpdate::Password {
-                password: (!password.is_empty()).then_some(password),
-            },
-            AuthMethodKind::PrivateKey => {
-                let key_path = expand_home(&key_path_raw);
-                if key_path.is_empty() {
-                    if let Some(editor) = self.settings.profile_editor.as_mut() {
-                        editor.error = Some("Enter the full path to your key file.".into());
-                    }
-                    cx.notify();
-                    return;
-                }
-                if key_path.chars().any(is_bidi_or_control) {
-                    if let Some(editor) = self.settings.profile_editor.as_mut() {
-                        editor.error = Some("Key path contains invalid characters.".into());
-                    }
-                    cx.notify();
-                    return;
-                }
-                ProfileAuthUpdate::PrivateKey {
-                    key_path: LocalPath::new(key_path),
-                    passphrase: match passphrase_policy {
-                        // The policy wins over typed text: choosing "no
-                        // passphrase" clears whatever is saved.
-                        PassphrasePolicy::NoPassphrase => PrivateKeyPassphraseUpdate::NoPassphrase,
-                        PassphrasePolicy::AskEveryTime => {
-                            if passphrase.is_empty() {
-                                // Dropping a remembered secret without
-                                // retyping it still leaves the has-passphrase
-                                // flag set; storage discards this value.
-                                PrivateKeyPassphraseUpdate::NotRemembered(String::new())
-                            } else {
-                                PrivateKeyPassphraseUpdate::NotRemembered(passphrase)
-                            }
-                        }
-                        PassphrasePolicy::Remember => {
-                            if passphrase.is_empty() {
-                                PrivateKeyPassphraseUpdate::KeepExisting
-                            } else {
-                                PrivateKeyPassphraseUpdate::Remember(passphrase)
-                            }
-                        }
-                    },
-                }
-            }
-            AuthMethodKind::KeyboardInteractive => ProfileAuthUpdate::KeyboardInteractive,
-            AuthMethodKind::SshAgent => {
-                let socket_path = expand_home(&agent_socket_raw);
-                ProfileAuthUpdate::SshAgent {
-                    socket_path: (!socket_path.is_empty()).then(|| LocalPath::new(socket_path)),
-                }
-            }
-        };
 
         let route = match route_kind {
             ProfileRouteKind::Direct => ConnectionRoute::Direct,

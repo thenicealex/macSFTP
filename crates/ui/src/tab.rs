@@ -110,6 +110,7 @@ impl RenderOnce for Tab {
                 .group_hover(self.hover_group.clone(), |style| style.visible());
         }
 
+        let tab_tooltip = SharedString::from(format!("{} — {}", self.title, self.status_label));
         div()
             .id(self.id)
             .flex()
@@ -120,7 +121,7 @@ impl RenderOnce for Tab {
             .pl_3()
             .pr_1()
             .max_w(px(220.0))
-            .tooltip(text_tooltip(self.title.clone()))
+            .tooltip(text_tooltip(tab_tooltip))
             .bg(background)
             .border_1()
             .border_color(border_color)

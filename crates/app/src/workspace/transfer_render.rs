@@ -5,10 +5,7 @@ use gpui_kit::{
     MouseButton, MouseDownEvent, ParentElement, Pixels, Role, SharedString, Styled, Window, div,
     prelude::*, px,
 };
-use macsftp_core::{
-    EditPhase, EntryPath, IdMatcher, TransferId, TransferJob, TransferPlanState, TransferState,
-    TransferStore,
-};
+use macsftp_core::{EditPhase, EntryPath, TransferId, TransferJob, TransferState};
 use macsftp_ui::{
     ActiveTheme, IconName, TextRoleExt, connection_status, format_size, icon, icon_button,
     section_header_static, text_tooltip, transfer_row, transfer_title,
@@ -39,78 +36,6 @@ pub(crate) fn painted_progress(
         Transition::new(PROGRESS_SMOOTHING),
         window,
         cx,
-    )
-}
-
-pub(crate) fn visible_transfer_jobs(store: &TransferStore) -> Vec<&TransferJob> {
-    let mut hidden_roots = Vec::with_capacity(store.plans.len());
-    let mut hidden_matchers = Vec::with_capacity(store.plans.len());
-
-    for (plan_idx, plan) in store.plans.iter().enumerate() {
-        let show_root = if plan.child_jobs.is_empty()
-            || matches!(plan.state, TransferPlanState::Planning)
-            || matches!(plan.state, TransferPlanState::Cancelled)
-        {
-            true
-        } else if matches!(plan.state, TransferPlanState::Failed { .. }) {
-            let children_are_terminal = if let Some(range) = store.child_jobs_slice_range(plan_idx)
-            {
-                store.jobs[range].iter().all(|job| {
-                    matches!(
-                        job.state,
-                        TransferState::Completed
-                            | TransferState::Skipped
-                            | TransferState::Failed { .. }
-                    )
-                })
-            } else {
-                plan.child_jobs.iter().all(|child_id| {
-                    store.find_job(*child_id).is_some_and(|job| {
-                        matches!(
-                            job.state,
-                            TransferState::Completed
-                                | TransferState::Skipped
-                                | TransferState::Failed { .. }
-                        )
-                    })
-                })
-            };
-            !children_are_terminal
-        } else {
-            false
-        };
-
-        if show_root {
-            hidden_matchers.push(IdMatcher::new(&plan.child_jobs));
-        } else {
-            hidden_roots.push(plan.root_job_id);
-        }
-    }
-
-    store
-        .jobs
-        .iter()
-        .filter(|job| {
-            !hidden_roots.contains(&job.id)
-                && !hidden_matchers
-                    .iter()
-                    .any(|matcher| matcher.contains(job.id))
-        })
-        .collect()
-}
-
-/// A failed transfer offers a Retry control only when it is genuinely
-/// retryable. Handoff failures (no connection available, connection lost,
-/// transfer manager gone) mark their planned children `retryable: false`
-/// because those jobs never entered the transfer manager and therefore have
-/// no retry route — surfacing a Retry button there would be a dead control.
-fn can_retry_transfer(job: &TransferJob) -> bool {
-    matches!(
-        job.state,
-        TransferState::Failed {
-            retryable: true,
-            ..
-        }
     )
 }
 
@@ -175,8 +100,9 @@ impl crate::workspace::Workspace {
             rendered: Vec::new(),
         };
         let mut running = Vec::new();
+        let mut has_retryable_failed = false;
 
-        let visible_jobs = visible_transfer_jobs(cx.transfers());
+        let visible_jobs = cx.transfers().visible_jobs();
         let total_visible_jobs = visible_jobs.len();
 
         for job in visible_jobs {
@@ -213,6 +139,9 @@ impl crate::workspace::Workspace {
                     }
                 }
                 TransferState::Failed { .. } => {
+                    if job.is_retryable() {
+                        has_retryable_failed = true;
+                    }
                     failed.total += 1;
                     if failed.rendered.len() < max_failed {
                         failed.rendered.push(job.clone());
@@ -361,6 +290,18 @@ impl crate::workspace::Workspace {
                                 workspace.cancel_all_transfers(cx);
                             });
                         }),
+                    )
+                })
+                .when(has_retryable_failed, |header| {
+                    let workspace = workspace_entity.clone();
+                    header.child(
+                        icon_button("retry-failed-transfers", IconName::Refresh, "Retry Failed")
+                            .icon_color(theme.colors.accent)
+                            .on_click(move |_event, _window, cx| {
+                                workspace.update(cx, |workspace, cx| {
+                                    workspace.retry_failed_transfers(cx);
+                                });
+                            }),
                     )
                 })
                 .when(completed.total + failed.total > 0, |header| {
@@ -666,7 +607,7 @@ impl crate::workspace::Workspace {
                 });
             });
         }
-        if can_retry_transfer(job) {
+        if job.is_retryable() {
             let workspace = workspace.clone();
             row = row.on_retry(move |_event, _window, cx| {
                 workspace.update(cx, |workspace, cx| {
@@ -748,7 +689,7 @@ impl crate::workspace::Workspace {
 
         let selected_count = self.focused_selection_count();
 
-        let jobs = visible_transfer_jobs(cx.transfers());
+        let jobs = cx.transfers().visible_jobs();
         let active_count = jobs
             .iter()
             .filter(|job| {
@@ -952,9 +893,6 @@ mod tests {
         TransferPlanState, TransferState, TransferStore, UserFacingError,
     };
 
-    use super::can_retry_transfer;
-    use super::visible_transfer_jobs;
-
     fn job(id: u64, state: TransferState) -> TransferJob {
         TransferJob {
             id: TransferId(id),
@@ -993,10 +931,7 @@ mod tests {
     }
 
     fn visible_ids(store: &TransferStore) -> Vec<TransferId> {
-        visible_transfer_jobs(store)
-            .into_iter()
-            .map(|job| job.id)
-            .collect()
+        store.visible_jobs().into_iter().map(|job| job.id).collect()
     }
 
     #[test]
@@ -1093,7 +1028,7 @@ mod tests {
             pending_conflicts: Vec::new(),
         };
 
-        let visible = visible_transfer_jobs(&store);
+        let visible = store.visible_jobs();
         assert_eq!(visible.len(), child_count as usize);
         assert_eq!(visible[0].id, TransferId(2));
     }
@@ -1126,7 +1061,7 @@ mod tests {
         };
 
         let start = std::time::Instant::now();
-        let visible = visible_transfer_jobs(&store);
+        let visible = store.visible_jobs();
         let elapsed = start.elapsed();
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, TransferId(1));
@@ -1152,7 +1087,7 @@ mod tests {
         );
 
         assert!(
-            can_retry_transfer(&failed),
+            failed.is_retryable(),
             "a retryable failure must offer the Retry control"
         );
     }
@@ -1176,7 +1111,7 @@ mod tests {
         );
 
         assert!(
-            !can_retry_transfer(&failed),
+            !failed.is_retryable(),
             "a non-retryable handoff failure must not offer the Retry control"
         );
     }

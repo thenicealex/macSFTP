@@ -12067,6 +12067,106 @@ fn cancel_all_transfers_is_reachable_from_chord_menu_and_palette(cx: &mut TestAp
     let _ = &workspace;
 }
 
+#[gpui_kit::test]
+fn retry_failed_transfers_dispatches_only_retryable_visible_jobs(cx: &mut TestAppContext) {
+    let (workspace, mut cx, channels) = init_workspace(cx);
+    let now = macsftp_core::Timestamp::from_secs_since_epoch(1);
+    let make_job = |id: u64, state: TransferState| macsftp_core::TransferJob {
+        id: TransferId(id),
+        direction: TransferDirection::Upload,
+        source: TransferEndpoint::Local(LocalPath::new(format!("/tmp/{id}.txt"))),
+        destination: TransferEndpoint::Remote(RemotePath::new(format!("/srv/{id}.txt"))),
+        state,
+        metadata_policy: macsftp_core::MetadataPolicy::default(),
+        conflict_policy: macsftp_core::ConflictPolicy::default(),
+        warnings: Vec::new(),
+        created_at: now,
+    };
+    let seed_event = |id: u64, state: TransferState| {
+        let job = make_job(id, state.clone());
+        let plan_state = match &state {
+            TransferState::Failed { error, .. } => macsftp_core::TransferPlanState::Failed {
+                error: error.clone(),
+            },
+            TransferState::Completed => macsftp_core::TransferPlanState::Completed,
+            _ => macsftp_core::TransferPlanState::Queued,
+        };
+        let plan = macsftp_core::TransferPlan {
+            id: macsftp_core::TransferPlanId(id),
+            root_job_id: TransferId(id),
+            source_root: job.source.clone(),
+            destination_root: job.destination.clone(),
+            state: plan_state,
+            planned_count: 1,
+            total_bytes: Some(10),
+            child_jobs: Vec::new(),
+            conflict_policy: macsftp_core::ConflictPolicy::default(),
+        };
+        TransferEvent::PlanStarted(Box::new(macsftp_core::TransferPlanSnapshot {
+            plan,
+            root_job: job,
+        }))
+    };
+
+    cx.update(|_window, cx| {
+        cx.apply_transfer_event(
+            &seed_event(
+                800,
+                TransferState::Failed {
+                    retryable: true,
+                    error: macsftp_core::UserFacingError::new(
+                        macsftp_core::ErrorCode::NetworkTimeout,
+                        "Timed out",
+                        "Try again.",
+                    )
+                    .with_retryable(true),
+                },
+            ),
+            now,
+        );
+        cx.apply_transfer_event(
+            &seed_event(
+                801,
+                TransferState::Failed {
+                    retryable: false,
+                    error: macsftp_core::UserFacingError::new(
+                        macsftp_core::ErrorCode::PermissionDenied,
+                        "Denied",
+                        "Check permissions.",
+                    ),
+                },
+            ),
+            now,
+        );
+        cx.apply_transfer_event(&seed_event(802, TransferState::Completed), now);
+    });
+    while channels.command_rx.try_recv().is_ok() {}
+
+    cx.update(|window, cx| {
+        workspace.update(cx, |workspace, cx| {
+            workspace.transfer_drawer.open = true;
+            workspace.retry_failed_transfers(cx);
+        });
+        window.render_frame(cx);
+        assert!(
+            window.find("retry-failed-transfers").label().is_some(),
+            "Retry Failed button must render when retryable failed jobs exist"
+        );
+    });
+
+    let mut retried = Vec::new();
+    while let Ok(command) = channels.command_rx.try_recv() {
+        if let AppCommand::RetryTransfer { transfer_id } = command {
+            retried.push(transfer_id);
+        }
+    }
+    assert_eq!(
+        retried,
+        vec![TransferId(800)],
+        "only retryable failed visible jobs should be retried"
+    );
+}
+
 /// Finder's Cmd-C / Cmd-V for files: copy on one side, paste on the other, and
 /// the paste is the transfer that moves them.
 #[gpui_kit::test]

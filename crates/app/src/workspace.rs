@@ -1630,6 +1630,7 @@ impl Render for Workspace {
 
 mod command_palette;
 mod connect_form;
+mod connection_fields;
 mod context_menu;
 mod drawer_height;
 mod event_handling;

@@ -939,84 +939,119 @@ impl crate::workspace::Workspace {
                                 .children(actions),
                         )
                         .when(!rows.is_empty(), |container| {
+                            let row_count = rows.len();
                             container.child(
                                 div()
                                     .flex()
                                     .flex_col()
-                                    .gap_1()
+                                    .gap_1p5()
                                     .w_full()
                                     .mt_6()
                                     .child(
                                         div()
-                                            .mb_1()
+                                            .px_1()
                                             .text_role(theme, theme.typography.label)
                                             .text_color(theme.colors.text_muted)
                                             .child("Recent Connections"),
                                     )
-                                    .child(div().flex().flex_col().gap_1().w_full().children(
-                                        rows.into_iter().map(|(id, primary, endpoint, full)| {
-                                            div()
-                                                .id(SharedString::from(format!("recent-{id}")))
-                                                .flex()
-                                                .items_center()
-                                                .gap_2()
-                                                .h(px(30.0))
-                                                .px_2p5()
-                                                .rounded_md()
-                                                .cursor_pointer()
-                                                .tooltip(text_tooltip(full))
-                                                .hover(|style| style.bg(theme.colors.element_hover))
-                                                .active(|style| {
-                                                    style.bg(theme.colors.element_active)
-                                                })
-                                                .child(icon(
-                                                    IconName::Server,
-                                                    theme.colors.text_muted,
-                                                ))
-                                                .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .min_w_0()
-                                                        .truncate()
-                                                        .text_role(theme, theme.typography.body)
-                                                        .text_color(theme.colors.text)
-                                                        .child(primary),
-                                                )
-                                                .when_some(endpoint, |row, endpoint| {
-                                                    row.child(
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .w_full()
+                                            .rounded(px(8.0))
+                                            .border_1()
+                                            .border_color(theme.colors.border)
+                                            .bg(theme.colors.elevated_surface)
+                                            .overflow_hidden()
+                                            .children(rows.into_iter().enumerate().flat_map(
+                                                |(index, (id, primary, endpoint, full))| {
+                                                    let divider = (index + 1 < row_count).then(|| {
                                                         div()
-                                                            .flex_none()
-                                                            .max_w(px(150.0))
-                                                            .truncate()
-                                                            .text_role(theme, theme.typography.secondary)
-                                                            .text_color(theme.colors.text_muted)
-                                                            .child(endpoint),
-                                                    )
-                                                })
-                                                .on_click(cx.listener(
-                                                    move |workspace, _event, window, cx| {
-                                                        workspace
-                                                            .open_recent_connection(id, window, cx);
-                                                    },
-                                                ))
-                                                .on_mouse_up(
-                                                    gpui_kit::MouseButton::Right,
-                                                    cx.listener(
-                                                        move |workspace,
-                                                              event: &gpui_kit::MouseUpEvent,
-                                                              window,
-                                                              cx| {
-                                                            workspace.show_recent_context_menu(
-                                                                id,
-                                                                event.position,
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    ),
-                                                )
-                                            })
-                                    )),
+                                                            .mx_2p5()
+                                                            .h(px(1.0))
+                                                            .bg(theme.colors.border)
+                                                            .opacity(0.45)
+                                                            .into_any_element()
+                                                    });
+                                                    let row = div()
+                                                        .id(SharedString::from(format!(
+                                                            "recent-{id}"
+                                                        )))
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap_2()
+                                                        .h(px(30.0))
+                                                        .px_2p5()
+                                                        .cursor_pointer()
+                                                        .tooltip(text_tooltip(full))
+                                                        .hover(|style| {
+                                                            style.bg(theme.colors.element_hover)
+                                                        })
+                                                        .active(|style| {
+                                                            style.bg(theme.colors.element_active)
+                                                        })
+                                                        .child(icon(
+                                                            IconName::Server,
+                                                            theme.colors.text_muted,
+                                                        ))
+                                                        .child(
+                                                            div()
+                                                                .flex_1()
+                                                                .min_w_0()
+                                                                .truncate()
+                                                                .text_role(
+                                                                    theme,
+                                                                    theme.typography.body,
+                                                                )
+                                                                .text_color(theme.colors.text)
+                                                                .child(primary),
+                                                        )
+                                                        .when_some(endpoint, |row, endpoint| {
+                                                            row.child(
+                                                                div()
+                                                                    .flex_none()
+                                                                    .max_w(px(156.0))
+                                                                    .truncate()
+                                                                    .text_role(
+                                                                        theme,
+                                                                        theme.typography.secondary,
+                                                                    )
+                                                                    .text_color(
+                                                                        theme.colors.text_muted,
+                                                                    )
+                                                                    .child(endpoint),
+                                                            )
+                                                        })
+                                                        .on_click(cx.listener(
+                                                            move |workspace, _event, window, cx| {
+                                                                workspace.open_recent_connection(
+                                                                    id, window, cx,
+                                                                );
+                                                            },
+                                                        ))
+                                                        .on_mouse_up(
+                                                            gpui_kit::MouseButton::Right,
+                                                            cx.listener(
+                                                                move |workspace,
+                                                                      event: &gpui_kit::MouseUpEvent,
+                                                                      window,
+                                                                      cx| {
+                                                                    workspace
+                                                                        .show_recent_context_menu(
+                                                                            id,
+                                                                            event.position,
+                                                                            window,
+                                                                            cx,
+                                                                        );
+                                                                },
+                                                            ),
+                                                        )
+                                                        .into_any_element();
+                                                    std::iter::once(row).chain(divider)
+                                                },
+                                            )),
+                                    ),
                             )
                         }),
                 );
@@ -1200,7 +1235,7 @@ impl crate::workspace::Workspace {
                     empty_state(
                         error.title.clone(),
                         vec![
-                            connect_button("retry-connect-remote", "Try Again"),
+                            connect_button("retry-connect-remote", "Try Again").primary(true),
                             edit_connection_button("edit-connection-failed"),
                         ],
                     )

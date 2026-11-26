@@ -1,7 +1,7 @@
 use gpui_kit::Context;
 use macsftp_core::{
-    AppCommand, EntryPath, FileKind, LocalPath, RemotePath, TabId, TransferEndpoint, TransferId,
-    TransferState, is_bidi_or_control,
+    AppCommand, EntryPath, FileKind, LocalPath, RemotePath, TabId, TransferEndpoint,
+    is_bidi_or_control,
 };
 use tracing::warn;
 
@@ -250,22 +250,15 @@ impl crate::workspace::Workspace {
         }
     }
     pub(crate) fn cancel_all_transfers(&mut self, cx: &mut Context<Self>) {
-        let job_ids: Vec<TransferId> =
-            crate::workspace::transfer_render::visible_transfer_jobs(cx.transfers())
-                .iter()
-                .filter(|job| {
-                    matches!(
-                        job.state,
-                        TransferState::Queued
-                            | TransferState::Running { .. }
-                            | TransferState::Planning
-                            | TransferState::WaitingForConflictDecision { .. }
-                    )
-                })
-                .map(|job| job.id)
-                .collect();
+        let job_ids = cx.transfers().cancellable_visible_job_ids();
         for id in job_ids {
             self.cancel_transfer(id, cx);
+        }
+    }
+    pub(crate) fn retry_failed_transfers(&mut self, cx: &mut Context<Self>) {
+        let job_ids = cx.transfers().retryable_visible_job_ids();
+        for id in job_ids {
+            self.retry_transfer(id, cx);
         }
     }
     pub(crate) fn clear_transfer_records(&mut self, cx: &mut Context<Self>) {

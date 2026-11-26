@@ -2,20 +2,24 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, Weak};
+use std::time::SystemTime;
 
 use macsftp_core::{
     AppEvent, ConflictDecision, ConflictPolicy, ConflictRequestId, ConnectionKey, ErrorCode,
-    TransferDirection, TransferEndpoint, TransferFailure, TransferId, TransferJob, TransferPlanId,
-    UserFacingError,
+    StartTransferCommand, TabId, Timestamp, TransferDirection, TransferEndpoint, TransferFailure,
+    TransferId, TransferJob, TransferPlanId, TransferPlanSnapshot, UserFacingError,
 };
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::pool::{ConnectionManager, SharedConnection};
+use crate::session_actor::RemoteSessionRequest;
 use crate::transfer_job::{
     ConflictWaiter, PlanTransferFacts, TransferConflictContext, TransferJobOutcome,
     TransferSessionSlot, open_transfer_session, run_transfer_job,
 };
+use crate::transfer_planner::{new_plan, plan_local_upload};
 
 pub(crate) const MAX_CONCURRENT_TRANSFERS: usize = 12;
 pub(crate) const MAX_CONCURRENT_PER_PLAN: usize = 8;
@@ -29,34 +33,22 @@ const MAX_CHANNELS_PER_CONNECTION: usize = 9;
 /// [`MAX_CONCURRENT_PER_PLAN`] at a time, so keeping that many is all a later
 /// job can use; the rest are closed instead of pinning server processes.
 const MAX_IDLE_SESSIONS_PER_PLAN: usize = MAX_CONCURRENT_PER_PLAN;
-/// Upper bound on pre-enqueue cancellation records. Each one is a few bytes and
-/// only matters for the instant between a cancel and its enqueue, so dropping
-/// the oldest is always safe.
-const MAX_PENDING_CANCELS: usize = 1024;
+/// Narrow seam for looking up the live browsing session's request channel
+/// for a `(TabId, session_epoch)` pair.
+pub(crate) trait TransferSessionSource: Send + Sync + 'static {
+    fn session_request_tx(
+        &self,
+        tab_id: TabId,
+        session_epoch: u64,
+    ) -> Option<flume::Sender<RemoteSessionRequest>>;
+}
 
 pub(crate) enum TransferManagerRequest {
-    Enqueue {
-        connection: Arc<SharedConnection>,
-        plan_id: TransferPlanId,
-        jobs: Vec<TransferJob>,
-    },
+    Start(StartTransferCommand),
     Cancel {
         transfer_id: TransferId,
         /// Plan the cancelled job belongs to, when the runtime knows it.
         plan_id: Option<TransferPlanId>,
-    },
-    /// Cancel every job of a plan. Sent by the runtime only for a cancel that
-    /// landed while the plan was being handed to the manager, after the
-    /// enqueue itself was already queued.
-    CancelPlan {
-        plan_id: TransferPlanId,
-    },
-    /// Drop the pre-enqueue cancellation records of a plan that will never be
-    /// enqueued (planning failed, or it was cancelled before the handoff).
-    /// Cancelling a child row during planning is what creates those records,
-    /// and without this they would live for the whole process.
-    ForgetPlan {
-        plan_id: TransferPlanId,
     },
     Retry {
         transfer_id: TransferId,
@@ -64,6 +56,31 @@ pub(crate) enum TransferManagerRequest {
     ResolveConflict {
         request_id: ConflictRequestId,
         decision: ConflictDecision,
+    },
+}
+
+struct PlanningPlan {
+    root_job_id: TransferId,
+    cancel: CancellationToken,
+    cancelled_children: HashSet<TransferId>,
+    retry_command: StartTransferCommand,
+}
+
+struct PlanningFinished {
+    plan_id: TransferPlanId,
+    outcome: PlanningOutcome,
+}
+
+enum PlanningOutcome {
+    Cancelled,
+    Failed,
+    HandoffFailed {
+        jobs: Vec<TransferJob>,
+        error: UserFacingError,
+    },
+    Ready {
+        connection: Arc<SharedConnection>,
+        jobs: Vec<TransferJob>,
     },
 }
 
@@ -96,7 +113,12 @@ struct RetryRoute {
 pub(crate) struct TransferManager {
     event_tx: flume::Sender<AppEvent>,
     connection_manager: Arc<ConnectionManager>,
+    session_source: Arc<dyn TransferSessionSource>,
+    next_plan_id: u64,
+    next_transfer_id: Arc<AtomicU64>,
     next_conflict_id: Arc<AtomicU64>,
+    planning_plans: HashMap<TransferPlanId, PlanningPlan>,
+    planning_retries: HashMap<TransferId, StartTransferCommand>,
     pending: VecDeque<QueuedTransfer>,
     pending_per_plan: HashMap<TransferPlanId, usize>,
     pending_roots: HashSet<TransferId>,
@@ -109,17 +131,6 @@ pub(crate) struct TransferManager {
     /// Plans whose non-root job has started at least once. A retried root must
     /// not clear the destination again after children wrote into it.
     plan_children_started: HashSet<TransferPlanId>,
-    /// Transfers cancelled while the manager did not own them yet, mapped to
-    /// the plan a cancel reported (if the runtime knew it). The plan id is only
-    /// used to reclaim records of a plan that never reaches the manager; the
-    /// value is never used to decide whether a job may run.
-    cancelled_before_enqueue: HashMap<TransferId, Option<TransferPlanId>>,
-    /// Insertion order of `cancelled_before_enqueue`. A record is only useful
-    /// while the matching enqueue is in flight, so the oldest entries are
-    /// dropped once the map grows past [`MAX_PENDING_CANCELS`]; this bounds the
-    /// memory a stream of late cancels can pin without affecting any cancel
-    /// that still has a job to stop.
-    pending_cancel_order: VecDeque<TransferId>,
     retry_routes: HashMap<TransferId, RetryRoute>,
     /// Sessions a plan has finished with, available to its queued jobs.
     /// Dropped as soon as the plan has no work left.
@@ -136,11 +147,17 @@ impl TransferManager {
         event_tx: flume::Sender<AppEvent>,
         next_conflict_id: Arc<AtomicU64>,
         connection_manager: Arc<ConnectionManager>,
+        session_source: Arc<dyn TransferSessionSource>,
     ) -> Self {
         Self {
             event_tx,
             connection_manager,
+            session_source,
+            next_plan_id: 1,
+            next_transfer_id: Arc::new(AtomicU64::new(1)),
             next_conflict_id,
+            planning_plans: HashMap::new(),
+            planning_retries: HashMap::new(),
             pending: VecDeque::new(),
             pending_per_plan: HashMap::new(),
             pending_roots: HashSet::new(),
@@ -148,8 +165,6 @@ impl TransferManager {
             running_per_plan: HashMap::new(),
             plan_root_jobs: HashMap::new(),
             plan_children_started: HashSet::new(),
-            cancelled_before_enqueue: HashMap::new(),
-            pending_cancel_order: VecDeque::new(),
             retry_routes: HashMap::new(),
             idle_sessions: HashMap::new(),
             plan_facts: HashMap::new(),
@@ -160,13 +175,21 @@ impl TransferManager {
 
     pub(crate) async fn run(mut self, request_rx: flume::Receiver<TransferManagerRequest>) {
         let (complete_tx, complete_rx) = flume::bounded(MAX_CONCURRENT_TRANSFERS * 2);
+        let (planning_tx, planning_rx) = flume::bounded(64);
         loop {
             tokio::select! {
                 request = request_rx.recv_async() => {
                     let Ok(request) = request else {
                         break;
                     };
-                    self.handle_request(request).await;
+                    self.handle_request(request, Some(&planning_tx)).await;
+                    self.start_queued(&complete_tx).await;
+                }
+                finished = planning_rx.recv_async() => {
+                    let Ok(finished) = finished else {
+                        break;
+                    };
+                    self.handle_planning_finished(finished).await;
                     self.start_queued(&complete_tx).await;
                 }
                 completed = complete_rx.recv_async() => {
@@ -179,28 +202,39 @@ impl TransferManager {
             }
         }
 
+        for planning in self.planning_plans.values() {
+            planning.cancel.cancel();
+        }
         for running in self.running.values() {
             running.cancel.cancel();
         }
     }
 
-    async fn handle_request(&mut self, request: TransferManagerRequest) {
+    async fn handle_request(
+        &mut self,
+        request: TransferManagerRequest,
+        planning_tx: Option<&flume::Sender<PlanningFinished>>,
+    ) {
         match request {
-            TransferManagerRequest::Enqueue {
-                connection,
-                plan_id,
-                jobs,
-            } => self.enqueue(connection, plan_id, jobs, true).await,
+            TransferManagerRequest::Start(command) => {
+                self.start_transfer(command, planning_tx).await;
+            }
             TransferManagerRequest::Cancel {
                 transfer_id,
                 plan_id,
             } => {
-                // A cancel aimed at a plan root only reaches this manager when
-                // it lost the race with the planning handoff: the runtime
-                // releases its guard after the enqueue is queued, so the plan
-                // and its children are already here. Treat it as a plan-level
-                // cancel instead of skipping just the root and letting the
-                // children finish into a "completed" plan.
+                if let Some((&_planning_plan_id, planning)) = self
+                    .planning_plans
+                    .iter_mut()
+                    .find(|(id, plan)| plan.root_job_id == transfer_id || plan_id == Some(**id))
+                {
+                    if planning.root_job_id == transfer_id {
+                        planning.cancel.cancel();
+                    } else {
+                        planning.cancelled_children.insert(transfer_id);
+                    }
+                    return;
+                }
                 if let Some(plan_id) = self.plan_of_root(transfer_id) {
                     self.cancel_plan(plan_id).await;
                     return;
@@ -223,35 +257,28 @@ impl TransferManager {
                     }
                 } else if let Some(running) = self.running.get(&transfer_id) {
                     running.cancel.cancel();
-                } else {
-                    // Either the job is between planning and enqueue, or it
-                    // already finished and this cancel lost the race with
-                    // completion. Record the cancel and report it only if the
-                    // job actually reaches the queue: a late cancel must not
-                    // rewrite a finished transfer as `Skipped`.
-                    self.record_pending_cancel(transfer_id, plan_id);
                 }
             }
-            TransferManagerRequest::CancelPlan { plan_id } => {
-                self.cancel_plan(plan_id).await;
-            }
-            TransferManagerRequest::ForgetPlan { plan_id } => {
-                self.forget_cancellations_for_plan(plan_id);
-            }
             TransferManagerRequest::Retry { transfer_id } => {
+                if let Some(command) = self.planning_retries.remove(&transfer_id) {
+                    self.start_transfer(command, planning_tx).await;
+                    return;
+                }
                 if let Some(route) = self.retry_routes.remove(&transfer_id) {
-                    // The user is explicitly asking for another attempt, so a
-                    // cancel recorded while the job was not queued no longer
-                    // applies and must not swallow the retry.
-                    self.take_pending_cancel(transfer_id);
                     let connection = route
                         .connection
                         .upgrade()
                         .filter(|connection| !connection.connection_lost.is_cancelled())
                         .or_else(|| self.connection_manager.connected(&route.connection_key));
                     if let Some(connection) = connection {
-                        self.enqueue(connection, route.plan_id, vec![route.job], false)
-                            .await;
+                        self.enqueue(
+                            connection,
+                            route.plan_id,
+                            vec![route.job],
+                            false,
+                            &HashSet::new(),
+                        )
+                        .await;
                     } else {
                         self.retry_routes.insert(transfer_id, route);
                         let error = UserFacingError::new(
@@ -287,36 +314,189 @@ impl TransferManager {
         }
     }
 
+    async fn start_transfer(
+        &mut self,
+        command: StartTransferCommand,
+        planning_tx: Option<&flume::Sender<PlanningFinished>>,
+    ) {
+        let request_tx = self
+            .session_source
+            .session_request_tx(command.tab_id, command.session_epoch);
+        let transfer_connection_rx = request_tx.as_ref().and_then(|request_tx| {
+            let (responder, response) = oneshot::channel();
+            request_tx
+                .try_send(RemoteSessionRequest::AcquireTransferConnection { responder })
+                .ok()
+                .map(|()| response)
+        });
+        let plan_id = TransferPlanId(self.next_plan_id);
+        self.next_plan_id += 1;
+        let root_job_id = TransferId(self.next_transfer_id.fetch_add(1, Ordering::Relaxed));
+        let planning_cancel = CancellationToken::new();
+        let (plan, root_job) =
+            new_plan(&command, plan_id, root_job_id, Timestamp(SystemTime::now()));
+        if let Err(error) = self
+            .event_tx
+            .send_async(AppEvent::TransferPlanStarted(Box::new(
+                TransferPlanSnapshot {
+                    plan,
+                    root_job: root_job.clone(),
+                },
+            )))
+            .await
+        {
+            warn!(error = %error, plan_id = plan_id.0, "transfer plan started event dropped");
+            return;
+        }
+        self.planning_plans.insert(
+            plan_id,
+            PlanningPlan {
+                root_job_id,
+                cancel: planning_cancel.clone(),
+                cancelled_children: HashSet::new(),
+                retry_command: command.clone(),
+            },
+        );
+
+        let Some(planning_tx) = planning_tx.cloned() else {
+            return;
+        };
+        let event_tx = self.event_tx.clone();
+        let next_transfer_id = self.next_transfer_id.clone();
+        let cancel_after_task = planning_cancel.clone();
+        let planning_task = match command.direction {
+            TransferDirection::Upload => tokio::task::spawn_blocking(move || {
+                plan_local_upload(
+                    command,
+                    plan_id,
+                    root_job,
+                    next_transfer_id,
+                    event_tx,
+                    planning_cancel,
+                )
+            }),
+            TransferDirection::Download => tokio::spawn(async move {
+                let Some(request_tx) = request_tx else {
+                    emit_download_preparation_failed(&event_tx, plan_id).await;
+                    return None;
+                };
+                let (responder, response) = oneshot::channel();
+                if request_tx
+                    .send_async(RemoteSessionRequest::PlanRemoteDownload {
+                        command,
+                        plan_id,
+                        created_at: root_job.created_at,
+                        next_transfer_id,
+                        cancel: planning_cancel,
+                        responder,
+                    })
+                    .await
+                    .is_err()
+                {
+                    emit_download_preparation_failed(&event_tx, plan_id).await;
+                    return None;
+                }
+                response.await.ok().flatten()
+            }),
+        };
+
+        std::mem::drop(tokio::spawn(async move {
+            let outcome = match planning_task.await {
+                Ok(Some(jobs)) => {
+                    if cancel_after_task.is_cancelled() {
+                        PlanningOutcome::Cancelled
+                    } else if let Some(connection_rx) = transfer_connection_rx {
+                        tokio::select! {
+                            _ = cancel_after_task.cancelled() => PlanningOutcome::Cancelled,
+                            res = connection_rx => match res {
+                                Ok(connection) => PlanningOutcome::Ready { connection, jobs },
+                                Err(_) => PlanningOutcome::HandoffFailed {
+                                    jobs,
+                                    error: transfer_handoff_error(
+                                        "The connection closed. Reconnect and try again.",
+                                    ),
+                                },
+                            }
+                        }
+                    } else {
+                        PlanningOutcome::HandoffFailed {
+                            jobs,
+                            error: transfer_handoff_error(
+                                "The connected session has no transfer channel.",
+                            ),
+                        }
+                    }
+                }
+                _ => {
+                    if cancel_after_task.is_cancelled() {
+                        PlanningOutcome::Cancelled
+                    } else {
+                        PlanningOutcome::Failed
+                    }
+                }
+            };
+            if let Err(error) = planning_tx
+                .send_async(PlanningFinished { plan_id, outcome })
+                .await
+            {
+                warn!(
+                    error = %error,
+                    plan_id = plan_id.0,
+                    "transfer planning completion could not reach transfer manager"
+                );
+            }
+        }));
+    }
+
+    async fn handle_planning_finished(&mut self, finished: PlanningFinished) {
+        let Some(planning) = self.planning_plans.remove(&finished.plan_id) else {
+            return;
+        };
+        let plan_id = finished.plan_id;
+        match finished.outcome {
+            PlanningOutcome::Cancelled => {
+                emit_plan_cancelled(&self.event_tx, plan_id).await;
+            }
+            PlanningOutcome::Failed => {
+                if planning.cancel.is_cancelled() {
+                    emit_plan_cancelled(&self.event_tx, plan_id).await;
+                } else {
+                    self.planning_retries
+                        .insert(planning.root_job_id, planning.retry_command);
+                }
+            }
+            PlanningOutcome::HandoffFailed { jobs, error } => {
+                if planning.cancel.is_cancelled() {
+                    emit_plan_cancelled(&self.event_tx, plan_id).await;
+                } else {
+                    fail_planned_jobs(&self.event_tx, jobs, error).await;
+                }
+            }
+            PlanningOutcome::Ready { connection, jobs } => {
+                if planning.cancel.is_cancelled() {
+                    emit_plan_cancelled(&self.event_tx, plan_id).await;
+                } else {
+                    self.enqueue(
+                        connection,
+                        plan_id,
+                        jobs,
+                        true,
+                        &planning.cancelled_children,
+                    )
+                    .await;
+                }
+            }
+        }
+    }
+
     async fn enqueue(
         &mut self,
         connection: Arc<SharedConnection>,
         plan_id: TransferPlanId,
         jobs: Vec<TransferJob>,
         record_root: bool,
+        cancelled_children: &HashSet<TransferId>,
     ) {
-        // A cancel of the plan root can be processed before the enqueue it is
-        // racing with, because the two commands travel on different senders:
-        // the runtime releases its planning guard right after queueing the
-        // enqueue, so a Cancel that finds no guard goes straight to this
-        // manager and can win the race. The root row only shows a cancel
-        // control while the plan still reads "Preparing…", so such a cancel
-        // means "cancel the plan"; skipping just the root would let the
-        // children run and report a completed plan.
-        if record_root
-            && jobs
-                .first()
-                .is_some_and(|root| self.cancelled_before_enqueue.contains_key(&root.id))
-        {
-            self.forget_cancellations_for_plan(plan_id);
-            if let Err(error) = self
-                .event_tx
-                .send_async(AppEvent::TransferPlanCancelled { plan_id })
-                .await
-            {
-                warn!(error = %error, "plan cancellation event dropped");
-            }
-            return;
-        }
         if let Some(job) = jobs.first()
             && let Ok(mut policies) = self.plan_policies.lock()
         {
@@ -335,7 +515,7 @@ impl TransferManager {
         }
         let mut skipped = Vec::new();
         for job in jobs {
-            if self.take_pending_cancel(job.id) {
+            if cancelled_children.contains(&job.id) {
                 skipped.push(job.id);
                 continue;
             }
@@ -345,10 +525,6 @@ impl TransferManager {
                 job,
             });
         }
-        // The enqueue is the plan's final job set, so any tombstone left for
-        // this plan belongs to a row that was published during planning but
-        // did not survive into the plan. Nothing can consume it anymore.
-        self.forget_cancellations_for_plan(plan_id);
         let skipped_any = !skipped.is_empty();
         for transfer_id in skipped {
             if let Err(error) = self
@@ -361,47 +537,6 @@ impl TransferManager {
         }
         if skipped_any {
             self.cleanup_plan_if_idle(plan_id);
-        }
-    }
-
-    /// Forget pre-enqueue cancellation records that belong to a plan this
-    /// manager will never see.
-    ///
-    /// A child row is published while its plan is still being planned, so its
-    /// cancel reaches the manager before any enqueue exists. If that plan then
-    /// fails planning or is cancelled wholesale, the enqueue never arrives and
-    /// the record would otherwise stay for the life of the process. Records
-    /// without a plan id are left alone: their plan cannot be identified.
-    fn forget_cancellations_for_plan(&mut self, plan_id: TransferPlanId) {
-        self.cancelled_before_enqueue
-            .retain(|_, recorded| *recorded != Some(plan_id));
-        self.pending_cancel_order
-            .retain(|transfer_id| self.cancelled_before_enqueue.contains_key(transfer_id));
-    }
-
-    /// Consume a pre-enqueue cancellation for `transfer_id`, if any.
-    fn take_pending_cancel(&mut self, transfer_id: TransferId) -> bool {
-        let recorded = self.cancelled_before_enqueue.remove(&transfer_id).is_some();
-        if recorded {
-            self.pending_cancel_order
-                .retain(|queued| *queued != transfer_id);
-        }
-        recorded
-    }
-
-    /// Remember that a transfer must be skipped if its enqueue arrives later.
-    fn record_pending_cancel(&mut self, transfer_id: TransferId, plan_id: Option<TransferPlanId>) {
-        if self
-            .cancelled_before_enqueue
-            .insert(transfer_id, plan_id)
-            .is_none()
-        {
-            self.pending_cancel_order.push_back(transfer_id);
-        }
-        while self.pending_cancel_order.len() > MAX_PENDING_CANCELS {
-            if let Some(oldest) = self.pending_cancel_order.pop_front() {
-                self.cancelled_before_enqueue.remove(&oldest);
-            }
         }
     }
 
@@ -428,11 +563,6 @@ impl TransferManager {
     /// cancel that loses the race with completion cannot rewrite finished
     /// work.
     async fn cancel_plan(&mut self, plan_id: TransferPlanId) {
-        // A plan-level cancel also settles any child cancel recorded while the
-        // plan was still being planned. Any enqueue still in flight is
-        // processed before this request (same sender), so its jobs are already
-        // queued here and are stopped below.
-        self.forget_cancellations_for_plan(plan_id);
         let cancelled_pending: Vec<TransferId> = self
             .pending
             .iter()
@@ -580,9 +710,6 @@ impl TransferManager {
             // while the plan still has jobs to run.
             self.idle_sessions.remove(&plan_id);
             self.plan_facts.remove(&plan_id);
-            // An idle plan can no longer be enqueued, so a tombstone recorded
-            // for one of its finished jobs can never be consumed.
-            self.forget_cancellations_for_plan(plan_id);
         }
     }
 
@@ -827,6 +954,66 @@ impl TransferManager {
     }
 }
 
+async fn emit_download_preparation_failed(
+    event_tx: &flume::Sender<AppEvent>,
+    plan_id: TransferPlanId,
+) {
+    if let Err(error) = event_tx
+        .send_async(AppEvent::TransferPlanFailed {
+            plan_id,
+            error: UserFacingError::new(
+                ErrorCode::ChannelClosed,
+                "Download Preparation Failed",
+                "The connected session is no longer available. Reconnect and try again.",
+            )
+            .with_retryable(true),
+        })
+        .await
+    {
+        warn!(
+            error = %error,
+            plan_id = plan_id.0,
+            "download preparation failure event dropped"
+        );
+    }
+}
+
+pub(crate) fn transfer_handoff_error(detail: &'static str) -> UserFacingError {
+    UserFacingError::new(ErrorCode::ChannelClosed, "Transfer Couldn’t Start", detail)
+}
+
+async fn emit_plan_cancelled(event_tx: &flume::Sender<AppEvent>, plan_id: TransferPlanId) {
+    if let Err(error) = event_tx
+        .send_async(AppEvent::TransferPlanCancelled { plan_id })
+        .await
+    {
+        warn!(
+            error = %error,
+            plan_id = plan_id.0,
+            "plan cancellation event dropped"
+        );
+    }
+}
+
+pub(crate) async fn fail_planned_jobs(
+    event_tx: &flume::Sender<AppEvent>,
+    jobs: Vec<TransferJob>,
+    error: UserFacingError,
+) {
+    for job in jobs {
+        if let Err(send_error) = event_tx
+            .send_async(AppEvent::TransferFailed(TransferFailure {
+                transfer_id: job.id,
+                error: error.clone(),
+            }))
+            .await
+        {
+            warn!(error = %send_error, "transfer handoff failure event dropped");
+            return;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -840,6 +1027,48 @@ mod tests {
         TransferState,
     };
     use macsftp_test_support::SshTestServer;
+
+    struct NoopSessionSource;
+
+    impl TransferSessionSource for NoopSessionSource {
+        fn session_request_tx(
+            &self,
+            _tab_id: TabId,
+            _session_epoch: u64,
+        ) -> Option<flume::Sender<RemoteSessionRequest>> {
+            None
+        }
+    }
+
+    impl TransferManager {
+        fn new_for_test(
+            event_tx: flume::Sender<AppEvent>,
+            next_conflict_id: Arc<AtomicU64>,
+            connection_manager: Arc<ConnectionManager>,
+        ) -> Self {
+            Self::new(
+                event_tx,
+                next_conflict_id,
+                connection_manager,
+                Arc::new(NoopSessionSource),
+            )
+        }
+
+        async fn enqueue_for_test(
+            &mut self,
+            connection: Arc<SharedConnection>,
+            plan_id: TransferPlanId,
+            jobs: Vec<TransferJob>,
+            record_root: bool,
+        ) {
+            self.enqueue(connection, plan_id, jobs, record_root, &HashSet::new())
+                .await;
+        }
+
+        async fn handle_test_request(&mut self, request: TransferManagerRequest) {
+            self.handle_request(request, None).await;
+        }
+    }
 
     async fn connect_test_server(server: &SshTestServer) -> Arc<SharedConnection> {
         let (event_tx, _event_rx) = flume::bounded(64);
@@ -911,14 +1140,14 @@ mod tests {
         let (event_tx, _event_rx) = flume::bounded(64);
         let next_conflict_id = Arc::new(AtomicU64::new(1));
         let cm = Arc::new(ConnectionManager::new());
-        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
+        let mut manager = TransferManager::new_for_test(event_tx, next_conflict_id, cm);
 
         let plan_1 = TransferPlanId(1);
         let plan_2 = TransferPlanId(2);
 
         // Plans are enqueued as a whole, root job first.
         manager
-            .enqueue(
+            .enqueue_for_test(
                 connection.clone(),
                 plan_1,
                 (1..=4)
@@ -928,7 +1157,7 @@ mod tests {
             )
             .await;
         manager
-            .enqueue(
+            .enqueue_for_test(
                 connection.clone(),
                 plan_2,
                 vec![dummy_job(5, TransferDirection::Upload)],
@@ -987,13 +1216,15 @@ mod tests {
         let (event_tx, _event_rx) = flume::bounded(64);
         let next_conflict_id = Arc::new(AtomicU64::new(1));
         let cm = Arc::new(ConnectionManager::new());
-        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
+        let mut manager = TransferManager::new_for_test(event_tx, next_conflict_id, cm);
 
         let plan_id = TransferPlanId(9);
         let jobs: Vec<TransferJob> = (1..=4)
             .map(|id| dummy_job(id, TransferDirection::Download))
             .collect();
-        manager.enqueue(connection, plan_id, jobs, true).await;
+        manager
+            .enqueue_for_test(connection, plan_id, jobs, true)
+            .await;
 
         // A folder plan's first job removes the destination tree; it must run
         // alone before any child starts.
@@ -1026,7 +1257,7 @@ mod tests {
         let (event_tx, _event_rx) = flume::bounded(1);
         let next_conflict_id = Arc::new(AtomicU64::new(1));
         let cm = Arc::new(ConnectionManager::new());
-        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
+        let mut manager = TransferManager::new_for_test(event_tx, next_conflict_id, cm);
         let plan_id = TransferPlanId(4);
         manager.plan_root_jobs.insert(plan_id, TransferId(1));
 
@@ -1054,14 +1285,14 @@ mod tests {
         let (event_tx, _event_rx) = flume::bounded(64);
         let next_conflict_id = Arc::new(AtomicU64::new(1));
         let cm = Arc::new(ConnectionManager::new());
-        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
+        let mut manager = TransferManager::new_for_test(event_tx, next_conflict_id, cm);
 
         let plan_1 = TransferPlanId(1);
         let plan_2 = TransferPlanId(2);
 
         for i in 1..=5 {
             manager
-                .enqueue(
+                .enqueue_for_test(
                     connection.clone(),
                     plan_1,
                     vec![dummy_job(i, TransferDirection::Upload)],
@@ -1080,7 +1311,7 @@ mod tests {
 
         // Enqueue a job for Plan 2
         manager
-            .enqueue(
+            .enqueue_for_test(
                 connection.clone(),
                 plan_2,
                 vec![dummy_job(10, TransferDirection::Upload)],
@@ -1097,7 +1328,7 @@ mod tests {
         let (event_tx, _event_rx) = flume::bounded(64);
         let next_conflict_id = Arc::new(AtomicU64::new(1));
         let cm = Arc::new(ConnectionManager::new());
-        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
+        let mut manager = TransferManager::new_for_test(event_tx, next_conflict_id, cm);
 
         let plan_1 = TransferPlanId(1);
         manager
@@ -1166,7 +1397,7 @@ mod tests {
         let (event_tx, _event_rx) = flume::bounded(64);
         let next_conflict_id = Arc::new(AtomicU64::new(1));
         let cm = Arc::new(ConnectionManager::new());
-        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
+        let mut manager = TransferManager::new_for_test(event_tx, next_conflict_id, cm);
 
         let plan_1 = TransferPlanId(1);
         manager
@@ -1221,7 +1452,7 @@ mod tests {
         let (event_tx, _event_rx) = flume::bounded(64);
         let next_conflict_id = Arc::new(AtomicU64::new(1));
         let cm = Arc::new(ConnectionManager::new());
-        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
+        let mut manager = TransferManager::new_for_test(event_tx, next_conflict_id, cm);
 
         let plan_id = TransferPlanId(99);
 
@@ -1288,11 +1519,11 @@ mod tests {
         let (event_tx, event_rx) = flume::bounded(64);
         let next_conflict_id = Arc::new(AtomicU64::new(1));
         let cm = Arc::new(ConnectionManager::new());
-        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
+        let mut manager = TransferManager::new_for_test(event_tx, next_conflict_id, cm);
 
         let plan_1 = TransferPlanId(1);
         manager
-            .enqueue(
+            .enqueue_for_test(
                 connection.clone(),
                 plan_1,
                 vec![dummy_job(100, TransferDirection::Upload)],
@@ -1303,7 +1534,7 @@ mod tests {
 
         // Cancel the queued transfer
         manager
-            .handle_request(TransferManagerRequest::Cancel {
+            .handle_test_request(TransferManagerRequest::Cancel {
                 transfer_id: TransferId(100),
                 plan_id: Some(TransferPlanId(1)),
             })
@@ -1324,8 +1555,21 @@ mod tests {
         );
     }
 
+    fn dummy_start_command() -> StartTransferCommand {
+        StartTransferCommand {
+            tab_id: TabId(1),
+            session_epoch: 1,
+            profile_id: macsftp_core::ProfileId(1),
+            direction: TransferDirection::Upload,
+            sources: vec![TransferEndpoint::Local(LocalPath::new("/tmp/source"))],
+            destination: TransferEndpoint::Remote(RemotePath::new("/remote/dest")),
+            conflict_policy: ConflictPolicy::Ask,
+            metadata_policy: MetadataPolicy::default(),
+        }
+    }
+
     #[tokio::test]
-    async fn cancelling_the_plan_root_before_enqueue_cancels_the_whole_plan() {
+    async fn cancelling_the_plan_root_during_planning_cancels_the_whole_plan() {
         let Some(server) = SshTestServer::spawn() else {
             eprintln!("skipping test: sshd not available");
             return;
@@ -1334,36 +1578,50 @@ mod tests {
         let (event_tx, event_rx) = flume::bounded(64);
         let next_conflict_id = Arc::new(AtomicU64::new(1));
         let cm = Arc::new(ConnectionManager::new());
-        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
+        let mut manager = TransferManager::new_for_test(event_tx, next_conflict_id, cm);
 
         let plan_id = TransferPlanId(1);
+        manager.planning_plans.insert(
+            plan_id,
+            PlanningPlan {
+                root_job_id: TransferId(100),
+                cancel: CancellationToken::new(),
+                cancelled_children: HashSet::new(),
+                retry_command: dummy_start_command(),
+            },
+        );
         manager
-            .handle_request(TransferManagerRequest::Cancel {
+            .handle_test_request(TransferManagerRequest::Cancel {
                 transfer_id: TransferId(100),
-                plan_id: Some(TransferPlanId(1)),
+                plan_id: Some(plan_id),
             })
             .await;
         assert!(
             event_rx.try_recv().is_err(),
-            "a pre-enqueue cancel must not emit an event on its own"
+            "cancelling while planning is still running waits for the planning finish"
         );
 
         manager
-            .enqueue(
-                connection,
+            .handle_planning_finished(PlanningFinished {
                 plan_id,
-                vec![
-                    dummy_job(100, TransferDirection::Upload),
-                    dummy_job(101, TransferDirection::Upload),
-                    dummy_job(102, TransferDirection::Upload),
-                ],
-                true,
-            )
+                outcome: PlanningOutcome::Ready {
+                    connection,
+                    jobs: vec![
+                        dummy_job(100, TransferDirection::Upload),
+                        dummy_job(101, TransferDirection::Upload),
+                        dummy_job(102, TransferDirection::Upload),
+                    ],
+                },
+            })
             .await;
 
         assert!(
             manager.pending.is_empty(),
             "cancelling the root must stop the whole plan, not just the root job"
+        );
+        assert!(
+            !manager.planning_plans.contains_key(&plan_id),
+            "planning state must be removed once planning finishes"
         );
         let mut events = Vec::new();
         while let Ok(event) = event_rx.try_recv() {
@@ -1377,7 +1635,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cancellation_before_enqueue_skips_job_when_enqueued() {
+    async fn cancelling_a_child_during_planning_skips_it_when_enqueued() {
         let Some(server) = SshTestServer::spawn() else {
             eprintln!("skipping test: sshd not available");
             return;
@@ -1386,37 +1644,43 @@ mod tests {
         let (event_tx, event_rx) = flume::bounded(64);
         let next_conflict_id = Arc::new(AtomicU64::new(1));
         let cm = Arc::new(ConnectionManager::new());
-        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
+        let mut manager = TransferManager::new_for_test(event_tx, next_conflict_id, cm);
 
         let plan_1 = TransferPlanId(1);
+        manager.planning_plans.insert(
+            plan_1,
+            PlanningPlan {
+                root_job_id: TransferId(100),
+                cancel: CancellationToken::new(),
+                cancelled_children: HashSet::new(),
+                retry_command: dummy_start_command(),
+            },
+        );
 
-        // Cancel a child (101) while its plan is still being planned: child
-        // rows are published before the plan is handed to the manager, so the
-        // cancel reaches the manager first.
+        // Cancel a child (101) while its plan is still being planned.
         manager
-            .handle_request(TransferManagerRequest::Cancel {
+            .handle_test_request(TransferManagerRequest::Cancel {
                 transfer_id: TransferId(101),
-                plan_id: Some(TransferPlanId(1)),
+                plan_id: Some(plan_1),
             })
             .await;
 
-        // The manager does not own the job yet, so it must not claim an
-        // outcome before the job reaches the queue.
         assert!(
             event_rx.try_recv().is_err(),
-            "a pre-enqueue cancel must not emit an event on its own"
+            "a planning-phase child cancel must not emit an event before enqueue"
         );
 
         manager
-            .enqueue(
-                connection,
-                plan_1,
-                vec![
-                    dummy_job(100, TransferDirection::Upload),
-                    dummy_job(101, TransferDirection::Upload),
-                ],
-                true,
-            )
+            .handle_planning_finished(PlanningFinished {
+                plan_id: plan_1,
+                outcome: PlanningOutcome::Ready {
+                    connection,
+                    jobs: vec![
+                        dummy_job(100, TransferDirection::Upload),
+                        dummy_job(101, TransferDirection::Upload),
+                    ],
+                },
+            })
             .await;
 
         // Only the cancelled child is skipped; the root still runs.
@@ -1435,94 +1699,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pre_enqueue_cancellations_are_bounded() {
-        let (event_tx, _event_rx) = flume::bounded(64);
-        let next_conflict_id = Arc::new(AtomicU64::new(1));
-        let cm = Arc::new(ConnectionManager::new());
-        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
-
-        // A plan that never reaches the manager can record one tombstone per
-        // published child; the map must not grow without bound.
-        for id in 0..(MAX_PENDING_CANCELS as u64 + 50) {
-            manager
-                .handle_request(TransferManagerRequest::Cancel {
-                    transfer_id: TransferId(id),
-                    plan_id: Some(TransferPlanId(1)),
-                })
-                .await;
-        }
-
-        assert_eq!(manager.cancelled_before_enqueue.len(), MAX_PENDING_CANCELS);
-        assert_eq!(manager.pending_cancel_order.len(), MAX_PENDING_CANCELS);
-        assert!(
-            !manager
-                .cancelled_before_enqueue
-                .contains_key(&TransferId(0)),
-            "the oldest record is the one dropped"
-        );
-        assert!(
-            manager
-                .cancelled_before_enqueue
-                .contains_key(&TransferId(MAX_PENDING_CANCELS as u64 + 49)),
-            "the newest record must survive"
-        );
-    }
-
-    #[tokio::test]
-    async fn forget_plan_drops_pre_enqueue_cancellations_of_that_plan() {
+    async fn failed_planning_drops_child_cancellations_and_records_retry() {
         let (event_tx, event_rx) = flume::bounded(64);
         let next_conflict_id = Arc::new(AtomicU64::new(1));
         let cm = Arc::new(ConnectionManager::new());
-        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
+        let mut manager = TransferManager::new_for_test(event_tx, next_conflict_id, cm);
 
-        let abandoned = TransferPlanId(1);
-        let other = TransferPlanId(2);
+        let plan_id = TransferPlanId(1);
+        manager.planning_plans.insert(
+            plan_id,
+            PlanningPlan {
+                root_job_id: TransferId(100),
+                cancel: CancellationToken::new(),
+                cancelled_children: HashSet::from([TransferId(101)]),
+                retry_command: dummy_start_command(),
+            },
+        );
 
-        // Two child rows cancelled while their plans were still planning: the
-        // manager sees neither plan yet, so both records are tombstones.
         manager
-            .handle_request(TransferManagerRequest::Cancel {
-                transfer_id: TransferId(100),
-                plan_id: Some(abandoned),
+            .handle_planning_finished(PlanningFinished {
+                plan_id,
+                outcome: PlanningOutcome::Failed,
             })
             .await;
-        manager
-            .handle_request(TransferManagerRequest::Cancel {
-                transfer_id: TransferId(101),
-                plan_id: Some(other),
-            })
-            .await;
-        assert!(
-            manager
-                .cancelled_before_enqueue
-                .contains_key(&TransferId(100))
-        );
-        assert!(
-            manager
-                .cancelled_before_enqueue
-                .contains_key(&TransferId(101))
-        );
-
-        // Plan 1 fails to plan and is never handed over; plan 2 is unrelated.
-        manager
-            .handle_request(TransferManagerRequest::ForgetPlan { plan_id: abandoned })
-            .await;
 
         assert!(
-            !manager
-                .cancelled_before_enqueue
-                .contains_key(&TransferId(100)),
-            "a plan that will never be enqueued must not keep its tombstones"
+            !manager.planning_plans.contains_key(&plan_id),
+            "failed planning must drop per-plan cancellation records"
         );
         assert!(
-            manager
-                .cancelled_before_enqueue
-                .contains_key(&TransferId(101)),
-            "another plan's tombstones must not be dropped"
+            manager.planning_retries.contains_key(&TransferId(100)),
+            "failed planning must retain the command for retry"
         );
         assert!(
             event_rx.try_recv().is_err(),
-            "reclaiming tombstones must not emit an event"
+            "planning failure bookkeeping must not emit spurious events"
         );
     }
 
@@ -1536,11 +1747,11 @@ mod tests {
         let (event_tx, event_rx) = flume::bounded(64);
         let next_conflict_id = Arc::new(AtomicU64::new(1));
         let cm = Arc::new(ConnectionManager::new());
-        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
+        let mut manager = TransferManager::new_for_test(event_tx, next_conflict_id, cm);
 
         let plan_id = TransferPlanId(7);
         manager
-            .enqueue(
+            .enqueue_for_test(
                 connection,
                 plan_id,
                 vec![
@@ -1553,9 +1764,7 @@ mod tests {
             .await;
         assert_eq!(manager.pending.len(), 3);
 
-        manager
-            .handle_request(TransferManagerRequest::CancelPlan { plan_id })
-            .await;
+        manager.cancel_plan(plan_id).await;
 
         assert!(manager.pending.is_empty(), "the whole plan must stop");
         assert!(
@@ -1578,14 +1787,10 @@ mod tests {
         let (event_tx, event_rx) = flume::bounded(64);
         let next_conflict_id = Arc::new(AtomicU64::new(1));
         let cm = Arc::new(ConnectionManager::new());
-        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
+        let mut manager = TransferManager::new_for_test(event_tx, next_conflict_id, cm);
 
-        // A transfer the manager no longer tracks is either still in planning
-        // or already finished. A cancel that loses the race with completion
-        // must not turn a finished transfer into `Skipped`; only a job that
-        // actually reaches the queue reports the skip.
         manager
-            .handle_request(TransferManagerRequest::Cancel {
+            .handle_test_request(TransferManagerRequest::Cancel {
                 transfer_id: TransferId(100),
                 plan_id: Some(TransferPlanId(1)),
             })
@@ -1595,17 +1800,12 @@ mod tests {
             event_rx.try_recv().is_err(),
             "cancel of an untracked transfer must not emit TransferSkipped"
         );
-        assert!(
-            manager
-                .cancelled_before_enqueue
-                .contains_key(&TransferId(100))
-        );
         assert!(manager.pending.is_empty());
         assert!(manager.running.is_empty());
     }
 
     #[tokio::test]
-    async fn retry_clears_a_cancel_recorded_before_enqueue() {
+    async fn retry_enqueues_previously_failed_route() {
         let Some(server) = SshTestServer::spawn() else {
             eprintln!("skipping test: sshd not available");
             return;
@@ -1614,7 +1814,7 @@ mod tests {
         let (event_tx, event_rx) = flume::bounded(64);
         let next_conflict_id = Arc::new(AtomicU64::new(1));
         let cm = Arc::new(ConnectionManager::new());
-        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
+        let mut manager = TransferManager::new_for_test(event_tx, next_conflict_id, cm);
 
         let plan_id = TransferPlanId(1);
         manager.retry_routes.insert(
@@ -1632,28 +1832,20 @@ mod tests {
             },
         );
 
-        // A cancel loses the race with completion and lands in the
-        // pre-enqueue record; the retry the user clicks afterwards must still
-        // run instead of being skipped by that stale cancel.
         manager
-            .handle_request(TransferManagerRequest::Cancel {
+            .handle_test_request(TransferManagerRequest::Cancel {
                 transfer_id: TransferId(100),
                 plan_id: Some(TransferPlanId(1)),
             })
             .await;
         manager
-            .handle_request(TransferManagerRequest::Retry {
+            .handle_test_request(TransferManagerRequest::Retry {
                 transfer_id: TransferId(100),
             })
             .await;
 
         assert_eq!(manager.pending.len(), 1, "retry must enqueue the job");
         assert_eq!(manager.pending[0].job.id, TransferId(100));
-        assert!(
-            !manager
-                .cancelled_before_enqueue
-                .contains_key(&TransferId(100))
-        );
         assert!(
             event_rx.try_recv().is_err(),
             "a retried transfer must not be reported as skipped"
@@ -1670,7 +1862,7 @@ mod tests {
         let (event_tx, _event_rx) = flume::bounded(64);
         let next_conflict_id = Arc::new(AtomicU64::new(1));
         let cm = Arc::new(ConnectionManager::new());
-        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
+        let mut manager = TransferManager::new_for_test(event_tx, next_conflict_id, cm);
 
         let upload = open_transfer_session(&connection.handle, TransferDirection::Upload)
             .await
@@ -1729,11 +1921,11 @@ mod tests {
         let (event_tx, _event_rx) = flume::bounded(64);
         let next_conflict_id = Arc::new(AtomicU64::new(1));
         let cm = Arc::new(ConnectionManager::new());
-        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
+        let mut manager = TransferManager::new_for_test(event_tx, next_conflict_id, cm);
 
         let plan_id = TransferPlanId(1);
         manager
-            .enqueue(
+            .enqueue_for_test(
                 connection.clone(),
                 plan_id,
                 vec![dummy_job(1, TransferDirection::Upload)],
@@ -1770,14 +1962,14 @@ mod tests {
         let (event_tx, _event_rx) = flume::bounded(64);
         let next_conflict_id = Arc::new(AtomicU64::new(1));
         let cm = Arc::new(ConnectionManager::new());
-        let mut manager = TransferManager::new(event_tx, next_conflict_id, cm);
+        let mut manager = TransferManager::new_for_test(event_tx, next_conflict_id, cm);
 
         let plan_download = TransferPlanId(10);
         let jobs: Vec<TransferJob> = (1..=3000)
             .map(|id| dummy_job(id, TransferDirection::Download))
             .collect();
         manager
-            .enqueue(connection.clone(), plan_download, jobs, true)
+            .enqueue_for_test(connection.clone(), plan_download, jobs, true)
             .await;
 
         assert_eq!(manager.pending.len(), 3000);
@@ -1836,7 +2028,7 @@ mod tests {
             .map(|id| dummy_job(id, TransferDirection::Upload))
             .collect();
         manager
-            .enqueue(connection.clone(), plan_upload, upload_jobs, true)
+            .enqueue_for_test(connection.clone(), plan_upload, upload_jobs, true)
             .await;
 
         // Plan 2 has 0 running jobs and is prioritized by Phase 1

@@ -1,15 +1,19 @@
+use std::ops::{Deref, DerefMut};
+
 use gpui_kit::base::input::InputEvent;
 use gpui_kit::{App, Context, KeyDownEvent, SharedString, Window};
 use macsftp_core::{
     AuthCredential, AuthMethod, AuthMethodKind, ConnectionProfile, ConnectionSettings, ProfileId,
-    ResolvedConnectionRoute, is_bidi_or_control,
+    ResolvedConnectionRoute,
 };
 use macsftp_storage::ProfileMutationError;
-use macsftp_ui::{InputKeyResult, InputState, PlainInput, SecretInputState};
+use macsftp_ui::{InputKeyResult, InputState, PlainInput};
 use tracing::warn;
 
 use crate::resources::ActiveResources;
-use crate::workspace::helpers::expand_home;
+use crate::workspace::connection_fields::{
+    ConnectionFieldKind, ConnectionFields, step_field_focus,
+};
 use crate::workspace::profiles::profile_matches_filter;
 
 /// One field of the connect form, in Tab-cycle order.
@@ -26,16 +30,23 @@ pub(crate) enum ConnectField {
 }
 
 impl ConnectField {
-    pub(crate) fn placeholder(self) -> &'static str {
+    pub(crate) const fn as_connection_field(self) -> Option<ConnectionFieldKind> {
         match self {
-            Self::Host => "example.com",
-            Self::Port => "22",
-            Self::Username => "user",
-            Self::Password => "",
-            Self::KeyPath => "~/.ssh/id_ed25519",
-            Self::Passphrase => "",
-            Self::AgentSocket => "SSH_AUTH_SOCK (optional)",
-            Self::ProfileFilter => "Filter saved connections…",
+            Self::Host => Some(ConnectionFieldKind::Host),
+            Self::Port => Some(ConnectionFieldKind::Port),
+            Self::Username => Some(ConnectionFieldKind::Username),
+            Self::Password => Some(ConnectionFieldKind::Password),
+            Self::KeyPath => Some(ConnectionFieldKind::KeyPath),
+            Self::Passphrase => Some(ConnectionFieldKind::Passphrase),
+            Self::AgentSocket => Some(ConnectionFieldKind::AgentSocket),
+            Self::ProfileFilter => None,
+        }
+    }
+
+    pub(crate) fn placeholder(self) -> &'static str {
+        match self.as_connection_field() {
+            Some(kind) => kind.placeholder(),
+            None => "Filter saved connections…",
         }
     }
 }
@@ -45,14 +56,7 @@ impl ConnectField {
 /// `ConnectionSettings` and drops the form.
 pub(crate) struct ConnectForm {
     pub(crate) inputs: std::collections::HashMap<ConnectField, PlainInput>,
-    pub(crate) host: InputState,
-    pub(crate) port: InputState,
-    pub(crate) username: InputState,
-    pub(crate) auth_method: AuthMethodKind,
-    pub(crate) password: SecretInputState,
-    pub(crate) key_path: InputState,
-    pub(crate) passphrase: SecretInputState,
-    pub(crate) agent_socket: InputState,
+    pub(crate) fields: ConnectionFields,
     pub(crate) route: ResolvedConnectionRoute,
     pub(crate) focused_field: ConnectField,
     pub(crate) error: Option<SharedString>,
@@ -70,18 +74,25 @@ pub(crate) struct ConnectForm {
     pub(crate) show_passphrase: bool,
 }
 
+impl Deref for ConnectForm {
+    type Target = ConnectionFields;
+
+    fn deref(&self) -> &Self::Target {
+        &self.fields
+    }
+}
+
+impl DerefMut for ConnectForm {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.fields
+    }
+}
+
 impl ConnectForm {
     pub(crate) fn empty() -> Self {
         Self {
             inputs: std::collections::HashMap::new(),
-            host: InputState::new(),
-            port: InputState::with_value("22"),
-            username: InputState::new(),
-            auth_method: AuthMethodKind::Password,
-            password: SecretInputState::new(),
-            key_path: InputState::new(),
-            passphrase: SecretInputState::new(),
-            agent_socket: InputState::new(),
+            fields: ConnectionFields::empty(),
             route: ResolvedConnectionRoute::Direct,
             focused_field: ConnectField::Host,
             error: None,
@@ -105,26 +116,8 @@ impl ConnectForm {
 
     pub(crate) fn prefilled(settings: &ConnectionSettings) -> Self {
         let mut form = Self::empty();
-        form.host = InputState::with_value(settings.host.clone());
-        form.port = InputState::with_value(settings.port.to_string());
-        form.username = InputState::with_value(settings.username.clone());
+        form.fields.prefill_from_settings(settings);
         form.route = settings.route.clone();
-        match &settings.auth {
-            AuthCredential::PrivateKey { key_path, .. } => {
-                form.auth_method = AuthMethodKind::PrivateKey;
-                form.key_path = InputState::with_value(key_path.clone());
-            }
-            AuthCredential::KeyboardInteractive => {
-                form.auth_method = AuthMethodKind::KeyboardInteractive;
-            }
-            AuthCredential::SshAgent { socket_path } => {
-                form.auth_method = AuthMethodKind::SshAgent;
-                if let Some(socket_path) = socket_path {
-                    form.agent_socket = InputState::with_value(socket_path.clone());
-                }
-            }
-            AuthCredential::Password { .. } => {}
-        }
         // Secrets are deliberately not prefilled.
         form
     }
@@ -134,28 +127,8 @@ impl ConnectForm {
     /// back from the Keychain (architecture §11).
     pub(crate) fn from_profile(profile: &ConnectionProfile) -> Self {
         let mut form = Self::empty();
-        form.host = InputState::with_value(profile.host.clone());
-        form.port = InputState::with_value(profile.port.to_string());
-        form.username = InputState::with_value(profile.username.clone());
+        form.fields.prefill_from_profile(profile);
         form.source_profile_id = Some(profile.id);
-        match &profile.auth {
-            AuthMethod::Password { .. } => {
-                form.auth_method = AuthMethodKind::Password;
-            }
-            AuthMethod::PrivateKey { key_path, .. } => {
-                form.auth_method = AuthMethodKind::PrivateKey;
-                form.key_path = InputState::with_value(key_path.as_str().to_string());
-            }
-            AuthMethod::KeyboardInteractive => {
-                form.auth_method = AuthMethodKind::KeyboardInteractive;
-            }
-            AuthMethod::SshAgent { socket_path } => {
-                form.auth_method = AuthMethodKind::SshAgent;
-                if let Some(socket_path) = socket_path {
-                    form.agent_socket = InputState::with_value(socket_path.as_str().to_string());
-                }
-            }
-        }
         form
     }
 
@@ -189,28 +162,14 @@ impl ConnectForm {
     }
 
     pub(crate) fn field_state_mut(&mut self, field: ConnectField) -> &mut InputState {
-        match field {
-            ConnectField::Host => &mut self.host,
-            ConnectField::Port => &mut self.port,
-            ConnectField::Username => &mut self.username,
-            ConnectField::Password => self.password.as_input_state_mut(),
-            ConnectField::KeyPath => &mut self.key_path,
-            ConnectField::Passphrase => self.passphrase.as_input_state_mut(),
-            ConnectField::AgentSocket => &mut self.agent_socket,
-            ConnectField::ProfileFilter => &mut self.profile_picker_filter,
+        match field.as_connection_field() {
+            Some(kind) => self.fields.field_state_mut(kind),
+            None => &mut self.profile_picker_filter,
         }
     }
 
     pub(crate) fn cycle_focus(&mut self, backwards: bool) {
-        let order = self.field_order();
-        let current_index = order
-            .iter()
-            .position(|field| *field == self.focused_field)
-            .unwrap_or(0);
-        let field_count = order.len() as isize;
-        let offset: isize = if backwards { -1 } else { 1 };
-        let next_index = (current_index as isize + offset).rem_euclid(field_count) as usize;
-        self.focused_field = order[next_index];
+        self.focused_field = step_field_focus(self.field_order(), self.focused_field, backwards);
     }
 
     pub(crate) fn set_auth_method(&mut self, method: AuthMethodKind) {
@@ -222,18 +181,11 @@ impl ConnectForm {
             // A secret for a method the user just left stops living in the
             // form, and a reveal never survives the switch: coming back to
             // Password has to ask before it shows the characters again.
+            self.fields.clear_inactive_secrets(method);
             match method {
-                AuthMethodKind::Password => {
-                    self.passphrase.clear();
-                    self.show_passphrase = false;
-                }
-                AuthMethodKind::PrivateKey => {
-                    self.password.clear();
-                    self.show_password = false;
-                }
+                AuthMethodKind::Password => self.show_passphrase = false,
+                AuthMethodKind::PrivateKey => self.show_password = false,
                 AuthMethodKind::KeyboardInteractive | AuthMethodKind::SshAgent => {
-                    self.password.clear();
-                    self.passphrase.clear();
                     self.show_password = false;
                     self.show_passphrase = false;
                 }
@@ -253,74 +205,13 @@ impl ConnectForm {
     /// Validate and build the settings. Returns `Err` with a short,
     /// user-facing message.
     pub(crate) fn build_settings(&self) -> Result<ConnectionSettings, SharedString> {
-        let host = self.host.value().trim().to_string();
-        if host.is_empty() {
-            return Err("Enter a server address.".into());
-        }
-        if host
-            .chars()
-            .any(|c| c.is_whitespace() || is_bidi_or_control(c))
-        {
-            return Err("Server address contains invalid characters.".into());
-        }
-        let port_text = self.port.value().trim();
-        let port: u16 = if port_text.is_empty() {
-            22
-        } else {
-            match port_text.parse() {
-                Ok(port) if port > 0 => port,
-                _ => return Err("Enter a whole number from 1 to 65535.".into()),
-            }
-        };
-        let username = self.username.value().trim().to_string();
-        if username.is_empty() {
-            return Err("Enter a username.".into());
-        }
-        if username
-            .chars()
-            .any(|c| c.is_whitespace() || is_bidi_or_control(c))
-        {
-            return Err("Username contains invalid characters.".into());
-        }
-
-        let auth = match self.auth_method {
-            AuthMethodKind::Password => AuthCredential::Password {
-                password: self.password.value().to_string(),
-            },
-            AuthMethodKind::PrivateKey => {
-                let key_path = expand_home(self.key_path.value().trim());
-                if key_path.is_empty() {
-                    return Err("Enter the full path to your key file.".into());
-                }
-                if key_path.chars().any(is_bidi_or_control) {
-                    return Err("Key path contains invalid characters.".into());
-                }
-                let passphrase = self.passphrase.value();
-                AuthCredential::PrivateKey {
-                    key_path,
-                    passphrase: if passphrase.is_empty() {
-                        None
-                    } else {
-                        Some(passphrase.to_string())
-                    },
-                }
-            }
-            AuthMethodKind::KeyboardInteractive => AuthCredential::KeyboardInteractive,
-            AuthMethodKind::SshAgent => AuthCredential::SshAgent {
-                socket_path: {
-                    let path = expand_home(self.agent_socket.value().trim());
-                    if path.chars().any(is_bidi_or_control) {
-                        return Err("Agent socket path contains invalid characters.".into());
-                    }
-                    (!path.is_empty()).then_some(path)
-                },
-            },
-        };
+        let endpoint = self.fields.validate_endpoint()?;
+        let auth = self.fields.build_auth_credential()?;
 
         Ok(ConnectionSettings {
-            host,
-            port,
-            username,
+            host: endpoint.host,
+            port: endpoint.port,
+            username: endpoint.username,
             auth,
             route: self.route.clone(),
         })
@@ -347,8 +238,7 @@ impl ConnectForm {
     /// and the tab must not claim the saved profile's identity.
     pub(crate) fn detach_from_profile(&mut self) {
         self.source_profile_id = None;
-        self.password.clear();
-        self.passphrase.clear();
+        self.fields.clear_secrets();
     }
 
     /// Detach from the selected profile and clear secret fields for manual

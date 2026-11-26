@@ -185,7 +185,11 @@ impl Workspace {
                     row.child(
                         div()
                             .flex_none()
-                            .min_w(px(56.0))
+                            .text_right()
+                            .px_1p5()
+                            .py_0p5()
+                            .rounded(px(4.0))
+                            .bg(theme.colors.element_active)
                             .text_role(&theme, theme.typography.shortcut)
                             .text_color(theme.colors.text_muted)
                             .child(binding),
@@ -231,10 +235,9 @@ impl Workspace {
                         .on_key_down(cx.listener(Self::handle_command_palette_key))
                         .flex()
                         .flex_col()
-                        .gap_2()
                         .w(px(520.0))
                         .max_h(max_palette_height)
-                        .p_3()
+                        .overflow_hidden()
                         .bg(theme.colors.elevated_surface)
                         .border_1()
                         .border_color(theme.colors.border)
@@ -242,54 +245,78 @@ impl Workspace {
                         .shadow(theme.shadow_popover())
                         .child(
                             div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    div()
-                                        .text_role(&theme, theme.typography.title)
-                                        .text_color(theme.colors.text)
-                                        .child("Find an Action"),
-                                )
-                                .child(
-                                    div()
-                                        .text_role(&theme, theme.typography.shortcut)
-                                        .text_color(theme.colors.text_muted)
-                                        .child("⌘⇧P"),
-                                ),
-                        )
-                        .child(self.render_text_input(
-                            TextInputTarget::CommandPalette,
-                            "command-palette-input",
-                            cx,
-                        ))
-                        .child({
-                            let list = div()
+                                .flex_none()
                                 .flex()
                                 .flex_col()
-                                .gap_1()
-                                .when(has_results, |list| list.children(rows))
-                                .when(!has_results, |list| {
-                                    list.child(
-                                        div()
-                                            .px_2()
-                                            .py_2()
-                                            .text_role(&theme, theme.typography.body)
-                                            .text_color(theme.colors.text_muted)
-                                            .child("No matching actions"),
-                                    )
-                                });
-                            macsftp_ui::scroll_area(
-                                "command-palette-results",
-                                list,
-                                self.palette_scroll(),
-                                self.palette_scrollbar(),
-                                window,
-                                cx,
-                            )
-                        })
+                                .gap_2()
+                                .px_3()
+                                .pt_3()
+                                .pb_2()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(
+                                            div()
+                                                .text_role(&theme, theme.typography.title)
+                                                .text_color(theme.colors.text)
+                                                .child("Find an Action"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_role(&theme, theme.typography.shortcut)
+                                                .text_color(theme.colors.text_muted)
+                                                .child("⌘⇧P"),
+                                        ),
+                                )
+                                .child(self.render_text_input(
+                                    TextInputTarget::CommandPalette,
+                                    "command-palette-input",
+                                    cx,
+                                )),
+                        )
                         .child(
                             div()
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_hidden()
+                                .px_2()
+                                .pb_2()
+                                .child({
+                                    let list = div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_0p5()
+                                        .when(has_results, |list| list.children(rows))
+                                        .when(!has_results, |list| {
+                                            list.child(
+                                                div()
+                                                    .px_2()
+                                                    .py_2()
+                                                    .text_role(&theme, theme.typography.body)
+                                                    .text_color(theme.colors.text_muted)
+                                                    .child("No matching actions"),
+                                            )
+                                        });
+                                    macsftp_ui::scroll_area(
+                                        "command-palette-results",
+                                        list,
+                                        self.palette_scroll(),
+                                        self.palette_scrollbar(),
+                                        window,
+                                        cx,
+                                    )
+                                }),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .px_3()
+                                .py_2()
+                                .bg(theme.colors.surface)
+                                .border_t_1()
+                                .border_color(theme.colors.border)
                                 .text_role(&theme, theme.typography.secondary)
                                 .text_color(theme.colors.text_muted)
                                 .child("↑↓ to select · Enter to run · Esc to close"),
