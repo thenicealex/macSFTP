@@ -947,14 +947,7 @@ impl crate::workspace::Workspace {
 
     /// Surfaces that own keyboard input block type-to-filter / cmd-f.
     fn filter_input_blocked(&self) -> bool {
-        self.go_to_path.open
-            || self.connect_form_ui.form.is_some()
-            || self.modal_inputs.delete_confirm.is_some()
-            || self.modal_inputs.inline_edit.is_some()
-            || self.active_host_key_prompt().is_some()
-            || self.active_keyboard_interactive_prompt().is_some()
-            || self.active_transfer_conflict_prompt().is_some()
-            || self.modal_inputs.about_open
+        self.any_overlay_blocking(crate::workspace::modals::OverlayKind::blocks_pane_input)
             || self.surface != WorkspaceSurface::Files
     }
 

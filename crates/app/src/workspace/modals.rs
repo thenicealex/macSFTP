@@ -25,7 +25,136 @@ use crate::workspace::view_state::KeyboardInteractiveUi;
 use crate::workspace::*;
 use macsftp_core::HistoryOp;
 
+/// Every modal, sheet, surface, or popover that can sit above the file panes
+/// and compete for Escape, surface switching, or pane keyboard input.
+///
+/// `ALL` defines Escape / z-order precedence (highest first). All cross-overlay
+/// policies match exhaustively so adding a new overlay forces an explicit
+/// classification for blocking and dismissal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OverlayKind {
+    CommandPalette,
+    TabSwitcher,
+    GoToPath,
+    About,
+    ProfileDeleteConfirm,
+    SettingsSurface,
+    DeleteConfirm,
+    InlineEdit,
+    LargeEditConfirm,
+    ConnectProfilePicker,
+    ConnectForm,
+    KeyboardInteractive,
+    HostKeyTrust,
+    TransferConflict,
+}
+
+impl OverlayKind {
+    const ALL: [Self; 14] = [
+        Self::CommandPalette,
+        Self::TabSwitcher,
+        Self::GoToPath,
+        Self::About,
+        Self::ProfileDeleteConfirm,
+        Self::SettingsSurface,
+        Self::DeleteConfirm,
+        Self::InlineEdit,
+        Self::LargeEditConfirm,
+        Self::ConnectProfilePicker,
+        Self::ConnectForm,
+        Self::KeyboardInteractive,
+        Self::HostKeyTrust,
+        Self::TransferConflict,
+    ];
+
+    pub(crate) const fn blocks_surface_switch(self) -> bool {
+        match self {
+            Self::ConnectProfilePicker
+            | Self::ConnectForm
+            | Self::KeyboardInteractive
+            | Self::HostKeyTrust
+            | Self::TransferConflict
+            | Self::DeleteConfirm
+            | Self::InlineEdit
+            | Self::LargeEditConfirm
+            | Self::GoToPath
+            | Self::ProfileDeleteConfirm => true,
+            Self::CommandPalette | Self::TabSwitcher | Self::About | Self::SettingsSurface => false,
+        }
+    }
+
+    pub(crate) const fn blocks_pane_input(self) -> bool {
+        match self {
+            Self::CommandPalette
+            | Self::TabSwitcher
+            | Self::GoToPath
+            | Self::About
+            | Self::ProfileDeleteConfirm
+            | Self::SettingsSurface
+            | Self::DeleteConfirm
+            | Self::InlineEdit
+            | Self::LargeEditConfirm
+            | Self::ConnectProfilePicker
+            | Self::ConnectForm
+            | Self::KeyboardInteractive
+            | Self::HostKeyTrust
+            | Self::TransferConflict => true,
+        }
+    }
+
+    pub(crate) const fn blocks_go_to_path(self) -> bool {
+        match self {
+            Self::ConnectProfilePicker
+            | Self::ConnectForm
+            | Self::KeyboardInteractive
+            | Self::HostKeyTrust
+            | Self::TransferConflict
+            | Self::DeleteConfirm
+            | Self::InlineEdit
+            | Self::LargeEditConfirm
+            | Self::ProfileDeleteConfirm
+            | Self::SettingsSurface => true,
+            Self::CommandPalette | Self::TabSwitcher | Self::GoToPath | Self::About => false,
+        }
+    }
+}
+
 impl crate::workspace::Workspace {
+    pub(crate) fn is_overlay_active(&self, kind: OverlayKind) -> bool {
+        match kind {
+            OverlayKind::CommandPalette => self.palette.open,
+            OverlayKind::TabSwitcher => self.tab_switcher.open,
+            OverlayKind::GoToPath => self.go_to_path.open,
+            OverlayKind::About => self.modal_inputs.about_open,
+            OverlayKind::ProfileDeleteConfirm => self.settings.profile_delete_confirm.is_some(),
+            OverlayKind::SettingsSurface => self.surface == WorkspaceSurface::Settings,
+            OverlayKind::DeleteConfirm => self.modal_inputs.delete_confirm.is_some(),
+            OverlayKind::InlineEdit => self.modal_inputs.inline_edit.is_some(),
+            OverlayKind::LargeEditConfirm => self.modal_inputs.large_edit_confirm.is_some(),
+            OverlayKind::ConnectProfilePicker => self
+                .connect_form_ui
+                .form
+                .as_ref()
+                .is_some_and(|form| form.profile_picker_open),
+            OverlayKind::ConnectForm => self.connect_form_ui.form.is_some(),
+            OverlayKind::KeyboardInteractive => self.active_keyboard_interactive_prompt().is_some(),
+            OverlayKind::HostKeyTrust => self.active_host_key_prompt().is_some(),
+            OverlayKind::TransferConflict => self.active_transfer_conflict_prompt().is_some(),
+        }
+    }
+
+    pub(crate) fn top_overlay(&self) -> Option<OverlayKind> {
+        OverlayKind::ALL
+            .into_iter()
+            .find(|&kind| self.is_overlay_active(kind))
+    }
+
+    pub(crate) fn any_overlay_blocking(&self, predicate: fn(OverlayKind) -> bool) -> bool {
+        OverlayKind::ALL
+            .into_iter()
+            .any(|kind| predicate(kind) && self.is_overlay_active(kind))
+    }
+
     pub(crate) fn drain_expired_modals(&mut self) -> bool {
         let expired = self.state.drain_expired_modals();
         for modal in &expired {
@@ -108,12 +237,7 @@ impl crate::workspace::Workspace {
     /// Whether replacing the workspace surface (Settings, About) is allowed.
     /// Any active modal owns input; switching under it would strand the modal.
     pub(crate) fn can_switch_surface(&self) -> bool {
-        self.connect_form_ui.form.is_none()
-            && self.active_host_key_prompt().is_none()
-            && self.active_keyboard_interactive_prompt().is_none()
-            && self.active_transfer_conflict_prompt().is_none()
-            && self.modal_inputs.delete_confirm.is_none()
-            && !self.go_to_path.open
+        !self.any_overlay_blocking(OverlayKind::blocks_surface_switch)
     }
     pub(crate) fn remove_modal(&mut self, request_id: TrustRequestId) {
         self.state
@@ -334,74 +458,56 @@ impl crate::workspace::Workspace {
         cx.notify();
     }
     pub(crate) fn cancel_active_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Command palette sits above other modals (phase 4 design §2.3).
-        if self.palette.open {
-            self.close_command_palette(window, cx);
+        let Some(top) = self.top_overlay() else {
             return;
-        }
-        // MRU tab switcher next (phase 4 design §4.3 — Esc cancels without switching).
-        if self.tab_switcher.open {
-            self.close_tab_switcher(window, cx);
-            return;
-        }
-        // Go to Path next so Esc dismisses the path field when palette is closed.
-        if self.go_to_path.open {
-            self.close_go_to_path(window, cx);
-            return;
-        }
-        if self.modal_inputs.about_open {
-            self.close_about(window, cx);
-            return;
-        }
-        // Profile-delete confirm sits above Settings / Connect so Esc dismisses
-        // the confirm first rather than leaving the parent surface.
-        if self.settings.profile_delete_confirm.is_some() {
-            self.cancel_delete_profile(window, cx);
-            return;
-        }
-        if self.surface == WorkspaceSurface::Settings {
-            self.leave_settings(window, cx);
-            return;
-        }
-        if self.modal_inputs.delete_confirm.is_some() {
-            self.cancel_delete_confirm(window, cx);
-            return;
-        }
-        if self.modal_inputs.inline_edit.is_some() {
-            self.cancel_inline_edit(cx);
-            self.focus_pane(self.focused_side, window, cx);
-            return;
-        }
-        // Connect profile picker sits above the form: Esc closes the picker
-        // first, then a second Esc dismisses Connect.
-        if let Some(form) = &mut self.connect_form_ui.form {
-            if form.profile_picker_open {
-                form.close_profile_picker();
-                cx.notify();
-                return;
+        };
+        match top {
+            OverlayKind::CommandPalette => self.close_command_palette(window, cx),
+            OverlayKind::TabSwitcher => self.close_tab_switcher(window, cx),
+            OverlayKind::GoToPath => self.close_go_to_path(window, cx),
+            OverlayKind::About => self.close_about(window, cx),
+            OverlayKind::ProfileDeleteConfirm => self.cancel_delete_profile(window, cx),
+            OverlayKind::SettingsSurface => self.leave_settings(window, cx),
+            OverlayKind::DeleteConfirm => self.cancel_delete_confirm(window, cx),
+            OverlayKind::InlineEdit => {
+                self.cancel_inline_edit(cx);
+                self.focus_pane(self.focused_side, window, cx);
             }
-            self.close_connect_form(window, cx);
-            return;
-        }
-        if let Some(prompt) = self.active_keyboard_interactive_prompt() {
-            let request_id = prompt.request_id;
-            self.cancel_keyboard_interactive(request_id, window, cx);
-        } else if let Some(prompt) = self.active_host_key_prompt() {
-            let request_id = prompt.request_id;
-            self.reject_host_key(request_id, window, cx);
-        } else if let Some(prompt) = self.active_transfer_conflict_prompt().cloned() {
-            self.resolve_transfer_conflict(&prompt, ConflictDecision::CancelJob, window, cx);
+            OverlayKind::LargeEditConfirm => self.cancel_large_edit(cx),
+            OverlayKind::ConnectProfilePicker => {
+                if let Some(form) = &mut self.connect_form_ui.form {
+                    form.close_profile_picker();
+                    cx.notify();
+                }
+            }
+            OverlayKind::ConnectForm => self.close_connect_form(window, cx),
+            OverlayKind::KeyboardInteractive => {
+                if let Some(prompt) = self.active_keyboard_interactive_prompt() {
+                    let request_id = prompt.request_id;
+                    self.cancel_keyboard_interactive(request_id, window, cx);
+                }
+            }
+            OverlayKind::HostKeyTrust => {
+                if let Some(prompt) = self.active_host_key_prompt() {
+                    let request_id = prompt.request_id;
+                    self.reject_host_key(request_id, window, cx);
+                }
+            }
+            OverlayKind::TransferConflict => {
+                if let Some(prompt) = self.active_transfer_conflict_prompt().cloned() {
+                    self.resolve_transfer_conflict(
+                        &prompt,
+                        ConflictDecision::CancelJob,
+                        window,
+                        cx,
+                    );
+                }
+            }
         }
     }
 
     pub(crate) fn open_go_to_path(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.connect_form_ui.form.is_some()
-            || self.active_host_key_prompt().is_some()
-            || self.active_keyboard_interactive_prompt().is_some()
-            || self.active_transfer_conflict_prompt().is_some()
-            || self.modal_inputs.delete_confirm.is_some()
-            || self.modal_inputs.inline_edit.is_some()
-        {
+        if self.any_overlay_blocking(OverlayKind::blocks_go_to_path) {
             return;
         }
         self.modal_inputs.about_open = false;
