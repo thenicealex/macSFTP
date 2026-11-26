@@ -14,6 +14,7 @@ ignore = [
     { id = "RUSTSEC-2026-0173", reason = "GPUI stacksafe transitive dependency; no direct macSFTP use" },
     { id = "RUSTSEC-2026-0192", reason = "GPUI SVG/font transitive dependency; no direct replacement is selectable from macSFTP" },
     { id = "RUSTSEC-2026-0206", reason = "GPUI SVG/font transitive dependency; remove when GPUI adopts harfrust" },
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained advisory (no patched 0.4.x release); used for local timestamp formatting without untrusted input parsing" },
 ]
 
 [licenses]
