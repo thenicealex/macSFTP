@@ -83,12 +83,16 @@ impl ConnectionFields {
         }
     }
 
+    fn prefill_endpoint(&mut self, host: &str, port: u16, username: &str) {
+        self.host = InputState::with_value(host.to_string());
+        self.port = InputState::with_value(port.to_string());
+        self.username = InputState::with_value(username.to_string());
+    }
+
     /// Prefill non-secret endpoint and auth fields from an active session's
     /// `ConnectionSettings`. Secrets are deliberately not prefilled.
     pub(crate) fn prefill_from_settings(&mut self, settings: &ConnectionSettings) {
-        self.host = InputState::with_value(settings.host.clone());
-        self.port = InputState::with_value(settings.port.to_string());
-        self.username = InputState::with_value(settings.username.clone());
+        self.prefill_endpoint(&settings.host, settings.port, &settings.username);
         match &settings.auth {
             AuthCredential::PrivateKey { key_path, .. } => {
                 self.auth_method = AuthMethodKind::PrivateKey;
@@ -111,9 +115,7 @@ impl ConnectionFields {
 
     /// Prefill non-secret endpoint and auth fields from a saved profile.
     pub(crate) fn prefill_from_profile(&mut self, profile: &ConnectionProfile) {
-        self.host = InputState::with_value(profile.host.clone());
-        self.port = InputState::with_value(profile.port.to_string());
-        self.username = InputState::with_value(profile.username.clone());
+        self.prefill_endpoint(&profile.host, profile.port, &profile.username);
         match &profile.auth {
             AuthMethod::Password { .. } => {
                 self.auth_method = AuthMethodKind::Password;
@@ -277,6 +279,9 @@ impl ConnectionFields {
 /// Step forward or backward through an ordered slice of focusable fields,
 /// wrapping around at the ends.
 pub(crate) fn step_field_focus<F: Copy + PartialEq>(order: &[F], current: F, backwards: bool) -> F {
+    if order.is_empty() {
+        return current;
+    }
     let current_index = order
         .iter()
         .position(|field| *field == current)
@@ -284,7 +289,7 @@ pub(crate) fn step_field_focus<F: Copy + PartialEq>(order: &[F], current: F, bac
     let field_count = order.len() as isize;
     let offset: isize = if backwards { -1 } else { 1 };
     let next_index = (current_index as isize + offset).rem_euclid(field_count) as usize;
-    order[next_index]
+    order.get(next_index).copied().unwrap_or(current)
 }
 
 #[cfg(test)]

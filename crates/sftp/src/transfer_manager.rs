@@ -377,17 +377,7 @@ impl TransferManager {
             }),
             TransferDirection::Download => tokio::spawn(async move {
                 let Some(request_tx) = request_tx else {
-                    let _ = event_tx
-                        .send_async(AppEvent::TransferPlanFailed {
-                            plan_id,
-                            error: UserFacingError::new(
-                                ErrorCode::ChannelClosed,
-                                "Download Preparation Failed",
-                                "The connected session is no longer available. Reconnect and try again.",
-                            )
-                            .with_retryable(true),
-                        })
-                        .await;
+                    emit_download_preparation_failed(&event_tx, plan_id).await;
                     return None;
                 };
                 let (responder, response) = oneshot::channel();
@@ -403,17 +393,7 @@ impl TransferManager {
                     .await
                     .is_err()
                 {
-                    let _ = event_tx
-                        .send_async(AppEvent::TransferPlanFailed {
-                            plan_id,
-                            error: UserFacingError::new(
-                                ErrorCode::ChannelClosed,
-                                "Download Preparation Failed",
-                                "The connected session is no longer available. Reconnect and try again.",
-                            )
-                            .with_retryable(true),
-                        })
-                        .await;
+                    emit_download_preparation_failed(&event_tx, plan_id).await;
                     return None;
                 }
                 response.await.ok().flatten()
@@ -974,12 +954,31 @@ impl TransferManager {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn transfer_handoff_error(detail: &'static str) -> UserFacingError {
-    UserFacingError::new(ErrorCode::ChannelClosed, "Transfer Couldn’t Start", detail)
+async fn emit_download_preparation_failed(
+    event_tx: &flume::Sender<AppEvent>,
+    plan_id: TransferPlanId,
+) {
+    if let Err(error) = event_tx
+        .send_async(AppEvent::TransferPlanFailed {
+            plan_id,
+            error: UserFacingError::new(
+                ErrorCode::ChannelClosed,
+                "Download Preparation Failed",
+                "The connected session is no longer available. Reconnect and try again.",
+            )
+            .with_retryable(true),
+        })
+        .await
+    {
+        warn!(
+            error = %error,
+            plan_id = plan_id.0,
+            "download preparation failure event dropped"
+        );
+    }
 }
-#[cfg(not(test))]
-fn transfer_handoff_error(detail: &'static str) -> UserFacingError {
+
+pub(crate) fn transfer_handoff_error(detail: &'static str) -> UserFacingError {
     UserFacingError::new(ErrorCode::ChannelClosed, "Transfer Couldn’t Start", detail)
 }
 
@@ -996,27 +995,7 @@ async fn emit_plan_cancelled(event_tx: &flume::Sender<AppEvent>, plan_id: Transf
     }
 }
 
-#[cfg(test)]
 pub(crate) async fn fail_planned_jobs(
-    event_tx: &flume::Sender<AppEvent>,
-    jobs: Vec<TransferJob>,
-    error: UserFacingError,
-) {
-    for job in jobs {
-        if let Err(send_error) = event_tx
-            .send_async(AppEvent::TransferFailed(TransferFailure {
-                transfer_id: job.id,
-                error: error.clone(),
-            }))
-            .await
-        {
-            warn!(error = %send_error, "transfer handoff failure event dropped");
-            return;
-        }
-    }
-}
-#[cfg(not(test))]
-async fn fail_planned_jobs(
     event_tx: &flume::Sender<AppEvent>,
     jobs: Vec<TransferJob>,
     error: UserFacingError,
