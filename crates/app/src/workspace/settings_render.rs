@@ -1,20 +1,20 @@
 use crate::resources::ActiveResources;
-use crate::workspace::profiles::{
-    profile_list_label, PassphrasePolicy, ProfileEditorField, ProfileRouteKind, SettingsSection,
-};
 use crate::workspace::TextInputTarget;
 use crate::workspace::Workspace;
+use crate::workspace::profiles::{
+    PassphrasePolicy, ProfileEditorField, ProfileRouteKind, SettingsSection, profile_list_label,
+};
 use gpui_kit::base::{Button, Toggle};
 use gpui_kit::{
-    div, prelude::*, px, rgb, App, ClickEvent, Context, IntoElement, ParentElement, Styled, Window,
-    WindowControlArea,
+    App, ClickEvent, Context, IntoElement, ParentElement, Styled, Window, WindowControlArea, div,
+    prelude::*, px, rgb,
 };
-use macsftp_core::{is_bidi_or_control, AuthMethodKind, ConnectionRoute};
+use macsftp_core::{AuthMethodKind, ConnectionRoute, is_bidi_or_control};
 use macsftp_storage::AppearancePreference;
 use macsftp_ui::{
-    empty_state, icon, icon_button, ordinary_text_field, plain_text_field, text_button, text_field,
-    text_tooltip, ActiveTheme, Appearance, IconName, InputState, TextFieldModel, TextRoleExt,
-    Theme,
+    ActiveTheme, Appearance, IconName, InputState, TextFieldModel, TextRoleExt, Theme, empty_state,
+    icon, icon_button, ordinary_text_field, plain_text_field, text_button, text_field,
+    text_tooltip,
 };
 
 impl crate::workspace::Workspace {
@@ -488,30 +488,32 @@ impl crate::workspace::Workspace {
             .child(settings_section_card(
                 "Default Editor",
                 "",
-                vec![div()
-                    .px_4()
-                    .py_3()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_role(&theme, theme.typography.body_medium)
-                            .text_color(theme.colors.text)
-                            .child("Application or command"),
-                    )
-                    .child(
-                        div()
-                            .id("settings-external-editor")
-                            .on_click(cx.listener(|workspace, _event, window, cx| {
-                                workspace.focus_external_editor(window, cx);
-                            }))
-                            .child(ordinary_text_field(
-                                "settings-external-editor-input",
-                                &self.settings.external_editor_input,
-                            )),
-                    )
-                    .into_any_element()],
+                vec![
+                    div()
+                        .px_4()
+                        .py_3()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_role(&theme, theme.typography.body_medium)
+                                .text_color(theme.colors.text)
+                                .child("Application or command"),
+                        )
+                        .child(
+                            div()
+                                .id("settings-external-editor")
+                                .on_click(cx.listener(|workspace, _event, window, cx| {
+                                    workspace.focus_external_editor(window, cx);
+                                }))
+                                .child(ordinary_text_field(
+                                    "settings-external-editor-input",
+                                    &self.settings.external_editor_input,
+                                )),
+                        )
+                        .into_any_element(),
+                ],
                 &theme,
             ))
             .child(
@@ -1424,44 +1426,46 @@ impl crate::workspace::Workspace {
         form = form.child(server_details_card);
 
         // Section 2: Authentication
-        let mut auth_elements = vec![labeled_row(
-            "Sign-In Method",
-            segmented_track(vec![
-                auth_toggle(
-                    "Password",
-                    AuthMethodKind::Password,
-                    "profile-auth-password",
-                    auth_method,
-                    cx,
-                )
-                .into_any_element(),
-                auth_toggle(
-                    "Key File",
-                    AuthMethodKind::PrivateKey,
-                    "profile-auth-private-key",
-                    auth_method,
-                    cx,
-                )
-                .into_any_element(),
-                auth_toggle(
-                    "Server Prompts",
-                    AuthMethodKind::KeyboardInteractive,
-                    "profile-auth-keyboard-interactive",
-                    auth_method,
-                    cx,
-                )
-                .into_any_element(),
-                auth_toggle(
-                    "SSH Agent",
-                    AuthMethodKind::SshAgent,
-                    "profile-auth-agent",
-                    auth_method,
-                    cx,
-                )
-                .into_any_element(),
-            ]),
-        )
-        .into_any_element()];
+        let mut auth_elements = vec![
+            labeled_row(
+                "Sign-In Method",
+                segmented_track(vec![
+                    auth_toggle(
+                        "Password",
+                        AuthMethodKind::Password,
+                        "profile-auth-password",
+                        auth_method,
+                        cx,
+                    )
+                    .into_any_element(),
+                    auth_toggle(
+                        "Key File",
+                        AuthMethodKind::PrivateKey,
+                        "profile-auth-private-key",
+                        auth_method,
+                        cx,
+                    )
+                    .into_any_element(),
+                    auth_toggle(
+                        "Server Prompts",
+                        AuthMethodKind::KeyboardInteractive,
+                        "profile-auth-keyboard-interactive",
+                        auth_method,
+                        cx,
+                    )
+                    .into_any_element(),
+                    auth_toggle(
+                        "SSH Agent",
+                        AuthMethodKind::SshAgent,
+                        "profile-auth-agent",
+                        auth_method,
+                        cx,
+                    )
+                    .into_any_element(),
+                ]),
+            )
+            .into_any_element(),
+        ];
 
         match auth_method {
             AuthMethodKind::Password => {
@@ -1567,36 +1571,38 @@ impl crate::workspace::Workspace {
 
         // Section 3: Connection Route
         let route_kind = editor.route_kind;
-        let mut route_elements = vec![labeled_row(
-            "Connection Method",
-            segmented_track(vec![
-                route_toggle(
-                    "Direct",
-                    ProfileRouteKind::Direct,
-                    "profile-route-direct",
-                    route_kind,
-                    cx,
-                )
-                .into_any_element(),
-                route_toggle(
-                    "Via Another Server",
-                    ProfileRouteKind::JumpHost,
-                    "profile-route-jump",
-                    route_kind,
-                    cx,
-                )
-                .into_any_element(),
-                route_toggle(
-                    "Run a Command",
-                    ProfileRouteKind::ProxyCommand,
-                    "profile-route-command",
-                    route_kind,
-                    cx,
-                )
-                .into_any_element(),
-            ]),
-        )
-        .into_any_element()];
+        let mut route_elements = vec![
+            labeled_row(
+                "Connection Method",
+                segmented_track(vec![
+                    route_toggle(
+                        "Direct",
+                        ProfileRouteKind::Direct,
+                        "profile-route-direct",
+                        route_kind,
+                        cx,
+                    )
+                    .into_any_element(),
+                    route_toggle(
+                        "Via Another Server",
+                        ProfileRouteKind::JumpHost,
+                        "profile-route-jump",
+                        route_kind,
+                        cx,
+                    )
+                    .into_any_element(),
+                    route_toggle(
+                        "Run a Command",
+                        ProfileRouteKind::ProxyCommand,
+                        "profile-route-command",
+                        route_kind,
+                        cx,
+                    )
+                    .into_any_element(),
+                ]),
+            )
+            .into_any_element(),
+        ];
 
         match route_kind {
             ProfileRouteKind::Direct => {}
