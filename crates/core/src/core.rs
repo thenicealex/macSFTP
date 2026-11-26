@@ -1574,6 +1574,83 @@ impl TransferStore {
         true
     }
 
+    /// Project the jobs that belong in the Transfer Drawer:
+    /// - single-file plans show their root job;
+    /// - multi-file plans show the root job while `Planning` / `Cancelled`
+    ///   (or `Failed` before children reach terminal states), and switch to
+    ///   child jobs once execution begins.
+    pub fn visible_jobs(&self) -> Vec<&TransferJob> {
+        let mut hidden_roots = Vec::with_capacity(self.plans.len());
+        let mut hidden_matchers = Vec::with_capacity(self.plans.len());
+
+        for (plan_idx, plan) in self.plans.iter().enumerate() {
+            let show_root = if plan.child_jobs.is_empty()
+                || matches!(plan.state, TransferPlanState::Planning)
+                || matches!(plan.state, TransferPlanState::Cancelled)
+            {
+                true
+            } else if matches!(plan.state, TransferPlanState::Failed { .. }) {
+                let children_are_terminal =
+                    if let Some(range) = self.child_jobs_slice_range(plan_idx) {
+                        self.jobs[range].iter().all(|job| {
+                            matches!(
+                                job.state,
+                                TransferState::Completed
+                                    | TransferState::Skipped
+                                    | TransferState::Failed { .. }
+                            )
+                        })
+                    } else {
+                        plan.child_jobs.iter().all(|child_id| {
+                            self.find_job(*child_id).is_some_and(|job| {
+                                matches!(
+                                    job.state,
+                                    TransferState::Completed
+                                        | TransferState::Skipped
+                                        | TransferState::Failed { .. }
+                                )
+                            })
+                        })
+                    };
+                !children_are_terminal
+            } else {
+                false
+            };
+
+            if show_root {
+                hidden_matchers.push(IdMatcher::new(&plan.child_jobs));
+            } else {
+                hidden_roots.push(plan.root_job_id);
+            }
+        }
+
+        self.jobs
+            .iter()
+            .filter(|job| {
+                !hidden_roots.contains(&job.id)
+                    && !hidden_matchers
+                        .iter()
+                        .any(|matcher| matcher.contains(job.id))
+            })
+            .collect()
+    }
+
+    pub fn cancellable_visible_job_ids(&self) -> Vec<TransferId> {
+        self.visible_jobs()
+            .into_iter()
+            .filter(|job| job.is_cancellable())
+            .map(|job| job.id)
+            .collect()
+    }
+
+    pub fn retryable_visible_job_ids(&self) -> Vec<TransferId> {
+        self.visible_jobs()
+            .into_iter()
+            .filter(|job| job.is_retryable())
+            .map(|job| job.id)
+            .collect()
+    }
+
     pub fn clear_terminal(&mut self) -> bool {
         let before = self.jobs.len();
         self.jobs.retain(|job| {
@@ -3336,6 +3413,28 @@ pub struct TransferJob {
     pub conflict_policy: ConflictPolicy,
     pub warnings: Vec<TransferWarning>,
     pub created_at: Timestamp,
+}
+
+impl TransferJob {
+    pub fn is_cancellable(&self) -> bool {
+        matches!(
+            self.state,
+            TransferState::Queued
+                | TransferState::Running { .. }
+                | TransferState::Planning
+                | TransferState::WaitingForConflictDecision { .. }
+        )
+    }
+
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self.state,
+            TransferState::Failed {
+                retryable: true,
+                ..
+            }
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1235,7 +1235,7 @@ impl crate::workspace::Workspace {
                     empty_state(
                         error.title.clone(),
                         vec![
-                            connect_button("retry-connect-remote", "Try Again"),
+                            connect_button("retry-connect-remote", "Try Again").primary(true),
                             edit_connection_button("edit-connection-failed"),
                         ],
                     )
