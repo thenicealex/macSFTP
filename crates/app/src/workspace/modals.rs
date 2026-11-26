@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use gpui_kit::base::Button;
 use gpui_kit::{
     Context, IntoElement, KeyDownEvent, ParentElement, SharedString, Styled, Window, div,
     prelude::*, px,
@@ -12,8 +13,8 @@ use macsftp_core::{
     TrustRequestId,
 };
 use macsftp_ui::{
-    ActiveTheme, InputKeyResult, InputState, TextFieldModel, TextRoleExt, copy_name, format_size,
-    format_timestamp, plain_text_field, text_button, text_field,
+    ActiveTheme, IconName, InputKeyResult, InputState, TextFieldModel, TextRoleExt, copy_name,
+    format_size, format_timestamp, icon_button, plain_text_field, text_button, text_field,
 };
 
 use crate::resources::{ActiveResources, ActiveTransfers};
@@ -717,21 +718,33 @@ impl crate::workspace::Workspace {
         let form = self.connect_form_ui.form.as_ref()?;
         let theme = cx.theme().clone();
 
-        // `secret` is Some for secret fields: the value renders as characters
-        // while the toggle is on, and a trailing Show/Hide button flips it.
-        let field_row = |label: &'static str,
-                         field: ConnectField,
-                         state: &InputState,
-                         placeholder: &'static str,
-                         secret: Option<bool>,
-                         cx: &mut Context<Self>| {
-            let revealed = secret.unwrap_or(false);
-            let masked = secret.is_some() && !revealed;
-            let mut row = div()
+        let connect_input_box = |field: ConnectField,
+                                 state: &InputState,
+                                 placeholder: &'static str,
+                                 secret: Option<bool>,
+                                 cx: &mut Context<Self>| {
+            let masked = secret.is_some_and(|revealed| !revealed);
+            let input_el = if secret.is_some() {
+                text_field(
+                    ("connect-input", field as usize),
+                    TextFieldModel {
+                        state,
+                        placeholder,
+                        focused: form.focused_field == field,
+                        masked,
+                    },
+                    cx,
+                )
+                .into_any_element()
+            } else if let Some(binding) = form.inputs.get(&field) {
+                plain_text_field(("connect-input", field as usize), binding, cx).into_any_element()
+            } else {
+                div().into_any_element()
+            };
+            div()
                 .id(("connect-field", field as usize))
-                .flex()
-                .items_center()
-                .gap_2()
+                .flex_1()
+                .min_w_0()
                 .on_click(cx.listener(move |workspace, _event, window, cx| {
                     if let Some(form) = &mut workspace.connect_form_ui.form {
                         form.focused_field = field;
@@ -743,6 +756,22 @@ impl crate::workspace::Workspace {
                         cx.notify();
                     }
                 }))
+                .child(input_el)
+        };
+
+        // `secret` is Some for secret fields: the value renders as characters
+        // while the toggle is on, and a trailing Show/Hide button flips it.
+        let field_row = |label: &'static str,
+                         field: ConnectField,
+                         state: &InputState,
+                         placeholder: &'static str,
+                         secret: Option<bool>,
+                         cx: &mut Context<Self>| {
+            let revealed = secret.unwrap_or(false);
+            let mut row = div()
+                .flex()
+                .items_center()
+                .gap_2()
                 .child(
                     div()
                         .w(px(96.0))
@@ -751,32 +780,16 @@ impl crate::workspace::Workspace {
                         .text_color(theme.colors.text_muted)
                         .child(label),
                 )
-                .child(div().flex_1().min_w_0().child(if secret.is_some() {
-                    text_field(
-                        ("connect-input", field as usize),
-                        TextFieldModel {
-                            state,
-                            placeholder,
-                            focused: form.focused_field == field,
-                            masked,
-                        },
-                        cx,
-                    )
-                    .into_any_element()
-                } else {
-                    plain_text_field(
-                        ("connect-input", field as usize),
-                        form.inputs
-                            .get(&field)
-                            .expect("visible ordinary fields must have prepared component inputs"),
-                        cx,
-                    )
-                    .into_any_element()
-                }));
+                .child(connect_input_box(field, state, placeholder, secret, cx));
             if secret.is_some() {
                 row = row.child(
-                    text_button(
+                    icon_button(
                         ("connect-reveal", field as usize),
+                        if revealed {
+                            IconName::EyeOff
+                        } else {
+                            IconName::Eye
+                        },
                         if revealed { "Hide" } else { "Show" },
                     )
                     .on_click(cx.listener(
@@ -805,21 +818,6 @@ impl crate::workspace::Workspace {
             row
         };
 
-        let auth_toggle = |label: &'static str,
-                           method: AuthMethodKind,
-                           id: &'static str,
-                           cx: &mut Context<Self>| {
-            text_button(id, label)
-                .primary(form.auth_method == method)
-                .on_click(cx.listener(move |workspace, _event, window, cx| {
-                    if let Some(form) = &mut workspace.connect_form_ui.form {
-                        form.set_auth_method(method);
-                        cx.notify();
-                    }
-                    workspace.focus_connect_field(window, cx);
-                }))
-        };
-
         let mut card = div()
             .key_context(crate::app_actions::CONNECT_FORM_CONTEXT)
             .on_action(cx.listener(
@@ -837,7 +835,7 @@ impl crate::workspace::Workspace {
             .flex()
             .flex_col()
             .gap_3()
-            .w(px(460.0))
+            .w(px(476.0))
             .p_4()
             .bg(theme.colors.elevated_surface)
             .border_1()
@@ -1049,23 +1047,98 @@ impl crate::workspace::Workspace {
             );
         }
 
+        let auth_segment = |label: &'static str,
+                            method: AuthMethodKind,
+                            id: &'static str,
+                            cx: &mut Context<Self>| {
+            let selected = form.auth_method == method;
+            Button::new(id)
+                .px_2()
+                .py_1()
+                .rounded(px(5.0))
+                .border_1()
+                .border_color(if selected {
+                    theme.colors.border
+                } else {
+                    gpui_kit::transparent_black()
+                })
+                .bg(if selected {
+                    theme.colors.elevated_surface
+                } else {
+                    gpui_kit::transparent_black()
+                })
+                .whitespace_nowrap()
+                .text_role(
+                    &theme,
+                    if selected {
+                        theme.typography.body_medium
+                    } else {
+                        theme.typography.secondary
+                    },
+                )
+                .text_color(if selected {
+                    theme.colors.text
+                } else {
+                    theme.colors.text_muted
+                })
+                .when(!selected, |btn| {
+                    btn.hover(|style| style.text_color(theme.colors.text))
+                })
+                .focus_visible(|style| style.border_color(theme.colors.border_focused))
+                .accessibility_label(label)
+                .on_click(cx.listener(move |workspace, _event, window, cx| {
+                    if let Some(form) = &mut workspace.connect_form_ui.form {
+                        form.set_auth_method(method);
+                        cx.notify();
+                    }
+                    workspace.focus_connect_field(window, cx);
+                }))
+                .child(label)
+        };
+
         card = card
-            .child(field_row(
-                "Server Address",
-                ConnectField::Host,
-                &form.host,
-                ConnectField::Host.placeholder(),
-                None,
-                cx,
-            ))
-            .child(field_row(
-                "Port",
-                ConnectField::Port,
-                &form.port,
-                ConnectField::Port.placeholder(),
-                None,
-                cx,
-            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(96.0))
+                            .flex_none()
+                            .text_role(&theme, theme.typography.label)
+                            .text_color(theme.colors.text_muted)
+                            .child("Server & Port"),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(connect_input_box(
+                                ConnectField::Host,
+                                &form.host,
+                                ConnectField::Host.placeholder(),
+                                None,
+                                cx,
+                            ))
+                            .child(
+                                div()
+                                    .w(px(68.0))
+                                    .flex_none()
+                                    .flex()
+                                    .child(connect_input_box(
+                                        ConnectField::Port,
+                                        &form.port,
+                                        ConnectField::Port.placeholder(),
+                                        None,
+                                        cx,
+                                    )),
+                            ),
+                    ),
+            )
             .child(field_row(
                 "Username",
                 ConnectField::Username,
@@ -1090,27 +1163,32 @@ impl crate::workspace::Workspace {
                     .child(
                         div()
                             .flex()
-                            .flex_wrap()
-                            .gap_2()
-                            .child(auth_toggle(
+                            .items_center()
+                            .gap_0p5()
+                            .p_0p5()
+                            .rounded(px(7.0))
+                            .bg(theme.colors.element_active)
+                            .border_1()
+                            .border_color(theme.colors.border)
+                            .child(auth_segment(
                                 "Password",
                                 AuthMethodKind::Password,
                                 "auth-password",
                                 cx,
                             ))
-                            .child(auth_toggle(
+                            .child(auth_segment(
                                 "Key File",
                                 AuthMethodKind::PrivateKey,
                                 "auth-private-key",
                                 cx,
                             ))
-                            .child(auth_toggle(
+                            .child(auth_segment(
                                 "Server Prompts",
                                 AuthMethodKind::KeyboardInteractive,
                                 "auth-keyboard-interactive",
                                 cx,
                             ))
-                            .child(auth_toggle(
+                            .child(auth_segment(
                                 "SSH Agent",
                                 AuthMethodKind::SshAgent,
                                 "auth-agent",
