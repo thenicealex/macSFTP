@@ -11,9 +11,9 @@ The runtime submits transfer plans to the process-wide `TransferManager`. The br
 
 ## Decision
 
-1. `TransferManager` is the sole transfer scheduler. Transfers, cancellation, retries, and conflict decisions enter through the runtime command path.
-2. Remove the actor's test-only transfer queue and its transfer execution, cancellation, retry, and conflict-decision request variants. The actor continues to provide a connection lease and a dedicated channel for remote download planning.
-3. Move shared transfer execution, remote download planning, conflict handling, and session reuse into the internal `transfer_job` module. `TransferManager` owns scheduling and uses that module to execute jobs.
+1. `TransferManager` is the sole transfer owner from planning through execution. Transfers, cancellation, retries, and conflict decisions enter through the runtime command path and are forwarded directly to `TransferManager`.
+2. Remove the actor's test-only transfer queue and its transfer execution, cancellation, retry, and conflict-decision request variants. The actor continues to provide a connection lease and a dedicated channel for remote download planning, looked up by `TransferManager` through the narrow `TransferSessionSource` seam.
+3. Move shared transfer execution, remote download planning, conflict handling, and session reuse into the internal `transfer_job` module. `TransferManager` owns planning-phase cancellation, planning retries, scheduling, and uses `transfer_job` and `transfer_planner` to plan and execute jobs.
 4. Exercise transfer behavior in real-session integration tests through `RuntimeController` and `AppCommand`. Directory plans cover decisions applied across multiple jobs, including conflicts already waiting when a decision is made.
 
 ## Alternatives considered

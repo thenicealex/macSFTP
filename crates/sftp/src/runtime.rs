@@ -1,5 +1,8 @@
-use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::HashMap;
+use std::ops::Deref;
+use std::sync::atomic::AtomicU64;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -8,11 +11,10 @@ use macsftp_core::TrustRequestId;
 use macsftp_core::{
     AppCommand, AppEvent, CheckRemoteEditSnapshotCommand, CommandDispatchError, ErrorCode,
     FsCommand, FsScope, RemoteEditSnapshotDispatchFailed, RemoteEventScope, RemoteOperationFailure,
-    RemotePath, RemoteScoped, RuntimeBridgeConfig, SessionId, TabId, Timestamp, TransferDirection,
-    TransferId, TransferJob, TransferPlanId, TransferPlanSnapshot, TrustDecision, UserFacingError,
+    RemotePath, RemoteScoped, RuntimeBridgeConfig, SessionId, TabId, TrustDecision,
+    UserFacingError,
 };
 use tokio::runtime::Runtime;
-use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -21,8 +23,7 @@ use crate::known_hosts::KnownHostsStore;
 #[cfg(test)]
 use crate::mock_actor::{MockRemoteSessionActor, MockSessionConfig};
 use crate::session_actor::{HostTrustConfig, RemoteSessionActor, RemoteSessionRequest};
-use crate::transfer_manager::{TransferManager, TransferManagerRequest};
-use crate::transfer_planner::{new_plan, plan_local_upload};
+use crate::transfer_manager::{TransferManager, TransferManagerRequest, TransferSessionSource};
 use crate::trust::TrustRegistry;
 use tracing::{info, warn};
 
@@ -459,6 +460,110 @@ async fn dispatch_fs_command(
 /// - `DisconnectTab` / `CloseTab` → cancel the actor, reject pending
 ///   trust requests for the tab.
 /// - `Shutdown` → cancel all actors, reject all trust requests, exit.
+struct SessionRequestRegistry {
+    endpoints: Mutex<HashMap<TabId, (u64, flume::Sender<RemoteSessionRequest>)>>,
+}
+
+impl SessionRequestRegistry {
+    fn new() -> Self {
+        Self {
+            endpoints: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn set(
+        &self,
+        tab_id: TabId,
+        session_epoch: u64,
+        request_tx: Option<flume::Sender<RemoteSessionRequest>>,
+    ) {
+        let mut endpoints = match self.endpoints.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(request_tx) = request_tx {
+            endpoints.insert(tab_id, (session_epoch, request_tx));
+        } else {
+            endpoints.remove(&tab_id);
+        }
+    }
+
+    fn remove(&self, tab_id: &TabId) {
+        let mut endpoints = match self.endpoints.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        endpoints.remove(tab_id);
+    }
+
+    fn clear(&self) {
+        let mut endpoints = match self.endpoints.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        endpoints.clear();
+    }
+}
+
+impl TransferSessionSource for SessionRequestRegistry {
+    fn session_request_tx(
+        &self,
+        tab_id: TabId,
+        session_epoch: u64,
+    ) -> Option<flume::Sender<RemoteSessionRequest>> {
+        let endpoints = match self.endpoints.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        endpoints
+            .get(&tab_id)
+            .filter(|(epoch, _)| *epoch == session_epoch)
+            .map(|(_, tx)| tx.clone())
+    }
+}
+
+struct SessionTable {
+    handles: HashMap<TabId, RemoteSessionHandle>,
+    registry: Arc<SessionRequestRegistry>,
+}
+
+impl SessionTable {
+    fn new() -> Self {
+        Self {
+            handles: HashMap::new(),
+            registry: Arc::new(SessionRequestRegistry::new()),
+        }
+    }
+
+    fn registry(&self) -> Arc<SessionRequestRegistry> {
+        self.registry.clone()
+    }
+
+    fn insert(&mut self, tab_id: TabId, handle: RemoteSessionHandle) {
+        self.registry
+            .set(tab_id, handle.session_epoch, handle.request_tx.clone());
+        self.handles.insert(tab_id, handle);
+    }
+
+    fn remove(&mut self, tab_id: &TabId) -> Option<RemoteSessionHandle> {
+        self.registry.remove(tab_id);
+        self.handles.remove(tab_id)
+    }
+
+    fn drain_all(&mut self) -> Vec<RemoteSessionHandle> {
+        self.registry.clear();
+        self.handles.drain().map(|(_, handle)| handle).collect()
+    }
+}
+
+impl Deref for SessionTable {
+    type Target = HashMap<TabId, RemoteSessionHandle>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.handles
+    }
+}
+
 async fn command_dispatch_loop(
     command_rx: flume::Receiver<AppCommand>,
     event_tx: flume::Sender<AppEvent>,
@@ -467,11 +572,9 @@ async fn command_dispatch_loop(
     backend: RuntimeBackend,
     config: RuntimeBridgeConfig,
 ) {
-    let mut sessions: HashMap<TabId, RemoteSessionHandle> = HashMap::new();
+    let mut sessions = SessionTable::new();
     let next_trust_id = Arc::new(AtomicU64::new(1));
     let next_keyboard_interactive_id = Arc::new(AtomicU64::new(1));
-    let mut next_plan_id: u64 = 1;
-    let next_transfer_id = Arc::new(AtomicU64::new(1));
     let next_conflict_id = Arc::new(AtomicU64::new(1));
     let connection_manager = Arc::new(crate::pool::ConnectionManager::with_keyboard_interactive(
         keyboard_interactive_registry.clone(),
@@ -483,13 +586,9 @@ async fn command_dispatch_loop(
         event_tx.clone(),
         next_conflict_id.clone(),
         connection_manager.clone(),
+        sessions.registry(),
     );
     let transfer_manager_handle = tokio::spawn(transfer_manager.run(transfer_manager_rx));
-    let planning_cancellations: Arc<Mutex<HashMap<TransferId, CancellationToken>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let planning_retries: Arc<Mutex<HashMap<TransferId, macsftp_core::StartTransferCommand>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let mut pending_commands = VecDeque::new();
 
     // Real sessions share one known_hosts store so a trust decision in
     // one tab covers later sessions to the same host (plan ADR-003).
@@ -506,11 +605,7 @@ async fn command_dispatch_loop(
     };
 
     loop {
-        let command = match pending_commands.pop_front() {
-            Some(command) => Ok(command),
-            None => command_rx.recv_async().await,
-        };
-        match command {
+        match command_rx.recv_async().await {
             Ok(AppCommand::Shutdown) => break,
 
             Ok(AppCommand::ConnectTab(cmd)) => {
@@ -852,316 +947,18 @@ async fn command_dispatch_loop(
             }
 
             Ok(AppCommand::StartTransfer(command)) => {
-                let transfer_request_tx = sessions
-                    .get(&command.tab_id)
-                    .filter(|session| session.session_epoch == command.session_epoch)
-                    .and_then(|session| session.request_tx.clone());
-                let transfer_connection_rx = transfer_request_tx.as_ref().and_then(|request_tx| {
-                    let (responder, response) = oneshot::channel();
-                    request_tx
-                        .try_send(RemoteSessionRequest::AcquireTransferConnection { responder })
-                        .ok()
-                        .map(|()| response)
-                });
-                let plan_id = TransferPlanId(next_plan_id);
-                next_plan_id += 1;
-                let root_job_id = TransferId(next_transfer_id.fetch_add(1, Ordering::Relaxed));
-                let planning_cancel = CancellationToken::new();
-                if let Ok(mut retries) = planning_retries.lock() {
-                    retries.insert(root_job_id, command.clone());
-                } else {
-                    let _ = event_tx
-                        .send_async(AppEvent::TransferPlanFailed {
-                            plan_id,
-                            error: UserFacingError::new(
-                                ErrorCode::Unknown,
-                                "Preparation Failed",
-                                "The transfer couldn’t restart. Try again.",
-                            )
-                            .with_retryable(true),
-                        })
-                        .await;
-                    continue;
-                }
-                if let Ok(mut cancellations) = planning_cancellations.lock() {
-                    cancellations.insert(root_job_id, planning_cancel.clone());
-                } else {
-                    let _ = event_tx
-                        .send_async(AppEvent::TransferPlanFailed {
-                            plan_id,
-                            error: UserFacingError::new(
-                                ErrorCode::Unknown,
-                                "Preparation Failed",
-                                "The transfer couldn’t be prepared. Try again.",
-                            )
-                            .with_retryable(true),
-                        })
-                        .await;
-                    continue;
-                }
-                let (plan, root_job) = new_plan(
-                    &command,
-                    plan_id,
-                    root_job_id,
-                    Timestamp(std::time::SystemTime::now()),
-                );
-                if event_tx
-                    .send_async(AppEvent::TransferPlanStarted(Box::new(
-                        TransferPlanSnapshot {
-                            plan,
-                            root_job: root_job.clone(),
-                        },
-                    )))
+                if let Err(error) = transfer_manager_tx
+                    .send_async(TransferManagerRequest::Start(command))
                     .await
-                    .is_err()
                 {
-                    break;
+                    warn!(error = %error, "transfer start could not reach transfer manager");
                 }
-
-                let event_tx = event_tx.clone();
-                let next_transfer_id = next_transfer_id.clone();
-                let cancellations = planning_cancellations.clone();
-                let retries = planning_retries.clone();
-                let planner_request_tx = transfer_request_tx.clone();
-                let manager_tx = transfer_manager_tx.clone();
-                let terminal_event_tx = event_tx.clone();
-                let planning_cancel_after_task = planning_cancel.clone();
-                let planning_task: JoinHandle<Option<Vec<TransferJob>>> = match command.direction {
-                    TransferDirection::Upload => tokio::task::spawn_blocking(move || {
-                        plan_local_upload(
-                            command,
-                            plan_id,
-                            root_job,
-                            next_transfer_id,
-                            event_tx,
-                            planning_cancel,
-                        )
-                    }),
-                    TransferDirection::Download => tokio::spawn(async move {
-                        let Some(request_tx) = planner_request_tx else {
-                            let _ = event_tx
-                                    .send_async(AppEvent::TransferPlanFailed {
-                                        plan_id,
-                                        error: UserFacingError::new(
-                                            ErrorCode::ChannelClosed,
-                                            "Download Preparation Failed",
-                                            "The connected session is no longer available. Reconnect and try again.",
-                                        )
-                                        .with_retryable(true),
-                                    })
-                                    .await;
-                            return None;
-                        };
-                        let (responder, response) = oneshot::channel();
-                        if request_tx
-                            .send_async(RemoteSessionRequest::PlanRemoteDownload {
-                                command,
-                                plan_id,
-                                created_at: root_job.created_at,
-                                next_transfer_id,
-                                cancel: planning_cancel,
-                                responder,
-                            })
-                            .await
-                            .is_err()
-                        {
-                            let _ = event_tx
-                                    .send_async(AppEvent::TransferPlanFailed {
-                                        plan_id,
-                                        error: UserFacingError::new(
-                                            ErrorCode::ChannelClosed,
-                                            "Download Preparation Failed",
-                                            "The connected session is no longer available. Reconnect and try again.",
-                                        )
-                                        .with_retryable(true),
-                                    })
-                                    .await;
-                            return None;
-                        }
-                        response.await.ok().flatten()
-                    }),
-                };
-                std::mem::drop(tokio::spawn(async move {
-                    let planning_result = planning_task.await;
-                    let Ok(Some(jobs)) = planning_result else {
-                        // The planner normally reports its own failure or
-                        // cancellation. Emitting here as well is safe (the
-                        // store ignores a second terminal event) and covers the
-                        // case where planning returned without an event while
-                        // the user had already cancelled.
-                        if take_planning_guard(
-                            &cancellations,
-                            root_job_id,
-                            &planning_cancel_after_task,
-                        ) {
-                            emit_plan_cancelled(&terminal_event_tx, plan_id).await;
-                        }
-                        if planning_cancel_after_task.is_cancelled()
-                            && let Ok(mut retries) = retries.lock()
-                        {
-                            retries.remove(&root_job_id);
-                        }
-                        forget_plan_cancellations(&manager_tx, plan_id).await;
-                        return;
-                    };
-                    if let Ok(mut retries) = retries.lock() {
-                        retries.remove(&root_job_id);
-                    }
-                    // Fast path for a cancel that arrived while planning was
-                    // still finishing: it must win before any handoff work,
-                    // including the handoff failure paths below.
-                    if planning_cancel_after_task.is_cancelled() {
-                        take_planning_guard(
-                            &cancellations,
-                            root_job_id,
-                            &planning_cancel_after_task,
-                        );
-                        emit_plan_cancelled(&terminal_event_tx, plan_id).await;
-                        forget_plan_cancellations(&manager_tx, plan_id).await;
-                        return;
-                    }
-                    let Some(connection_rx) = transfer_connection_rx else {
-                        if take_planning_guard(
-                            &cancellations,
-                            root_job_id,
-                            &planning_cancel_after_task,
-                        ) {
-                            emit_plan_cancelled(&terminal_event_tx, plan_id).await;
-                            forget_plan_cancellations(&manager_tx, plan_id).await;
-                            return;
-                        }
-                        fail_planned_jobs(
-                            &terminal_event_tx,
-                            jobs,
-                            transfer_handoff_error(
-                                "The connected session has no transfer channel.",
-                            ),
-                        )
-                        .await;
-                        forget_plan_cancellations(&manager_tx, plan_id).await;
-                        return;
-                    };
-                    let connection = tokio::select! {
-                        _ = planning_cancel_after_task.cancelled() => {
-                            take_planning_guard(
-                                &cancellations,
-                                root_job_id,
-                                &planning_cancel_after_task,
-                            );
-                            emit_plan_cancelled(&terminal_event_tx, plan_id).await;
-                            forget_plan_cancellations(&manager_tx, plan_id).await;
-                            return;
-                        }
-                        res = connection_rx => match res {
-                            Ok(connection) => connection,
-                            Err(_) => {
-                                if take_planning_guard(
-                                    &cancellations,
-                                    root_job_id,
-                                    &planning_cancel_after_task,
-                                ) {
-                                    emit_plan_cancelled(&terminal_event_tx, plan_id).await;
-                                    forget_plan_cancellations(&manager_tx, plan_id).await;
-                                    return;
-                                }
-                                fail_planned_jobs(
-                                    &terminal_event_tx,
-                                    jobs,
-                                    transfer_handoff_error(
-                                        "The connection closed. Reconnect and try again.",
-                                    ),
-                                )
-                                .await;
-                                forget_plan_cancellations(&manager_tx, plan_id).await;
-                                return;
-                            }
-                        }
-                    };
-                    // The guard stays in `planning_cancellations` until the
-                    // manager has accepted the enqueue. A cancel that arrives
-                    // during the handoff therefore cannot fall through to the
-                    // "unknown transfer" branch while the jobs are still on
-                    // their way; it cancels the token, and the check below
-                    // turns that into a plan-level cancellation.
-                    let enqueue = manager_tx
-                        .send_async(TransferManagerRequest::Enqueue {
-                            connection,
-                            plan_id,
-                            jobs,
-                        })
-                        .await;
-                    let cancelled = take_planning_guard(
-                        &cancellations,
-                        root_job_id,
-                        &planning_cancel_after_task,
-                    );
-                    if cancelled {
-                        match enqueue {
-                            // The manager owns the plan now. It decides
-                            // whether anything is still cancellable, so a
-                            // cancel that lost the race with completion does
-                            // not rewrite a finished plan.
-                            Ok(()) => {
-                                if let Err(error) = manager_tx
-                                    .send_async(TransferManagerRequest::CancelPlan { plan_id })
-                                    .await
-                                {
-                                    warn!(
-                                        error = %error,
-                                        plan_id = plan_id.0,
-                                        "plan cancellation could not reach transfer manager"
-                                    );
-                                }
-                            }
-                            // Nothing reached the manager, so no job can have
-                            // run: report the cancellation directly. Records
-                            // from earlier child cancels still need reclaiming.
-                            Err(_) => {
-                                emit_plan_cancelled(&terminal_event_tx, plan_id).await;
-                                forget_plan_cancellations(&manager_tx, plan_id).await;
-                            }
-                        }
-                        return;
-                    }
-                    if let Err(error) = enqueue {
-                        warn!(error = %error, "planned transfer could not reach transfer manager");
-                        if let TransferManagerRequest::Enqueue { jobs, .. } = error.0 {
-                            fail_planned_jobs(
-                                &terminal_event_tx,
-                                jobs,
-                                transfer_handoff_error(
-                                    "The transfer manager is no longer running.",
-                                ),
-                            )
-                            .await;
-                        }
-                        forget_plan_cancellations(&manager_tx, plan_id).await;
-                    }
-                }));
             }
 
             Ok(AppCommand::CancelTransfer {
                 transfer_id,
                 plan_id,
             }) => {
-                // Cancel the planning token while still holding the map lock.
-                // The planner re-checks the token under the same lock right
-                // before it releases its guard, so either it observes this
-                // cancel and cancels the whole plan, or it has already
-                // released the guard and the manager (which by then has the
-                // enqueue) treats a cancel of the plan root as a plan cancel.
-                let planning_cancel =
-                    planning_cancellations
-                        .lock()
-                        .ok()
-                        .and_then(|cancellations| {
-                            let cancel = cancellations.get(&transfer_id)?;
-                            cancel.cancel();
-                            Some(())
-                        });
-                if planning_cancel.is_some() {
-                    continue;
-                }
                 if let Err(error) = transfer_manager_tx
                     .send_async(TransferManagerRequest::Cancel {
                         transfer_id,
@@ -1177,14 +974,6 @@ async fn command_dispatch_loop(
             }
 
             Ok(AppCommand::RetryTransfer { transfer_id }) => {
-                let planning_retry = planning_retries
-                    .lock()
-                    .ok()
-                    .and_then(|mut retries| retries.remove(&transfer_id));
-                if let Some(command) = planning_retry {
-                    pending_commands.push_back(AppCommand::StartTransfer(command));
-                    continue;
-                }
                 if let Err(error) = transfer_manager_tx
                     .send_async(TransferManagerRequest::Retry { transfer_id })
                     .await
@@ -1217,11 +1006,7 @@ async fn command_dispatch_loop(
     }
 
     // Shutdown cleanup: cancel all actors and reject all pending requests.
-    shutdown_session_tasks(
-        sessions.drain().map(|(_, handle)| handle).collect(),
-        config.shutdown_timeout,
-    )
-    .await;
+    shutdown_session_tasks(sessions.drain_all(), config.shutdown_timeout).await;
     drop(transfer_manager_tx);
     if let Err(error) = transfer_manager_handle.await {
         warn!(error = %error, "transfer manager did not shut down cleanly");
@@ -1268,105 +1053,6 @@ impl ProgressThrottle {
     /// to a terminal state and the final progress must be emitted.
     pub fn reset(&mut self) {
         self.last_sent = None;
-    }
-}
-
-/// Build a non-retryable handoff error for a planned transfer that could not
-/// reach the transfer manager or acquire a connection. These jobs have no
-/// `RetryRoute` (they never entered the manager), so surfacing them as
-/// retryable would present a dead Retry control in the UI.
-fn transfer_handoff_error(detail: &'static str) -> UserFacingError {
-    UserFacingError::new(ErrorCode::ChannelClosed, "Transfer Couldn’t Start", detail)
-}
-
-/// Release the planning guard for `root_job_id` and report whether a cancel
-/// arrived before the handoff completed.
-///
-/// The token is read under the same lock that owns the guard, so a cancel
-/// either finds the guard and sets the token (observed here), or runs after
-/// the guard is gone and reaches the manager instead. Without that pairing a
-/// cancel could slip between the check and the removal and be lost entirely.
-fn take_planning_guard(
-    cancellations: &Mutex<HashMap<TransferId, CancellationToken>>,
-    root_job_id: TransferId,
-    cancel: &CancellationToken,
-) -> bool {
-    let mut cancellations = match cancellations.lock() {
-        Ok(cancellations) => cancellations,
-        Err(poisoned) => {
-            warn!(
-                transfer_id = root_job_id.0,
-                "planning cancellation guard lock was poisoned"
-            );
-            poisoned.into_inner()
-        }
-    };
-    cancellations.remove(&root_job_id);
-    cancel.is_cancelled()
-}
-
-/// Tell the transfer manager to drop pre-enqueue cancellation records for a
-/// plan that will never be enqueued.
-///
-/// A child row is published while planning is still running, so cancelling it
-/// records a tombstone in the manager before the plan exists there. If planning
-/// then fails or the plan is cancelled during the handoff, no enqueue ever
-/// arrives and nothing would consume that record.
-async fn forget_plan_cancellations(
-    manager_tx: &flume::Sender<TransferManagerRequest>,
-    plan_id: TransferPlanId,
-) {
-    if let Err(error) = manager_tx
-        .send_async(TransferManagerRequest::ForgetPlan { plan_id })
-        .await
-    {
-        warn!(
-            error = %error,
-            plan_id = plan_id.0,
-            "plan cancellation cleanup could not reach transfer manager"
-        );
-    }
-}
-
-/// Report a cancelled plan exactly once. A send failure means the GPUI event
-/// channel is gone, so nothing can be displayed anymore; log it instead of
-/// hiding the failure behind `let _ =`.
-async fn emit_plan_cancelled(event_tx: &flume::Sender<AppEvent>, plan_id: TransferPlanId) {
-    if let Err(error) = event_tx
-        .send_async(AppEvent::TransferPlanCancelled { plan_id })
-        .await
-    {
-        warn!(
-            error = %error,
-            plan_id = plan_id.0,
-            "plan cancellation event dropped"
-        );
-    }
-}
-
-/// Emit one `TransferFailed` per planned job after a post-planning handoff
-/// failure (no connection available, connection lost, or manager gone).
-///
-/// Planned jobs never entered the transfer manager, so they carry no
-/// `RetryRoute`; the caller passes a non-retryable error. Stops on the first
-/// send error (the event channel is disconnected) rather than silently
-/// dropping the remaining failures.
-async fn fail_planned_jobs(
-    event_tx: &flume::Sender<AppEvent>,
-    jobs: Vec<TransferJob>,
-    error: UserFacingError,
-) {
-    for job in jobs {
-        if let Err(send_error) = event_tx
-            .send_async(AppEvent::TransferFailed(macsftp_core::TransferFailure {
-                transfer_id: job.id,
-                error: error.clone(),
-            }))
-            .await
-        {
-            warn!(error = %send_error, "transfer handoff failure event dropped");
-            return;
-        }
     }
 }
 
@@ -1633,12 +1319,14 @@ async fn route_check_remote_edit_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transfer_manager::{fail_planned_jobs, transfer_handoff_error};
     use macsftp_core::{
         AuthCredential, ConflictPolicy, ConnectCommand, ConnectionPoolIdentity, ConnectionSettings,
         EditCheckId, EditSessionId, HostKeyDecisionCommand, LocalPath, MetadataPolicy, ProfileId,
         RemotePath, SessionId, StartTransferCommand, TabId, TransferDirection, TransferEndpoint,
-        TransferId, TransferPlanState, TransferState,
+        TransferId, TransferJob, TransferPlanId, TransferPlanState, TransferState,
     };
+    use tokio::sync::oneshot;
 
     /// Placeholder settings — the mock backend never dials them.
     fn test_settings() -> ConnectionSettings {
@@ -2359,7 +2047,7 @@ mod tests {
                     created_at: macsftp_core::Timestamp(std::time::UNIX_EPOCH),
                 },
             ];
-            super::fail_planned_jobs(&event_tx, jobs, super::transfer_handoff_error("test")).await;
+            fail_planned_jobs(&event_tx, jobs, transfer_handoff_error("test")).await;
 
             let mut seen = Vec::new();
             while let Ok(event) = event_rx.try_recv() {
@@ -2402,7 +2090,7 @@ mod tests {
                 created_at: macsftp_core::Timestamp(std::time::UNIX_EPOCH),
             }];
             // Must return without panicking even though the first send fails.
-            super::fail_planned_jobs(&event_tx, jobs, super::transfer_handoff_error("test")).await;
+            fail_planned_jobs(&event_tx, jobs, transfer_handoff_error("test")).await;
         });
 
         helper.shutdown_timeout(Duration::from_secs(1));
