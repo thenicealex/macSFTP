@@ -41,6 +41,9 @@ embedded_icons!(
     "chevron_right.svg",
     "transfers.svg",
     "server.svg",
+    "eye.svg",
+    "eye_off.svg",
+    "sliders.svg",
 );
 
 impl AssetSource for Assets {
@@ -90,6 +93,9 @@ mod tests {
             IconName::ChevronRight,
             IconName::Transfers,
             IconName::Server,
+            IconName::Eye,
+            IconName::EyeOff,
+            IconName::Sliders,
         ];
 
         for icon in icons {

@@ -4,7 +4,11 @@
 import pathlib
 import re
 import sys
-import tomllib
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
 
 # Remove comments/literals before looking for Rust keywords or lint overrides.
 # Block comments nest in Rust; a regex for the entire comment is insufficient.

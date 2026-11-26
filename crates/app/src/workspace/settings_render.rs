@@ -7,13 +7,14 @@ use crate::workspace::profiles::{
 use gpui_kit::base::{Button, Toggle};
 use gpui_kit::{
     App, ClickEvent, Context, IntoElement, ParentElement, Styled, Window, WindowControlArea, div,
-    prelude::*, px,
+    prelude::*, px, rgb,
 };
 use macsftp_core::{AuthMethodKind, ConnectionRoute, is_bidi_or_control};
 use macsftp_storage::AppearancePreference;
 use macsftp_ui::{
-    ActiveTheme, IconName, InputState, TextFieldModel, TextRoleExt, Theme, empty_state, icon,
-    ordinary_text_field, plain_text_field, text_button, text_field, text_tooltip,
+    ActiveTheme, Appearance, IconName, InputState, TextFieldModel, TextRoleExt, Theme, empty_state,
+    icon, icon_button, ordinary_text_field, plain_text_field, text_button, text_field,
+    text_tooltip,
 };
 
 impl crate::workspace::Workspace {
@@ -23,6 +24,7 @@ impl crate::workspace::Workspace {
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         let theme = cx.theme().clone();
+        let canvas_bg = settings_canvas_bg(&theme);
         let selected_section = self.settings.section;
         let sidebar_item = |id: &'static str,
                             label: &'static str,
@@ -33,9 +35,9 @@ impl crate::workspace::Workspace {
             Button::new(id)
                 .w_full()
                 .justify_start()
-                .h(px(32.0))
+                .h(px(30.0))
                 .px_2p5()
-                .rounded(theme.sizes.button_radius)
+                .rounded(px(6.0))
                 // The transparent border reserves the one pixel the focus ring
                 // needs, so focusing never shifts the label.
                 .border_1()
@@ -43,7 +45,7 @@ impl crate::workspace::Workspace {
                 .bg(if selected {
                     theme.colors.element_selected
                 } else {
-                    theme.colors.surface
+                    gpui_kit::transparent_black()
                 })
                 .text_role(
                     &theme,
@@ -58,7 +60,13 @@ impl crate::workspace::Workspace {
                 } else {
                     theme.colors.text_muted
                 })
-                .hover(|style| style.bg(theme.colors.element_hover))
+                .when(!selected, |btn| {
+                    btn.hover(|style| {
+                        style
+                            .bg(theme.colors.element_hover)
+                            .text_color(theme.colors.text)
+                    })
+                })
                 .focus_visible(|style| style.border_color(theme.colors.border_focused))
                 .accessibility_label(label)
                 .on_click(cx.listener(move |workspace, _event, _window, cx| {
@@ -68,7 +76,7 @@ impl crate::workspace::Workspace {
                     div()
                         .flex()
                         .items_center()
-                        .gap_2()
+                        .gap_2p5()
                         .child(icon(
                             icon_name,
                             if selected {
@@ -93,9 +101,10 @@ impl crate::workspace::Workspace {
             .flex_col()
             .flex_1()
             .min_h_0()
-            .bg(theme.colors.background)
+            .bg(canvas_bg)
             .child(
                 div()
+                    .relative()
                     .h(theme.sizes.tab_bar_height)
                     .flex_none()
                     .flex()
@@ -107,6 +116,15 @@ impl crate::workspace::Workspace {
                     .bg(theme.colors.surface)
                     .border_b_1()
                     .border_color(theme.colors.border)
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .right_0()
+                            .h(px(1.0))
+                            .bg(theme.chrome_highlight()),
+                    )
                     .child(
                         div()
                             .w(px(crate::workspace::render::TRAFFIC_LIGHT_RESERVE))
@@ -134,17 +152,18 @@ impl crate::workspace::Workspace {
                         div()
                             .w(px(176.0))
                             .flex_none()
-                            .p_2p5()
+                            .px_2p5()
+                            .py_3()
                             .flex()
                             .flex_col()
-                            .gap_1()
+                            .gap_0p5()
                             .bg(theme.colors.surface)
                             .border_r_1()
                             .border_color(theme.colors.border)
                             .child(sidebar_item(
                                 "settings-section-general",
                                 "General",
-                                IconName::Folder,
+                                IconName::Sliders,
                                 SettingsSection::General,
                                 cx,
                             ))
@@ -170,16 +189,18 @@ impl crate::workspace::Workspace {
                             .flex_1()
                             .min_w_0()
                             .min_h_0()
+                            .bg(canvas_bg)
                             .children(self.config_error.clone().map(|error| {
                                 div()
                                     .debug_selector(|| "settings-config-error".into())
                                     .mx_6()
                                     .mt_3()
-                                    .p_3()
-                                    .rounded(theme.sizes.button_radius)
+                                    .px_3p5()
+                                    .py_2p5()
+                                    .rounded(px(8.0))
                                     .border_1()
                                     .border_color(theme.colors.error)
-                                    .bg(theme.colors.surface)
+                                    .bg(theme.colors.elevated_surface)
                                     .text_role(&theme, theme.typography.secondary)
                                     .text_color(theme.colors.error)
                                     .child(error)
@@ -198,7 +219,8 @@ impl crate::workspace::Workspace {
         let theme = cx.theme().clone();
         let selected_appearance = cx.resources().config.config().appearance;
         let confirm_delete = cx.resources().config.config().confirm_delete;
-        let show_hidden_files = cx.resources().config.config().show_hidden_files;
+        let show_local_hidden_files = cx.resources().config.config().show_local_hidden_files;
+        let show_remote_hidden_files = cx.resources().config.config().show_remote_hidden_files;
         let preserve_mtime = cx
             .resources()
             .config
@@ -212,100 +234,51 @@ impl crate::workspace::Workspace {
             .metadata_policy
             .preserve_permissions;
 
-        let appearance_segment = |id: &'static str,
-                                  label: &'static str,
-                                  appearance: AppearancePreference,
-                                  cx: &mut Context<Self>| {
+        let appearance_tile = |id: &'static str,
+                               label: &'static str,
+                               appearance: AppearancePreference,
+                               cx: &mut Context<Self>| {
             let selected = selected_appearance == appearance;
+            let preview = appearance_preview_thumbnail(appearance, selected, &theme);
             div()
                 .id(id)
-                .flex_1()
-                .py_1p5()
-                .px_3()
-                .text_center()
-                .text_role(
-                    &theme,
-                    if selected {
-                        theme.typography.body_medium
-                    } else {
-                        theme.typography.body
-                    },
-                )
-                .rounded(theme.sizes.button_radius)
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_1p5()
                 .cursor_pointer()
-                .when(selected, |seg| {
-                    seg.bg(theme.colors.surface)
-                        .border_1()
-                        .border_color(theme.colors.border)
-                        .shadow(theme.shadow_chip())
-                        .text_color(theme.colors.text)
-                })
-                .when(!selected, |seg| {
-                    seg.text_color(theme.colors.text_muted)
-                        .hover(|style| style.bg(theme.colors.element_hover))
-                })
                 .on_click(cx.listener(move |workspace, _event, window, cx| {
                     workspace.set_appearance(appearance, window, cx);
                 }))
-                .child(label)
-        };
-
-        let section_header = |title: &'static str, description: &'static str| {
-            div()
-                .flex()
-                .flex_col()
-                .gap_0p5()
+                .child(preview)
                 .child(
                     div()
-                        .text_role(&theme, theme.typography.heading)
-                        .text_color(theme.colors.text)
-                        .child(title),
-                )
-                .when(!description.is_empty(), |el| {
-                    el.child(
-                        div()
-                            .text_role(&theme, theme.typography.secondary)
-                            .text_color(theme.colors.text_muted)
-                            .child(description),
-                    )
-                })
-                .into_any_element()
-        };
-
-        let section_card = |title: &'static str,
-                            description: &'static str,
-                            children: Vec<gpui_kit::AnyElement>| {
-            div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(section_header(title, description))
-                .child(
-                    div()
-                        .rounded(theme.sizes.modal_radius)
-                        .border_1()
-                        .border_color(theme.colors.border)
-                        .bg(theme.colors.surface)
-                        .overflow_hidden()
-                        .children(children),
+                        .text_role(
+                            &theme,
+                            if selected {
+                                theme.typography.body_medium
+                            } else {
+                                theme.typography.secondary
+                            },
+                        )
+                        .text_color(if selected {
+                            theme.colors.text
+                        } else {
+                            theme.colors.text_muted
+                        })
+                        .child(label),
                 )
         };
-
-        let section_block =
-            |title: &'static str, description: &'static str, content: gpui_kit::AnyElement| {
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(section_header(title, description))
-                    .child(content)
-            };
 
         let weak = cx.weak_entity();
         let on_confirm_delete =
             settings_toggle_handler(weak.clone(), Workspace::set_confirm_delete_setting);
-        let on_show_hidden =
-            settings_toggle_handler(weak.clone(), Workspace::set_show_hidden_files_setting);
+        let on_show_local_hidden =
+            settings_toggle_handler(weak.clone(), Workspace::set_show_local_hidden_files_setting);
+        let on_show_remote_hidden = settings_toggle_handler(
+            weak.clone(),
+            Workspace::set_show_remote_hidden_files_setting,
+        );
         let on_preserve_mtime =
             settings_toggle_handler(weak.clone(), Workspace::set_metadata_preserve_mtime);
         let on_preserve_permissions =
@@ -314,114 +287,179 @@ impl crate::workspace::Workspace {
         let form = div()
             .flex_none()
             .w_full()
-            .p_5()
+            .px_6()
+            .py_5()
             .track_focus(&self.workspace_focus)
             .child(
                 div()
-                    .max_w(px(640.0))
+                    .max_w(px(560.0))
                     .mx_auto()
                     .flex()
                     .flex_col()
-                    .gap_5()
-                    .child(section_block(
-                        "Appearance",
-                        "Match your Mac’s appearance, or always use Light or Dark.",
+                    .gap_4()
+                    .child(
                         div()
-                            .flex()
-                            .gap_1()
-                            .p_1()
-                            .rounded(theme.sizes.button_radius)
-                            .bg(theme.colors.element_active)
-                            .border_1()
-                            .border_color(theme.colors.border)
-                            .child(appearance_segment(
-                                "appearance-system",
-                                "Automatic",
-                                AppearancePreference::System,
-                                cx,
-                            ))
-                            .child(appearance_segment(
-                                "appearance-light",
-                                "Light",
-                                AppearancePreference::Light,
-                                cx,
-                            ))
-                            .child(appearance_segment(
-                                "appearance-dark",
-                                "Dark",
-                                AppearancePreference::Dark,
-                                cx,
-                            ))
-                            .into_any_element(),
+                            .px_1()
+                            .text_role(&theme, theme.typography.title)
+                            .text_color(theme.colors.text)
+                            .child("General"),
+                    )
+                    .child(settings_section_card(
+                        "Appearance",
+                        "",
+                        vec![
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_4()
+                                .px_4()
+                                .py_3()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .gap_0p5()
+                                        .min_w_0()
+                                        .child(
+                                            div()
+                                                .text_role(&theme, theme.typography.body_medium)
+                                                .text_color(theme.colors.text)
+                                                .child("Theme"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_role(&theme, theme.typography.secondary)
+                                                .text_color(theme.colors.text_muted)
+                                                .child("Follow system, or pick Light or Dark."),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .flex_none()
+                                        .gap_3()
+                                        .child(appearance_tile(
+                                            "appearance-system",
+                                            "Auto",
+                                            AppearancePreference::System,
+                                            cx,
+                                        ))
+                                        .child(appearance_tile(
+                                            "appearance-light",
+                                            "Light",
+                                            AppearancePreference::Light,
+                                            cx,
+                                        ))
+                                        .child(appearance_tile(
+                                            "appearance-dark",
+                                            "Dark",
+                                            AppearancePreference::Dark,
+                                            cx,
+                                        )),
+                                )
+                                .into_any_element(),
+                        ],
+                        &theme,
                     ))
-                    .child(section_card(
+                    .child(settings_section_card(
                         "Behavior",
-                        "Choose what macSFTP asks before destructive actions and which items it lists.",
+                        "",
                         vec![
                             settings_switch_row(
                                 "settings-confirm-delete",
                                 "Confirm before delete",
-                                "Ask before removing files. Turn this back on if you dismissed the prompt earlier.",
+                                None,
                                 confirm_delete,
                                 on_confirm_delete,
                                 &theme,
                             ),
-                            div().h(px(1.0)).bg(theme.colors.border).into_any_element(),
+                            settings_inset_divider(&theme),
                             settings_switch_row(
-                                "settings-show-hidden-files",
-                                "Show hidden files",
-                                "Include items whose names start with a dot.",
-                                show_hidden_files,
-                                on_show_hidden,
+                                "settings-show-local-hidden-files",
+                                "Show hidden local files",
+                                Some("Dotfiles and macOS hidden items."),
+                                show_local_hidden_files,
+                                on_show_local_hidden,
+                                &theme,
+                            ),
+                            settings_inset_divider(&theme),
+                            settings_switch_row(
+                                "settings-show-remote-hidden-files",
+                                "Show hidden server files",
+                                None,
+                                show_remote_hidden_files,
+                                on_show_remote_hidden,
                                 &theme,
                             ),
                         ],
+                        &theme,
                     ))
-                    .child(section_card(
-                        "Transfers",
-                        "Applied to new uploads and downloads; retries keep the policy they started with. Remote-edit uploads always keep their timestamp. If the destination can’t apply metadata, the transfer still completes with a warning.",
-                        vec![
-                            settings_switch_row(
-                                "settings-preserve-mtime",
-                                "Preserve modification time",
-                                "Keep the source date. When off, the destination keeps the time written by the transfer.",
-                                preserve_mtime,
-                                on_preserve_mtime,
-                                &theme,
-                            ),
-                            div().h(px(1.0)).bg(theme.colors.border).into_any_element(),
-                            settings_switch_row(
-                                "settings-preserve-permissions",
-                                "Preserve permissions",
-                                "Keep the source file mode where the server allows it. When off, the destination applies its own defaults.",
-                                preserve_permissions,
-                                on_preserve_permissions,
-                                &theme,
-                            ),
-                        ],
-                    ))
-                    .child(section_block(
-                        "Troubleshooting",
-                        "Open the log folder or copy build details for a bug report.",
+                    .child(
                         div()
                             .flex()
-                            .gap_2()
-                            .items_center()
+                            .flex_col()
+                            .gap_1p5()
+                            .child(settings_section_card(
+                                "Transfers",
+                                "",
+                                vec![
+                                    settings_switch_row(
+                                        "settings-preserve-mtime",
+                                        "Preserve modification time",
+                                        None,
+                                        preserve_mtime,
+                                        on_preserve_mtime,
+                                        &theme,
+                                    ),
+                                    settings_inset_divider(&theme),
+                                    settings_switch_row(
+                                        "settings-preserve-permissions",
+                                        "Preserve permissions",
+                                        None,
+                                        preserve_permissions,
+                                        on_preserve_permissions,
+                                        &theme,
+                                    ),
+                                ],
+                                &theme,
+                            ))
                             .child(
-                                text_button("open-log-folder", "Show Logs").on_click(
-                                    cx.listener(|workspace, _event, _window, cx| {
+                                div()
+                                    .px_1()
+                                    .text_role(&theme, theme.typography.secondary)
+                                    .text_color(theme.colors.text_muted)
+                                    .child("Applies to new transfers. Remote-edit uploads always keep their timestamp."),
+                            ),
+                    )
+                    .child(settings_section_card(
+                        "Diagnostics",
+                        "",
+                        vec![
+                            settings_action_row(
+                                "Diagnostic logs",
+                                None,
+                                text_button("open-log-folder", "Show Logs")
+                                    .on_click(cx.listener(|workspace, _event, _window, cx| {
                                         workspace.open_log_folder(cx);
-                                    }),
-                                ),
-                            )
-                            .child(
-                                text_button("copy-version", "Copy Version Info").on_click(
-                                    cx.listener(|workspace, _event, _window, cx| {
+                                    }))
+                                    .into_any_element(),
+                                &theme,
+                            ),
+                            settings_inset_divider(&theme),
+                            settings_action_row(
+                                "Version details",
+                                None,
+                                text_button("copy-version", "Copy Version Info")
+                                    .on_click(cx.listener(|workspace, _event, _window, cx| {
                                         workspace.copy_version_info(cx);
-                                    }),
-                                ),
-                            )
-                            .into_any_element(),
+                                    }))
+                                    .into_any_element(),
+                                &theme,
+                            ),
+                        ],
+                        &theme,
                     )),
             );
 
@@ -443,85 +481,77 @@ impl crate::workspace::Workspace {
     ) -> gpui_kit::AnyElement {
         let theme = cx.theme().clone();
 
-        let section_header = |title: &'static str, description: &'static str| {
-            div()
-                .flex()
-                .flex_col()
-                .gap_0p5()
-                .child(
-                    div()
-                        .text_role(&theme, theme.typography.heading)
-                        .text_color(theme.colors.text)
-                        .child(title),
-                )
-                .when(!description.is_empty(), |el| {
-                    el.child(
-                        div()
-                            .text_role(&theme, theme.typography.secondary)
-                            .text_color(theme.colors.text_muted)
-                            .child(description),
-                    )
-                })
-                .into_any_element()
-        };
-
-        let section_card =
-            |title: &'static str, description: &'static str, content: gpui_kit::AnyElement| {
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(section_header(title, description))
-                    .child(
-                        div()
-                            .rounded(theme.sizes.modal_radius)
-                            .border_1()
-                            .border_color(theme.colors.border)
-                            .bg(theme.colors.surface)
-                            .overflow_hidden()
-                            .child(content),
-                    )
-            };
-
-        let file_editor_section = div()
+        let file_editor_card = div()
             .flex()
             .flex_col()
-            .gap_2()
-            .child(section_header(
-                "File Editor",
-                "Enter an app or command. Leave blank to use your Mac’s default app.",
+            .gap_1p5()
+            .child(settings_section_card(
+                "Default Editor",
+                "",
+                vec![
+                    div()
+                        .px_4()
+                        .py_3()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_role(&theme, theme.typography.body_medium)
+                                .text_color(theme.colors.text)
+                                .child("Application or command"),
+                        )
+                        .child(
+                            div()
+                                .id("settings-external-editor")
+                                .on_click(cx.listener(|workspace, _event, window, cx| {
+                                    workspace.focus_external_editor(window, cx);
+                                }))
+                                .child(ordinary_text_field(
+                                    "settings-external-editor-input",
+                                    &self.settings.external_editor_input,
+                                )),
+                        )
+                        .into_any_element(),
+                ],
+                &theme,
             ))
             .child(
                 div()
-                    .id("settings-external-editor")
-                    .on_click(cx.listener(|workspace, _event, window, cx| {
-                        workspace.focus_external_editor(window, cx);
-                    }))
-                    .child(ordinary_text_field(
-                        "settings-external-editor-input",
-                        &self.settings.external_editor_input,
-                    )),
+                    .px_1()
+                    .text_role(&theme, theme.typography.secondary)
+                    .text_color(theme.colors.text_muted)
+                    .child("Leave blank to use your Mac’s default text editor."),
             );
 
-        let editor_rules_card = section_card(
-            "Editor Associations",
-            "Route files to specific editors by filename pattern (e.g. *.rs or *.png).",
-            self.render_editor_rules(cx),
+        let editor_rules_card = settings_section_card(
+            "File Associations",
+            "Open matching filenames in a dedicated application.",
+            vec![self.render_editor_rules(cx)],
+            &theme,
         );
 
         let form = div()
             .flex_none()
             .w_full()
-            .p_5()
+            .px_6()
+            .py_5()
             .track_focus(&self.workspace_focus)
             .child(
                 div()
-                    .max_w(px(640.0))
+                    .max_w(px(560.0))
                     .mx_auto()
                     .flex()
                     .flex_col()
-                    .gap_5()
-                    .child(file_editor_section)
+                    .gap_4()
+                    .child(
+                        div()
+                            .px_1()
+                            .text_role(&theme, theme.typography.title)
+                            .text_color(theme.colors.text)
+                            .child("Editor"),
+                    )
+                    .child(file_editor_card)
                     .child(editor_rules_card),
             );
 
@@ -546,16 +576,29 @@ impl crate::workspace::Workspace {
         cx.notify();
     }
 
-    pub(crate) fn set_show_hidden_files_setting(
+    pub(crate) fn set_show_local_hidden_files_setting(
         &mut self,
-        show_hidden_files: bool,
+        show_local_hidden_files: bool,
         cx: &mut Context<Self>,
     ) {
         let result = cx
             .resources_mut()
             .config
-            .set_show_hidden_files(show_hidden_files);
-        self.finish_config_change(result, "show_hidden_files", cx);
+            .set_show_local_hidden_files(show_local_hidden_files);
+        self.finish_config_change(result, "show_local_hidden_files", cx);
+        cx.notify();
+    }
+
+    pub(crate) fn set_show_remote_hidden_files_setting(
+        &mut self,
+        show_remote_hidden_files: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let result = cx
+            .resources_mut()
+            .config
+            .set_show_remote_hidden_files(show_remote_hidden_files);
+        self.finish_config_change(result, "show_remote_hidden_files", cx);
         cx.notify();
     }
 
@@ -628,23 +671,24 @@ impl crate::workspace::Workspace {
             content = content.child(
                 div()
                     .px_4()
-                    .py_3p5()
+                    .py_4()
                     .text_role(&theme, theme.typography.secondary)
                     .text_color(theme.colors.text_muted)
-                    .child("No rules configured. Files open in the fallback editor, or in the system text editor."),
+                    .child("No file associations configured."),
             );
         } else {
             for (index, rule) in rules.iter().enumerate() {
                 if index > 0 {
-                    content = content.child(div().h(px(1.0)).bg(theme.colors.border));
+                    content = content.child(settings_inset_divider(&theme));
                 }
                 content = content.child(
                     div()
                         .flex()
                         .items_center()
                         .justify_between()
+                        .gap_3()
                         .px_4()
-                        .py_2p5()
+                        .py_2()
                         .child(
                             div()
                                 .flex()
@@ -660,7 +704,7 @@ impl crate::workspace::Workspace {
                                         .truncate()
                                         .px_2()
                                         .py_0p5()
-                                        .rounded(theme.sizes.button_radius)
+                                        .rounded(px(5.0))
                                         .bg(theme.colors.element_active)
                                         .text_role(&theme, theme.typography.mono)
                                         .text_color(theme.colors.text)
@@ -687,8 +731,8 @@ impl crate::workspace::Workspace {
                                 ),
                         )
                         .child(
-                            text_button(("remove-rule", index), "Remove")
-                                .danger(true)
+                            icon_button(("remove-rule", index), IconName::Trash, "Remove rule")
+                                .icon_color(theme.colors.text_muted)
                                 .on_click(cx.listener(move |workspace, _event, _window, cx| {
                                     workspace.remove_editor_rule(index, cx);
                                 })),
@@ -700,31 +744,26 @@ impl crate::workspace::Workspace {
         let add_form = div()
             .border_t_1()
             .border_color(theme.colors.border)
-            .p_3p5()
-            .bg(theme.colors.surface)
+            .px_4()
+            .py_2p5()
+            .bg(settings_canvas_bg(&theme))
             .flex()
-            .flex_col()
             .gap_2()
+            .items_center()
+            .child(div().w(px(140.0)).flex_none().child(ordinary_text_field(
+                "new-rule-pattern",
+                &self.settings.new_rule_pattern,
+            )))
+            .child(div().flex_1().min_w_0().child(ordinary_text_field(
+                "new-rule-app",
+                &self.settings.new_rule_app,
+            )))
             .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .items_center()
-                    .child(div().flex_1().child(ordinary_text_field(
-                        "new-rule-pattern",
-                        &self.settings.new_rule_pattern,
-                    )))
-                    .child(div().flex_1().child(ordinary_text_field(
-                        "new-rule-app",
-                        &self.settings.new_rule_app,
-                    )))
-                    .child(
-                        text_button("add-editor-rule-button", "Add Rule")
-                            .primary(true)
-                            .on_click(cx.listener(|workspace, _event, window, cx| {
-                                workspace.add_editor_rule(window, cx);
-                            })),
-                    ),
+                text_button("add-editor-rule-button", "Add")
+                    .primary(true)
+                    .on_click(cx.listener(|workspace, _event, window, cx| {
+                        workspace.add_editor_rule(window, cx);
+                    })),
             );
 
         content.child(add_form).into_any_element()
@@ -819,64 +858,49 @@ impl crate::workspace::Workspace {
                 let endpoint = format!("{}@{}", profile.username, profile.host);
                 let port = format!(":{}", profile.port);
                 let hover_background = if selected {
-                    theme.colors.element_active
+                    theme.colors.element_selected
                 } else {
                     theme.colors.element_hover
                 };
-                let profile_icon = div()
-                    .size(px(28.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_md()
-                    .bg(if selected {
-                        theme.colors.element_active
+                let profile_icon = icon(
+                    IconName::Server,
+                    if selected {
+                        theme.colors.accent
                     } else {
-                        theme.colors.elevated_surface
-                    })
-                    .child(icon(
-                        IconName::Server,
-                        if selected {
-                            theme.colors.accent
-                        } else {
-                            theme.colors.text_muted
-                        },
-                    ));
+                        theme.colors.text_muted
+                    },
+                );
                 let profile_name = div()
                     .truncate()
-                    .text_role(&theme, theme.typography.body_medium)
+                    .text_role(
+                        &theme,
+                        if selected {
+                            theme.typography.body_medium
+                        } else {
+                            theme.typography.body
+                        },
+                    )
                     .text_color(theme.colors.text)
                     .child(profile.name.clone());
                 let profile_endpoint = div().flex_1().min_w_0().truncate().child(endpoint);
                 let profile_port = div()
                     .flex_none()
-                    .px_1p5()
-                    .py_0p5()
-                    .rounded_sm()
-                    .bg(theme.colors.element_active)
-                    .text_role(&theme, theme.typography.label)
+                    .text_role(&theme, theme.typography.mono)
                     .text_color(theme.colors.text_muted)
                     .child(port);
                 let row = div()
-                    .h(px(48.0))
+                    .h(px(44.0))
                     .w_full()
                     .flex()
                     .items_center()
                     .gap_2p5()
                     .px_2p5()
                     .cursor_pointer()
-                    .rounded(theme.sizes.button_radius)
-                    .border_1()
-                    .border_color(if selected {
-                        theme.colors.accent
-                    } else {
-                        theme.colors.border
-                    })
+                    .rounded(px(6.0))
                     .bg(if selected {
                         theme.colors.element_selected
                     } else {
-                        theme.colors.surface
+                        gpui_kit::transparent_black()
                     });
                 let row = if selected {
                     row.id("settings-selected-profile-row")
@@ -953,6 +977,10 @@ impl crate::workspace::Workspace {
                 .into_any_element()
         };
 
+        let list_bg = match theme.appearance {
+            Appearance::Light => theme.colors.background,
+            Appearance::Dark => theme.colors.surface,
+        };
         div()
             .flex()
             .flex_1()
@@ -960,33 +988,48 @@ impl crate::workspace::Workspace {
             .min_w_0()
             .child(
                 div()
-                    .w(px(195.0))
+                    .w(px(212.0))
                     .flex_none()
                     .flex()
                     .flex_col()
                     .gap_2()
-                    .p_2p5()
+                    .p_3()
+                    .bg(list_bg)
                     .border_r_1()
                     .border_color(theme.colors.border)
                     .track_focus(&self.workspace_focus)
                     .child(
-                        text_button("settings-new-profile", "Add Connection").on_click(
-                            cx.listener(|workspace, _event, _window, cx| {
-                                workspace.start_new_profile(cx);
-                            }),
-                        ),
-                    )
-                    .child(
                         div()
-                            .id("settings-profile-filter")
-                            .on_click(cx.listener(|workspace, _event, window, cx| {
-                                workspace.focus_profile_filter(window, cx);
-                            }))
-                            .child(self.render_text_input(
-                                TextInputTarget::ProfileFilter,
-                                "settings-profile-filter-input",
-                                cx,
-                            )),
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .child(
+                                div()
+                                    .id("settings-profile-filter")
+                                    .flex_1()
+                                    .min_w_0()
+                                    .on_click(cx.listener(|workspace, _event, window, cx| {
+                                        workspace.focus_profile_filter(window, cx);
+                                    }))
+                                    .child(self.render_text_input(
+                                        TextInputTarget::ProfileFilter,
+                                        "settings-profile-filter-input",
+                                        cx,
+                                    )),
+                            )
+                            .child(
+                                icon_button(
+                                    "settings-new-profile",
+                                    IconName::Plus,
+                                    "Add Connection",
+                                )
+                                .emphasis(true)
+                                .on_click(cx.listener(
+                                    |workspace, _event, _window, cx| {
+                                        workspace.start_new_profile(cx);
+                                    },
+                                )),
+                            ),
                     )
                     .child(
                         div()
@@ -995,8 +1038,8 @@ impl crate::workspace::Workspace {
                             .justify_between()
                             .px_1()
                             .text_role(&theme, theme.typography.label)
-                            .text_color(theme.colors.text_disabled)
-                            .child("SAVED CONNECTIONS")
+                            .text_color(theme.colors.text_muted)
+                            .child("CONNECTIONS")
                             .child(if filter_active {
                                 format!("{filtered_count} of {total_count}")
                             } else {
@@ -1005,23 +1048,30 @@ impl crate::workspace::Workspace {
                     )
                     .child(macsftp_ui::scroll_area(
                         "settings-profile-list-scroll",
-                        div().flex().flex_col().gap_1().pr_1().child(list_body),
+                        div().flex().flex_col().gap_0p5().pr_1().child(list_body),
                         &self.settings.profile_list_scroll,
                         &self.settings.profile_list_scrollbar,
                         window,
                         cx,
                     )),
             )
-            .child(div().flex().flex_col().flex_1().min_w_0().min_h_0().child(
-                macsftp_ui::scroll_area(
-                    "settings-profile-editor-scroll",
-                    div().flex_none().w_full().px_4().py_4().child(detail),
-                    &self.settings.editor_scroll,
-                    &self.settings.editor_scrollbar,
-                    window,
-                    cx,
-                ),
-            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .bg(settings_canvas_bg(&theme))
+                    .child(macsftp_ui::scroll_area(
+                        "settings-profile-editor-scroll",
+                        div().flex_none().w_full().p_5().child(detail),
+                        &self.settings.editor_scroll,
+                        &self.settings.editor_scrollbar,
+                        window,
+                        cx,
+                    )),
+            )
             .into_any_element()
     }
 
@@ -1053,12 +1103,14 @@ impl crate::workspace::Workspace {
             div()
                 .flex()
                 .when(compact, |row| row.flex_col().items_start().gap_1p5())
-                .when(!compact, |row| row.items_start().gap_2())
+                .when(!compact, |row| row.items_center().gap_3())
+                .px_4()
+                .py_2p5()
                 .child(
                     div()
-                        .when(!compact, |el| el.w(px(112.0)).flex_none().pt_1())
-                        .text_role(&theme, theme.typography.label)
-                        .text_color(theme.colors.text_muted)
+                        .when(!compact, |el| el.w(px(124.0)).flex_none())
+                        .text_role(&theme, theme.typography.body_medium)
+                        .text_color(theme.colors.text)
                         .child(label),
                 )
                 .child(
@@ -1122,20 +1174,47 @@ impl crate::workspace::Workspace {
                 .into_any_element()
         };
 
+        let segment_button = |id: &'static str, label: &'static str, selected: bool| {
+            div()
+                .id(id)
+                .px_2p5()
+                .py_1()
+                .rounded(px(6.0))
+                .cursor_pointer()
+                .text_role(
+                    &theme,
+                    if selected {
+                        theme.typography.body_medium
+                    } else {
+                        theme.typography.body
+                    },
+                )
+                .when(selected, |seg| {
+                    seg.bg(theme.colors.elevated_surface)
+                        .shadow(theme.shadow_chip())
+                        .text_color(theme.colors.text)
+                })
+                .when(!selected, |seg| {
+                    seg.text_color(theme.colors.text_muted)
+                        .hover(|style| style.text_color(theme.colors.text))
+                })
+                .child(label)
+        };
+
         let auth_toggle = |label: &'static str,
                            method: AuthMethodKind,
                            id: &'static str,
                            active: AuthMethodKind,
                            cx: &mut Context<Self>| {
-            text_button(id, label)
-                .primary(active == method)
-                .on_click(cx.listener(move |workspace, _event, window, cx| {
+            segment_button(id, label, active == method).on_click(cx.listener(
+                move |workspace, _event, window, cx| {
                     if let Some(editor) = workspace.settings.profile_editor.as_mut() {
                         editor.set_auth_method(method);
                         cx.notify();
                     }
                     workspace.focus_profile_field(window, cx);
-                }))
+                },
+            ))
         };
 
         let passphrase_policy_toggle =
@@ -1144,14 +1223,14 @@ impl crate::workspace::Workspace {
              id: &'static str,
              active: PassphrasePolicy,
              cx: &mut Context<Self>| {
-                text_button(id, label)
-                    .primary(active == policy)
-                    .on_click(cx.listener(move |workspace, _event, _window, cx| {
+                segment_button(id, label, active == policy).on_click(cx.listener(
+                    move |workspace, _event, _window, cx| {
                         if let Some(editor) = workspace.settings.profile_editor.as_mut() {
                             editor.set_passphrase_policy(policy);
                             cx.notify();
                         }
-                    }))
+                    },
+                ))
             };
 
         let route_toggle = |label: &'static str,
@@ -1159,40 +1238,33 @@ impl crate::workspace::Workspace {
                             id: &'static str,
                             active: ProfileRouteKind,
                             cx: &mut Context<Self>| {
-            text_button(id, label)
-                .primary(active == route_kind)
-                .on_click(cx.listener(move |workspace, _event, window, cx| {
+            segment_button(id, label, active == route_kind).on_click(cx.listener(
+                move |workspace, _event, window, cx| {
                     if let Some(editor) = workspace.settings.profile_editor.as_mut() {
                         editor.set_route_kind(route_kind);
                         cx.notify();
                     }
                     workspace.focus_profile_field(window, cx);
-                }))
+                },
+            ))
         };
 
-        let section_card = |title: &'static str, children: Vec<gpui_kit::AnyElement>| {
+        let segmented_track = |items: Vec<gpui_kit::AnyElement>| {
             div()
                 .flex()
-                .flex_col()
-                .gap_1p5()
                 .child(
                     div()
-                        .text_role(&theme, theme.typography.label)
-                        .text_color(theme.colors.text_disabled)
-                        .child(title),
-                )
-                .child(
-                    div()
-                        .rounded(theme.sizes.modal_radius)
+                        .flex()
+                        .flex_wrap()
+                        .gap_0p5()
+                        .p_0p5()
+                        .rounded(px(7.0))
+                        .bg(theme.colors.element_active)
                         .border_1()
                         .border_color(theme.colors.border)
-                        .bg(theme.colors.surface)
-                        .p_3()
-                        .flex()
-                        .flex_col()
-                        .gap_2p5()
-                        .children(children),
+                        .children(items),
                 )
+                .into_any_element()
         };
 
         let focused = editor.focused_field;
@@ -1234,11 +1306,12 @@ impl crate::workspace::Workspace {
         if let Some(error) = &editor.error {
             form = form.child(
                 div()
-                    .p_2p5()
-                    .rounded(theme.sizes.button_radius)
+                    .px_3p5()
+                    .py_2p5()
+                    .rounded(px(8.0))
                     .border_1()
                     .border_color(theme.colors.error)
-                    .bg(theme.colors.surface)
+                    .bg(theme.colors.elevated_surface)
                     .text_role(&theme, theme.typography.secondary)
                     .text_color(theme.colors.error)
                     .child(error.clone()),
@@ -1246,8 +1319,85 @@ impl crate::workspace::Workspace {
         }
 
         // Section 1: Server Details
-        let server_details_card = section_card(
-            "SERVER DETAILS",
+        let field_wrapper = |field: ProfileEditorField, cx: &mut Context<Self>| {
+            div()
+                .id(("profile-editor-field", field as usize))
+                .on_click(cx.listener(move |workspace, _event, window, cx| {
+                    workspace.settings.profile_filter_focused = false;
+                    if let Some(editor) = workspace.settings.profile_editor.as_mut() {
+                        editor.focused_field = field;
+                    }
+                    if let Some(input) = workspace
+                        .settings
+                        .profile_editor
+                        .as_ref()
+                        .and_then(|editor| editor.inputs.get(&field))
+                    {
+                        input.focus(window, cx);
+                    } else {
+                        window.focus(&workspace.modal_focus, cx);
+                    }
+                    cx.notify();
+                }))
+                .child(plain_text_field(
+                    ("profile-editor-input", field as usize),
+                    editor
+                        .inputs
+                        .get(&field)
+                        .expect("visible ordinary fields must have prepared component inputs"),
+                    cx,
+                ))
+        };
+        let server_row = if compact {
+            div()
+                .flex()
+                .flex_col()
+                .child(field_row(
+                    "Server Address",
+                    ProfileEditorField::Host,
+                    &editor.host,
+                    ProfileEditorField::Host.placeholder(),
+                    false,
+                    focused,
+                    cx,
+                ))
+                .child(settings_inset_divider(&theme))
+                .child(field_row(
+                    "Port",
+                    ProfileEditorField::Port,
+                    &editor.port,
+                    ProfileEditorField::Port.placeholder(),
+                    false,
+                    focused,
+                    cx,
+                ))
+                .into_any_element()
+        } else {
+            labeled_row(
+                "Server & Port",
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(field_wrapper(ProfileEditorField::Host, cx)),
+                    )
+                    .child(
+                        div()
+                            .w(px(72.0))
+                            .flex_none()
+                            .child(field_wrapper(ProfileEditorField::Port, cx)),
+                    )
+                    .into_any_element(),
+            )
+            .into_any_element()
+        };
+        let server_details_card = settings_section_card(
+            "Server Details",
+            "",
             vec![
                 field_row(
                     "Connection Name",
@@ -1258,24 +1408,9 @@ impl crate::workspace::Workspace {
                     focused,
                     cx,
                 ),
-                field_row(
-                    "Server Address",
-                    ProfileEditorField::Host,
-                    &editor.host,
-                    ProfileEditorField::Host.placeholder(),
-                    false,
-                    focused,
-                    cx,
-                ),
-                field_row(
-                    "Port",
-                    ProfileEditorField::Port,
-                    &editor.port,
-                    ProfileEditorField::Port.placeholder(),
-                    false,
-                    focused,
-                    cx,
-                ),
+                settings_inset_divider(&theme),
+                server_row,
+                settings_inset_divider(&theme),
                 field_row(
                     "Username",
                     ProfileEditorField::Username,
@@ -1286,6 +1421,7 @@ impl crate::workspace::Workspace {
                     cx,
                 ),
             ],
+            &theme,
         );
         form = form.child(server_details_card);
 
@@ -1293,45 +1429,47 @@ impl crate::workspace::Workspace {
         let mut auth_elements = vec![
             labeled_row(
                 "Sign-In Method",
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_1p5()
-                    .child(auth_toggle(
+                segmented_track(vec![
+                    auth_toggle(
                         "Password",
                         AuthMethodKind::Password,
                         "profile-auth-password",
                         auth_method,
                         cx,
-                    ))
-                    .child(auth_toggle(
+                    )
+                    .into_any_element(),
+                    auth_toggle(
                         "Key File",
                         AuthMethodKind::PrivateKey,
                         "profile-auth-private-key",
                         auth_method,
                         cx,
-                    ))
-                    .child(auth_toggle(
+                    )
+                    .into_any_element(),
+                    auth_toggle(
                         "Server Prompts",
                         AuthMethodKind::KeyboardInteractive,
                         "profile-auth-keyboard-interactive",
                         auth_method,
                         cx,
-                    ))
-                    .child(auth_toggle(
+                    )
+                    .into_any_element(),
+                    auth_toggle(
                         "SSH Agent",
                         AuthMethodKind::SshAgent,
                         "profile-auth-agent",
                         auth_method,
                         cx,
-                    ))
+                    )
                     .into_any_element(),
+                ]),
             )
             .into_any_element(),
         ];
 
         match auth_method {
             AuthMethodKind::Password => {
+                auth_elements.push(settings_inset_divider(&theme));
                 auth_elements.push(field_row(
                     "Password",
                     ProfileEditorField::Password,
@@ -1348,6 +1486,7 @@ impl crate::workspace::Workspace {
             }
             AuthMethodKind::PrivateKey => {
                 let policy = editor.passphrase_policy;
+                auth_elements.push(settings_inset_divider(&theme));
                 auth_elements.push(field_row(
                     "Key File Path",
                     ProfileEditorField::KeyPath,
@@ -1357,35 +1496,36 @@ impl crate::workspace::Workspace {
                     focused,
                     cx,
                 ));
+                auth_elements.push(settings_inset_divider(&theme));
                 auth_elements.push(
                     labeled_row(
                         "Key Password",
-                        div()
-                            .flex()
-                            .flex_wrap()
-                            .gap_1p5()
-                            .child(passphrase_policy_toggle(
+                        segmented_track(vec![
+                            passphrase_policy_toggle(
                                 "No Password",
                                 PassphrasePolicy::NoPassphrase,
                                 "profile-pass-none",
                                 policy,
                                 cx,
-                            ))
-                            .child(passphrase_policy_toggle(
+                            )
+                            .into_any_element(),
+                            passphrase_policy_toggle(
                                 "Ask Every Time",
                                 PassphrasePolicy::AskEveryTime,
                                 "profile-pass-ask",
                                 policy,
                                 cx,
-                            ))
-                            .child(passphrase_policy_toggle(
-                                "Remember Password",
+                            )
+                            .into_any_element(),
+                            passphrase_policy_toggle(
+                                "Remember",
                                 PassphrasePolicy::Remember,
                                 "profile-pass-remember",
                                 policy,
                                 cx,
-                            ))
+                            )
                             .into_any_element(),
+                        ]),
                     )
                     .into_any_element(),
                 );
@@ -1396,8 +1536,9 @@ impl crate::workspace::Workspace {
                         (PassphrasePolicy::Remember, false) => "",
                         (PassphrasePolicy::NoPassphrase, _) => "",
                     };
+                    auth_elements.push(settings_inset_divider(&theme));
                     auth_elements.push(field_row(
-                        "Key Password",
+                        "Passphrase",
                         ProfileEditorField::Passphrase,
                         editor.passphrase.as_input_state(),
                         placeholder,
@@ -1409,6 +1550,7 @@ impl crate::workspace::Workspace {
             }
             AuthMethodKind::KeyboardInteractive => {}
             AuthMethodKind::SshAgent => {
+                auth_elements.push(settings_inset_divider(&theme));
                 auth_elements.push(field_row(
                     "Agent Location",
                     ProfileEditorField::AgentSocket,
@@ -1420,39 +1562,44 @@ impl crate::workspace::Workspace {
                 ));
             }
         }
-        form = form.child(section_card("AUTHENTICATION", auth_elements));
+        form = form.child(settings_section_card(
+            "Authentication",
+            "",
+            auth_elements,
+            &theme,
+        ));
 
         // Section 3: Connection Route
         let route_kind = editor.route_kind;
         let mut route_elements = vec![
             labeled_row(
                 "Connection Method",
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_1p5()
-                    .child(route_toggle(
+                segmented_track(vec![
+                    route_toggle(
                         "Direct",
                         ProfileRouteKind::Direct,
                         "profile-route-direct",
                         route_kind,
                         cx,
-                    ))
-                    .child(route_toggle(
+                    )
+                    .into_any_element(),
+                    route_toggle(
                         "Via Another Server",
                         ProfileRouteKind::JumpHost,
                         "profile-route-jump",
                         route_kind,
                         cx,
-                    ))
-                    .child(route_toggle(
+                    )
+                    .into_any_element(),
+                    route_toggle(
                         "Run a Command",
                         ProfileRouteKind::ProxyCommand,
                         "profile-route-command",
                         route_kind,
                         cx,
-                    ))
+                    )
                     .into_any_element(),
+                ]),
             )
             .into_any_element(),
         ];
@@ -1460,6 +1607,7 @@ impl crate::workspace::Workspace {
         match route_kind {
             ProfileRouteKind::Direct => {}
             ProfileRouteKind::ProxyCommand => {
+                route_elements.push(settings_inset_divider(&theme));
                 route_elements.push(field_row(
                     "Connection Command",
                     ProfileEditorField::ProxyCommand,
@@ -1472,9 +1620,11 @@ impl crate::workspace::Workspace {
                 route_elements.push(
                     div()
                         .flex()
-                        .gap_2()
+                        .gap_3()
+                        .px_4()
+                        .pb_3()
                         .when(!compact, |row| {
-                            row.child(div().w(px(112.0)).flex_none())
+                            row.child(div().w(px(124.0)).flex_none())
                         })
                         .child(
                             div()
@@ -1491,6 +1641,7 @@ impl crate::workspace::Workspace {
                 );
             }
             ProfileRouteKind::JumpHost => {
+                route_elements.push(settings_inset_divider(&theme));
                 let mut choices = div().flex().flex_wrap().gap_1p5();
                 for (profile_id, label) in &jump_candidates {
                     let profile_id = *profile_id;
@@ -1520,11 +1671,17 @@ impl crate::workspace::Workspace {
                 );
             }
         }
-        form = form.child(section_card("CONNECTION ROUTE", route_elements));
+        form = form.child(settings_section_card(
+            "Connection Route",
+            "",
+            route_elements,
+            &theme,
+        ));
 
         // Section 4: Preferences
-        let preferences_card = section_card(
-            "PREFERENCES",
+        let preferences_card = settings_section_card(
+            "Preferences",
+            "",
             vec![field_row(
                 "Starting Folder",
                 ProfileEditorField::DefaultRemotePath,
@@ -1534,6 +1691,7 @@ impl crate::workspace::Workspace {
                 focused,
                 cx,
             )],
+            &theme,
         );
         form = form.child(preferences_card);
 
@@ -1555,36 +1713,60 @@ impl crate::workspace::Workspace {
             );
         }
 
-        form = form.child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2p5()
-                .pt_1()
-                .child(
-                    text_button("settings-save-profile", "Save")
-                        .primary(true)
-                        .on_click(cx.listener(|workspace, _event, _window, cx| {
-                            workspace.save_profile_editor(cx);
-                        })),
-                )
-                .when(!editor.is_new, |row| {
-                    let profile_id = editor.profile_id;
-                    row.child(
-                        text_button("settings-delete-profile", "Delete…")
-                            .danger(true)
-                            .on_click(cx.listener(move |workspace, _event, window, cx| {
-                                if let Some(id) = profile_id {
-                                    workspace.request_delete_profile(id, window, cx);
-                                } else if let Some(id) = workspace.settings.selected_profile_id {
-                                    workspace.request_delete_profile(id, window, cx);
-                                }
-                            })),
-                    )
-                }),
+        let mut actions = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2p5()
+            .pt_1();
+        if !editor.is_new {
+            let profile_id = editor.profile_id;
+            actions = actions.child(
+                Button::new("settings-delete-profile")
+                    .h(theme.sizes.button_height)
+                    .px(theme.sizes.button_padding_x)
+                    .rounded(theme.sizes.button_radius)
+                    .border_1()
+                    .border_color(theme.colors.border)
+                    .bg(theme.colors.elevated_surface)
+                    .text_role(&theme, theme.typography.control)
+                    .text_color(theme.colors.error)
+                    .hover(|style| style.bg(theme.colors.element_hover))
+                    .active(|style| style.bg(theme.colors.element_active))
+                    .focus_visible(|style| style.border_color(theme.colors.border_focused))
+                    .accessibility_label("Delete…")
+                    .on_click(cx.listener(move |workspace, _event, window, cx| {
+                        if let Some(id) = profile_id {
+                            workspace.request_delete_profile(id, window, cx);
+                        } else if let Some(id) = workspace.settings.selected_profile_id {
+                            workspace.request_delete_profile(id, window, cx);
+                        }
+                    }))
+                    .child("Delete…"),
+            );
+        } else {
+            actions = actions.child(div());
+        }
+        actions = actions.child(
+            text_button("settings-save-profile", "Save")
+                .primary(true)
+                .on_click(cx.listener(|workspace, _event, _window, cx| {
+                    workspace.save_profile_editor(cx);
+                })),
         );
+        form = form.child(actions);
 
         form.into_any_element()
+    }
+}
+
+/// Canvas background for Settings content panes so grouped `elevated_surface`
+/// cards stay distinct in both Light (`surface` `#f5f5f7` behind `#ffffff`)
+/// and Dark (`background` `#1e1e1e` behind `#2c2c2e`).
+fn settings_canvas_bg(theme: &Theme) -> gpui_kit::Hsla {
+    match theme.appearance {
+        Appearance::Light => theme.colors.surface,
+        Appearance::Dark => theme.colors.background,
     }
 }
 
@@ -1604,13 +1786,260 @@ fn settings_toggle_handler(
     }
 }
 
-/// A settings row with a label, explanation, and a controlled native-style
-/// switch. The Base `Toggle` owns focus, Enter/Space activation and the
-/// toggled accessibility state; this helper owns the macOS-like track.
+/// Grouped macOS System Settings card: concise section heading above a crisp
+/// elevated card container.
+fn settings_section_card(
+    title: &'static str,
+    description: &'static str,
+    children: Vec<gpui_kit::AnyElement>,
+    theme: &Theme,
+) -> gpui_kit::AnyElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1p5()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .px_1()
+                .child(
+                    div()
+                        .text_role(theme, theme.typography.heading)
+                        .text_color(theme.colors.text)
+                        .child(title),
+                )
+                .when(!description.is_empty(), |el| {
+                    el.child(
+                        div()
+                            .text_role(theme, theme.typography.secondary)
+                            .text_color(theme.colors.text_muted)
+                            .child(description),
+                    )
+                }),
+        )
+        .child(
+            div()
+                .rounded(px(8.0))
+                .border_1()
+                .border_color(theme.colors.border)
+                .bg(theme.colors.elevated_surface)
+                .overflow_hidden()
+                .children(children),
+        )
+        .into_any_element()
+}
+
+/// Inset hairline divider matching macOS grouped settings lists.
+fn settings_inset_divider(theme: &Theme) -> gpui_kit::AnyElement {
+    div()
+        .mx_4()
+        .h(px(1.0))
+        .bg(theme.colors.border)
+        .opacity(0.45)
+        .into_any_element()
+}
+
+/// Compact macOS-style window thumbnail for Auto / Light / Dark appearance.
+/// Only the thumbnail itself carries the accent selection ring (matching
+/// macOS System Settings), and traffic lights are drawn once on the top-left.
+fn appearance_preview_thumbnail(
+    appearance: AppearancePreference,
+    selected: bool,
+    theme: &Theme,
+) -> gpui_kit::AnyElement {
+    let light_chrome = rgb(0xebebee);
+    let light_bg = rgb(0xffffff);
+    let light_bar = rgb(0xd1d1d6);
+    let dark_chrome = rgb(0x323236);
+    let dark_bg = rgb(0x1e1e20);
+    let dark_bar = rgb(0x48484c);
+    let accent = rgb(0x0a84ff);
+
+    let traffic_lights = || {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(2.5))
+            .child(div().size(px(3.5)).rounded_full().bg(rgb(0xff5f57)))
+            .child(div().size(px(3.5)).rounded_full().bg(rgb(0xfebc2e)))
+            .child(div().size(px(3.5)).rounded_full().bg(rgb(0x28c840)))
+    };
+
+    let content = match appearance {
+        AppearancePreference::Light => div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(light_bg)
+            .child(
+                div()
+                    .h(px(10.0))
+                    .px_1()
+                    .flex()
+                    .items_center()
+                    .bg(light_chrome)
+                    .child(traffic_lights()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .p_1p5()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().w(px(22.0)).h(px(3.0)).rounded_full().bg(accent))
+                    .child(div().w(px(36.0)).h(px(2.5)).rounded_full().bg(light_bar))
+                    .child(div().w(px(28.0)).h(px(2.5)).rounded_full().bg(light_bar)),
+            ),
+        AppearancePreference::Dark => div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(dark_bg)
+            .child(
+                div()
+                    .h(px(10.0))
+                    .px_1()
+                    .flex()
+                    .items_center()
+                    .bg(dark_chrome)
+                    .child(traffic_lights()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .p_1p5()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(div().w(px(22.0)).h(px(3.0)).rounded_full().bg(accent))
+                    .child(div().w(px(36.0)).h(px(2.5)).rounded_full().bg(dark_bar))
+                    .child(div().w(px(28.0)).h(px(2.5)).rounded_full().bg(dark_bar)),
+            ),
+        AppearancePreference::System => div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(
+                div()
+                    .h(px(10.0))
+                    .flex()
+                    .child(
+                        div()
+                            .flex_1()
+                            .h_full()
+                            .px_1()
+                            .flex()
+                            .items_center()
+                            .bg(light_chrome)
+                            .child(traffic_lights()),
+                    )
+                    .child(div().flex_1().h_full().bg(dark_chrome)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .child(
+                        div()
+                            .flex_1()
+                            .h_full()
+                            .p_1()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .bg(light_bg)
+                            .child(div().w(px(16.0)).h(px(3.0)).rounded_full().bg(accent))
+                            .child(div().w(px(22.0)).h(px(2.5)).rounded_full().bg(light_bar))
+                            .child(div().w(px(18.0)).h(px(2.5)).rounded_full().bg(light_bar)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .h_full()
+                            .p_1()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .bg(dark_bg)
+                            .child(div().w(px(16.0)).h(px(3.0)).rounded_full().bg(accent))
+                            .child(div().w(px(22.0)).h(px(2.5)).rounded_full().bg(dark_bar))
+                            .child(div().w(px(18.0)).h(px(2.5)).rounded_full().bg(dark_bar)),
+                    ),
+            ),
+    };
+
+    div()
+        .p(px(1.5))
+        .rounded(px(8.0))
+        .border_2()
+        .border_color(if selected {
+            theme.colors.accent
+        } else {
+            gpui_kit::transparent_black()
+        })
+        .child(
+            div()
+                .w(px(66.0))
+                .h(px(42.0))
+                .rounded(px(5.5))
+                .border_1()
+                .border_color(theme.colors.border)
+                .overflow_hidden()
+                .child(content),
+        )
+        .into_any_element()
+}
+
+/// A settings row pairing a label and optional description on the left with an
+/// action control on the right.
+fn settings_action_row(
+    title: &'static str,
+    description: Option<&'static str>,
+    action: gpui_kit::AnyElement,
+    theme: &Theme,
+) -> gpui_kit::AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_4()
+        .px_4()
+        .py_2p5()
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .min_w_0()
+                .child(
+                    div()
+                        .text_role(theme, theme.typography.body_medium)
+                        .text_color(theme.colors.text)
+                        .child(title),
+                )
+                .when_some(description, |col, desc| {
+                    col.child(
+                        div()
+                            .text_role(theme, theme.typography.secondary)
+                            .text_color(theme.colors.text_muted)
+                            .child(desc),
+                    )
+                }),
+        )
+        .child(action)
+        .into_any_element()
+}
+
+/// A settings row with a label, optional explanation, and a controlled
+/// native-style switch. The Base `Toggle` owns focus, Enter/Space activation
+/// and the toggled accessibility state; this helper owns the macOS-like track.
 fn settings_switch_row(
     id: &'static str,
     title: &'static str,
-    description: &'static str,
+    description: Option<&'static str>,
     pressed: bool,
     on_change: impl Fn(bool, &ClickEvent, &mut Window, &mut App) + 'static,
     theme: &Theme,
@@ -1624,10 +2053,10 @@ fn settings_switch_row(
     let toggle = Toggle::new(id)
         .pressed(pressed)
         .accessibility_label(title)
-        .w(px(36.0))
-        .h(px(22.0))
+        .w(px(34.0))
+        .h(px(20.0))
         .flex_none()
-        .p(px(3.0))
+        .p(px(2.0))
         .rounded_full()
         .bg(track)
         .when(pressed, |toggle| toggle.justify_end())
@@ -1649,7 +2078,7 @@ fn settings_switch_row(
         .justify_between()
         .gap_4()
         .px_4()
-        .py_3()
+        .py_2p5()
         .child(
             div()
                 .flex()
@@ -1662,12 +2091,14 @@ fn settings_switch_row(
                         .text_color(colors.text)
                         .child(title),
                 )
-                .child(
-                    div()
-                        .text_role(theme, theme.typography.secondary)
-                        .text_color(colors.text_muted)
-                        .child(description),
-                ),
+                .when_some(description, |col, desc| {
+                    col.child(
+                        div()
+                            .text_role(theme, theme.typography.secondary)
+                            .text_color(colors.text_muted)
+                            .child(desc),
+                    )
+                }),
         )
         .child(toggle)
         .into_any_element()

@@ -17,7 +17,8 @@ use crate::resources::ActiveResources;
 use crate::workspace::helpers::connected_transfer_session;
 use crate::workspace::visible_entries::{
     QueryMatcher, count_visible_local, count_visible_remote, first_prefix_match, is_dotfile,
-    real_local_index_at, real_remote_index_at, visible_local_indices, visible_remote_indices,
+    is_local_hidden, real_local_index_at, real_remote_index_at, visible_local_indices,
+    visible_remote_indices,
 };
 use crate::workspace::*;
 use macsftp_core::HistoryOp;
@@ -107,10 +108,19 @@ impl crate::workspace::Workspace {
         self.pane_filter(side).query.as_str()
     }
 
+    /// Whether `side` currently shows hidden entries.
+    pub(crate) fn show_hidden_files(&self, side: PaneSide, cx: &App) -> bool {
+        let config = cx.resources().config.config();
+        match side {
+            PaneSide::Local => config.show_local_hidden_files,
+            PaneSide::Remote => config.show_remote_hidden_files,
+        }
+    }
+
     /// Indices of stored entries that currently appear in the file list.
     /// Index space used by selection, keyboard nav, and `uniform_list`.
     pub(crate) fn visible_indices(&self, side: PaneSide, cx: &App) -> Vec<usize> {
-        let show_hidden = cx.resources().config.config().show_hidden_files;
+        let show_hidden = self.show_hidden_files(side, cx);
         let query = self.filter_query(side);
         match (self.active_tab(), side) {
             (Some(tab), PaneSide::Local) => {
@@ -125,7 +135,7 @@ impl crate::workspace::Workspace {
 
     /// Visible count after hidden-files filter only (ignores name query).
     pub(crate) fn count_after_hidden(&self, side: PaneSide, cx: &App) -> usize {
-        let show_hidden = cx.resources().config.config().show_hidden_files;
+        let show_hidden = self.show_hidden_files(side, cx);
         match (self.active_tab(), side) {
             (Some(tab), PaneSide::Local) => {
                 if show_hidden {
@@ -134,7 +144,7 @@ impl crate::workspace::Workspace {
                     tab.local
                         .entries
                         .iter()
-                        .filter(|entry| !is_dotfile(&entry.name))
+                        .filter(|entry| !is_local_hidden(entry))
                         .count()
                 }
             }
@@ -154,7 +164,7 @@ impl crate::workspace::Workspace {
     }
 
     pub(crate) fn entry_count(&self, side: PaneSide, cx: &App) -> usize {
-        let show_hidden = cx.resources().config.config().show_hidden_files;
+        let show_hidden = self.show_hidden_files(side, cx);
         let query = self.filter_query(side);
         match (self.active_tab(), side) {
             (Some(tab), PaneSide::Local) => {
@@ -173,7 +183,7 @@ impl crate::workspace::Workspace {
         visible_index: usize,
         cx: &App,
     ) -> Option<usize> {
-        let show_hidden = cx.resources().config.config().show_hidden_files;
+        let show_hidden = self.show_hidden_files(side, cx);
         let query = self.filter_query(side);
         match (self.active_tab(), side) {
             (Some(tab), PaneSide::Local) => {
@@ -227,14 +237,14 @@ impl crate::workspace::Workspace {
         cx: &App,
     ) -> Option<usize> {
         let tab = self.active_tab()?;
-        let show_hidden = cx.resources().config.config().show_hidden_files;
+        let show_hidden = self.show_hidden_files(side, cx);
         let query = self.filter_query(side);
         let matcher = QueryMatcher::new(query);
         match (side, path) {
             (PaneSide::Local, EntryPath::Local(local_path)) => {
                 let mut visible_idx = 0;
                 for entry in &tab.local.entries {
-                    if !show_hidden && is_dotfile(&entry.name) {
+                    if !show_hidden && is_local_hidden(entry) {
                         continue;
                     }
                     if !matcher.is_empty() && !matcher.matches(&entry.name) {
@@ -592,9 +602,22 @@ impl crate::workspace::Workspace {
     }
 
     pub(crate) fn toggle_hidden_files(&mut self, cx: &mut Context<Self>) {
-        let next = !cx.resources().config.config().show_hidden_files;
-        let result = cx.resources_mut().config.set_show_hidden_files(next);
-        self.finish_config_change(result, "show_hidden_files", cx);
+        self.toggle_hidden_files_for(self.focused_side, cx);
+    }
+
+    pub(crate) fn toggle_hidden_files_for(&mut self, side: PaneSide, cx: &mut Context<Self>) {
+        let next = !self.show_hidden_files(side, cx);
+        let (result, field) = match side {
+            PaneSide::Local => (
+                cx.resources_mut().config.set_show_local_hidden_files(next),
+                "show_local_hidden_files",
+            ),
+            PaneSide::Remote => (
+                cx.resources_mut().config.set_show_remote_hidden_files(next),
+                "show_remote_hidden_files",
+            ),
+        };
+        self.finish_config_change(result, field, cx);
         cx.notify();
     }
     pub(crate) fn set_local_path(
@@ -1043,7 +1066,7 @@ impl crate::workspace::Workspace {
         let Some(tab) = self.active_tab() else {
             return Vec::new();
         };
-        let show_hidden = cx.resources().config.config().show_hidden_files;
+        let show_hidden = self.show_hidden_files(side, cx);
         let query = self.filter_query(side);
         let matcher = QueryMatcher::new(query);
         match side {
@@ -1052,7 +1075,7 @@ impl crate::workspace::Workspace {
                 .entries
                 .iter()
                 .filter(|entry| {
-                    (show_hidden || !is_dotfile(&entry.name))
+                    (show_hidden || !is_local_hidden(entry))
                         && (matcher.is_empty() || matcher.matches(&entry.name))
                 })
                 .map(|entry| entry.name.as_str())

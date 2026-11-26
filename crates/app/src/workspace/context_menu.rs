@@ -13,7 +13,7 @@ use tracing::warn;
 use crate::app_actions::{
     ConnectRecent, CopyFiles, CopyPath, CopyRecentEndpoint, DeleteSelection, DownloadSelection,
     ForgetRecent, NewFolder, OpenSelectedEntry, PasteFiles, RefreshPane, RenameEntry, ShowInFinder,
-    UploadSelection,
+    ToggleHiddenFiles, UploadSelection,
 };
 use crate::workspace::{PaneSide, Workspace};
 
@@ -39,7 +39,13 @@ pub(crate) fn file_context_menu(
     target: ContextMenuTarget,
     remote_ready: bool,
     can_paste: bool,
+    show_hidden_files: bool,
 ) -> NativeMenu {
+    let hidden_label = if show_hidden_files {
+        "Hide Hidden Files"
+    } else {
+        "Show Hidden Files"
+    };
     match (side, target) {
         (_, ContextMenuTarget::Background) => {
             let enabled = side == PaneSide::Local || remote_ready;
@@ -47,6 +53,8 @@ pub(crate) fn file_context_menu(
                 .menu_with_disabled("New Folder…", !enabled, Box::new(NewFolder))
                 .separator()
                 .menu_with_disabled("Refresh", !enabled, Box::new(RefreshPane))
+                .separator()
+                .menu(hidden_label, Box::new(ToggleHiddenFiles))
         }
         // Every local row opens: folders navigate, links resolve their target,
         // and files go to their default application (the Finder convention for
@@ -65,7 +73,9 @@ pub(crate) fn file_context_menu(
             .menu_with_disabled("Paste", !can_paste, Box::new(PasteFiles))
             .separator()
             .menu("Copy Path", Box::new(CopyPath))
-            .menu("Show in Finder", Box::new(ShowInFinder)),
+            .menu("Show in Finder", Box::new(ShowInFinder))
+            .separator()
+            .menu(hidden_label, Box::new(ToggleHiddenFiles)),
         (PaneSide::Remote, ContextMenuTarget::Entry(kind)) => {
             let open_label = match kind {
                 FileKind::Directory | FileKind::Symlink => "Open",
@@ -87,6 +97,8 @@ pub(crate) fn file_context_menu(
                 .menu_with_disabled("Paste", !can_paste || !remote_ready, Box::new(PasteFiles))
                 .separator()
                 .menu("Copy Path", Box::new(CopyPath))
+                .separator()
+                .menu(hidden_label, Box::new(ToggleHiddenFiles))
         }
     }
 }
@@ -114,7 +126,8 @@ impl Workspace {
         };
         let remote_ready = self.fs_scope_for_side(PaneSide::Remote).is_some();
         let can_paste = !self.file_clipboard.is_empty();
-        let menu = file_context_menu(side, target, remote_ready, can_paste);
+        let show_hidden_files = self.show_hidden_files(side, cx);
+        let menu = file_context_menu(side, target, remote_ready, can_paste, show_hidden_files);
         if let Err(error) = macsftp_native_menu::show(menu, position, window, cx) {
             warn!(%error, "could not present the file context menu");
         }
@@ -199,6 +212,7 @@ mod tests {
             ContextMenuTarget::Entry(FileKind::Directory),
             true,
             true,
+            false,
         );
         assert_eq!(
             layout(&menu),
@@ -217,6 +231,8 @@ mod tests {
                 (None, false),
                 (Some("Copy Path"), false),
                 (Some("Show in Finder"), false),
+                (None, false),
+                (Some("Show Hidden Files"), false),
             ]
         );
         assert_action::<OpenSelectedEntry>(&menu, "Open");
@@ -226,6 +242,7 @@ mod tests {
         assert_action::<DeleteSelection>(&menu, "Delete…");
         assert_action::<CopyPath>(&menu, "Copy Path");
         assert_action::<ShowInFinder>(&menu, "Show in Finder");
+        assert_action::<ToggleHiddenFiles>(&menu, "Show Hidden Files");
     }
 
     /// A local file opens in its default application, so the menu leads with
@@ -237,6 +254,7 @@ mod tests {
             ContextMenuTarget::Entry(FileKind::File),
             true,
             true,
+            false,
         );
         assert_eq!(layout(&menu)[0], (Some("Open"), false));
         assert_action::<OpenSelectedEntry>(&menu, "Open");
@@ -248,6 +266,7 @@ mod tests {
         let menu = file_context_menu(
             PaneSide::Remote,
             ContextMenuTarget::Entry(FileKind::File),
+            true,
             true,
             true,
         );
@@ -267,10 +286,13 @@ mod tests {
                 (Some("Paste"), false),
                 (None, false),
                 (Some("Copy Path"), false),
+                (None, false),
+                (Some("Hide Hidden Files"), false),
             ]
         );
         assert_action::<OpenSelectedEntry>(&menu, "Open for Editing");
         assert_action::<DownloadSelection>(&menu, "Download");
+        assert_action::<ToggleHiddenFiles>(&menu, "Hide Hidden Files");
         assert!(
             layout(&menu)
                 .iter()
@@ -286,6 +308,7 @@ mod tests {
             ContextMenuTarget::Entry(FileKind::Directory),
             false,
             true,
+            false,
         );
         for (label, disabled) in layout(&menu) {
             match label {
@@ -293,6 +316,9 @@ mod tests {
                 // Copying a selection needs no session; pasting it into the
                 // server pane does.
                 Some("Copy") => assert!(!disabled, "Copy works offline"),
+                Some("Show Hidden Files") => {
+                    assert!(!disabled, "Show Hidden Files works offline")
+                }
                 Some(_) => assert!(disabled, "{label:?} needs the session"),
                 None => {}
             }
@@ -306,6 +332,7 @@ mod tests {
             ContextMenuTarget::Entry(FileKind::File),
             false,
             true,
+            false,
         );
         // Open stays available offline: a local file needs no session.
         assert_eq!(layout(&disconnected)[0], (Some("Open"), false));
@@ -321,6 +348,7 @@ mod tests {
             ContextMenuTarget::Entry(FileKind::File),
             true,
             false,
+            false,
         );
         for (label, disabled) in layout(&menu) {
             match label {
@@ -334,29 +362,46 @@ mod tests {
     }
 
     #[test]
-    fn background_menu_offers_new_folder_then_refresh() {
-        let menu = file_context_menu(PaneSide::Local, ContextMenuTarget::Background, false, true);
+    fn background_menu_offers_new_folder_then_refresh_and_hidden_toggle() {
+        let menu = file_context_menu(
+            PaneSide::Local,
+            ContextMenuTarget::Background,
+            false,
+            true,
+            false,
+        );
         assert_eq!(
             layout(&menu),
             vec![
                 (Some("New Folder…"), false),
                 (None, false),
                 (Some("Refresh"), false),
+                (None, false),
+                (Some("Show Hidden Files"), false),
             ]
         );
         assert_action::<NewFolder>(&menu, "New Folder…");
         assert_action::<RefreshPane>(&menu, "Refresh");
+        assert_action::<ToggleHiddenFiles>(&menu, "Show Hidden Files");
 
-        let offline =
-            file_context_menu(PaneSide::Remote, ContextMenuTarget::Background, false, true);
+        let offline = file_context_menu(
+            PaneSide::Remote,
+            ContextMenuTarget::Background,
+            false,
+            true,
+            true,
+        );
         assert_eq!(
             layout(&offline),
             vec![
                 (Some("New Folder…"), true),
                 (None, false),
                 (Some("Refresh"), true),
+                (None, false),
+                (Some("Hide Hidden Files"), false),
             ],
-            "a disconnected remote pane keeps the menu shape and disables both commands"
+            "a disconnected remote pane disables session commands while keeping hidden-files toggle enabled"
         );
+        assert_action::<ToggleHiddenFiles>(&offline, "Hide Hidden Files");
     }
 }

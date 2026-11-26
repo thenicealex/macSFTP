@@ -12,6 +12,12 @@ pub(crate) fn is_dotfile(name: &str) -> bool {
     name.starts_with('.')
 }
 
+/// Local entries are hidden when either their name starts with `.` or macOS
+/// marked them with `UF_HIDDEN`.
+pub(crate) fn is_local_hidden(entry: &LocalEntry) -> bool {
+    entry.is_hidden || is_dotfile(&entry.name)
+}
+
 /// Case-insensitive query matcher for file names with an ASCII fast path
 /// to avoid heap allocations when both the query and file name are ASCII.
 pub(crate) struct QueryMatcher<'a> {
@@ -123,7 +129,9 @@ pub(crate) fn visible_local_indices(
 ) -> Vec<usize> {
     visible_indices(
         entries.len(),
-        entries.iter().map(|entry| entry.name.as_str()),
+        entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), is_local_hidden(entry))),
         show_hidden,
         query,
     )
@@ -137,7 +145,9 @@ pub(crate) fn visible_remote_indices(
 ) -> Vec<usize> {
     visible_indices(
         entries.len(),
-        entries.iter().map(|entry| entry.name.as_str()),
+        entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), is_dotfile(&entry.name))),
         show_hidden,
         query,
     )
@@ -147,7 +157,9 @@ pub(crate) fn visible_remote_indices(
 pub(crate) fn count_visible_local(entries: &[LocalEntry], show_hidden: bool, query: &str) -> usize {
     count_visible(
         entries.len(),
-        entries.iter().map(|entry| entry.name.as_str()),
+        entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), is_local_hidden(entry))),
         show_hidden,
         query,
     )
@@ -161,7 +173,9 @@ pub(crate) fn count_visible_remote(
 ) -> usize {
     count_visible(
         entries.len(),
-        entries.iter().map(|entry| entry.name.as_str()),
+        entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), is_dotfile(&entry.name))),
         show_hidden,
         query,
     )
@@ -169,7 +183,7 @@ pub(crate) fn count_visible_remote(
 
 fn count_visible<'a>(
     total_count: usize,
-    names: impl Iterator<Item = &'a str>,
+    entries: impl Iterator<Item = (&'a str, bool)>,
     show_hidden: bool,
     query: &str,
 ) -> usize {
@@ -178,10 +192,10 @@ fn count_visible<'a>(
         if show_hidden {
             return total_count;
         }
-        return names.filter(|name| !is_dotfile(name)).count();
+        return entries.filter(|(_, hidden)| !hidden).count();
     }
-    names
-        .filter(|name| (show_hidden || !is_dotfile(name)) && matcher.matches(name))
+    entries
+        .filter(|(name, hidden)| (show_hidden || !hidden) && matcher.matches(name))
         .count()
 }
 
@@ -194,7 +208,9 @@ pub(crate) fn real_local_index_at(
 ) -> Option<usize> {
     real_index_at(
         entries.len(),
-        entries.iter().map(|entry| entry.name.as_str()),
+        entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), is_local_hidden(entry))),
         visible_index,
         show_hidden,
         query,
@@ -210,7 +226,9 @@ pub(crate) fn real_remote_index_at(
 ) -> Option<usize> {
     real_index_at(
         entries.len(),
-        entries.iter().map(|entry| entry.name.as_str()),
+        entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), is_dotfile(&entry.name))),
         visible_index,
         show_hidden,
         query,
@@ -219,7 +237,7 @@ pub(crate) fn real_remote_index_at(
 
 fn real_index_at<'a>(
     total_count: usize,
-    names: impl Iterator<Item = &'a str>,
+    entries: impl Iterator<Item = (&'a str, bool)>,
     visible_index: usize,
     show_hidden: bool,
     query: &str,
@@ -229,22 +247,22 @@ fn real_index_at<'a>(
         if show_hidden {
             return (visible_index < total_count).then_some(visible_index);
         }
-        return names
+        return entries
             .enumerate()
-            .filter(|(_, name)| !is_dotfile(name))
+            .filter(|(_, (_, hidden))| !hidden)
             .map(|(index, _)| index)
             .nth(visible_index);
     }
-    names
+    entries
         .enumerate()
-        .filter(|(_, name)| (show_hidden || !is_dotfile(name)) && matcher.matches(name))
+        .filter(|(_, (name, hidden))| (show_hidden || !hidden) && matcher.matches(name))
         .map(|(index, _)| index)
         .nth(visible_index)
 }
 
 fn visible_indices<'a>(
     total_count: usize,
-    names: impl Iterator<Item = &'a str>,
+    entries: impl Iterator<Item = (&'a str, bool)>,
     show_hidden: bool,
     query: &str,
 ) -> Vec<usize> {
@@ -254,8 +272,8 @@ fn visible_indices<'a>(
             return (0..total_count).collect();
         }
         let mut result = Vec::with_capacity(total_count);
-        for (index, name) in names.enumerate() {
-            if !is_dotfile(name) {
+        for (index, (_, hidden)) in entries.enumerate() {
+            if !hidden {
                 result.push(index);
             }
         }
@@ -263,8 +281,8 @@ fn visible_indices<'a>(
     }
 
     let mut result = Vec::new();
-    for (index, name) in names.enumerate() {
-        if !show_hidden && is_dotfile(name) {
+    for (index, (name, hidden)) in entries.enumerate() {
+        if !show_hidden && hidden {
             continue;
         }
         if matcher.matches(name) {
@@ -327,6 +345,7 @@ mod tests {
             permissions: None,
             modified_at: None,
             link_target: None,
+            is_hidden: is_dotfile(name),
         }
     }
 
@@ -367,6 +386,15 @@ mod tests {
     }
 
     #[test]
+    fn hides_macos_flagged_local_entries_when_show_hidden_is_false() {
+        let mut library = local("Library");
+        library.is_hidden = true;
+        let entries = vec![library, local("Documents")];
+        assert_eq!(visible_local_indices(&entries, false, ""), vec![1]);
+        assert_eq!(visible_local_indices(&entries, true, ""), vec![0, 1]);
+    }
+
+    #[test]
     fn empty_query_does_not_filter_by_name() {
         let entries = vec![remote("alpha"), remote("beta")];
         assert_eq!(visible_remote_indices(&entries, true, ""), vec![0, 1]);
@@ -402,6 +430,7 @@ mod tests {
                 permissions: None,
                 modified_at: None,
                 link_target: None,
+                is_hidden: false,
             })
             .collect();
         let all = visible_local_indices(&entries, true, "");

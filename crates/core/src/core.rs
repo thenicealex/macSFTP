@@ -404,6 +404,8 @@ pub enum ErrorCode {
     FileExists,
     NotFound,
     UnsupportedSymlink,
+    /// Remote sockets, FIFOs, and device nodes have no file content to transfer.
+    UnsupportedFileType,
     MetadataPreservationFailed,
     ChannelClosed,
     /// Mid-session loss: no inbound traffic for ~60s (keepalive gave up).
@@ -2104,6 +2106,7 @@ pub struct LocalEntry {
     pub permissions: Option<u32>,
     pub modified_at: Option<Timestamp>,
     pub link_target: Option<LocalPath>,
+    pub is_hidden: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3527,6 +3530,7 @@ impl fmt::Display for ErrorCode {
             Self::FileExists => "file_exists",
             Self::NotFound => "not_found",
             Self::UnsupportedSymlink => "unsupported_symlink",
+            Self::UnsupportedFileType => "unsupported_file_type",
             Self::MetadataPreservationFailed => "metadata_preservation_failed",
             Self::ChannelClosed => "channel_closed",
             Self::NetworkTimeout => "network_timeout",
@@ -5267,6 +5271,7 @@ mod tests {
                 permissions: None,
                 modified_at: None,
                 link_target: None,
+                is_hidden: false,
             })
             .collect();
 
@@ -5436,6 +5441,7 @@ mod tests {
                 permissions: None,
                 modified_at: None,
                 link_target: None,
+                is_hidden: false,
             },
             super::LocalEntry {
                 name: "Documents".to_string(),
@@ -5445,6 +5451,7 @@ mod tests {
                 permissions: None,
                 modified_at: None,
                 link_target: None,
+                is_hidden: false,
             },
         ];
         super::sort_entries(&mut entries, &super::FileSort::default());

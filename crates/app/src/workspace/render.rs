@@ -400,7 +400,7 @@ impl crate::workspace::Workspace {
         let tab_state = self.active_tab();
         let is_remote_refreshing =
             side == PaneSide::Remote && tab_state.is_some_and(|tab| tab.remote.is_refreshing);
-        let show_hidden_files = cx.resources().config.config().show_hidden_files;
+        let show_hidden_files = self.show_hidden_files(side, cx);
         let entry_count = self.entry_count(side, cx);
         let remote_error = (side == PaneSide::Remote)
             .then(|| tab_state.and_then(|tab| tab.remote.error.clone()))
@@ -730,7 +730,7 @@ impl crate::workspace::Workspace {
                 })),
             )
             .child({
-                // Labels differ by toggle state; chord always from registry.
+                // Labels and icon differ by toggle state; chord always from registry.
                 let hidden_tooltip = if show_hidden_files {
                     labeled_shortcut("Hide Hidden Files", "ToggleHiddenFiles")
                 } else {
@@ -742,12 +742,17 @@ impl crate::workspace::Workspace {
                     } else {
                         "remote-toggle-hidden"
                     },
-                    IconName::File,
+                    if show_hidden_files {
+                        IconName::Eye
+                    } else {
+                        IconName::EyeOff
+                    },
                     hidden_tooltip,
                 )
                 .emphasis(show_hidden_files)
                 .on_click(cx.listener(move |workspace, _event, _window, cx| {
-                    workspace.toggle_hidden_files(cx);
+                    workspace.focused_side = side;
+                    workspace.toggle_hidden_files_for(side, cx);
                 }))
             })
             .child(
@@ -1246,7 +1251,7 @@ impl crate::workspace::Workspace {
                             EntryPath::Remote(remote_path) => remote_path.as_str(),
                         })
                         .collect();
-                    let show_hidden = cx.resources().config.config().show_hidden_files;
+                    let show_hidden = workspace_view.show_hidden_files(side, cx);
                     let query = workspace_view.filter_query(side);
                     let is_identity = query.is_empty() && show_hidden;
                     let real_indices = if is_identity {
@@ -1269,7 +1274,8 @@ impl crate::workspace::Workspace {
                                         FileRowModel {
                                             name: entry.name.clone().into(),
                                             kind: entry.kind,
-                                            is_hidden: entry.name.starts_with('.'),
+                                            is_hidden: entry.is_hidden
+                                                || entry.name.starts_with('.'),
                                             selected: selected_set.contains(entry.path.as_str()),
                                             size_label: format_size_label(entry.kind, entry.size),
                                             modified_label: format_timestamp(entry.modified_at),

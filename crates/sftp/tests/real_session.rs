@@ -3180,3 +3180,121 @@ async fn encrypted_key_without_passphrase_reports_encrypted() {
 
     fixture.cancel.cancel();
 }
+
+/// A directory that contains a FIFO — the shape of the sockets servers leave
+/// behind — must still download. Treating such an entry as a regular file used
+/// to block inside `open` until the client request timeout and then fail the
+/// whole plan.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn runtime_directory_download_skips_special_files() {
+    let Some(server) = SshTestServer::spawn() else {
+        return;
+    };
+    let source_root = server.fixture_dir.join("special-file-download-source");
+    std::fs::create_dir_all(source_root.join("nested/deep")).expect("create download source tree");
+    for index in 0..5u32 {
+        let payload = vec![index as u8; 1024 + index as usize];
+        std::fs::write(source_root.join(format!("file-{index:02}.bin")), payload)
+            .expect("write small download source");
+    }
+    std::fs::write(source_root.join("nested/deep/regular.txt"), b"nested")
+        .expect("write nested download source");
+    let fifo = source_root.join("nested/deep/agent.sock");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo must run");
+    assert!(status.success(), "mkfifo must succeed");
+    let destination_root = server.fixture_dir.join("special-file-download-destination");
+
+    let (controller, mut events) = connected_transfer_runtime(&server).await;
+    start_transfer(
+        &controller,
+        TransferDirection::Download,
+        remote_endpoint(&source_root),
+        local_endpoint(&destination_root),
+        ConflictPolicy::default(),
+    );
+
+    // The root directory job, `nested/`, `nested/deep/`, five files, one
+    // nested file, and the FIFO.
+    let expected_planned = 10usize;
+    let mut planned = 0usize;
+    let mut finished = 0usize;
+    let mut skipped = Vec::new();
+    let mut warnings = Vec::new();
+    let mut plan_completed = false;
+    loop {
+        match next_runtime_event(&mut events, "special file download event").await {
+            AppEvent::TransferPlanStarted(_) => {}
+            AppEvent::TransferPlanProgress(progress) => planned += progress.child_jobs.len(),
+            AppEvent::TransferPlanCompleted { .. } => plan_completed = true,
+            AppEvent::TransferPlanFailed { error, .. } => {
+                panic!("special file download planning failed: {error:?}")
+            }
+            AppEvent::TransferPlanCancelled { .. } => {
+                panic!("special file download plan cancelled")
+            }
+            AppEvent::TransferRunning(_) | AppEvent::TransferProgress(_) => {}
+            AppEvent::TransferWarning(warning) => warnings.push(warning),
+            AppEvent::TransferCompleted { .. } => finished += 1,
+            AppEvent::TransferSkipped { transfer_id } => {
+                skipped.push(transfer_id);
+                finished += 1;
+            }
+            AppEvent::TransferFailed(failure) => {
+                panic!("special file download must not fail: {:?}", failure.error)
+            }
+            AppEvent::ResidualTempCreated(_) | AppEvent::ResidualTempCleared { .. } => {}
+            other => panic!("unexpected special file download event: {other:?}"),
+        }
+        if planned > 0 && finished >= planned && plan_completed {
+            break;
+        }
+    }
+
+    assert_eq!(
+        planned, expected_planned,
+        "planner must still publish every remote entry"
+    );
+    assert_eq!(
+        skipped.len(),
+        1,
+        "only the special file may be skipped: {skipped:?}"
+    );
+    assert_eq!(
+        warnings.len(),
+        1,
+        "the skipped special file must report a warning: {warnings:?}"
+    );
+    assert_eq!(
+        warnings[0].transfer_id, skipped[0],
+        "the warning must belong to the skipped entry"
+    );
+    assert_eq!(
+        warnings[0].code,
+        ErrorCode::UnsupportedFileType,
+        "the warning must explain the file type"
+    );
+
+    for index in 0..5u32 {
+        let expected = vec![index as u8; 1024 + index as usize];
+        assert_eq!(
+            std::fs::read(destination_root.join(format!("file-{index:02}.bin")))
+                .expect("read small result"),
+            expected
+        );
+    }
+    assert_eq!(
+        std::fs::read(destination_root.join("nested/deep/regular.txt"))
+            .expect("read nested result"),
+        b"nested"
+    );
+    assert!(
+        !destination_root.join("nested/deep/agent.sock").exists(),
+        "the special file must not be recreated locally"
+    );
+
+    shutdown_transfer_runtime(controller);
+}

@@ -139,6 +139,7 @@ route 支持 Direct、单跳 saved-profile JumpHost（jump profile 自身必须 
 - residual cleanup command 无法路由到 live actor 时保留记录并写结构化 WARN，等待下一次连接重试，不能静默当作成功；
 - 权限或 mtime 保留失败通常产生 warning，不推翻已成功的数据传输；
 - symlink 默认复制 link 本身，不解引用；下载时 target 为空、绝对路径、含 `\`、Windows 盘符前缀、控制/Bidi 字符或向外越出下载根目录（逃逸出下载树）的符号链接一律拒绝（`UnsupportedSymlink`）；目标经词法解析严格保持在下载目录树内的相对符号链接（包括内部含 `..` 但未逃逸出下载根的相对链接）允许作为 link 复制；
+- socket、FIFO、device 等特殊文件没有可传输的内容：下载时不得对它们发起 `open`（`open` 会一直等到请求超时，并让整个目录 plan 失败），而是发 `TransferWarning`（`UnsupportedFileType`）并把该 job 记为 skipped；服务端未回报 permissions 时 `russh-sftp` 也把条目报成 `Other`，因此只有确认回报了 mode 才按特殊文件跳过；
 - 浏览时 link 仍显示为 symlink，列表不做 per-entry stat；用户打开时由 actor 解析一次类型：目录 link 按逻辑路径进入（服务端自行解析），文件 link 进入编辑且后续下载、上传、远端快照检查都使用解析后的目标路径（写穿透），链接本身保持不变。文件 link 的写穿透起点按三条路径确定：(1) 服务端 `REALPATH` 返回绝对路径时直接使用；(2) 返回相对路径（不符合 SFTP v3）时拒绝；(3) 服务端不支持 `REALPATH` 时退回 `readlink`，但 link target 含 `..`（无论相对还是绝对）一律拒绝。安全依据是「客户端不做 `..` 折叠，父路径由服务端解析」，不是「已经 canonicalize」。若 link 指向的目标又落在目录上，按目录打开；断链、环、无权限只报状态，不移动 pane。
 
 ## 9. 远程编辑
@@ -219,7 +220,7 @@ Profile 更新由 `ProfileStore` 协调：校验请求和 route → 写入或读
 - transfer drawer 默认位于底部，可以折叠，不能遮挡主文件列表；折叠后 status bar 仍须简要提示 active 或 failed transfer。
 - 空文件夹、加载和无匹配状态填满列表 viewport 后居中；首次未连接的远端 pane 居中显示连接入口及说明，最近连接列表保持靠上以便扫描，并用统一的 scrollbar 保证短窗口中仍可访问全部入口。
 - 调整 pane 或窗口尺寸时，路径栏、表头、滚动区域和空状态布局必须保持完整。
-- 路径栏按功能成组：导航（后退、前进、上级、刷新）、面包屑、文件操作（复制路径、隐藏文件、新建文件夹、删除）、传输（上传或下载）；组间用 1px 竖线分隔，图标命中区保持冻结的 26×22，窄 pane 下优先保证面包屑的末段（当前目录）可见。
+- 路径栏按功能成组：导航（后退、前进、上级、刷新）、面包屑、文件操作（复制路径、隐藏文件切换 `eye.svg` / `eye_off.svg`、新建文件夹、删除）、传输（上传或下载）；组间用 1px 竖线分隔，图标命中区保持冻结的 26×22，窄 pane 下优先保证面包屑的末段（当前目录）可见。
 - 空状态只提供下一步操作（如 `Open Connection`、`Choose Local Folder`、`Retry`），不含长篇功能说明。
 - 文件列表、传输列表、tab、路径栏和状态栏保持紧凑；组件高度稳定，hover、loading、progress 不引发布局变化。
 - 状态栏消息是单次动作的瞬时结果，必须过期（`StatusLine::LIFETIME`，6s）：`show_status` 在写入时启动一次性 timer，到点用 generation guard 清除自己的那条，更晚的消息不能被更早的 timer 清掉。后台目录读取只允许退役自己设置的 "Loading files on your Mac…" 行，不得清除用户在加载期间得到的其它消息。
@@ -316,7 +317,7 @@ remote pane 必须覆盖：`Disconnected`（提供连接或重新连接）、`Co
 - Settings 可通过 `macSFTP > Settings…`、`⌘,` 和 `OpenSettings` action 打开，并通过 Done 或 Escape 返回工作区。
 - Settings 固定为三个分类：General（外观、行为、传输偏好、诊断）、Editor（外部编辑器与关联规则）、Saved Connections（Profile 管理）；不按单项设置拆分更多分类。
 - 外观选择立即预览；`System` 跟随窗口 appearance，固定为 Light 或 Dark 时不被系统外观变化覆盖。
-- General 中的 `Confirm before delete` 是删除 modal 里 “Don’t ask again” 的唯一恢复入口；`Show hidden files` 与路径栏、菜单和快捷键读写同一份配置。
+- General 中的 `Confirm before delete` 是删除 modal 里 “Don’t ask again” 的唯一恢复入口；`Show hidden local files` 与 `Show hidden server files` 分别读写 `show_local_hidden_files` / `show_remote_hidden_files`（加载旧版 `config.json` 时兼容迁移 `show_hidden_files`），与左右路径栏按钮、右键菜单、View 菜单和 `⌘⇧.`（作用于当前聚焦面板）共享同一份配置；本地隐藏判定覆盖点文件与 macOS `UF_HIDDEN` 标志（`LocalEntry::is_hidden`）。
 - 传输元数据偏好（保留 mtime / permissions）适用于用户发起的上传和下载；remote-edit 回传固定保留 mtime，因为其冲突基线由本地临时文件的 mtime 推导。
 - 配置保存失败必须在 Settings 内行内展示，且每个分类都要能看到该错误，不能使用 toast，也不能静默丢弃错误。
 - 离散配置写入统一经过 `Workspace::finish_config_change`：成功后清除错误并 `refresh_windows()`，让其他窗口的开关和菜单不保留旧快照；失败时写入同一行内错误。调用点不得各自复制 `match` 和错误文案；高频的编辑器输入通过同一错误收口，但不强制跨窗口重绘。
@@ -373,7 +374,7 @@ App 和 UI 通过 workspace 的 `gpui-kit = "=0.7.3"`（gpui-pre snapshot）引�
 - Settings 的开关使用 `gpui-base::Toggle`：Base 负责 Tab、Enter/Space 和 `aria_toggled`，macSFTP theme 负责 track/knob 外观；不得用裸 `div().on_click` 实现设置开关。
 - Assets 只加载项目嵌入图标，未知资源返回 None，不回退到另一套控件资源。
 - 输入右键菜单使用 Base 的 `NativeMenu` 模型和编辑 action；`macsftp-native-menu` 只呈现 macOS AppKit 菜单，不持有输入 Entity 或业务草稿。NSView 在释放 GPUI Window 借用前被 retain，AppKit tracking loop 在 foreground task 中执行且不持有 GPUI update 借用；呈现前检查窗口/焦点，返回后只向仍存在且焦点未变的窗口派发 action，取消后刷新窗口；非 macOS 返回明确 Unsupported 错误。
-- 文件列表右键菜单同样走 `macsftp-native-menu`（`workspace/context_menu.rs` 构建纯数据菜单模型）：右键在 mouse-up 时先聚焦并选中指针下的行，再以指针位置弹出；菜单条目复用既有 workspace action（Open/Open for Editing、Upload、Download、Rename…、New Folder…、Delete…、Copy Path、Show in Finder、Refresh），暂时不可用的命令以禁用态呈现而不是隐藏，只有 side/kind 不适用的命令才不出现；菜单模型必须可在无窗口环境下单测。
+- 文件列表右键菜单同样走 `macsftp-native-menu`（`workspace/context_menu.rs` 构建纯数据菜单模型）：右键在 mouse-up 时先聚焦并选中指针下的行，再以指针位置弹出；菜单条目复用既有 workspace action（Open/Open for Editing、Upload、Download、Rename…、New Folder…、Delete…、Copy Path、Show in Finder、Refresh、Show/Hide Hidden Files），暂时不可用的命令以禁用态呈现而不是隐藏（Show/Hide Hidden Files 作为视图偏好在空白区与断连态下均保持可用），只有 side/kind 不适用的命令才不出现；菜单模型必须可在无窗口环境下单测。
 - 用户已授权 `macsftp-native-menu` 的 `src/macos.rs` 包含必要 unsafe：该 crate 默认 deny，其余 workspace crate 继续 inherit forbid。unsafe 边界检查递归扫描其 Rust 源文件，只允许规范路径 `src/macos.rs` 和唯一 macOS-gated module 例外，拒绝其他 unsafe 语法、lint 覆盖、外部 include/path 和符号链接模块；回归 fixture 覆盖嵌套路径、unsafe fn/impl/extern/attribute、注释与字面量。菜单调度层使用真实 GPUI 窗口更新验证关闭、焦点变更及重复取消，原生界面截图见 `docs/visual-evidence/gpui-base/README.md`。
 - 表单草稿仍由 Workspace 持有；`PlainInput` 只保留选区、撤销和 IME 编辑状态，Change 事件写回草稿，程序修改草稿时只在文本不同时同步控件；关闭 surface 时释放绑定，替换表单或冲突请求后旧控件事件必须被忽略。
 - Connect/Profile 表单的 Tab 使用 scoped action 跨普通和敏感字段移动实际焦点，普通字段的 Enter 通过 Base `PressEnter` 转发原有提交入口；端口、路径、名称及认证校验仍由原有业务入口统一执行，无效提交不能清空草稿。
